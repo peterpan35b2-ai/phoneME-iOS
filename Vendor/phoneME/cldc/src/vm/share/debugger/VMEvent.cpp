@@ -949,7 +949,7 @@ void VMEvent::clear_event_request(VMEvent *ep)
   VMEvent::remove_event_request(ep);
 #ifdef AZZERT
   if (TraceDebugger) {
-    tty->print_cr("VMEvent: clear 0x%x, id 0x%x", (int)ep->obj(), ep->event_id());
+    tty->print_cr("VMEvent: clear %p, id 0x%x", ep->obj(), ep->event_id());
   }
 #endif
   switch (ep->event_kind()) {
@@ -1407,7 +1407,7 @@ void VMEvent::stepping_info_request(DebuggerEvent *d_event,
   // IMPL_NOTE: GC problem ?? I don't think so as req is a handle and the address of 
   // req is valid in the previous stack frame which stays in existence until
   // the agent sends the info back
-  out.write_int((jint)(loc));
+  out.write_int(JavaDebugger::get_object_id_by_ref(loc));
   loc->write(&out, false);
   out.send_packet();
 }

@@ -599,7 +599,8 @@ class EntryFrame : public Frame {
   void caller_is( Frame& result ) const {
     const address caller_fp = *(address*)(fp() + stored_last_fp_offset());
     const address caller_sp = *(address*)(fp() + stored_last_sp_offset());
-    address* caller_pc_addr =  (address*)(caller_sp + JavaStackDirection * (int)sizeof(jint));
+    address* caller_pc_addr =
+        (address*)(caller_sp + JavaStackDirection * BytesPerWord);
     result.set_values(_thread, _stack_base, caller_pc_addr,
                       caller_sp, caller_fp);
   }

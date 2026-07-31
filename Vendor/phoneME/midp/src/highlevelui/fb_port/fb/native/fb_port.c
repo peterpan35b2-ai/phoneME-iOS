@@ -229,12 +229,12 @@ void initFrameBuffer() {
 
     fb.data = (unsigned short *)mmap(0, fb.mapsize,
         PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    fb.data += fb.dataoffset;
 
-    if ((int)fb.data == -1) {
+    if (fb.data == MAP_FAILED) {
         PERROR("mapping /dev/fb0");
         exit(1);
     } else {
+      fb.data += fb.dataoffset;
       /* IMPL_NOTE - CDC disabled.*/
 #if 0 /* Don't draw into the screen area outside of the main midp window. */
         int n;

@@ -29,6 +29,7 @@
  * Immutable image functions that needed to be implemented for each port.
  */
 
+#include <stdint.h>
 #include <gx_image.h>
 #include <gxpport_mutableimage.h>
 #include <gxpport_immutableimage.h>
@@ -57,11 +58,12 @@ extern void gx_render_image(const java_imagedata * srcImageDataPtr,
 			    const jshort * clip,
 			    jint x, jint y) {
   gxpport_image_native_handle srcImageNativeData =
-    (gxpport_image_native_handle)srcImageDataPtr->nativeImageData;    
+    (gxpport_image_native_handle)(intptr_t)
+        srcImageDataPtr->nativeImageData;
   gxpport_mutableimage_native_handle dstMutableImageNativeData =
-    (gxpport_mutableimage_native_handle)(dstMutableImageDataPtr ? 
-				   dstMutableImageDataPtr->nativeImageData : 
-				   0);
+    (gxpport_mutableimage_native_handle)(intptr_t)
+        (dstMutableImageDataPtr != NULL ?
+            dstMutableImageDataPtr->nativeImageData : 0);
 
   if (srcImageDataPtr->isMutable) {
     gxpport_render_mutableimage(srcImageNativeData, 
@@ -96,11 +98,12 @@ extern void gx_render_imageregion(const java_imagedata * srcImageDataPtr,
 				   jint x_dest, jint y_dest, 
 				   jint transform) {
   gxpport_image_native_handle srcImageNativeData =
-    (gxpport_image_native_handle)srcImageDataPtr->nativeImageData;    
+    (gxpport_image_native_handle)(intptr_t)
+        srcImageDataPtr->nativeImageData;
   gxpport_mutableimage_native_handle dstMutableImageNativeData =
-    (gxpport_mutableimage_native_handle)(dstMutableImageDataPtr ? 
-				   dstMutableImageDataPtr->nativeImageData : 
-				   0);
+    (gxpport_mutableimage_native_handle)(intptr_t)
+        (dstMutableImageDataPtr != NULL ?
+            dstMutableImageDataPtr->nativeImageData : 0);
 
   if (srcImageDataPtr->isMutable) {
     gxpport_render_mutableregion(srcImageNativeData,

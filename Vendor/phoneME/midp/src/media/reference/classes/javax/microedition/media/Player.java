@@ -76,6 +76,12 @@ public interface Player extends Controllable {
 
     // JAVADOC COMMENT ELIDED
     void close();
+
+    // JAVADOC COMMENT ELIDED
+    void setTimeBase(TimeBase master) throws MediaException;
+
+    // JAVADOC COMMENT ELIDED
+    TimeBase getTimeBase();
     
 
     // JAVADOC COMMENT ELIDED

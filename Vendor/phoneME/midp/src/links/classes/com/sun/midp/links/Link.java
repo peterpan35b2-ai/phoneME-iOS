@@ -34,7 +34,7 @@ public class Link {
 
     private Link emptyLinkCache; // = null
 
-    private int nativePointer; // set and get only by native code
+    private long nativePointer; // set and get only by native code
 
     public static Link newLink(Isolate sender, Isolate receiver) {
         int rid = receiver.id();  // throws NullPointerException
@@ -64,7 +64,7 @@ public class Link {
     }
 
     public int hashCode() {
-        return nativePointer;
+        return (int)(nativePointer ^ (nativePointer >>> 32));
     }
 
     public native boolean isOpen();

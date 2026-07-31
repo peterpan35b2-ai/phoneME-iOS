@@ -30,6 +30,7 @@
  * Implementation of Java native methods for the <tt>ImageData</tt> class.
  */
 
+#include <stdint.h>
 #include <commonKNIMacros.h>
 
 #include <midpEventUtil.h>
@@ -70,7 +71,8 @@ Java_javax_microedition_lcdui_ImageData_finalize() {
      * Image objects with NULL nativeImageData could exist when loading
      * romized image but failed.
      */
-    h = (gxpport_image_native_handle)imageDataPtr->nativeImageData;
+    h = (gxpport_image_native_handle)(intptr_t)
+        imageDataPtr->nativeImageData;
     if (h != NULL) {
         if (imageDataPtr->isMutable) {
             gxpport_destroy_mutable(h);
@@ -131,7 +133,8 @@ KNIDECL(javax_microedition_lcdui_ImageData_getRGB) {
 
     srcImageDataPtr = IMGAPI_GET_IMAGEDATA_PTR(thisObject);
     srcImageNativeData =
-      (gxpport_mutableimage_native_handle)srcImageDataPtr->nativeImageData;    
+      (gxpport_mutableimage_native_handle)(intptr_t)
+          srcImageDataPtr->nativeImageData;    
 
     if (srcImageDataPtr->isMutable) {
         gxpport_get_mutable_argb(srcImageNativeData,

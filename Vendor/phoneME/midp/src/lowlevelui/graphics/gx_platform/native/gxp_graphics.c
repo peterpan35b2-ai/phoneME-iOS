@@ -46,8 +46,13 @@
  * @brief Porting interface to low-level graphics and images
  */
 
+#include <stdint.h>
 #include <gx_image.h>
 #include <gxpport_graphics.h>
+
+#define GXP_MUTABLE_HANDLE(imageData) \
+    ((gxpport_mutableimage_native_handle)(intptr_t) \
+        ((imageData) != NULL ? (imageData)->nativeImageData : 0))
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,8 +99,7 @@ extern jint gx_get_pixel(jint rgb, int gray, int isGray) {
 extern void gx_draw_line(jint pixel, const jshort *clip, 
 			  const java_imagedata *dst,
                           int dotted, int x1, int y1, int x2, int y2) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_line(pixel, clip, dstHandle, 
 		    dotted, x1, y1, x2, y2);
@@ -128,8 +132,7 @@ extern void gx_draw_line(jint pixel, const jshort *clip,
 extern void gx_draw_rect(jint pixel, const jshort *clip, 
 			  const java_imagedata *dst,
                           int dotted, int x, int y, int width, int height) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_rect(pixel, clip, dstHandle, 
 				    dotted, x, y, width, height);
@@ -163,8 +166,7 @@ extern void gx_draw_rect(jint pixel, const jshort *clip,
 extern void gx_fill_rect(jint pixel, const jshort *clip, 
 			  const java_imagedata *dst,
                           int dotted, int x, int y, int width, int height) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_fill_rect(pixel, clip, dstHandle, 
 				    dotted, x, y, width, height);
@@ -202,8 +204,7 @@ extern void gx_draw_roundrect(jint pixel, const jshort *clip,
                                int dotted,
                                int x, int y, int width, int height,
                                int arcWidth, int arcHeight) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_roundrect(pixel, clip, dstHandle, 
 					 dotted, x, y, width, height,
@@ -242,8 +243,7 @@ extern void gx_fill_roundrect(jint pixel, const jshort *clip,
                                int dotted,
                                int x, int y, int width, int height,
                                int arcWidth, int arcHeight) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_fill_roundrect(pixel, clip, dstHandle, 
 					 dotted, x, y, width, height,
@@ -290,8 +290,7 @@ extern void gx_draw_arc(jint pixel, const jshort *clip,
 			 const java_imagedata *dst,
                          int dotted, int x, int y, int width, int height, 
                          int startAngle, int arcAngle) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_arc(pixel, clip, dstHandle, 
 				   dotted, x, y, width, height,
@@ -338,8 +337,7 @@ extern void gx_fill_arc(jint pixel, const jshort *clip,
 			 const java_imagedata *dst,
                          int dotted, int x, int y, int width, int height, 
                          int startAngle, int arcAngle) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_fill_arc(pixel, clip, dstHandle, 
 				   dotted, x, y, width, height,
@@ -374,8 +372,7 @@ extern void gx_fill_triangle(jint pixel, const jshort *clip,
                               int x1, int y1,
                               int x2, int y2,
                               int x3, int y3) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_fill_triangle(pixel, clip, dstHandle, 
 					dotted, x1, y1, x2, y2, x3, y3);
@@ -413,8 +410,7 @@ extern void gx_draw_chars(jint pixel, const jshort *clip,
                            int face, int style, int size,
                            int x, int y, int anchor, 
                            const jchar *chararray, int n) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_chars(pixel, clip, dstHandle, 
 				     dotted, 
@@ -444,8 +440,7 @@ extern void gx_draw_chars(jint pixel, const jshort *clip,
 extern void gx_copy_area(const jshort *clip, const java_imagedata *dst,
                           int x_src, int y_src, int width, int height, 
                           int x_dest, int y_dest) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_copy_area(clip, dstHandle, 
 				    x_src, y_src, width, height, 
@@ -485,8 +480,7 @@ extern void gx_draw_rgb(const jshort *clip,
 			 const java_imagedata *dst, jint *rgbData, 
                          jint offset, jint scanlen, jint x, jint y, 
                          jint width, jint height, jboolean processAlpha) {
-  gxpport_mutableimage_native_handle dstHandle =
-    (gxpport_mutableimage_native_handle)(dst ? dst->nativeImageData : 0);
+  gxpport_mutableimage_native_handle dstHandle = GXP_MUTABLE_HANDLE(dst);
 
   gxpport_draw_rgb(clip, dstHandle, rgbData, 
 				   offset, scanlen, x, y, 

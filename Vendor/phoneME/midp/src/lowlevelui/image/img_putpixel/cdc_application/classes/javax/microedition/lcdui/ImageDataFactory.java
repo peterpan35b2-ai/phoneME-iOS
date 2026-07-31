@@ -392,7 +392,7 @@ class ImageDataFactory implements AbstractImageDataFactory {
      * @return <code>ImageData</code> created from romized data.
      * @throws IllegalArgumentException if the id is invalid
      */
-    public ImageData createImmutableImageData(int imageDataArrayPtr,
+    public ImageData createImmutableImageData(long imageDataArrayPtr,
             int imageDataArrayLength) {
 
         ImageData data = new ImageData();
@@ -726,7 +726,7 @@ class ImageDataFactory implements AbstractImageDataFactory {
      *         false - otherwise
      */
     private native boolean loadRomizedImage(ImageData data,
-            int imageDataArrayPtr, int imageDataArrayLength);
+            long imageDataArrayPtr, int imageDataArrayLength);
 
     /**
      * Native function to load an <code>ImageData</code> from ARGB data.

@@ -1158,7 +1158,7 @@ inline OopDesc** ObjectHeap::decode_reference(const int ref_index) {
   GUARANTEE(ref_index != 0, "Must not be NULL");
 
   if (!is_encoded_reference(ref_index)) {
-    return (OopDesc**)ref_index;
+    return (OopDesc**)(intptr_t)ref_index;
   }
 
   Array::Raw array = get_reference_array(ref_index);
@@ -1426,7 +1426,7 @@ int ObjectHeap::get_global_reference_owner(const int ref_index) {
 
 #if ENABLE_JNI
 extern "C" OopDesc** decode_handle(const jobject ref) {
-  return ObjectHeap::decode_reference((const int)ref);
+  return ObjectHeap::decode_reference((int)(intptr_t)ref);
 }
 #endif
 
@@ -2232,11 +2232,13 @@ ObjectHeap::set_collection_area_boundary(size_t min_free_after_collection,
   if (YoungGenerationAtEndOfHeap) {
     int delta = DISTANCE(_old_generation_end, _young_generation_start);
     if (delta == 0) {
-    } else if (delta == 4) {
+    } else if (delta == BytesPerWord) {
       _old_generation_end[0] = Universe::object_class()->prototypical_near();
     } else {
-      _old_generation_end[0] = Universe::byte_array_class()->prototypical_near();
-      _old_generation_end[1] = (OopDesc*)(delta - Array::base_offset());
+      GUARANTEE(delta >= Array::base_offset(), "Invalid generation filler");
+      ArrayDesc* const filler = (ArrayDesc*)_old_generation_end;
+      filler->_klass = Universe::byte_array_class()->prototypical_near();
+      filler->_length = delta - Array::base_offset();
     }
   } else {
     GUARANTEE(DISTANCE(_old_generation_end, _young_generation_start) == 0,
@@ -2281,10 +2283,17 @@ juint ObjectHeap::mark_and_stack_pointers(OopDesc** p, juint bitword) {
     if ((bitword &    0x3) == 0) { bitword >>=  2; i +=  2; }
     if ((bitword &    0x1) == 0) { bitword >>=  1; i +=  1; }
 
+    OopDesc** const slot =
+        DERIVED(OopDesc**, p, i * BytesPerInt);
     if( TraceGC ) {
-      TTY_TRACE_CR(("TraceGC: 0x%x write barrier entry", p+i));
+      TTY_TRACE_CR(("TraceGC: 0x%x write barrier entry", slot));
     }
-    OopDesc** const obj = (OopDesc**) p[i];
+    /*
+     * Each remembered-set bit represents one 32-bit Java word. On LP64,
+     * indexing OopDesc** advances by 8 bytes and reads the wrong slot. Read
+     * the reference from the exact 4-byte bitmap position instead.
+     */
+    OopDesc** const obj = (OopDesc**)*slot;
     if( collection_area_start <= obj && obj < heap_top ) {
       // Is object already marked?
       if( !test_and_set_bit_for(obj, bitvector_base) ) {
@@ -2313,16 +2322,23 @@ juint ObjectHeap::mark_and_stack_pointers(OopDesc** p, juint bitword) {
 }
 
 inline void ObjectHeap::mark_remembered_set(void) {
-  OopDesc** p = align_down( _heap_start );
+  OopDesc** p = align_down(_heap_start);
   juint* bitp = get_bitvectorword_for_aligned(p);
-  OopDesc** const end = _old_generation_end - BitsPerWord;
-  for( ; p <= end; bitp++, p += BitsPerWord ) {
+  OopDesc** const end = DERIVED(
+      OopDesc**, _old_generation_end,
+      -(BitsPerWord * BytesPerInt));
+  for (; p <= end;
+       bitp++, p = DERIVED(OopDesc**, p, BitsPerWord * BytesPerInt)) {
     const juint bitword = *bitp;
-    if( bitword ) {
+    if (bitword) {
       *bitp = mark_and_stack_pointers(p, bitword);
     }
   }
-  const juint mask = right_n_bits( end - p + BitsPerWord );
+  const jint remaining_words =
+      DISTANCE(p, _old_generation_end) / BytesPerInt;
+  GUARANTEE(remaining_words >= 0 && remaining_words < BitsPerWord,
+            "Invalid remembered-set tail");
+  const juint mask = right_n_bits(remaining_words);
   juint bitword = *bitp & mask;
   if( bitword ) {
     bitword = mark_and_stack_pointers(p, bitword);
@@ -4291,7 +4307,7 @@ ObjectHeap::compiler_area_compute_new_locations ( CompiledMethodDesc* dst ) {
     }
 
     // Store delta in _klass to relocate frames.
-    p->_klass = (OopDesc*)delta;
+    p->_klass = (OopDesc*)(intptr_t)delta;
 
     if (TraceGC || TraceCompilerGC) {
       TTY_TRACE_CR(("TraceGC: 0x%p (%u bytes) => 0x%p (delta=%d)", p,
@@ -4348,7 +4364,8 @@ inline void ObjectHeap::compiler_area_compact( const int last_moving_up ) {
       CompiledMethodCache::patched_method();
     if (cache != NULL) {
       CompiledMethodDesc* const dst =
-        DERIVED(CompiledMethodDesc*, cache, (int)cache->_klass);
+        DERIVED(CompiledMethodDesc*, cache,
+                (int)(intptr_t)cache->_klass);
       CompiledMethodCache::set_patched_method(dst);
     }
   }
@@ -4358,7 +4375,7 @@ inline void ObjectHeap::compiler_area_compact( const int last_moving_up ) {
     for( int i = last_moving_up; i >= 0; --i ) {
       const CompiledMethodDesc* const src = CompiledMethodCache::Map[i];
       CompiledMethodDesc* const dst =
-        DERIVED(CompiledMethodDesc*, src, (int)src->_klass);
+        DERIVED(CompiledMethodDesc*, src, (int)(intptr_t)src->_klass);
       compiler_area_move_compiled_method( dst, src, i );
       dst->_klass = compiled_method_class;
     }
@@ -4368,7 +4385,7 @@ inline void ObjectHeap::compiler_area_compact( const int last_moving_up ) {
     for( int i = last_moving_up; ++i <= upb; ) {
       const CompiledMethodDesc* const src = CompiledMethodCache::Map[i];
       CompiledMethodDesc* const dst =
-        DERIVED(CompiledMethodDesc*, src, (int)src->_klass);
+        DERIVED(CompiledMethodDesc*, src, (int)(intptr_t)src->_klass);
       if( src != dst ) {
         compiler_area_move_compiled_method( dst, src, i );
       }
@@ -4394,7 +4411,7 @@ inline void ObjectHeap::compiler_area_update_pointers( void ) {
     ForAllHandles( handle ) {
       const CompiledMethodDesc* p = (const CompiledMethodDesc*)handle->obj();
       if( compiler_area_contains( p ) ) {
-        const int delta = (int)p->_klass;
+        const int delta = (int)(intptr_t)p->_klass;
         if( delta ) {
           handle->set_obj( DERIVED( OopDesc*, p, delta ) );
         }
@@ -4416,7 +4433,7 @@ inline void ObjectHeap::compiler_area_update_pointers( void ) {
           CompiledMethodDesc* p = 
             (CompiledMethodDesc*)java_frame.compiled_method();
           if( compiler_area_contains( p ) ) {
-            const int delta = (int)p->_klass;
+            const int delta = (int)(intptr_t)p->_klass;
             if( delta ) {
               JavaFrame copy = java_frame;
               java_frame.caller_is(frame);
@@ -5205,10 +5222,12 @@ void ObjectHeap::handle_out_of_memory(const size_t alloc_size,
         Frame frame(Thread::current());
         GUARANTEE(frame.is_java_frame(), "Must be a Java frame");
 
-        // Deoptimize the frame to handle suspend/redo in interpreter
+        // Deoptimize the frame to handle suspend/redo in interpreter.
+#if ENABLE_COMPILER
         if (frame.as_JavaFrame().is_compiled_frame()) {
           frame.as_JavaFrame().deoptimize();
         }
+#endif
       }
       // Redo the allocation bytecode.
       Thread::current()->set_async_redo(1);

@@ -72,7 +72,7 @@ void TaskContext::init(int task_id) {
 void TaskGCContext::init(const OopDesc* object) {
   if (ROM::system_contains(object)) {
     if (TraceTaskContext) {
-      tty->print_cr("TGCOROM: 0x%x", (int)object);
+      tty->print_cr("TGCOROM: %p", object);
     }
     _valid = true;
     return;
@@ -97,7 +97,7 @@ void TaskGCContext::set(const int task_id) {
     _valid = true;
 
     if (TraceTaskContext) {
-      tty->print_cr("TGC-set: %d 0x%x", task_id, (int)_class_list_base);
+      tty->print_cr("TGC-set: %d %p", task_id, _class_list_base);
     }
   }
 }
@@ -196,7 +196,7 @@ void TaskContext::set_current_task(int task_id) {
   _class_list_base = (address)task().class_list();
   _class_list_base += ObjArray::base_offset();
   if (TraceTaskContext) {
-    tty->print_cr("TSC: 0x%x", (int)_class_list_base);
+    tty->print_cr("TSC: %p", _class_list_base);
   }
 #if USE_LARGE_OBJECT_AREA
   GUARANTEE(!LargeObject::contains((LargeObject*)_mirror_list_base),
@@ -213,7 +213,7 @@ void TaskContext::set_class_list(ObjArray *cl) {
   _class_list_base = (address)cl->obj();
   _class_list_base += ObjArray::base_offset();
   if (TraceTaskContext) {
-    tty->print_cr("TSC2: 0x%x", (int)_class_list_base);
+    tty->print_cr("TSC2: %p", _class_list_base);
   }
 }
 

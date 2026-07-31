@@ -142,7 +142,7 @@ Java_javax_microedition_lcdui_CustomItemLFImpl_refresh0() {
     KNI_GetParameterAsObject(2, image);
 
 #if PHONEME_IOS_NATIVE
-    if (ciPtr != NULL && KNI_IsNullHandle(image) != KNI_TRUE) {
+    if (ciPtr != NULL) {
         phoneme_ios_lcdui_capture_image(
             MidpComponentToId(&ciPtr->component),
             image
@@ -273,8 +273,7 @@ Java_javax_microedition_lcdui_CustomItemLFImpl_setContentBuffer0() {
 
   err = lfpport_customitem_set_content_buffer(ciPtr, imgPtr);
 #if PHONEME_IOS_NATIVE
-  if (err == KNI_OK && ciPtr != NULL &&
-          KNI_IsNullHandle(image) != KNI_TRUE) {
+  if (err == KNI_OK && ciPtr != NULL) {
     phoneme_ios_lcdui_capture_image(
         MidpComponentToId(&ciPtr->component),
         image

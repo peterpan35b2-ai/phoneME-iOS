@@ -33,6 +33,17 @@ import com.sun.midp.configurator.Constants;
  * Look and feel class for <code>Form</code>.
  */
 class FormLFImpl extends DisplayableLFImpl implements FormLF {
+    /** Native host renderer kind for a regular Form. */
+    private static final int NATIVE_SCREEN_KIND_FORM = 0;
+
+    /** Native host renderer kind for a List flattened onto FormLFImpl. */
+    private static final int NATIVE_SCREEN_KIND_LIST = 1;
+
+    /** Native host renderer kind for a TextBox flattened onto FormLFImpl. */
+    private static final int NATIVE_SCREEN_KIND_TEXTBOX = 2;
+
+    /** Preserves the public LCDUI screen type after List/TextBox flattening. */
+    private final int nativeScreenKind;
     /**
      * Creates <code>FormLF</code> associated with passed in form.
      * <code>FormLFImpl</code> maintains an array of views associated
@@ -46,6 +57,7 @@ class FormLFImpl extends DisplayableLFImpl implements FormLF {
      */
     FormLFImpl(Form form, Item items[], int numOfItems) {
         super(form);
+        nativeScreenKind = NATIVE_SCREEN_KIND_FORM;
 
         // Initialize the in-out rect for Item traversal
         visRect = new int[4];
@@ -80,6 +92,9 @@ class FormLFImpl extends DisplayableLFImpl implements FormLF {
      */
     FormLFImpl(Screen screen, Item item) {
         super(screen);
+        nativeScreenKind = screen instanceof List
+                ? NATIVE_SCREEN_KIND_LIST
+                : NATIVE_SCREEN_KIND_TEXTBOX;
 
         itemLFs = new ItemLFImpl[1];
         itemLFs[0] = (ItemLFImpl)item.getLF();
@@ -971,7 +986,8 @@ class FormLFImpl extends DisplayableLFImpl implements FormLF {
         setScrollPosition0(0);    
         nativeId = createNativeResource0(owner.title,
 					 owner.ticker == null ?  null
-					    : owner.ticker.getString());
+					    : owner.ticker.getString(),
+                                         nativeScreenKind);
     }
 
     /**
@@ -1019,12 +1035,14 @@ class FormLFImpl extends DisplayableLFImpl implements FormLF {
      * @param title the title text of the <code>Form</code>
      * @param tickerText the text of the <code>Ticker</code>,
      *                   <code>Null</code> if no ticker.
+     * @param screenKind native host renderer kind for Form, List or TextBox
      *
      * @return native resource id
      *
      * @exception OutOfMemoryException - if out of native resource
      */
-    private native int createNativeResource0(String title, String tickerText);
+    private native int createNativeResource0(String title, String tickerText,
+                                             int screenKind);
 
     /**
      * Populate the native <code>Form</code> with visible <code>ItemLF</code>s

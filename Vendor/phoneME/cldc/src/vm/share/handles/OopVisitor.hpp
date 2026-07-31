@@ -167,6 +167,14 @@ class OopVisitor : public OopROMVisitor {
     //SHOULD_NOT_REACH_HERE(); (void)field; (void)offset; (void)visit_value;
     JVM_PURE_VIRTUAL_3_PARAM(field, offset, visit_value);
   }
+  virtual void do_address_word(VisitorField* field, int offset,
+                               bool visit_value) {
+#if JVM_64BIT
+    do_ulong(field, offset, visit_value);
+#else
+    do_uint(field, offset, visit_value);
+#endif
+  }
 
   // Called after visiting an object
   virtual void epilogue() 

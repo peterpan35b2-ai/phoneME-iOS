@@ -50,6 +50,14 @@ bool SocketTransport::_wait_for_accept = false;
 bool SocketTransport::_wait_for_read = false;
 bool SocketTransport::_wait_for_write = false;
 
+static inline address_word socket_handle_to_word(void* handle) {
+  return (address_word)(uintptr_t)handle;
+}
+
+static inline void* socket_handle_from_word(address_word handle) {
+  return (void*)(uintptr_t)handle;
+}
+
 Transport::transport_op_def_t SocketTransport::socket_transport_ops = {
   name,
   char_avail,
@@ -170,8 +178,8 @@ ReturnOop SocketTransport::new_transport(JVM_SINGLE_ARG_TRAPS)
   SocketTransport::Raw this_transport =
       SocketTransport::allocate(JVM_SINGLE_ARG_CHECK_0);
       
-  this_transport().set_listener_socket((int)_listen_handle);
-  this_transport().set_debugger_socket((int)INVALID_HANDLE);
+  this_transport().set_listener_socket(socket_handle_to_word(_listen_handle));
+  this_transport().set_debugger_socket(socket_handle_to_word(INVALID_HANDLE));
   this_transport().set_ops(&socket_transport_ops);
   this_transport().reset_read_ahead_buffer();
   
@@ -241,8 +249,8 @@ bool SocketTransport::connect_transport(Transport *t, ConnectionType ct,
     }
 
     st->reset_read_ahead_buffer();
-    st->set_debugger_socket((int)connect_handle);
-     
+    st->set_debugger_socket(socket_handle_to_word(connect_handle));
+
     _wait_for_accept = false;
 
     return true;
@@ -258,7 +266,7 @@ bool SocketTransport::connect_transport(Transport *t, ConnectionType ct,
       optval = 1;
       ::setsockopt(na_get_fd(connect_handle), IPPROTO_TCP, TCP_NODELAY,
                    (char *)&optval, sizeof(optval));
-      st->set_debugger_socket((int)connect_handle);
+      st->set_debugger_socket(socket_handle_to_word(connect_handle));
       return true;
 #endif
 
@@ -270,14 +278,14 @@ bool SocketTransport::connect_transport(Transport *t, ConnectionType ct,
 bool SocketTransport::initialized(Transport *t)
 {
   SocketTransport *st = (SocketTransport *)t;
-  return ((void*)st->debugger_socket() != INVALID_HANDLE);
+  return socket_handle_from_word(st->debugger_socket()) != INVALID_HANDLE;
 }
 
 void SocketTransport::disconnect_transport(Transport *t)
 {
   UsingFastOops fastoops;
   SocketTransport *st = (SocketTransport *)t;
-  void* dbg_handle = (void*)st->debugger_socket();
+  void* dbg_handle = socket_handle_from_word(st->debugger_socket());
 
   if (Verbose) {
     tty->print_cr("SocketTransport::disconnect_transport()");
@@ -294,7 +302,7 @@ void SocketTransport::disconnect_transport(Transport *t)
      */
     pcsl_socket_close_start(dbg_handle, NULL);
 
-    st->set_debugger_socket((int)INVALID_HANDLE);
+    st->set_debugger_socket(socket_handle_to_word(INVALID_HANDLE));
   }
 }
 
@@ -302,7 +310,7 @@ void SocketTransport::destroy_transport(Transport *t)
 {
   UsingFastOops fastoops;
   SocketTransport *st = (SocketTransport *)t;
-  void* listener_handle = (void*)st->listener_socket();
+  void* listener_handle = socket_handle_from_word(st->listener_socket());
 
   if (Verbose) {
     tty->print_cr("SocketTransport::destroy_transport()");
@@ -320,7 +328,7 @@ void SocketTransport::destroy_transport(Transport *t)
      */
     pcsl_socket_close_start(listener_handle, NULL);
 
-    st->set_listener_socket((int)INVALID_HANDLE);
+    st->set_listener_socket(socket_handle_to_word(INVALID_HANDLE));
   }
 
   /* The listener socket may be reopen again later */
@@ -334,7 +342,7 @@ bool SocketTransport::char_avail(Transport *t, int timeout)
 {
   UsingFastOops fastoops;
   SocketTransport *st = (SocketTransport *)t;
-  void* dbg_handle = (void*)st->debugger_socket();
+  void* dbg_handle = socket_handle_from_word(st->debugger_socket());
   int bytesAvailable = 0;
   (void)timeout; // IMPL_NOTE: take timeout into account
 
@@ -354,7 +362,7 @@ int SocketTransport::write_bytes(Transport *t, void *buf, int len)
 {
   UsingFastOops fastoops;
   SocketTransport *st = (SocketTransport *)t;
-  void* dbg_handle = (void*)st->debugger_socket();
+  void* dbg_handle = socket_handle_from_word(st->debugger_socket());
   int bytes_sent = 0;
   int status;
   static void* pContext;
@@ -426,7 +434,7 @@ int SocketTransport::read_bytes_impl(Transport *t, void *buf, int len,
   unsigned char *ptr = (unsigned char *) buf;
   unsigned int total = 0;
   SocketTransport *st = (SocketTransport *)t;
-  void* dbg_handle = (void*)st->debugger_socket();
+  void* dbg_handle = socket_handle_from_word(st->debugger_socket());
   int status;
   static void *pContext;
 
@@ -610,7 +618,7 @@ bool SocketTransport::add_to_read_ahead_buffer(unsigned char* buf_to_add,
 extern "C" int JVM_GetDebuggerSocketFd() {
   Transport::Raw t = Universe::transport_head();
   SocketTransport::Raw st = t().obj();
-  return ((int)st().debugger_socket());
+  return (int)(intptr_t)socket_handle_from_word(st().debugger_socket());
 }
 #endif
 

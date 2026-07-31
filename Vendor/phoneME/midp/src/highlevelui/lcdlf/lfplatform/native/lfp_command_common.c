@@ -175,6 +175,7 @@ MidpCommand* MidpCommandSortAll(jobject ItemCmdArray, int numItemCmds,
         c[j].priority  = (int)(getMidpCommandPtr(i)->priority);
         c[j].type  = (int)(getMidpCommandPtr(i)->commandType);
         c[j].id  = (int)(getMidpCommandPtr(i)->id);
+        c[j].scope = j < numItemCmds ? 1 : 0;
 
     } /* end for (j=0; j<nc; ++j); */
 

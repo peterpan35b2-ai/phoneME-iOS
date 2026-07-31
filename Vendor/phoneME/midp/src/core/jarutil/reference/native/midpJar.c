@@ -24,6 +24,7 @@
  * information or have any questions. 
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -36,6 +37,7 @@
 typedef struct _MidpJarInfo {
     FileObj fileObj;
     HeapManObj heapManObj;
+    int fileHandle;
     int status;
     JarInfo jarInfo;
 } MidpJarInfo;
@@ -45,7 +47,7 @@ sizeOfFile(void* state) {
     long size;
     char* pszError;
 
-    size = storageSizeOf(&pszError,(int)state);
+    size = storageSizeOf(&pszError, *(int*)state);
     storageFreeError(pszError);
     return size;
 }
@@ -55,7 +57,7 @@ readChars(void* state, unsigned char* buffer, long n) {
     long size;
     char* pszError;
  
-    size = storageRead(&pszError, (int)state, (char*)buffer, n);
+    size = storageRead(&pszError, *(int*)state, (char*)buffer, n);
     storageFreeError(pszError);
     return size;
 }
@@ -68,16 +70,16 @@ seekChars(void* state, long offset, int whence) {
     switch (whence) {
     case SEEK_SET:
         absPos = offset;
-        storagePosition(&pszError, (int)state, absPos);
+        storagePosition(&pszError, *(int*)state, absPos);
         break;
 
     case SEEK_END:
         absPos = sizeOfFile(state) + offset;
-        storagePosition(&pszError, (int)state, absPos);
+        storagePosition(&pszError, *(int*)state, absPos);
         break;
 
     case SEEK_CUR:
-        absPos = storageRelativePosition(&pszError, (int)state, offset);
+        absPos = storageRelativePosition(&pszError, *(int*)state, offset);
         break;
 
     default:
@@ -137,7 +139,8 @@ midpOpenJar(int* pError, const pcsl_string * name) {
 
     memset(pJarInfo, 0, sizeof (MidpJarInfo));
 
-    pJarInfo->fileObj.state = (void*)storage_open(&pszError, name, OPEN_READ);
+    pJarInfo->fileHandle = storage_open(&pszError, name, OPEN_READ);
+    pJarInfo->fileObj.state = &pJarInfo->fileHandle;
     if (pszError != NULL) {
         midpFree(pJarInfo);
         *pError = MIDP_JAR_IO_ERROR;
@@ -155,7 +158,7 @@ midpOpenJar(int* pError, const pcsl_string * name) {
 
     pJarInfo->jarInfo = getJarInfo(&pJarInfo->fileObj);
     if (pJarInfo->jarInfo.status != 0) {
-        storageClose(&pszError, (int)(pJarInfo->fileObj.state));
+        storageClose(&pszError, pJarInfo->fileHandle);
         storageFreeError(pszError);
         
         midpFree(pJarInfo);
@@ -175,7 +178,7 @@ midpCloseJar(void* handle) {
         return;
     }
 
-    storageClose(&pszError, (int)(pJarInfo->fileObj.state));
+    storageClose(&pszError, pJarInfo->fileHandle);
     storageFreeError(pszError);
 
     midpFree(pJarInfo);

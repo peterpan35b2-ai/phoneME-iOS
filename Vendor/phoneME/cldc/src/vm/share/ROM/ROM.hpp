@@ -517,7 +517,7 @@ public:
   inline static bool system_text_contains(const OopDesc* target) {
 #if ENABLE_SEGMENTED_ROM_TEXT_BLOCK
     GUARANTEE(_text_total_size > 0, "Sanity");
-    const juint offset = ((juint)target) - _min_text_seg_addr;
+    const uintptr_t offset = (uintptr_t)target - _min_text_seg_addr;
     if (offset < _text_total_size) {
       return true;
     }
@@ -624,15 +624,15 @@ private:
   static void arrange_text_block();
 
   static juint _rom_text_block_segment_sizes[];
-  static juint _rom_text_block_segments[];
-  static juint _min_text_seg_addr;
-  static juint _text_total_size;
+  static address_word _rom_text_block_segments[];
+  static address_word _min_text_seg_addr;
+  static size_t _text_total_size;
 
 public:
-  static juint min_text_seg_addr() {
+  static address_word min_text_seg_addr() {
     return _min_text_seg_addr;
   }
-  static juint text_total_size() {
+  static size_t text_total_size() {
     return _text_total_size;
   }
 private:

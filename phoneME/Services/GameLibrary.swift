@@ -1,0 +1,369 @@
+import Foundation
+
+@MainActor
+final class GameLibrary: ObservableObject {
+    @Published private(set) var games: [Game] = []
+
+    private let fileManager: FileManager
+    private let rootURL: URL
+    private let gamesURL: URL
+    private let iconsURL: URL
+    private let metadataURL: URL
+    private let compatibilityRevision = "avatar-lapro-stackmaps-v1"
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.temporaryDirectory
+
+        rootURL = applicationSupport.appendingPathComponent("phoneME", isDirectory: true)
+        gamesURL = rootURL.appendingPathComponent("Games", isDirectory: true)
+        iconsURL = rootURL.appendingPathComponent("Icons", isDirectory: true)
+        metadataURL = rootURL.appendingPathComponent("library.json", isDirectory: false)
+
+        do {
+            try fileManager.createDirectory(
+                at: gamesURL,
+                withIntermediateDirectories: true
+            )
+            try fileManager.createDirectory(
+                at: iconsURL,
+                withIntermediateDirectories: true
+            )
+            try load()
+        } catch {
+            games = []
+        }
+    }
+
+    func fileURL(for game: Game) -> URL {
+        gamesURL.appendingPathComponent(game.fileName, isDirectory: false)
+    }
+
+    func iconURL(for game: Game) -> URL? {
+        guard let iconFileName = game.iconFileName else { return nil }
+        let url = iconsURL.appendingPathComponent(iconFileName, isDirectory: false)
+        return fileManager.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Applies compatibility fixes to JARs imported by older app versions.
+    /// New imports are already normalized, so this becomes a cheap no-op after
+    /// the first successful launch.
+    func prepareJarForLaunch(_ game: Game) throws -> URL {
+        let sourceURL = fileURL(for: game)
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            throw LibraryError.missingGameFile
+        }
+        guard !isCompatibilityPrepared(for: sourceURL) else {
+            return sourceURL
+        }
+
+        let replacementURL = gamesURL.appendingPathComponent(
+            "launch-normalized-\(UUID().uuidString).jar",
+            isDirectory: false
+        )
+        defer {
+            try? fileManager.removeItem(at: replacementURL)
+        }
+
+        if try JarCompatibilityPatcher.writeNormalizedJar(
+            from: sourceURL,
+            to: replacementURL
+        ) {
+            _ = try fileManager.replaceItemAt(
+                sourceURL,
+                withItemAt: replacementURL
+            )
+            print("[JarCompatibilityPatcher] normalized existing JAR: \(game.fileName)")
+        }
+        try? markCompatibilityPrepared(for: sourceURL)
+        return sourceURL
+    }
+
+    @discardableResult
+    func importJar(from sourceURL: URL) throws -> Game {
+        let hasSecurityScope = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityScope {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard sourceURL.pathExtension.lowercased() == "jar" else {
+            throw LibraryError.unsupportedFile
+        }
+
+        let safeName = sourceURL
+            .deletingPathExtension()
+            .lastPathComponent
+            .replacingOccurrences(of: "/", with: "-")
+        let metadata = try? JarMetadataReader.read(from: sourceURL)
+        let id = UUID()
+        let storedName = "\(id.uuidString)-\(safeName).jar"
+        let destinationURL = gamesURL.appendingPathComponent(storedName)
+        let iconFileName = try storeIcon(from: metadata, gameID: id)
+
+        do {
+            let normalized = try JarCompatibilityPatcher.writeNormalizedJar(
+                from: sourceURL,
+                to: destinationURL
+            )
+            if !normalized {
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            }
+            try? markCompatibilityPrepared(for: destinationURL)
+        } catch {
+            if let iconFileName {
+                try? fileManager.removeItem(at: iconsURL.appendingPathComponent(iconFileName))
+            }
+            throw error
+        }
+
+        let game = Game(
+            id: id,
+            title: metadata?.title ?? safeName,
+            vendor: metadata?.vendor ?? "",
+            version: metadata?.version ?? "",
+            mainClass: metadata?.mainClass ?? "",
+            fileName: storedName,
+            iconFileName: iconFileName
+        )
+        games.append(game)
+        sortGames()
+
+        do {
+            try save()
+        } catch {
+            games.removeAll { $0.id == game.id }
+            try? fileManager.removeItem(at: destinationURL)
+            removeIcon(for: game)
+            throw error
+        }
+
+        return game
+    }
+
+    func reinstall(_ game: Game, from sourceURL: URL) throws {
+        let hasSecurityScope = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityScope {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard sourceURL.pathExtension.lowercased() == "jar" else {
+            throw LibraryError.unsupportedFile
+        }
+
+        let metadata = try? JarMetadataReader.read(from: sourceURL)
+        let destinationURL = fileURL(for: game)
+        let replacementURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent("replacement-\(UUID().uuidString).jar")
+        let normalized = try JarCompatibilityPatcher.writeNormalizedJar(
+            from: sourceURL,
+            to: replacementURL
+        )
+        if !normalized {
+            try fileManager.copyItem(at: sourceURL, to: replacementURL)
+        }
+
+        do {
+            _ = try fileManager.replaceItemAt(destinationURL, withItemAt: replacementURL)
+            try? markCompatibilityPrepared(for: destinationURL)
+        } catch {
+            try? fileManager.removeItem(at: replacementURL)
+            throw error
+        }
+
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        let previousIcon = games[index].iconFileName
+        let replacementIcon = try storeIcon(from: metadata, gameID: game.id)
+        games[index].vendor = metadata?.vendor ?? ""
+        games[index].version = metadata?.version ?? ""
+        games[index].mainClass = metadata?.mainClass ?? ""
+        games[index].iconFileName = replacementIcon
+        if let previousIcon, previousIcon != replacementIcon {
+            try? fileManager.removeItem(at: iconsURL.appendingPathComponent(previousIcon))
+        }
+        try save()
+    }
+
+    func saveLog() throws {
+        let lines = [
+            "J2ME Loader",
+            "Games: \(games.count)",
+            "Date: \(ISO8601DateFormatter().string(from: Date()))"
+        ]
+        let logURL = rootURL.appendingPathComponent("log.txt")
+        try lines.joined(separator: "\n").write(to: logURL, atomically: true, encoding: .utf8)
+    }
+
+    func removeGames(at offsets: IndexSet) {
+        let removedGames = offsets.compactMap { index in
+            games.indices.contains(index) ? games[index] : nil
+        }
+
+        games.remove(atOffsets: offsets)
+        for game in removedGames {
+            let jarURL = fileURL(for: game)
+            try? fileManager.removeItem(at: jarURL)
+            try? fileManager.removeItem(at: compatibilityMarkerURL(for: jarURL))
+            removeIcon(for: game)
+            PhoneMERuntimeResources.removeStorage(for: game.id)
+        }
+        try? save()
+    }
+
+    func remove(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games.remove(at: index)
+        let jarURL = fileURL(for: game)
+        try? fileManager.removeItem(at: jarURL)
+        try? fileManager.removeItem(at: compatibilityMarkerURL(for: jarURL))
+        removeIcon(for: game)
+        PhoneMERuntimeResources.removeStorage(for: game.id)
+        try? save()
+    }
+
+    func rename(_ game: Game, to title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].title = trimmed
+        try? save()
+    }
+
+    func markPlayed(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else {
+            return
+        }
+
+        games[index].lastPlayedAt = Date()
+        games[index].playCount += 1
+        sortGames()
+        try? save()
+    }
+
+    private func sortGames() {
+        games.sort {
+            let lhs = $0.lastPlayedAt ?? $0.importedAt
+            let rhs = $1.lastPlayedAt ?? $1.importedAt
+            return lhs > rhs
+        }
+    }
+
+    private func load() throws {
+        guard fileManager.fileExists(atPath: metadataURL.path) else {
+            games = []
+            return
+        }
+
+        let data = try Data(contentsOf: metadataURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        games = try decoder.decode([Game].self, from: data).filter {
+            fileManager.fileExists(atPath: fileURL(for: $0).path)
+        }
+        try refreshMetadataIfNeeded()
+        sortGames()
+    }
+
+    private func refreshMetadataIfNeeded() throws {
+        var changed = false
+
+        for index in games.indices {
+            let needsMetadata = games[index].vendor.isEmpty
+                || games[index].version.isEmpty
+                || games[index].mainClass.isEmpty
+                || games[index].iconFileName == nil
+            guard needsMetadata,
+                  let metadata = try? JarMetadataReader.read(from: fileURL(for: games[index])) else {
+                continue
+            }
+
+            if games[index].vendor.isEmpty, let vendor = metadata.vendor {
+                games[index].vendor = vendor
+                changed = true
+            }
+            if games[index].version.isEmpty, let version = metadata.version {
+                games[index].version = version
+                changed = true
+            }
+            if games[index].mainClass.isEmpty, let mainClass = metadata.mainClass {
+                games[index].mainClass = mainClass
+                changed = true
+            }
+            if games[index].iconFileName == nil,
+               let iconFileName = try storeIcon(from: metadata, gameID: games[index].id) {
+                games[index].iconFileName = iconFileName
+                changed = true
+            }
+        }
+
+        if changed {
+            try save()
+        }
+    }
+
+    private func storeIcon(from metadata: JarMetadata?, gameID: UUID) throws -> String? {
+        guard let data = metadata?.iconData, !data.isEmpty else { return nil }
+        let rawExtension = metadata?.iconExtension?.lowercased() ?? "png"
+        let allowedExtensions = CharacterSet.alphanumerics
+        let fileExtension = rawExtension.unicodeScalars.allSatisfy(allowedExtensions.contains)
+            ? rawExtension
+            : "png"
+        let fileName = "\(gameID.uuidString).\(fileExtension.isEmpty ? "png" : fileExtension)"
+        try data.write(to: iconsURL.appendingPathComponent(fileName), options: .atomic)
+        return fileName
+    }
+
+    private func removeIcon(for game: Game) {
+        guard let iconFileName = game.iconFileName else { return }
+        try? fileManager.removeItem(at: iconsURL.appendingPathComponent(iconFileName))
+    }
+
+    private func compatibilityMarkerURL(for jarURL: URL) -> URL {
+        jarURL.appendingPathExtension("phoneme-compatibility")
+    }
+
+    private func isCompatibilityPrepared(for jarURL: URL) -> Bool {
+        let markerURL = compatibilityMarkerURL(for: jarURL)
+        guard let data = try? Data(contentsOf: markerURL),
+              let value = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return value == compatibilityRevision
+    }
+
+    private func markCompatibilityPrepared(for jarURL: URL) throws {
+        try Data(compatibilityRevision.utf8).write(
+            to: compatibilityMarkerURL(for: jarURL),
+            options: .atomic
+        )
+    }
+
+    private func save() throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(games)
+        try data.write(to: metadataURL, options: .atomic)
+    }
+}
+
+enum LibraryError: LocalizedError {
+    case unsupportedFile
+    case missingGameFile
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedFile:
+            return "Unsupported file."
+        case .missingGameFile:
+            return "The game JAR is missing from the library."
+        }
+    }
+}

@@ -39,6 +39,7 @@
 #ifndef _WIN32_WCE
     #include <errno.h>
 #endif
+#include <stdint.h>
 #include <string.h>
 #include <java_types.h>
 
@@ -92,6 +93,9 @@
 #ifndef MAX_CACHED_DATA_SIZE
     #define MAX_CACHED_DATA_SIZE 1500
 #endif /* MAX_CACHED_DATA_SIZE */
+
+#define PUSH_PCSL_HANDLE(token) ((void *)(intptr_t)(token))
+#define PUSH_PCSL_TOKEN(handle) ((int)(intptr_t)(handle))
 
 /** For build a parameter string. */
 PCSL_DEFINE_STATIC_ASCII_STRING_LITERAL_START(COMMA_STRING)
@@ -214,6 +218,27 @@ typedef struct _alarmentry {
 
 static PushEntry *pushlist = NULL;
 static AlarmEntry *alarmlist = NULL;
+static int nextAlarmHandle = 1;
+
+static int allocateAlarmHandle(void) {
+    int candidate;
+    AlarmEntry *entry;
+
+    do {
+        candidate = nextAlarmHandle++;
+        if (nextAlarmHandle <= 0) {
+            nextAlarmHandle = 1;
+        }
+
+        for (entry = alarmlist; entry != NULL; entry = entry->next) {
+            if (entry->timerHandle == candidate) {
+                break;
+            }
+        }
+    } while (candidate <= 0 || entry != NULL);
+
+    return candidate;
+}
 
 typedef enum {
     NET_STATUS_DOWN       = -3,
@@ -450,9 +475,11 @@ static void pushAddNetworkNotifier(PushEntry* pe) {
     if (!pe->isWMAEntry) {
         /* Push only needs to know if a socket has data. */
         if (pushIsDatagramConnection(pe->value)) {
-            pcsl_add_network_notifier((void *)pe->fd, PCSL_NET_CHECK_READ);
+            pcsl_add_network_notifier(PUSH_PCSL_HANDLE(pe->fd),
+                                      PCSL_NET_CHECK_READ);
         } else if (pushIsSocketConnection(pe->value)) {
-            pcsl_add_network_notifier((void *)pe->fd, PCSL_NET_CHECK_ACCEPT);
+            pcsl_add_network_notifier(PUSH_PCSL_HANDLE(pe->fd),
+                                      PCSL_NET_CHECK_ACCEPT);
         }
     }
 }
@@ -860,7 +887,7 @@ static void pushDeleteEntry(PushEntry *p, PushEntry **pPrevNext) {
             /* closing will disconnect any socket notifiers */
             if (pushIsSocketConnection(p->value)) {
 #if ENABLE_SERVER_SOCKET
-                pcsl_socket_close_start((void*)(p->fd), &context);
+                pcsl_socket_close_start(PUSH_PCSL_HANDLE(p->fd), &context);
                 /* Update the resource count */
                 if (midpDecResourceCount(RSC_TYPE_TCP_SER, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL, "(Push)TCP Server : Resource limit"
@@ -868,7 +895,7 @@ static void pushDeleteEntry(PushEntry *p, PushEntry **pPrevNext) {
                 }
 #endif
             } else if (pushIsDatagramConnection(p->value)) {
-                pcsl_datagram_close_start((void *)p->fd, &context);
+                pcsl_datagram_close_start(PUSH_PCSL_HANDLE(p->fd), &context);
                 /* Update the resource count */
                 if (midpDecResourceCount(RSC_TYPE_UDP, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL, "(Push)Datagram : Resource limit"
@@ -1069,9 +1096,11 @@ int pushcheckout(char* protocol, int port, char * store) {
 
             /* The push system should stop monitoring this connection. */
             if (pushIsSocketConnection(p->value)) {
-                pcsl_remove_network_notifier((void*)fd, PCSL_NET_CHECK_ACCEPT);
+                pcsl_remove_network_notifier(PUSH_PCSL_HANDLE(fd),
+                                             PCSL_NET_CHECK_ACCEPT);
             } else if (pushIsDatagramConnection(p->value)) {
-                pcsl_remove_network_notifier((void*)fd, PCSL_NET_CHECK_READ);
+                pcsl_remove_network_notifier(PUSH_PCSL_HANDLE(fd),
+                                             PCSL_NET_CHECK_READ);
             }
 
             p->state = CHECKED_OUT;
@@ -1177,7 +1206,7 @@ pushcheckinbymidlet(SuiteIdType suiteId, char* pszClassName) {
         if (bt_push_parse_url(p->value, &port, NULL) == BT_RESULT_SUCCESS) {
             bt_handle_t handle = bt_push_start_server(&port);
             if (handle != BT_INVALID_HANDLE) {
-                p->fd = (int)handle;
+                p->fd = PUSH_PCSL_TOKEN(handle);
             }
             continue;
         }
@@ -1253,7 +1282,7 @@ static void pushcleanupentry(PushEntry *p) {
 #if ENABLE_SERVER_SOCKET
         void *context;
 
-        pcsl_socket_close_start((void*)(p->fdsock), &context);
+        pcsl_socket_close_start(PUSH_PCSL_HANDLE(p->fdsock), &context);
         /*
          * Update the resource count
          * Accepted sockets should be counted against client socket
@@ -1449,7 +1478,8 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
 #ifdef ENABLE_JSR_180
     if (prevState == RECEIVED_EVENT && pushp->pCachedData != NULL) {
         status = pcsl_socket_read_finish(
-                                        (void *)pushp->fdsock, (unsigned char *)pushp->pCachedData->buffer,
+                                        PUSH_PCSL_HANDLE(pushp->fdsock),
+                                        (unsigned char *)pushp->pCachedData->buffer,
                                         MAX_CACHED_DATA_SIZE, &(pushp->pCachedData->length),
                                         &context);
 
@@ -1463,7 +1493,8 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
              */
             REPORT_ERROR1(LC_PUSH,
                           "(Push) Cannot receive data, errno = %d\n",
-                          pcsl_network_error((void*)pushp->fdsock));
+                          pcsl_network_error(
+                              PUSH_PCSL_HANDLE(pushp->fdsock)));
             pushcheckinentry(pushp);
             return NULL;
         }
@@ -1475,7 +1506,7 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
         } else {
             pushp->state = WAITING_DATA;
             /* wait for end of header */
-            pcsl_add_network_notifier((void *)pushp->fdsock,
+            pcsl_add_network_notifier(PUSH_PCSL_HANDLE(pushp->fdsock),
                                       PCSL_NET_CHECK_READ);
         }
         /* wait for end of header */
@@ -1488,8 +1519,8 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
          * For a server socket connection, accept the inbound
          * socket connection so the end point filter can be checked.
          */
-        status = pcsl_serversocket_accept_start((void*)pushp->fd,
-                                                &clientHandle, &context);
+        status = pcsl_serversocket_accept_start(
+            PUSH_PCSL_HANDLE(pushp->fd), &clientHandle, &context);
 
         if (status != PCSL_NET_SUCCESS) {
             /*
@@ -1498,7 +1529,7 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
              */
             REPORT_ERROR1(LC_PUSH,
                           "(Push) Cannot accept serversocket, errno = %d\n",
-                          pcsl_network_error((void*)pushp->fd));
+                          pcsl_network_error(PUSH_PCSL_HANDLE(pushp->fd)));
             pushcheckinentry(pushp);
             return NULL;
         }
@@ -1510,9 +1541,9 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
                     "(Push) Resource limit update error");
     }
 
-    pushp->fdsock = (int)clientHandle;
+    pushp->fdsock = PUSH_PCSL_TOKEN(clientHandle);
 
-    pcsl_socket_getremoteaddr((void *)pushp->fdsock, ipAddress);
+    pcsl_socket_getremoteaddr(PUSH_PCSL_HANDLE(pushp->fdsock), ipAddress);
 
 #if ENABLE_JSR_180
     if (pushp->isSIPEntry) {
@@ -1534,12 +1565,14 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
         strcpy(ipAddress, pcsl_inet_ntoa(&ipBytes));
 
         status = pcsl_socket_read_start(
-                                       (void *)pushp->fdsock, (unsigned char *)pushp->pCachedData->buffer,
+                                       PUSH_PCSL_HANDLE(pushp->fdsock),
+                                       (unsigned char *)pushp->pCachedData->buffer,
                                        MAX_CACHED_DATA_SIZE, &(pushp->pCachedData->length), &context);
 
         if (status == PCSL_NET_SUCCESS) {
             status = pcsl_socket_read_finish(
-                                            (void *)pushp->fdsock, (unsigned char *)pushp->pCachedData->buffer,
+                                            PUSH_PCSL_HANDLE(pushp->fdsock),
+                                            (unsigned char *)pushp->pCachedData->buffer,
                                             MAX_CACHED_DATA_SIZE, &(pushp->pCachedData->length),
                                             &context);
 
@@ -1551,7 +1584,8 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
                  */
                 REPORT_ERROR1(LC_PUSH,
                               "(Push) Cannot receive data, errno = %d\n",
-                              pcsl_network_error((void*)pushp->fdsock));
+                              pcsl_network_error(
+                                  PUSH_PCSL_HANDLE(pushp->fdsock)));
                 pushcheckinentry(pushp);
                 return NULL;
             }
@@ -1565,7 +1599,7 @@ static char* pushAcceptConnection(PushEntry* pushp, int prevState) {
         }
         if (status == PCSL_NET_WOULDBLOCK) {
             pushp->state = WAITING_DATA;
-            pcsl_add_network_notifier((void *)pushp->fdsock,
+            pcsl_add_network_notifier(PUSH_PCSL_HANDLE(pushp->fdsock),
                                       PCSL_NET_CHECK_READ);
             return NULL;
         } else {
@@ -1660,7 +1694,7 @@ char *pushfindfd(int fd) {
                 pushp->pCachedData->offs = 0;
 
                 status = pcsl_datagram_read_finish(
-                                                  (void *)pushp->fd,
+                                                  PUSH_PCSL_HANDLE(pushp->fd),
                                                   ipBytes,
                                                   &(pushp->pCachedData->senderport),
                                                   pushp->pCachedData->buffer,
@@ -2266,7 +2300,7 @@ static int pushProcessPort(PushEntry* pe){
                 pe->fd = -1;
                 return -1;
             }
-            pe->fd = (int)handle;
+            pe->fd = PUSH_PCSL_TOKEN(handle);
             return 0;
         }
     }
@@ -2374,7 +2408,7 @@ static int pushProcessPort(PushEntry* pe){
                                               &handle, &context);
 
             if (status == PCSL_NET_SUCCESS){
-                pe->fd = (int) handle;
+                pe->fd = PUSH_PCSL_TOKEN(handle);
                 /* Update the resource count  */
                 if (midpIncResourceCount(RSC_TYPE_UDP, 1) == 0){
                     REPORT_INFO(LC_PROTOCOL, "(Push)Datagrams: Resource"
@@ -2403,7 +2437,7 @@ static int pushProcessPort(PushEntry* pe){
             status = pcsl_serversocket_open(pe->port, &handle);
 
             if (status == PCSL_NET_SUCCESS){
-                pe->fd = (int) handle;
+                pe->fd = PUSH_PCSL_TOKEN(handle);
 
                 /* Update the resource count  */
                 if (midpIncResourceCount(RSC_TYPE_TCP_SER, 1) == 0){
@@ -2969,7 +3003,7 @@ static void alarmstart(AlarmEntry *entry, jlong alarm){
     if (time >= 0){
         /* if not expired, check timer event */
         entry->state = CHECKED_IN;
-        entry->timerHandle = createTimerHandle((int)entry, time);
+        entry->timerHandle = createTimerHandle(allocateAlarmHandle(), time);
     } else{
         /* if expired, flag the timer as triggered */
         entry->state = RECEIVED_EVENT;

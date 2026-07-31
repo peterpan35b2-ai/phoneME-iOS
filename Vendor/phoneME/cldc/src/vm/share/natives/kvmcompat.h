@@ -69,24 +69,26 @@ typedef enum {
 typedef bool bool_t;
 #endif // JVM_CHECK
 
+#include <stdint.h>
+
 #ifndef STRINGBUFFERSIZE
 #define STRINGBUFFERSIZE 512
 #endif
 
 extern void _kvm_check_stack();
 
-extern int * _kvm_stack_top;
-extern int   _kvm_return_value32;
+extern unsigned char * _kvm_stack_top;
+extern uintptr_t       _kvm_return_value;
 extern int   _kvm_return_type;
 extern int   _in_kvm_native_method;
 
 #define getSP() _kvm_stack_top
 
-extern int popStack();
-extern void pushStack(int data);
+extern uintptr_t popStack();
+extern void pushStack(uintptr_t data);
 
 #define popStackAsType(_type_)          ((_type_)popStack())
-#define pushStackAsType(_type_, data)   pushStack((int)data)
+#define pushStackAsType(_type_, data)   pushStack((uintptr_t)(data))
 
 extern void popDoubleToAddress(void* ptr);
 extern void pushDoubleFromAddress(void* ptr);

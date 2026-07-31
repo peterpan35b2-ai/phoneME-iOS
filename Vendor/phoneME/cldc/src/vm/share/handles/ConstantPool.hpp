@@ -365,24 +365,17 @@ class ConstantPool: public Oop {
 
   void double_parts_at_put(int index, jint msw, jint lsw) {
     tag_at_put(index, JVM_CONSTANT_Double);
-    if (MSW_FIRST_FOR_DOUBLE) { 
-      int_field_put(offset_from_index(index), msw);
-      int_field_put(offset_from_index(index+1), lsw);
-    } else { 
-      int_field_put(offset_from_index(index), lsw);
-      int_field_put(offset_from_index(index+1), msw);
-    }
+    // A constant-pool index occupies one native-width slot on LP64. Writing
+    // the two 32-bit words into index and index + 1 leaves a native-word gap,
+    // so ldc2_w reads only the low word. Store the complete value in the
+    // first slot; the following class-file index remains reserved as usual.
+    double_field_put(offset_from_index(index),
+                     jdouble_from_msw_lsw(msw, lsw));
   }
 
   void long_parts_at_put(int index, jint msw, jint lsw) {
     tag_at_put(index, JVM_CONSTANT_Long);
-    if (MSW_FIRST_FOR_LONG) { 
-      int_field_put(offset_from_index(index), msw);
-      int_field_put(offset_from_index(index+1), lsw);
-    } else { 
-      int_field_put(offset_from_index(index), lsw);
-      int_field_put(offset_from_index(index+1), msw);
-    }
+    long_field_put(offset_from_index(index), jlong_from_msw_lsw(msw, lsw));
   }
 
   void symbol_at_put(int index, const Oop* oop) {

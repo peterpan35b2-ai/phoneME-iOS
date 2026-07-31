@@ -88,6 +88,8 @@ public interface PlayerListener {
      */
     String STOPPED = "stopped";
 
+    String STOPPED_AT_TIME = "stoppedAtTime";
+
     /**
      * Posted when a <code>Player</code> has reached the
      * end of the media.
@@ -174,6 +176,8 @@ public interface PlayerListener {
      */
     String VOLUME_CHANGED = "volumeChanged";
 
+    String SIZE_CHANGED = "sizeChanged";
+
 
     /**
      * Posted when an error had occurred.
@@ -192,6 +196,12 @@ public interface PlayerListener {
      * Value <code>closed</code> is assigned to <code>CLOSED</code>.
      */
     String CLOSED = "closed";
+
+    String RECORD_STARTED = "recordStarted";
+    String RECORD_STOPPED = "recordStopped";
+    String RECORD_ERROR = "recordError";
+    String BUFFERING_STARTED = "bufferingStarted";
+    String BUFFERING_STOPPED = "bufferingStopped";
 
     /**
      * This method is called to deliver an event to a registered

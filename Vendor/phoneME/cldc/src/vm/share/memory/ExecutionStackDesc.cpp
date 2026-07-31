@@ -82,9 +82,15 @@ void ExecutionStackDesc::relocate_internal_pointers(int delta,
 
   // Relocate this stack's thread's saved frame pointer,
   // stack_pointer, and stack_limit.
-  jint* stored_fp_addr = (jint*)thread->stack_pointer();
-  if (*stored_fp_addr != 0) {
-    *stored_fp_addr = *stored_fp_addr + delta;
+  /*
+   * The C interpreter saves its Java frame pointer in the first native-width
+   * slot at stack_pointer(). On LP64, updating it through jint truncates the
+   * pointer during GC compaction and eventually resumes the thread with a
+   * null or corrupt frame. Relocate the complete address-sized value.
+   */
+  address* stored_fp_addr = (address*)thread->stack_pointer();
+  if (*stored_fp_addr != NULL) {
+    *stored_fp_addr += delta;
   }
   thread->set_stack_pointer(thread->stack_pointer() + delta);
   thread->set_stack_limit(thread->stack_limit() + delta);

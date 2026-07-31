@@ -31,6 +31,7 @@
  */
 
 #include <kni.h>
+#include <jvm.h>
 
 #include <sys/time.h>
 #include <sys/types.h>
@@ -57,6 +58,19 @@
 
 #include "mastermode_check_signal.h"
 #include "mastermode_handle_signal.h"
+
+#ifdef PHONEME_IOS_NATIVE
+static void stop_vm_if_requested(void) {
+    /*
+     * Host Exit must unwind the VM on its own worker thread. The interpreter
+     * polls this flag while executing Java bytecodes, but an idle MIDlet can
+     * spend most of its time inside this native signal wait path.
+     */
+    if (phoneme_ios_port_should_stop()) {
+        JVM_Stop(0);
+    }
+}
+#endif
 
 /* Forward declarations */
 static jboolean checkForSocketPointerAndKeyboardSignal(MidpReentryData* pNewSignal,
@@ -117,6 +131,7 @@ static jboolean checkForSocketPointerAndKeyboardSignal(MidpReentryData* pNewSign
 #endif
 
 #ifdef PHONEME_IOS_NATIVE
+    stop_vm_if_requested();
     if (phoneme_ios_port_has_pending_key()) {
         handleKey(pNewSignal, pNewMidpEvent);
         return KNI_TRUE;
@@ -196,6 +211,7 @@ static jboolean checkForSocketPointerAndKeyboardSignal(MidpReentryData* pNewSign
 #endif
 
 #ifdef PHONEME_IOS_NATIVE
+    stop_vm_if_requested();
     if (phoneme_ios_port_has_pending_key()) {
         handleKey(pNewSignal, pNewMidpEvent);
         return KNI_TRUE;

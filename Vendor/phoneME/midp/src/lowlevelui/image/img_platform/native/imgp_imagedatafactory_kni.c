@@ -30,6 +30,7 @@
  * Implementation of Java native methods for the <tt>ImageImpl</tt> class.
  */
 
+#include <stdint.h>
 #include <stdlib.h>
 
 #include <midp_constants_data.h>
@@ -63,7 +64,8 @@ gxpport_image_native_handle gxp_get_imagedata(jobject imgData) {
     if (KNI_IsNullHandle(imgData)) {
         return NULL;
     } else {
-	return (gxpport_image_native_handle)IMGAPI_GET_IMAGEDATA_PTR(imgData)->nativeImageData;
+	return (gxpport_image_native_handle)(intptr_t)
+            IMGAPI_GET_IMAGEDATA_PTR(imgData)->nativeImageData;
     }
 }
 
@@ -148,7 +150,8 @@ int img_load_imagedata_from_raw_buffer(KNIDECLARGS jobject imageData,
 
         dstImageDataPtr->width   = (jint)imgWidth;
         dstImageDataPtr->height  = (jint)imgHeight;
-        dstImageDataPtr->nativeImageData  = (jint)newImagePtr;
+        dstImageDataPtr->nativeImageData =
+            (jlong)(intptr_t)newImagePtr;
         status = KNI_TRUE;        
 	} else if (IMG_NATIVE_IMAGE_OUT_OF_MEMORY_ERROR == creationError) {
         KNI_ThrowNew(midpOutOfMemoryError, NULL);        
@@ -204,7 +207,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_createImmutableImageDataCopy() {
     } else if (IMG_NATIVE_IMAGE_NO_ERROR != creationError) {
 	KNI_ThrowNew(midpIllegalArgumentException, NULL);
     } else {
-	IMGAPI_GET_IMAGEDATA_PTR(dest)->nativeImageData = (jint)newImage;
+	IMGAPI_GET_IMAGEDATA_PTR(dest)->nativeImageData =
+            (jlong)(intptr_t)newImage;
     }
 
     KNI_EndHandles();
@@ -280,7 +284,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_createImmutableImageDataRegion() 
     } else if (IMG_NATIVE_IMAGE_NO_ERROR != creationError) {
 	KNI_ThrowNew(midpIllegalArgumentException, NULL);
     } else {
-	IMGAPI_GET_IMAGEDATA_PTR(destImg)->nativeImageData = (jint)newImagePtr;
+	IMGAPI_GET_IMAGEDATA_PTR(destImg)->nativeImageData =
+            (jlong)(intptr_t)newImagePtr;
     }
 
     KNI_EndHandles();
@@ -357,7 +362,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_createImmutableImageDecodeImage()
 	  java_imagedata * dstImageDataPtr = IMGAPI_GET_IMAGEDATA_PTR(imageData);
 	  dstImageDataPtr->width  = (jint)imgWidth;
 	  dstImageDataPtr->height = (jint)imgHeight;
-	  dstImageDataPtr->nativeImageData = (jint)newImagePtr;
+	  dstImageDataPtr->nativeImageData =
+              (jlong)(intptr_t)newImagePtr;
 	}
     } while (0);
 
@@ -366,13 +372,13 @@ Java_javax_microedition_lcdui_ImageDataFactory_createImmutableImageDecodeImage()
 }
 
 /**
- * boolean loadRomizedImage(IamgeData imageData, int imageDataArrayPtr,
+ * boolean loadRomizedImage(IamgeData imageData, long imageDataArrayPtr,
  * int imageDataArrayLength);
  */
 KNIEXPORT KNI_RETURNTYPE_BOOLEAN
 Java_javax_microedition_lcdui_ImageDataFactory_loadRomizedImage() {
     int            status = KNI_FALSE;
-    int            imageDataArrayPtr  = KNI_GetParameterAsInt(2);
+    jlong          imageDataArrayPtr  = KNI_GetParameterAsLong(2);
     int            imageDataArrayLength  = KNI_GetParameterAsInt(3);
     int            imgWidth, imgHeight;
     img_native_error_codes creationError = IMG_NATIVE_IMAGE_NO_ERROR;
@@ -386,7 +392,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_loadRomizedImage() {
     KNI_GetParameterAsObject(1, imageData);
 
     do {
-        unsigned char* buffer = (unsigned char*)imageDataArrayPtr;
+        unsigned char* buffer =
+            (unsigned char *)(intptr_t)imageDataArrayPtr;
 
         gxpport_loadimmutable_from_platformbuffer(
                           buffer, imageDataArrayLength,
@@ -400,7 +407,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_loadRomizedImage() {
 
             dstImageDataPtr->width   = (jint)imgWidth;
             dstImageDataPtr->height  = (jint)imgHeight;
-            dstImageDataPtr->nativeImageData = (jint)newImagePtr;
+            dstImageDataPtr->nativeImageData =
+                (jlong)(intptr_t)newImagePtr;
             status = KNI_TRUE;
             break;
 
@@ -490,7 +498,8 @@ Java_javax_microedition_lcdui_ImageDataFactory_createImmutableImageDecodeRGBImag
 
             dstImageDataPtr->height = (jint)height;
             dstImageDataPtr->width = (jint)width;
-            dstImageDataPtr->nativeImageData = (jint)newImagePtr;
+            dstImageDataPtr->nativeImageData =
+                (jlong)(intptr_t)newImagePtr;
             break;
         }
 
@@ -556,7 +565,7 @@ Java_javax_microedition_lcdui_ImageDataFactory_createMutableImageData() {
 	    KNI_GetParameterAsObject(1, imageData);
 
 	    IMGAPI_GET_IMAGEDATA_PTR(imageData)->nativeImageData =
-                (jint) newImagePtr;
+                (jlong)(intptr_t)newImagePtr;
 	    KNI_EndHandles();
         }
     }

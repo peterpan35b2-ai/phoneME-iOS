@@ -31,6 +31,7 @@
   * to support timer alarms in the push subsystem.
   */
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <jvm.h>
 #include <midp_logging.h>
@@ -41,7 +42,7 @@
 /** Handle push timer alarm on timer wakeup & free timer instance */
 static void handlePushTimerAlarm(TimerHandle *timer) {
     if (timer != NULL) {
-        int pushHandle = (int)(get_timer_data(timer));
+        int pushHandle = (int)(intptr_t)get_timer_data(timer);
         if (findPushTimerBlockedHandle(pushHandle) != 0) {
             /* The push system is waiting for this alarm */
             REPORT_INFO1(LC_PUSH,
@@ -63,7 +64,7 @@ static void handlePushTimerAlarm(TimerHandle *timer) {
 int destroyTimerHandle(int pushHandle) {
 
     REPORT_INFO1(LC_PUSH, "[destroyTimerHandle] pushHandle=%#x", pushHandle);
-    delete_timer_by_userdata((void*)pushHandle);
+    delete_timer_by_userdata((void *)(intptr_t)pushHandle);
     return 0;
 }
 
@@ -82,6 +83,6 @@ int createTimerHandle(int pushHandle, jlong wakeupInMilliSeconds) {
         pushHandle, (long)wakeupInMilliSeconds);
 
     timer = new_timer(currentTime + wakeupInMilliSeconds,
-        (void*)pushHandle, (void*)handlePushTimerAlarm);
-    return pushHandle;
+        (void *)(intptr_t)pushHandle, handlePushTimerAlarm);
+    return timer != NULL ? pushHandle : 0;
 }

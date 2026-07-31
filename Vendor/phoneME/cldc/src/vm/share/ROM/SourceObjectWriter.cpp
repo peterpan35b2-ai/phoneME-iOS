@@ -390,8 +390,8 @@ void SourceObjectWriter::put_int(Oop *owner, jint value JVM_TRAPS) {
       StackmapList::Raw sm = method->stackmaps();
       _stream->print(" 0x%08x", sm().entry_count());
       for (int i=0; i<sm().entry_count(); i++) {
-        int n = sm().int_field(sm().entry_stat_offset(i));
-        _stream->print(", 0x%08x", n);
+        address_word n = sm().entry_word(i);
+        _stream->print(", %p", (void*)n);
       }
       _stream->print(" */");
     }
@@ -491,7 +491,7 @@ void SourceObjectWriter::put_symbolic(Oop *owner, int offset JVM_TRAPS) {
     return;
   }
 
-  address addr = (address)owner->int_field(offset);
+  address addr = (address)owner->address_word_field(offset);
 
   if (_word_position != 0) {
     _stream->print("\n\t");
@@ -599,7 +599,7 @@ void SourceObjectWriter::put_compiled_method_symbolic(CompiledMethod *cm,
   Method method = cm->method();
   JavaClass holder = method.holder();
 
-  const address value = (address)cm->int_field(offset);
+  const address value = (address)cm->address_word_field(offset);
 
   if (value == (address)Java_void_unimplemented) {
     // For midp and the like, we occassionally compile things that are
@@ -899,13 +899,13 @@ void SourceObjectWriter::write_kvm_method_stub(Method *method, const char *name)
 
   s->print_cr("%s __kvm_%s() {", ret_type_string, name);
   s->print_cr("    extern unsigned char * _kni_parameter_base;");
-  s->print_cr("    extern int * _kvm_stack_top;");
-  s->print_cr("    extern int   _kvm_return_value32;");
+  s->print_cr("    extern unsigned char * _kvm_stack_top;");
+  s->print_cr("    extern uintptr_t _kvm_return_value;");
   s->print_cr("    extern jlong _kvm_return_value64;");
   s->print_cr("    extern int   _kvm_return_type;");
   s->print_cr("    extern int   _kvm_pushed;");
   s->print_cr("    extern int   _in_kvm_native_method;");
-  s->print_cr("    extern int * _kvm_stack_bottom;");
+  s->print_cr("    extern unsigned char * _kvm_stack_bottom;");
 
   // See comments at the top of kvmcompat.c for the stack layout.
   //
@@ -921,27 +921,27 @@ void SourceObjectWriter::write_kvm_method_stub(Method *method, const char *name)
   s->print_cr("    _kvm_return_type = %d;", ret_type);
   if (ret_type == T_OBJECT || ret_type == T_ARRAY) {
     // Must NULL return value, since it would be scanned by GC.
-    s->print_cr("    _kvm_return_value32 = 0;");
+    s->print_cr("    _kvm_return_value = 0;");
     s->print_cr("#ifdef AZZERT");
     s->print_cr("    _in_kvm_native_method = 1;");
     s->print_cr("#endif");
   } else {
     s->print_cr("#ifdef AZZERT");
-    s->print_cr("    _kvm_return_value32 = 0xdeadbeef;");
+    s->print_cr("    _kvm_return_value = 0xdeadbeef;");
     s->print_cr("    _in_kvm_native_method = 1;");
     s->print_cr("#endif");
   }
   s->print_cr("#ifdef AZZERT");
   s->print_cr("    _kvm_pushed = 0;");
   if (method->is_static()) {
-    s->print_cr("    _kvm_stack_bottom = (int*)(_kni_parameter_base);");
+    s->print_cr("    _kvm_stack_bottom = _kni_parameter_base;");
   } else {
-    s->print_cr("    _kvm_stack_bottom = (int*)(_kni_parameter_base + 4);");
+    s->print_cr("    _kvm_stack_bottom = _kni_parameter_base + BytesPerStackElement;");
   }
   s->print_cr("#endif");
 
-  s->print   ("    _kvm_stack_top = (int*)(_kni_parameter_base - sizeof(int)");
-  s->print_cr(" * (%d-1));", parameter_word_size);
+  s->print   ("    _kvm_stack_top = _kni_parameter_base - BytesPerStackElement");
+  s->print_cr(" * (%d-1);", parameter_word_size);
   s->print_cr("    %s();", name);
   s->print_cr("#ifdef AZZERT");
   s->print_cr("    _kvm_check_stack();");
@@ -953,7 +953,7 @@ void SourceObjectWriter::write_kvm_method_stub(Method *method, const char *name)
     // do nothing
     break;
   case T_FLOAT:
-    s->print_cr("    return (jfloat)_kvm_return_value32;");
+    s->print_cr("    return (jfloat)_kvm_return_value;");
     break;
   case T_DOUBLE:
     s->print_cr("    return *((jdouble*)&_kvm_return_value64);");
@@ -962,7 +962,7 @@ void SourceObjectWriter::write_kvm_method_stub(Method *method, const char *name)
     s->print_cr("    return (jlong)_kvm_return_value64;");
     break;
   default:
-    s->print_cr("    return _kvm_return_value32;");
+    s->print_cr("    return (%s)_kvm_return_value;", ret_type_string);
   }
   s->print_cr("}");
   s->print_cr("}");

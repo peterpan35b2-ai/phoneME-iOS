@@ -682,7 +682,7 @@ jlong ObjectReferenceImpl::invoke_return(Oop *o, Oop *exc, Oop *transport,
   two_word_stack[0] = fr.fp();
   thread->set_last_java_fp(fr.fp());
   thread->set_last_java_sp(fr.sp());
-  thread->set_stack_pointer((jint)two_word_stack);
+  thread->set_stack_pointer((address)two_word_stack);
   return ret_val;
 }
 

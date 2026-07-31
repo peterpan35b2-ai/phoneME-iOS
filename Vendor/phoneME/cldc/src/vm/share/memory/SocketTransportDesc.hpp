@@ -27,8 +27,8 @@
 class SocketTransportDesc : public TransportDesc {
 #if ENABLE_JAVA_DEBUGGER
 public:
-  int              _debugger_socket;
-  int              _listener_socket;
+  address_word     _debugger_socket;
+  address_word     _listener_socket;
 #endif // ENABLE_JAVA_DEBUGGER
 
 protected:

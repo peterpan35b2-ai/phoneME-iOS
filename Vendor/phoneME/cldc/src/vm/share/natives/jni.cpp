@@ -43,6 +43,22 @@
   FOR_ALL_PRIMITIVE_TYPES(template) \
   template(jobject,  Object,  OBJECT)
 
+static inline jobject jni_handle_from_ref_index(const int ref_index) {
+  return (jobject)(intptr_t)ref_index;
+}
+
+static inline int jni_ref_index_from_handle(const jobject ref) {
+  return (int)(intptr_t)ref;
+}
+
+static inline jmethodID jni_method_id_from_encoded(const jint method_id) {
+  return (jmethodID)(intptr_t)method_id;
+}
+
+static inline jint jni_encoded_method_id(const jmethodID method_id) {
+  return (jint)(intptr_t)method_id;
+}
+
 /*
  * Helper function. 
  * For a given local reference, deletes the reference and returns NULL 
@@ -65,7 +81,8 @@ new_local_ref_for_oop(JNIEnv* env, Oop * oop) {
     return NULL;
   }
 
-  return (jobject)ObjectHeap::register_local_reference(oop);
+  return jni_handle_from_ref_index(
+      ObjectHeap::register_local_reference(oop));
 }
 
 static inline jobject
@@ -318,7 +335,8 @@ _JNI_PopLocalFrame(JNIEnv *env, jobject result) {
   }
 
   if (resultOop.not_null()) {
-    return (jobject)ObjectHeap::register_local_reference(&resultOop);
+    return jni_handle_from_ref_index(
+        ObjectHeap::register_local_reference(&resultOop));
   } else {
     return NULL;
   }
@@ -339,8 +357,8 @@ _JNI_NewGlobalRef(JNIEnv* env, jobject obj) {
   if (ref_index < 0) {
     Throw::out_of_memory_error(JVM_SINGLE_ARG_THROW_0);
   }
-  
-  return (jobject)ref_index;
+
+  return jni_handle_from_ref_index(ref_index);
 }
 
 static void JNICALL
@@ -349,7 +367,7 @@ _JNI_DeleteGlobalRef(JNIEnv* env, jobject obj) {
     return;
   }
 
-  const int ref_index = (int)obj;
+  const int ref_index = jni_ref_index_from_handle(obj);
   ObjectHeap::unregister_strong_reference(ref_index);
 }
 
@@ -359,7 +377,7 @@ _JNI_DeleteLocalRef(JNIEnv* env, jobject localRef) {
     return;
   }
 
-  const int ref_index = (int)localRef;
+  const int ref_index = jni_ref_index_from_handle(localRef);
   ObjectHeap::unregister_local_reference(ref_index);
 }
 
@@ -602,7 +620,8 @@ _JNI_GetMethodID(JNIEnv *env, jclass clazz,
     method_id = vtable_index | JniVtableMethod;
   }
 
-  return (jmethodID)construct_jint_from_jushorts(class_id, method_id);
+  return jni_method_id_from_encoded(
+      construct_jint_from_jushorts(class_id, method_id));
 }
 
 static jfieldID JNICALL 
@@ -614,7 +633,7 @@ _JNI_GetFieldID(JNIEnv *env, jclass clazz, const char *name, const char *sig) {
   // we must initialize it here.
   // IMPL_NOTE: throw NoSuchFieldError if the field is not found
   jfieldID fieldID = KNI_GetFieldID(clazz, name, sig);
-  if (fieldID == NULL) {
+  if (fieldID == 0) {
     SETUP_ERROR_CHECKER_ARG;
     Throw::no_such_field_error(JVM_SINGLE_ARG_THROW_0);
   }
@@ -700,7 +719,8 @@ _JNI_GetStaticMethodID(JNIEnv *env, jclass clazz,
   }
 
   const jushort method_id = mtable_index | JniMtableMethod;
-  return (jmethodID)construct_jint_from_jushorts(class_id, method_id);
+  return jni_method_id_from_encoded(
+      construct_jint_from_jushorts(class_id, method_id));
 }
 
 static ReturnOop 
@@ -719,9 +739,10 @@ new_entry_activation(JNIEnv *env, jobject obj, jclass cls, jmethodID methodID,
     return NULL;
   }
 
-  const jushort method_id = extract_low_jushort_from_jint((jint)methodID);
+  const jint encoded_method_id = jni_encoded_method_id(methodID);
+  const jushort method_id = extract_low_jushort_from_jint(encoded_method_id);
   const jushort method_index = method_id & JniMethodIndexMask;
-  const juint class_id = extract_high_jushort_from_jint((jint)methodID);
+  const juint class_id = extract_high_jushort_from_jint(encoded_method_id);
 
   const bool is_virtual_method = 
     (method_id & JniVtableMethod) == JniVtableMethod;
@@ -1041,11 +1062,11 @@ new_entry_activation_A(JNIEnv *env, jobject obj, jclass cls,
 #define ENTRY_RETURN_VOID    invoke_entry_void_return  
 #define ENTRY_RETURN_OBJECT  invoke_entry_word_return  
 
-#define RETURN_INVOKE_ENTRY_BOOLEAN return invoke_entry_word()
-#define RETURN_INVOKE_ENTRY_BYTE    return invoke_entry_word()
-#define RETURN_INVOKE_ENTRY_CHAR    return invoke_entry_word()
-#define RETURN_INVOKE_ENTRY_SHORT   return invoke_entry_word()
-#define RETURN_INVOKE_ENTRY_INT     return invoke_entry_word()
+#define RETURN_INVOKE_ENTRY_BOOLEAN return (jboolean)invoke_entry_word()
+#define RETURN_INVOKE_ENTRY_BYTE    return (jbyte)invoke_entry_word()
+#define RETURN_INVOKE_ENTRY_CHAR    return (jchar)invoke_entry_word()
+#define RETURN_INVOKE_ENTRY_SHORT   return (jshort)invoke_entry_word()
+#define RETURN_INVOKE_ENTRY_INT     return (jint)invoke_entry_word()
 #define RETURN_INVOKE_ENTRY_LONG    return invoke_entry_long()
 #define RETURN_INVOKE_ENTRY_FLOAT   return invoke_entry_float()
 #define RETURN_INVOKE_ENTRY_DOUBLE  return invoke_entry_double()
@@ -1053,7 +1074,7 @@ new_entry_activation_A(JNIEnv *env, jobject obj, jclass cls,
 #define RETURN_INVOKE_ENTRY_OBJECT                     \
   do {                                                 \
     UsingFastOops fast_oops;                           \
-    Oop::Fast oop = (OopDesc*)invoke_entry_word(); \
+    Oop::Fast oop = (OopDesc*)(uintptr_t)invoke_entry_word(); \
     return new_local_ref_or_null_for_oop(env, &oop);   \
   } while (0)
 
@@ -1752,7 +1773,7 @@ _JNI_NewWeakGlobalRef(JNIEnv* env, jobject obj) {
     Throw::out_of_memory_error(JVM_SINGLE_ARG_THROW_0);
   }
 
-  return (jobject)ref_index;
+  return jni_handle_from_ref_index(ref_index);
 }
 
 static void JNICALL
@@ -1761,7 +1782,7 @@ _JNI_DeleteWeakGlobalRef(JNIEnv* env, jobject obj) {
     return;
   }
 
-  const int ref_index = (int)obj;
+  const int ref_index = jni_ref_index_from_handle(obj);
   ObjectHeap::unregister_weak_reference(ref_index);
 }
 

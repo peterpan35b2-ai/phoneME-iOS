@@ -133,6 +133,20 @@ runMidlet(int argc, char** commandlineArgs) {
      */
     errCode = ams_get_startup_params(&ppParamsFromPlatform, &numberOfParams);
     if (errCode == ALL_OK && numberOfParams > 0) {
+#if defined(__APPLE__)
+        /*
+         * phoneME-iOS embeds runMidlet() and always supplies the selected
+         * game's class path and MIDlet class explicitly. A CommandState file
+         * left by the previous VM session may contain a null class name; the
+         * legacy launcher would otherwise prefer that stale state and ignore
+         * the current game, eventually calling Class.forName(null).
+         */
+        if (argc > 1) {
+            ams_free_startup_params(ppParamsFromPlatform, numberOfParams);
+            numberOfParams = 0;
+        } else
+#endif
+        {
         savedNumberOfParams = numberOfParams;
         ppSavedParams = ppParamsFromPlatform;
 
@@ -152,6 +166,7 @@ runMidlet(int argc, char** commandlineArgs) {
 	    for (i = 0; i < numberOfParams; i++) {
             /* argv[0] is the program name */
             argv[i + 1] = ppParamsFromPlatform[i];
+        }
         }
     }
 

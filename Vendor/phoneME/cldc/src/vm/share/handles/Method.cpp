@@ -172,7 +172,7 @@ ReturnOop Method::compiled_code_unchecked() const {
 
 #if USE_INDIRECT_EXECUTION_SENSOR_UPDATE
   GUARANTEE(ENABLE_THUMB_COMPILER, "sanity")
-  if ((((int)result) & 0x02) != 0) {
+  if ((((uintptr_t)result) & 0x02) != 0) {
     result = DERIVED(ReturnOop, result,
                      - CompiledMethodDesc::NUMBER_OF_EXECUTION_SENSOR_BYTES);
     GUARANTEE_R(result->is_compiled_method(), "sanity");
@@ -2199,7 +2199,7 @@ void Method::update_rom_default_entries() {
   MethodVariablePart *ptr =
     (MethodVariablePart *)&_rom_method_variable_parts[0];
   MethodVariablePart *end =
-    (MethodVariablePart *) (((int)ptr) + _rom_method_variable_parts_size);
+    DERIVED(MethodVariablePart*, ptr, _rom_method_variable_parts_size);
 
   address compile_entry = (address)shared_invoke_compiler;
 
@@ -2645,7 +2645,7 @@ void Method::iterate(OopVisitor* visitor) {
       NamedField id("constants (skipped)", true);
       id.set_hex_output(true);
       id.set_is_pointer(true);
-      visitor->do_uint(&id, constants_offset(), true);
+      visitor->do_address_word(&id, constants_offset(), true);
     } else {
       NamedField id("constants", true);
       visitor->do_oop(&id, constants_offset(), true);
@@ -2657,7 +2657,7 @@ void Method::iterate(OopVisitor* visitor) {
       NamedField id("exception_table (skipped)", true);
       id.set_hex_output(true);
       id.set_is_pointer(true);
-      visitor->do_uint(&id, exception_table_offset(), true);
+      visitor->do_address_word(&id, exception_table_offset(), true);
     } else {
       NamedField id("exception_table", true);
       visitor->do_oop(&id, exception_table_offset(), true);
@@ -2669,7 +2669,7 @@ void Method::iterate(OopVisitor* visitor) {
       NamedField id("stackmaps (skipped)", true);
       id.set_hex_output(true);
       id.set_is_pointer(true);
-      visitor->do_uint(&id, stackmaps_offset(), true);
+      visitor->do_address_word(&id, stackmaps_offset(), true);
     } else {
       NamedField id("stackmaps", true);
       visitor->do_oop(&id, stackmaps_offset(), true);
@@ -2680,22 +2680,20 @@ void Method::iterate(OopVisitor* visitor) {
     NamedField id("execution entry", true);
     id.set_hex_output(true);
     id.set_is_pointer(true);
-    visitor->do_uint(&id, heap_execution_entry_offset(), true);
+    visitor->do_address_word(&id, heap_execution_entry_offset(), true);
   }
 
 #if ENABLE_ROM_JAVA_DEBUGGER
   { // line number table
     NamedField id("line number table", true);
-    id.set_hex_output(true);
-    id.set_is_pointer(true);
-    visitor->do_uint(&id, line_var_table_offset(), true);
+    visitor->do_oop(&id, line_var_table_offset(), true);
   }
 #endif
   {
     NamedField id("variable info", true);
     id.set_hex_output(true);
     id.set_is_pointer(true);
-    visitor->do_uint(&id, variable_part_offset(), true);
+    visitor->do_address_word(&id, variable_part_offset(), true);
   }
 
 #if USE_REFLECTION
@@ -2723,7 +2721,7 @@ void Method::iterate(OopVisitor* visitor) {
     NamedField id("quick_native_code", true);
     id.set_hex_output(true);
     id.set_is_pointer(true);
-    visitor->do_uint(&id, quick_native_code_offset(), true);
+    visitor->do_address_word(&id, quick_native_code_offset(), true);
   } else if (is_fast_get_accessor()) {
     {
       NamedField id("fast_accessor_type", true);
@@ -2973,11 +2971,11 @@ void Method::iterate_oopmaps(oopmaps_doer do_map, void* param) {
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, constants);
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, exception_table);
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, stackmaps);
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    heap_execution_entry);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, heap_execution_entry);
 #if ENABLE_ROM_JAVA_DEBUGGER
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, line_var_table);
 #endif
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    variable_part);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, variable_part);
 #if USE_REFLECTION
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, thrown_exceptions);
 #endif

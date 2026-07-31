@@ -36,8 +36,9 @@ inline int CallInfo::stored_start_offset(int start_offset) {
 }
 
 inline int CallInfo::restored_start_offset(int stored_start_offset) {
-  int alignment = bitfield((jint) this, 0, LogBytesPerWord); // compute the jint alignment of this
-  int start_offset =  stored_start_offset << LogBytesPerWord;
+  const int alignment =
+      (int)((address_word)this & (address_word)WordAlignmentMask);
+  const int start_offset = stored_start_offset << LogBytesPerWord;
   return start_offset + alignment;
 }
 

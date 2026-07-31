@@ -47,18 +47,18 @@ _GCC_JTWI_GMK_	= true
 
 ifeq ($(TARGET_VM), cldc_vm)
 # the VM library
-LIBS		+= -L$(CLDC_DIST_DIR)/lib -lcldc_vm$(g)$(r)
-MIDP_DEPS       += $(CLDC_DIST_DIR)/lib/libcldc_vm$(g)$(r).a
+LIBS		+= -L$(CLDC_DIST_DIR)/lib -lcldc_vm$(cldc_g)$(cldc_r)
+MIDP_DEPS       += $(CLDC_DIST_DIR)/lib/libcldc_vm$(cldc_g)$(cldc_r).a
 ifeq ($(USE_MIDP_ROM), false)
 # When MIDP classes remain external, link the base CLDC ROM image that is
 # normally linked directly into the standalone VM executable.
-CLDC_ROM_IMAGE_OBJ = $(CLDC_DIST_DIR)/lib/cldc_rom_image$(g)$(r).o
+CLDC_ROM_IMAGE_OBJ = $(CLDC_DIST_DIR)/lib/cldc_rom_image$(cldc_g)$(cldc_r).o
 LIBS               += $(CLDC_ROM_IMAGE_OBJ)
 MIDP_DEPS           += $(CLDC_ROM_IMAGE_OBJ)
 endif
 ifeq ($(USE_MULTIPLE_ISOLATES)+$(USE_I3_TEST), true+true)
-LIBS		+= -lcldc_vmtest$(g)$(r)
-MIDP_DEPS       += $(CLDC_DIST_DIR)/lib/libcldc_vmtest$(g)$(r).a
+LIBS		+= -lcldc_vmtest$(cldc_g)$(cldc_r)
+MIDP_DEPS       += $(CLDC_DIST_DIR)/lib/libcldc_vmtest$(cldc_g)$(cldc_r).a
 endif
 endif
 

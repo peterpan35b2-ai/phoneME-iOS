@@ -1,0 +1,13 @@
+# iOS annunciator backend: haptics/backlight plus no-op status indicators.
+ANC_IOS_NAME = highlevelui/annunciator/ios_native
+ANC_IOS_DIR = $(SUBSYSTEM_DIR)/$(ANC_IOS_NAME)
+
+LIB_SET += $(ANC_IOS_NAME)
+
+SUBSYSTEM_ANNUNCIATOR_NATIVE_FILES += \
+    anc_ios_audio.c \
+    anc_ios_indicator.c \
+    anc_ios_pauseresume.c \
+    anc_ios_vibrate.c
+
+vpath % $(ANC_IOS_DIR)/native

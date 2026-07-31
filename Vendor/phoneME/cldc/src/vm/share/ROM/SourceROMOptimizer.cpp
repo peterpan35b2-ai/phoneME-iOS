@@ -2304,7 +2304,7 @@ public:
       juint n;
       for (int i=0; i<entry().entry_count(); i++) {
         if (entry().is_short_map(i)) {
-          n = entry().uint_field(StackmapList::entry_stat_offset(i));
+          n = (juint)entry().entry_word(i);
         } else {
           TypeArray::Raw long_map = entry().get_long_map(i);
           n = hashcode_for_short_array(&long_map);
@@ -2341,8 +2341,8 @@ public:
           return false;
         }
         if (entry1().is_short_map(i)) {
-          juint n1 = entry1().uint_field(StackmapList::entry_stat_offset(i));
-          juint n2 = entry2().uint_field(StackmapList::entry_stat_offset(i));
+          juint n1 = (juint)entry1().entry_word(i);
+          juint n2 = (juint)entry2().entry_word(i);
           if (n1 != n2) {
             return false;
           }
@@ -2463,10 +2463,11 @@ void ROMOptimizer::remove_redundant_stackmaps(Method *method, void* /*dummy*/
       // Do some accounting here
       _redundant_stackmap_count ++;
       if (old_maps().is_short_map(i)) {
-        _redundant_stackmap_bytes += sizeof(juint);
+        _redundant_stackmap_bytes += sizeof(address_word);
       } else {
         TypeArray::Raw long_map = old_maps().get_long_map(i);
-        _redundant_stackmap_bytes += long_map().object_size() - 4;
+        _redundant_stackmap_bytes +=
+            long_map().object_size() - sizeof(address_word);
       }
     }
 
@@ -2493,9 +2494,8 @@ void ROMOptimizer::remove_redundant_stackmaps(Method *method, void* /*dummy*/
         const int dst = num_copied;
 
         if (old_maps().is_short_map(src)) {
-          const juint val =
-            old_maps().uint_field(old_maps().entry_stat_offset(src));
-          new_maps().uint_field_put(new_maps().entry_stat_offset(dst), val);
+          const address_word val = old_maps().entry_word(src);
+          new_maps().entry_word_put(dst, val);
         } else {
           TypeArray::Raw long_map = old_maps().get_long_map(src);
           new_maps().set_long_map(dst, &long_map);

@@ -43,8 +43,9 @@ extern "C" {
 
   // external interpreter runtime routines, see InterpreterRuntime_<arch>.cpp
   // and  InterpreterRuntime.cpp
-  extern OopDesc*        anewarray(Thread *THREAD);
-  extern OopDesc*        _newarray(Thread *THREAD, BasicType type, jint len);
+  extern OopDesc*        anewarray(JVM_SINGLE_ARG_TRAPS);
+  extern OopDesc*        _newarray(Thread *THREAD, BasicType type, jint len
+                                   JVM_TRAPS);
   extern void            signal_waiters(Thread *THREAD,
                                         StackLock* stack_lock);
   extern void            lock_stack_lock(Thread* THREAD,
@@ -56,6 +57,16 @@ extern "C" {
 
   // init FPU
   extern void InitFPU();
+
+#if defined(PHONEME_IOS_NATIVE)
+  typedef int (*PhoneMEHostShouldStopCallback)(void);
+  static PhoneMEHostShouldStopCallback phoneme_host_should_stop_callback;
+
+  void phoneme_cldc_set_should_stop_callback(
+      PhoneMEHostShouldStopCallback callback) {
+    phoneme_host_should_stop_callback = callback;
+  }
+#endif
 
   // prototypes of C linkage function goes here
   static bool shared_call_vm_internal(address entry_point,
@@ -96,6 +107,91 @@ extern "C" {
   ((result_type (*)(Thread*, native_arg_t, native_arg_t))(entry)) \
     (NATIVE_ARG, (arg1), (arg2))
 #endif
+
+  /*
+   * The C interpreter dispatcher uses one fixed ARM64 ABI for runtime
+   * helpers: Thread* first, optional native arguments next, and Traps* last
+   * in non-product builds. Several legacy helpers accept only
+   * JVM_SINGLE_ARG_TRAPS. Calling them directly would pass Thread* as the
+   * Traps object and corrupt the current thread. Adapt those helpers locally
+   * while preserving their public phoneME signatures.
+   */
+#ifndef PRODUCT
+#define C_INTERPRETER_TRAPS_DECL , Traps* traps
+#define C_INTERPRETER_TRAPS_PASS traps
+#else
+#define C_INTERPRETER_TRAPS_DECL
+#define C_INTERPRETER_TRAPS_PASS
+#endif
+
+  static OopDesc* c_interpreter_newobject(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    return newobject(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static OopDesc* c_interpreter_anewarray(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    return anewarray(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static OopDesc* c_interpreter_multianewarray(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    return multianewarray(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_checkcast(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    checkcast(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static jint c_interpreter_instanceof(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    return instanceof(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_array_store_type_check(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    array_store_type_check(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_illegal_monitor_state_exception(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    illegal_monitor_state_exception(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_array_index_out_of_bounds_exception(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    array_index_out_of_bounds_exception(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_null_pointer_exception(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    null_pointer_exception(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_incompatible_class_change_error(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    incompatible_class_change_error(C_INTERPRETER_TRAPS_PASS);
+  }
+
+  static void c_interpreter_arithmetic_exception(
+      Thread* thread C_INTERPRETER_TRAPS_DECL) {
+    (void)thread;
+    arithmetic_exception(C_INTERPRETER_TRAPS_PASS);
+  }
+
+#undef C_INTERPRETER_TRAPS_DECL
+#undef C_INTERPRETER_TRAPS_PASS
 
   typedef union {
     jbyte   byte_val;
@@ -528,7 +624,7 @@ enum {
   static inline void check_timer_tick() {
 #if ENABLE_PAGE_PROTECTION
     // use g_jpc to prevent compiler from optimizing this memory access
-    _protected_page[INTERPRETER_TIMER_TICK_SLOT] = (int)g_jpc;
+    _protected_page[INTERPRETER_TIMER_TICK_SLOT] = *g_jpc;
 #else
     if (_rt_timer_ticks > 0) {
       interpreter_call_vm_1((address)&timer_tick, T_VOID,
@@ -559,7 +655,7 @@ enum {
     if (invoker_size) {
       SET_FRAME(locals_pointer, g_jlocals);
       SET_FRAME(bcp_store, g_jpc);
-      SET_FRAME(return_advance, (address)invoker_size);
+      SET_FRAME(return_advance, (address)(intptr_t)invoker_size);
     }
 
     address exec_entry =
@@ -996,8 +1092,8 @@ enum {
     // IMPL_NOTE: shouldn't it be lock?
     if (!object) {
       // lock better be locked
-      return interpreter_call_vm((address)&illegal_monitor_state_exception,
-                                 T_VOID);
+      return interpreter_call_vm(
+          (address)&c_interpreter_illegal_monitor_state_exception, T_VOID);
     }
 
     return unlock_object(object, lock);
@@ -1034,8 +1130,8 @@ enum {
     do {
       GUARANTEE(lock <= tmp1, "sanity");
       if (*(address*)(lock + StackLock::size()) != NULL) {
-        return interpreter_call_vm((address)&illegal_monitor_state_exception,
-                                   T_VOID);
+        return interpreter_call_vm(
+            (address)&c_interpreter_illegal_monitor_state_exception, T_VOID);
       }
       lock += StackLock::size() + BytesPerWord;
     } while (lock != tmp1);
@@ -1129,8 +1225,8 @@ enum {
     }
 
     if (!found) {
-      return interpreter_call_vm((address)&illegal_monitor_state_exception,
-                                 T_VOID);
+      return interpreter_call_vm(
+          (address)&c_interpreter_illegal_monitor_state_exception, T_VOID);
     }
 
     return unlock_object(object, lock);
@@ -1580,7 +1676,7 @@ enum {
   }
 
   static inline void reset_bits(address& addr, int mask) {
-    addr = (address)((int)addr & ~mask);
+    addr = (address)((uintptr_t)addr & ~(uintptr_t)mask);
   }
 
   static inline address get_real_mirror(address obj) {
@@ -1746,20 +1842,24 @@ enum {
   FUNC_UNIMPLEMENTED(interpreter_throw_NullPointerException_tos_cached)
 
   void interpreter_throw_NullPointerException() {
-    interpreter_call_vm((address)&null_pointer_exception, T_VOID);
+    interpreter_call_vm((address)&c_interpreter_null_pointer_exception,
+                        T_VOID);
   }
 
   void interpreter_throw_ArrayIndexOutOfBoundsException() {
-    interpreter_call_vm((address)&array_index_out_of_bounds_exception, T_VOID);
+    interpreter_call_vm(
+        (address)&c_interpreter_array_index_out_of_bounds_exception, T_VOID);
   }
 
   void interpreter_throw_IncompatibleClassChangeError() {
-    interpreter_call_vm((address)&incompatible_class_change_error, T_VOID);
+    interpreter_call_vm(
+        (address)&c_interpreter_incompatible_class_change_error, T_VOID);
 
   }
 
   void interpreter_throw_ArithmeticException() {
-    interpreter_call_vm((address)&arithmetic_exception, T_VOID);
+    interpreter_call_vm((address)&c_interpreter_arithmetic_exception,
+                        T_VOID);
   }
 
   static inline bool type_check(address ref, address obj, jint idx) {
@@ -1769,7 +1869,8 @@ enum {
     OBJ_PUSH(ref);
     PUSH(idx);
     OBJ_PUSH(obj);
-    if (!interpreter_call_vm((address)&array_store_type_check, T_VOID)) {
+    if (!interpreter_call_vm(
+            (address)&c_interpreter_array_store_type_check, T_VOID)) {
       // clear arguments from stack
       g_jsp += 3 * BytesPerStackElement;
       return true;
@@ -3606,8 +3707,8 @@ enum {
   }
 
   BYTECODE_IMPL(new)
-    shared_call_vm_internal((address)&newobject, (address)&new_return_point,
-                            T_OBJECT, 0);
+    shared_call_vm_internal((address)&c_interpreter_newobject,
+                            (address)&new_return_point, T_OBJECT, 0);
   BYTECODE_IMPL_END
 
   BYTECODE_IMPL(newarray)
@@ -3625,7 +3726,7 @@ enum {
   BYTECODE_IMPL_END
 
   BYTECODE_IMPL(anewarray)
-    if (!interpreter_call_vm((address)&anewarray, T_ARRAY)) {
+    if (!interpreter_call_vm((address)&c_interpreter_anewarray, T_ARRAY)) {
       // remove length from stack
       POP();
       // put returned value on stack
@@ -3648,7 +3749,7 @@ enum {
   BYTECODE_IMPL_END
 
   BYTECODE_IMPL(checkcast)
-    if (!interpreter_call_vm((address)&checkcast, T_VOID)) {
+    if (!interpreter_call_vm((address)&c_interpreter_checkcast, T_VOID)) {
       // checkcast can throw an exception
       ADVANCE(3);
     }
@@ -3658,7 +3759,7 @@ enum {
     // instanceof can throw an exception, like in
     // vm.instr.instanceofX.instanceof012.instanceof01201m1_1.instanceof01201m1
     // when we're using invalid class index in Java file
-    if (interpreter_call_vm((address)&instanceof, T_INT)) {
+    if (interpreter_call_vm((address)&c_interpreter_instanceof, T_INT)) {
       return;
     }
 
@@ -3698,7 +3799,8 @@ enum {
   BYTECODE_IMPL_END
 
   BYTECODE_IMPL(multianewarray)
-    if (!interpreter_call_vm((address)&multianewarray, T_ARRAY)) {
+    if (!interpreter_call_vm(
+            (address)&c_interpreter_multianewarray, T_ARRAY)) {
       // remove parameters
       g_jsp += GET_BYTE(2) * BytesPerStackElement;
       // put returned value on stack
@@ -4534,6 +4636,26 @@ static void init() {
 }
 #undef MY_GUARANTEE
 
+#if defined(PHONEME_IOS_NATIVE)
+static inline void check_host_stop_request() {
+  /*
+   * The MIDP event loop also observes this flag, but a broken MIDlet can stay
+   * inside Java bytecode forever and never return to that loop. Polling once
+   * per 1024 bytecodes keeps the hot dispatch path cheap while guaranteeing
+   * that host Exit can unwind the VM on its own thread via JVM_Stop().
+   */
+  static unsigned int poll_count;
+  ++poll_count;
+  if ((poll_count & 0x3ffU) == 0U &&
+      phoneme_host_should_stop_callback != NULL &&
+      phoneme_host_should_stop_callback()) {
+    JVM_Stop(0);
+  }
+}
+#else
+static inline void check_host_stop_request() {}
+#endif
+
 // interpreter
 static void Interpret() {
   // Start a new thread or continue in another existing thread
@@ -4543,11 +4665,13 @@ static void Interpret() {
   // process bytecodes in the infinite loop
   if (TraceBytecodes) {
     for (;;) {
+      check_host_stop_request();
       interpreter_call_vm((address)&trace_bytecode, T_VOID);
       interpreter_dispatch_table[*g_jpc]();
     }
   } else {
     for (;;) {
+      check_host_stop_request();
       interpreter_dispatch_table[*g_jpc]();
     }
   }
@@ -4668,9 +4792,9 @@ extern "C" {
 #endif
 
 #if ENABLE_JNI
-void    invoke_entry_void()   {}
-jint    invoke_entry_word()   { return 0; }
-jlong   invoke_entry_long()   { return 0; }
+void         invoke_entry_void()   {}
+address_word invoke_entry_word()   { return 0; }
+jlong        invoke_entry_long()   { return 0; }
 jfloat  invoke_entry_float()  { return 0; }
 jdouble invoke_entry_double() { return 0; }
 void    invoke_entry_return_point() {}

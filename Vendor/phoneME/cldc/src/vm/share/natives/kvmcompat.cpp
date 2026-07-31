@@ -51,14 +51,14 @@ int _in_kvm_native_method = 0;
  * After all the parameters are popped, _kvm_stack_top will equal to
  * _kvm_stack_bottom.
  */
-int * _kvm_stack_top;
-int   _kvm_return_value32;
+unsigned char * _kvm_stack_top;
+uintptr_t       _kvm_return_value;
 jlong _kvm_return_value64;
 int   _kvm_return_type;
 
 #ifdef AZZERT
 int   _kvm_pushed;
-int * _kvm_stack_bottom;
+unsigned char * _kvm_stack_bottom;
 #endif
 
 int   TemporaryRootsLength;
@@ -121,7 +121,7 @@ void kvmcompat_oops_do(void do_oop(OopDesc**)) {
   }
 
   if (_kvm_return_type == T_OBJECT || _kvm_return_type == T_ARRAY) {
-    do_oop((OopDesc**)(&_kvm_return_value32));
+    do_oop((OopDesc**)(&_kvm_return_value));
   }
 }
 
@@ -146,7 +146,7 @@ void _kvm_check_stack() {
 }
 #endif
 
-int popStack() {
+uintptr_t popStack() {
   GUARANTEE(_in_kvm_native_method, "sanity");
 
   if (JavaStackDirection > 0) {
@@ -154,28 +154,28 @@ int popStack() {
   } else {
     GUARANTEE(_kvm_stack_top < _kvm_stack_bottom, "stack is empty");
   }
-  int value = *_kvm_stack_top;
-  _kvm_stack_top -= JavaStackDirection;
+  uintptr_t value = *(uintptr_t*)_kvm_stack_top;
+  _kvm_stack_top -= JavaStackDirection * BytesPerStackElement;
   return value;
 }
 
-void pushStack(int data) {
+void pushStack(uintptr_t data) {
   GUARANTEE(_in_kvm_native_method, "sanity");
 #if USE_STRICT_STACK_CHECK
   GUARANTEE(_kvm_stack_top == _kvm_stack_bottom, 
             "must have an empty stack before pushing");
 #endif
   GUARANTEE(!_kvm_pushed, "pushStack can be called at most once");
-  _kvm_return_value32 = data;
+  _kvm_return_value = data;
 }
 
 void popLongToAddress(void* ptr) {
   GUARANTEE(_in_kvm_native_method, "sanity");
 
-  int BB = *_kvm_stack_top;
-  _kvm_stack_top -= JavaStackDirection;
-  int AA = *_kvm_stack_top;
-  _kvm_stack_top -= JavaStackDirection;
+  int BB = *(jint*)_kvm_stack_top;
+  _kvm_stack_top -= JavaStackDirection * BytesPerStackElement;
+  int AA = *(jint*)_kvm_stack_top;
+  _kvm_stack_top -= JavaStackDirection * BytesPerStackElement;
   jlong value;
 
   if (JavaStackDirection < 0) {

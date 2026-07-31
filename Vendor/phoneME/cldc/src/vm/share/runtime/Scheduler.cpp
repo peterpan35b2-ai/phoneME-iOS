@@ -609,8 +609,8 @@ void Scheduler::wake_up_terminated_sleepers(int task_id JVM_TRAPS) {
       if (this_thread().task_id() == task_id) {
         if (TraceThreadsExcessive) {
           TTY_TRACE_CR(("wakeup_timed_terminated_sleepers: signaling "
-                        "terminated thread 0x%x",
-                        (int)this_thread().obj()));
+                        "terminated thread %p",
+                        this_thread().obj()));
         }
         if (Thread::current()->equals(this_thread())) {
           Thread::set_current_pending_exception(&termination_signal);

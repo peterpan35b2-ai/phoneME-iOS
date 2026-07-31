@@ -215,6 +215,11 @@ typedef struct {
    * this ID to MidpCommandSelect() function.
    */
   unsigned int id:24;
+  /**
+   * Origin of this command: 0 for Displayable, 1 for focused Item.
+   * The value is host-renderer metadata and does not affect MIDP sorting.
+   */
+  int scope;
 } MidpCommand;
 
 #ifdef __cplusplus

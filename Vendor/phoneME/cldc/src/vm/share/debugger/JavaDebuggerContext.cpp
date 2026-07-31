@@ -249,14 +249,15 @@ void JavaDebuggerContext::rehash() {
 
 int JavaDebuggerContext::object_hash_code(Oop *p) {
 
-  unsigned int lastHash = (unsigned int)p->obj();
+  uintptr_t lastHash = (uintptr_t)p->obj();
   int result = 0;
 
   do {
-    lastHash = lastHash * 0xDEECE66DL + 0xB;
-    result = lastHash & ~3;
+    lastHash = lastHash * (uintptr_t)0xDEECE66DLL + 0xB;
+    const juint folded = (juint)(lastHash ^ (lastHash >> 32));
+    result = (int)(folded & ~3U);
   } while (result == 0);
-  return ((unsigned int)result) % JavaDebuggerContext::HASH_SLOT_SIZE;
+  return ((juint)result) % JavaDebuggerContext::HASH_SLOT_SIZE;
 }
 
 int JavaDebuggerContext::hash_id(int id) {

@@ -41,6 +41,13 @@
 
 #include <gxp_image.h>
 
+#if PHONEME_IOS_NATIVE
+extern void phoneme_ios_lcdui_capture_choice_image(
+        int32_t componentId,
+        int32_t choiceIndex,
+        jobject imageData);
+#endif
+
 /* cached field ids for CGElement class */
 static jfieldID _cgEl_stringEl_cache     = 0;
 static jfieldID _cgEl_imageDataEl_cache  = 0;
@@ -82,6 +89,7 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_createNativeResource0() {
   pcsl_string label_str;
   MidpChoiceGroupElement *cgChoices = NULL;
   int choiceType, layout;
+  MidpComponentType componentType;
   int fitPolicy;
   int numChoices = 0;
   int selectedIndex;
@@ -91,6 +99,7 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_createNativeResource0() {
   ownerPtr = MidpDisplayableFromId(KNI_GetParameterAsInt(1));
   layout = KNI_GetParameterAsInt(3);
   choiceType = KNI_GetParameterAsInt(4);
+  componentType = MIDP_EXCLUSIVE_CHOICE_GROUP_TYPE + choiceType - 1;
   fitPolicy  = KNI_GetParameterAsInt(5);
   numChoices = KNI_GetParameterAsInt(7);
   selectedIndex  = KNI_GetParameterAsInt(8);
@@ -195,11 +204,8 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_createNativeResource0() {
     }
   }
 
-  KNI_EndHandles();
-
   if (err == KNI_OK) {
-    cgPtr = MidpNewItem(ownerPtr, 
-			MIDP_EXCLUSIVE_CHOICE_GROUP_TYPE + choiceType - 1);
+    cgPtr = MidpNewItem(ownerPtr, componentType);
     
     if (cgPtr == NULL) {
       err = KNI_ENOMEM;
@@ -209,6 +215,23 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_createNativeResource0() {
 				    selectedIndex, fitPolicy);
     }
   }
+
+#if PHONEME_IOS_NATIVE
+  if (err == KNI_OK && cgPtr != NULL && numChoices > 0) {
+    jobjectArray cgElementsArray = (jobjectArray)cgElementsJObject;
+    int componentId = MidpComponentToId(&cgPtr->component);
+    for (i = 0; i < numChoices; i++) {
+      KNI_GetObjectArrayElement(cgElementsArray, i, cgElement);
+      KNI_GetObjectField(cgElement,
+                         _CACHE_FIELDID(cgElementHandle, "imageDataEl",
+                                        "Ljavax/microedition/lcdui/ImageData;",
+                                        _cgEl_imageDataEl_cache), imgJImage);
+      phoneme_ios_lcdui_capture_choice_image(componentId, i, imgJImage);
+    }
+  }
+#endif
+
+  KNI_EndHandles();
 
   // do clean up
   pcsl_string_free(&label_str);
@@ -270,11 +293,17 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_insert0() {
   cgElement.selected = KNI_GetParameterAsBoolean(5);
   cgElement.font = NULL;
 
-  KNI_EndHandles();
-
   if (PCSL_STRING_OK == perr) {
     err = lfpport_choicegroup_insert(cgPtr, elementNum, cgElement);
+#if PHONEME_IOS_NATIVE
+    if (err == KNI_OK) {
+      phoneme_ios_lcdui_capture_choice_image(
+          MidpComponentToId(&cgPtr->component), elementNum, imgPartJImage);
+    }
+#endif
   }
+
+  KNI_EndHandles();
   
   pcsl_string_free(&cgElement.string);
   
@@ -384,11 +413,17 @@ Java_javax_microedition_lcdui_ChoiceGroupLFImpl_set0() {
   cgElement.selected = KNI_GetParameterAsBoolean(5);
   cgElement.font = NULL;
 
-  KNI_EndHandles();
-
   if (PCSL_STRING_OK == perr) {
     err = lfpport_choicegroup_set(cgPtr, elementNum, cgElement);
+#if PHONEME_IOS_NATIVE
+    if (err == KNI_OK) {
+      phoneme_ios_lcdui_capture_choice_image(
+          MidpComponentToId(&cgPtr->component), elementNum, imgPartJImage);
+    }
+#endif
   }
+
+  KNI_EndHandles();
   
   pcsl_string_free(&cgElement.string);
 

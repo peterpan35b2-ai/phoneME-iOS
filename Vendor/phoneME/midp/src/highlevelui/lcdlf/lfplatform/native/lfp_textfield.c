@@ -133,9 +133,9 @@ Java_javax_microedition_lcdui_TextFieldLFImpl_createNativeResource0() {
  */
 KNIEXPORT KNI_RETURNTYPE_BOOLEAN
 Java_javax_microedition_lcdui_TextFieldLFImpl_getString0() {
-    pcsl_string v_text;
+    pcsl_string v_text = PCSL_STRING_NULL_INITIALIZER;
     pcsl_string *const text=&v_text;
-    jboolean newChange;
+    jboolean newChange = KNI_FALSE;
     MidpItem *tfPtr = MidpItemFromId(KNI_GetParameterAsInt(1));
 
     MidpError err = lfpport_textfield_get_string(text, &newChange, tfPtr);
@@ -173,7 +173,7 @@ Java_javax_microedition_lcdui_TextFieldLFImpl_getString0() {
  */
 KNIEXPORT KNI_RETURNTYPE_VOID
 Java_javax_microedition_lcdui_TextFieldLFImpl_setString0() {
-    pcsl_string v_text;
+    pcsl_string v_text = PCSL_STRING_NULL_INITIALIZER;
     pcsl_string *const text=&v_text;
     MidpError err;
     pcsl_string_status perr;

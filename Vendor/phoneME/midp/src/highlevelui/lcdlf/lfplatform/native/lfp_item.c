@@ -40,6 +40,12 @@
 #include "lfp_intern_registry.h"
 #include <midpUtilKni.h>
 
+#if defined(__GNUC__)
+/* Optional host-renderer hook for ports that mirror Item layout natively. */
+extern void phoneme_lfpport_item_set_layout(
+        MidpItem* item,
+        int layout) __attribute__((weak));
+#endif
 
 /*=========================================================================
  * FUNCTION:      show0(I)V
@@ -138,6 +144,29 @@ Java_javax_microedition_lcdui_ItemLFImpl_setSize0() {
   itemPtr->resize(itemPtr, w, h);
 
   KNI_ReturnVoid();
+}
+
+/**
+ * Updates layout directives for an Item whose native peer already exists.
+ *
+ * Class: javax.microedition.lcdui.ItemLFImpl
+ * Java prototype: native void setLayout0(int nativeId, int layout)
+ */
+KNIEXPORT KNI_RETURNTYPE_VOID
+Java_javax_microedition_lcdui_ItemLFImpl_setLayout0() {
+    MidpItem* itemPtr = MidpItemFromId(KNI_GetParameterAsInt(1));
+    int layout = KNI_GetParameterAsInt(2);
+
+    if (itemPtr != NULL) {
+        itemPtr->layout = layout;
+#if defined(__GNUC__)
+        if (phoneme_lfpport_item_set_layout != NULL) {
+            phoneme_lfpport_item_set_layout(itemPtr, layout);
+        }
+#endif
+    }
+
+    KNI_ReturnVoid();
 }
 
 /**

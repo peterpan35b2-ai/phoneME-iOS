@@ -59,14 +59,14 @@ final class ImageData implements AbstractImageData {
      * Set in native by loadRomizedImage().
      * Must remain 0 unless pixelData is null.
      */
-    private int nativePixelData;
+    private long nativePixelData;
     
     /**
      * Image native romized alpha data.
      * Set in native by loadRomizedImage().
      * Must remain 0 unless pixelData is null.
      */
-    private int nativeAlphaData;
+    private long nativeAlphaData;
 
     /**
      * Constructs empty <code>ImageData </code>.

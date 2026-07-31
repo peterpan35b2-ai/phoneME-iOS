@@ -25,6 +25,9 @@
  */
 
 #include <string.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 #include <jvmconfig.h>
 #include <kni.h>
@@ -315,7 +318,18 @@ JVMSPI_CheckExit(void) {
 void
 JVMSPI_Exit(int code) {
     midpFinalize();
+#if defined(__APPLE__)
+    /*
+     * phoneME runs inside the iOS application process. The reference launcher
+     * owns its process and may call exit(), but an embedded VM must only end
+     * its worker thread so Swift can return to the game library and start a
+     * new suite later.
+     */
+    (void)code;
+    pthread_exit(NULL);
+#else
     exit(code);
+#endif
 }
 
 /**
@@ -457,6 +471,7 @@ JVMSPI_DebuggerNotification(jboolean is_active) {
  */
 void JVMSPI_PrintRaw(const char* s, int length) {
   pcsl_print_chars(s, length);
+  fflush(stdout);
 }
 
 /**

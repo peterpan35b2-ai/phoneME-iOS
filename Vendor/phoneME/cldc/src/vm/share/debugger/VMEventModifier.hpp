@@ -192,10 +192,10 @@ public:
   }
 
   address saved_method_entry() {
-    return (address)int_field(saved_method_entry_offset());
+    return (address)address_word_field(saved_method_entry_offset());
   }
   void set_saved_method_entry(address val) {
-    int_field_put(saved_method_entry_offset(), (int)val);
+    address_word_field_put(saved_method_entry_offset(), (address_word)val);
   }
 
   static void deoptimize_frame(Thread *, bool bump_bci = false);
@@ -420,10 +420,10 @@ public:
     ulong_field_put(step_starting_offset_offset(), val);
   }
   address step_starting_fp() {
-    return (address)int_field(step_starting_fp_offset());
+    return (address)address_word_field(step_starting_fp_offset());
   }
-  void set_step_starting_fp(int val) {
-    int_field_put(step_starting_fp_offset(), (int)val);
+  void set_step_starting_fp(address_word val) {
+    address_word_field_put(step_starting_fp_offset(), val);
   }
 
 };

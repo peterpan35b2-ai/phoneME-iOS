@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <stdint.h>
 #include <string.h>
 #include <kni.h>
 #include <midp_logging.h>
@@ -48,7 +49,7 @@
  * the encoding for this character is stored.
  */
 static pfontbitmap selectFontBitmap(jchar c, pfontbitmap* pfonts) {
-    int i=1;
+    int i = 0;
     unsigned char c_hi = (c>>8) & 0xff;
     unsigned char c_lo = c & 0xff;
     do {
@@ -59,9 +60,9 @@ static pfontbitmap selectFontBitmap(jchar c, pfontbitmap* pfonts) {
             return pfonts[i];
         }
         i++;
-    } while (i <= (int) pfonts[0]);
+    } while (i < FontBitmapsCount);
     /* the first table must cover the range 0-nn */
-    return pfonts[1];
+    return pfonts[0];
 }
 
 /**
@@ -307,9 +308,9 @@ drawString(jint pixel, const jshort *clip,
         return;
     }
 
-    fontWidth = FontBitmaps[1][FONT_WIDTH];
-    fontHeight = FontBitmaps[1][FONT_HEIGHT];
-    fontDescent = FontBitmaps[1][FONT_DESCENT];
+    fontWidth = FontBitmaps[0][FONT_WIDTH];
+    fontHeight = FontBitmaps[0][FONT_HEIGHT];
+    fontDescent = FontBitmaps[0][FONT_DESCENT];
 
     width = fontWidth * n;
     yLimit = fontHeight;
@@ -476,9 +477,9 @@ gx_get_fontinfo(int face, int style, int size,
         return;
     }
 
-    *ascent  = FontBitmaps[1][FONT_ASCENT];
-    *descent = FontBitmaps[1][FONT_DESCENT];
-    *leading = FontBitmaps[1][FONT_LEADING];
+    *ascent  = FontBitmaps[0][FONT_ASCENT];
+    *descent = FontBitmaps[0][FONT_DESCENT];
+    *leading = FontBitmaps[0][FONT_LEADING];
 }
 
 /**
@@ -512,5 +513,5 @@ gx_get_charswidth(int face, int style, int size,
         return width;
     }
 
-    return n * FontBitmaps[1][FONT_WIDTH];
+    return n * FontBitmaps[0][FONT_WIDTH];
 }

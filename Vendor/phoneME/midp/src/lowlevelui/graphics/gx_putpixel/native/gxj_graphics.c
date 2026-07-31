@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <stdint.h>
 #include <kni.h>
 #include <midp_logging.h>
 
@@ -79,8 +80,8 @@ gxj_screen_buffer* gxj_get_image_screen_buffer_impl(const java_imagedata *img,
 			    ? (gxj_alpha_type *)&(img->alphaData->elements[0])
 			    : NULL;
     } else {
-	sbuf->pixelData = (gxj_pixel_type *)img->nativePixelData;
-	sbuf->alphaData = (gxj_alpha_type *)img->nativeAlphaData;
+	sbuf->pixelData = (gxj_pixel_type *)(intptr_t)img->nativePixelData;
+	sbuf->alphaData = (gxj_alpha_type *)(intptr_t)img->nativeAlphaData;
     }
 
 #if ENABLE_BOUNDS_CHECKS

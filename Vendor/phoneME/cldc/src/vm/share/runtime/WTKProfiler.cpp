@@ -55,7 +55,7 @@ struct WTKCallRecord;
 
 class WTKThreadRecordDesc : public MixedOopDesc {
   juint           _stack_depth;
-  jint            _top_call_record; /* in fact - pointer in native heap */
+  address_word    _top_call_record; /* pointer in native heap */
   
 private:
   static size_t allocation_size() { 
@@ -94,11 +94,11 @@ public:
   }
 
   WTKCallRecord* top_call_record() {
-    return (WTKCallRecord*)int_field(top_call_record_offset());
+    return (WTKCallRecord*)address_word_field(top_call_record_offset());
   }
-  
+
   void set_top_call_record(WTKCallRecord* value) {
-    int_field_put(top_call_record_offset(), (jint)value);
+    address_word_field_put(top_call_record_offset(), (address_word)value);
   }
 };
 
@@ -124,7 +124,7 @@ struct WTKCallRecord {
                                * NULL if this is at the bottom of a
                                * call stack. */
   OopDesc*         cached_method; /* cached method of the current Frame*/
-  juint            id;        /* unique method descriptor */ 
+  address_word     id;        /* unique method descriptor */
   juint            level;     /* nest level of this method call,
                                * 1 for the method at the stack
                                * bottom  */
@@ -136,7 +136,7 @@ struct WTKCallRecord {
   jushort          task_id;   /* isolate owning this record */
 #endif
   
-  WTKCallRecord(juint          _id,
+  WTKCallRecord(address_word   _id,
                 WTKCallRecord* _parent,
                 juint          _level, 
                 jushort        _flags) {
@@ -208,17 +208,17 @@ static inline juint encode_heap_method(Method* m) {
   return (((juint)i) << 16) | holder_id;
 }
 
-static inline juint encode_id(Method* m, jushort& flags) {
+static inline address_word encode_id(Method* m, jushort& flags) {
   // methods in ROM never move
   if (ROM::system_text_contains(m->obj())) {
     flags |= METHOD_IN_ROM;
-    return (juint)m->obj();
+    return (address_word)m->obj();
   }
 
   return encode_heap_method(m);
 }
 
-static inline ReturnOop decode_id(juint id, jushort flags) {
+static inline ReturnOop decode_id(address_word id, jushort flags) {
   if (flags & METHOD_IN_ROM) {
     return (ReturnOop)id;
   }
@@ -353,14 +353,14 @@ void WTKProfiler::print(Stream* out, int id) {
       out->print("\t%d", rec->numCalls);
 
       // only cycles, only ms, only %
-      out->print("\t"JVM_LLD"\t"JVM_LLD"\t%.2lf", 
+      out->print("\t" JVM_LLD "\t" JVM_LLD "\t%.2lf",
                  rec->thisTime, 
                  rec->thisTime * 1000 / freq,
                  perc_scale(rec->thisTime, _totalCycles)
                  ); 
 
       // plus kids cycles, plus kids ms, plus kids %
-      out->print("\t"JVM_LLD"\t"JVM_LLD"\t%.2lf", 
+      out->print("\t" JVM_LLD "\t" JVM_LLD "\t%.2lf",
                  rec->totalTime,
                  rec->totalTime * 1000 / freq,
                  perc_scale(rec->totalTime, _totalCycles)
@@ -405,9 +405,9 @@ static inline int stack_depth(Frame* frame) {
   return rv;
 }
 
-static WTKCallRecord* lookup_record(int level, 
-                                    WTKCallRecord* parent, 
-                                    juint id, 
+static WTKCallRecord* lookup_record(int level,
+                                    WTKCallRecord* parent,
+                                    address_word id,
                                     jushort flags) {
   WTKCallRecord* rec;
 #if ENABLE_ISOLATES
@@ -415,7 +415,7 @@ static WTKCallRecord* lookup_record(int level,
   int task_id = TaskContext::current_task_id();
 #endif
 
-  juint idx = (id ^ (juint)parent) % TABLE_SIZE;
+  juint idx = (juint)((id ^ (address_word)parent) % TABLE_SIZE);
 
   if (profilerTable[idx] == NULL) {
     rec = new WTKCallRecord(id, parent, level, flags);
@@ -463,7 +463,7 @@ static inline WTKCallRecord* call_record_from_frame(JavaFrame*     frame,
 
   Method::Raw m = frame->method();
   jushort flags = 0;
-  juint id = encode_id(&m, flags);
+  address_word id = encode_id(&m, flags);
 
   return lookup_record(level, parent, id, flags);
 }

@@ -271,11 +271,11 @@ interface AbstractImageDataFactory {
     /**
      * Create a immutable image from romized image data.
      * 
-     * @param imageDataArrayPtr native pointer to image data as Java int
+     * @param imageDataArrayPtr native pointer to image data as Java long
      * @param imageDataArrayLength length of image data array
      * @throws IllegalArgumentException if the id is invalid
      * @return the created image data
      */
-    ImageData createImmutableImageData(int imageDataArrayPtr, 
+    ImageData createImmutableImageData(long imageDataArrayPtr,
             int imageDataArrayLength);
 }

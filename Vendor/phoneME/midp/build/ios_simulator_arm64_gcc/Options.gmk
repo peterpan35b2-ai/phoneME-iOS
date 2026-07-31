@@ -10,13 +10,19 @@ IOS_TARGET_FLAGS := \
     -target arm64-apple-ios$(IOS_DEPLOYMENT_TARGET)-simulator \
     -isysroot $(IOS_SDKROOT) \
     -mios-simulator-version-min=$(IOS_DEPLOYMENT_TARGET)
-CMDLINE_CFLAGS += $(IOS_TARGET_FLAGS) -DPHONEME_IOS_NATIVE=1
+CMDLINE_CFLAGS += $(IOS_TARGET_FLAGS) -DPHONEME_IOS_NATIVE=1 \
+    -Werror=pointer-to-int-cast \
+    -Werror=int-to-pointer-cast \
+    -Werror=void-pointer-to-int-cast \
+    -Werror=int-to-void-pointer-cast \
+    -Werror=format
 LD_FLAGS += $(IOS_TARGET_FLAGS)
 USE_RFB = false
 USE_DIRECTFB = false
 
-USE_DEBUG = true
-USE_CLDC_RELEASE = false
+# Match device runtime behavior and avoid debug interpreter overhead in games.
+USE_DEBUG = false
+USE_CLDC_RELEASE = true
 DISABLE_WERROR = true
 USE_WEAK_GCC_WARNINGS = true
 USE_MULTIPLE_ISOLATES = false

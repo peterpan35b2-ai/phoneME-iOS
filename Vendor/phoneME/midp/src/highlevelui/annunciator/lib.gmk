@@ -47,12 +47,16 @@ SUBSYSTEM_ANNUNCIATOR_EXTRA_INCLUDES += -I$(ANC_DIR)/include
 #
 # vpath $(ANC_DIR)/native
 
-ifeq ($(PLATFORM), linux_gci)
-    include $(ANC_DIR)/stubs/lib.gmk
+ifeq ($(USE_IOS_NATIVE), true)
+    include $(ANC_DIR)/ios_native/lib.gmk
 else
-    ifeq ($(PLATFORM), win32_gci)
+    ifeq ($(PLATFORM), linux_gci)
         include $(ANC_DIR)/stubs/lib.gmk
     else
-        include $(ANC_DIR)/$(PLATFORM)/lib.gmk
+        ifeq ($(PLATFORM), win32_gci)
+            include $(ANC_DIR)/stubs/lib.gmk
+        else
+            include $(ANC_DIR)/$(PLATFORM)/lib.gmk
+        endif
     endif
 endif

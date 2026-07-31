@@ -53,10 +53,11 @@ static jfieldID socketIStreamsField;
 static jfieldID socketOStreamsField;
 static int socketFieldsInitialized;
 
+#define PCSL_TOKEN(handle) ((jint)(intptr_t)(handle))
 #define SOCKET_GET_HANDLE(object) \
     KNI_GetIntField((object), socketHandleField)
 #define SOCKET_SET_HANDLE(object, value) \
-    KNI_SetIntField((object), socketHandleField, (jint)(value))
+    KNI_SetIntField((object), socketHandleField, PCSL_TOKEN(value))
 #define SOCKET_GET_PENDING(object) \
     KNI_GetIntField((object), socketPendingConnectionsField)
 #define SOCKET_SET_PENDING(object, value) \
@@ -126,7 +127,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_open0(void) {
 
     info = (MidpReentryData*)SNI_GetReentryData(NULL);
     if (info == NULL) {   /* First invocation */
-       SOCKET_SET_HANDLE(thisObject, (jint)INVALID_HANDLE);
+       SOCKET_SET_HANDLE(thisObject, INVALID_HANDLE);
 
        /**
          * Verify that the resource is available well within limit as per 
@@ -145,7 +146,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_open0(void) {
             SNI_END_RAW_POINTERS;
 
             if (status == PCSL_NET_SUCCESS) {
-                SOCKET_SET_HANDLE(thisObject, (jint)pcslHandle);
+                SOCKET_SET_HANDLE(thisObject, pcslHandle);
                 if (midpIncResourceCount(RSC_TYPE_TCP_CLI, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL, "Resource limit update error"); 
                 }
@@ -163,23 +164,27 @@ Java_com_sun_midp_io_j2me_socket_Protocol_open0(void) {
                 KNI_ThrowNew(midpConnectionNotFoundException, gKNIBuffer);
             } else if (status == PCSL_NET_WOULDBLOCK) {
                 SOCK_ANC_INC_NETWORK_INDICATOR;
-                SOCKET_SET_HANDLE(thisObject, (jint)pcslHandle);
+                SOCKET_SET_HANDLE(thisObject, pcslHandle);
                 if (midpIncResourceCount(RSC_TYPE_TCP_CLI, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL, "Resource limit update error"); 
                 }
-                REPORT_INFO1(LC_PROTOCOL, " handle = %d\n", pcslHandle);
-                midp_thread_wait(NETWORK_WRITE_SIGNAL, (int)pcslHandle,
-                    context);
+                REPORT_INFO1(LC_PROTOCOL, " handle = %d\n",
+                             PCSL_TOKEN(pcslHandle));
+                midp_thread_wait(NETWORK_WRITE_SIGNAL, PCSL_TOKEN(pcslHandle),
+                                 context);
             } else {
                 REPORT_INFO(LC_PROTOCOL, "Unknown error during socket::open"); 
                 KNI_ThrowNew(midpIOException, NULL);
             }
         }
     } else {  /* Reinvocation after unblocking the thread */
-        pcslHandle = (void *) info->descriptor;
-        context = (void *)info->status;
+        pcslHandle = (void *)(intptr_t)info->descriptor;
+        /* midp_thread_wait stores the platform continuation in pResult;
+         * status is reserved for the signal result. Mixing them breaks
+         * asynchronous socket connect implementations. */
+        context = info->pResult;
 
-        if (SOCKET_GET_HANDLE(thisObject) != (jint)pcslHandle) {
+        if (SOCKET_GET_HANDLE(thisObject) != PCSL_TOKEN(pcslHandle)) {
             REPORT_CRIT2(LC_PROTOCOL,
                          "socket::open Handles mismatched 0x%x != 0x%x\n",
                          pcslHandle,
@@ -191,10 +196,11 @@ Java_com_sun_midp_io_j2me_socket_Protocol_open0(void) {
         if (status == PCSL_NET_SUCCESS) {
             SOCK_ANC_DEC_NETWORK_INDICATOR;
         } else if (status == PCSL_NET_WOULDBLOCK) {
-            midp_thread_wait(NETWORK_WRITE_SIGNAL, (int)pcslHandle, context);
+            midp_thread_wait(NETWORK_WRITE_SIGNAL, PCSL_TOKEN(pcslHandle),
+                             context);
         } else  {
             SOCK_ANC_DEC_NETWORK_INDICATOR;
-            SOCKET_SET_HANDLE(thisObject, (jint)INVALID_HANDLE);
+            SOCKET_SET_HANDLE(thisObject, INVALID_HANDLE);
             if (midpDecResourceCount(RSC_TYPE_TCP_CLI, 1) == 0) {
                 REPORT_INFO(LC_PROTOCOL, "Resource limit update error"); 
             }
@@ -254,7 +260,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_read0(void) {
     iStreams = (int)KNI_GetIntField(thisObject, socketIStreamsField);
 
     REPORT_INFO3(LC_PROTOCOL, "socket::read0 o=%d l=%d fd=%d\n",
-                 offset, length, (int)pcslHandle);
+                 offset, length, PCSL_TOKEN(pcslHandle));
 
     if (pcslHandle != INVALID_HANDLE) {
         int ipAddress;
@@ -262,7 +268,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_read0(void) {
 
         /* Check the push cache for a waiting packet. */
         SNI_BEGIN_RAW_POINTERS;
-        bytesRead = pushgetcachedpacket((int)pcslHandle, &ipAddress, &port,
+        bytesRead = pushgetcachedpacket(PCSL_TOKEN(pcslHandle),
+            &ipAddress, &port,
             (char*)&(JavaByteArray(bufferObject)[offset]), length);
         SNI_END_RAW_POINTERS;
     }
@@ -292,7 +299,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_read0(void) {
                     SOCK_ANC_DEC_NETWORK_INDICATOR;
                 }
             } else {
-                if ((void *)info->descriptor != pcslHandle) {
+                if ((void *)(intptr_t)info->descriptor != pcslHandle) {
                     REPORT_CRIT2(LC_PROTOCOL,
                                  "socket::read Handles mismatched 0x%x != 0x%x\n",
                                  pcslHandle,
@@ -321,7 +328,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_read0(void) {
                              pcsl_network_error(pcslHandle));
 
                 if (status == PCSL_NET_WOULDBLOCK) {
-                    midp_thread_wait(NETWORK_READ_SIGNAL, (int)pcslHandle, context);
+                    midp_thread_wait(NETWORK_READ_SIGNAL,
+                                     PCSL_TOKEN(pcslHandle), context);
                 } else if (status == PCSL_NET_INTERRUPTED) {
                     midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
                             "Interrupted IO error %d during socket::read ",
@@ -384,8 +392,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_write0(void) {
     pcslHandle = (void *)(intptr_t)SOCKET_GET_HANDLE(thisObject);
     oStreams = (int)KNI_GetIntField(thisObject, socketOStreamsField);
 
-    REPORT_INFO3(LC_PROTOCOL, "socket::write0 o=%d l=%d fd=%d\n", 
-                 offset, length, pcslHandle);
+    REPORT_INFO3(LC_PROTOCOL, "socket::write0 o=%d l=%d fd=%d\n",
+                 offset, length, PCSL_TOKEN(pcslHandle));
 
     info = (MidpReentryData*)SNI_GetReentryData(NULL);
 
@@ -410,7 +418,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_write0(void) {
                          "Interrupted IO error during socket::write");
             SOCK_ANC_DEC_NETWORK_INDICATOR;
         } else {
-            if ((void *)info->descriptor != pcslHandle) {
+            if ((void *)(intptr_t)info->descriptor != pcslHandle) {
                 REPORT_CRIT2(LC_PROTOCOL, 
                              "socket::write Handles mismatched 0x%x != 0x%x\n", 
                              pcslHandle,
@@ -433,7 +441,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_write0(void) {
                          (int)pcsl_network_error(pcslHandle));
 
             if (status == PCSL_NET_WOULDBLOCK) {
-                midp_thread_wait(NETWORK_WRITE_SIGNAL, (int)pcslHandle, context);
+                midp_thread_wait(NETWORK_WRITE_SIGNAL,
+                                 PCSL_TOKEN(pcslHandle), context);
             } else if (status == PCSL_NET_INTERRUPTED) {
                 midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
                         "Interrupted IO error %d during socket::write ", 
@@ -481,7 +490,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_available0(void) {
 
     KNI_EndHandles();
 
-    REPORT_INFO1(LC_PROTOCOL, "socket::available0 fd=%d\n", (int)pcslHandle);
+    REPORT_INFO1(LC_PROTOCOL, "socket::available0 fd=%d\n",
+                 PCSL_TOKEN(pcslHandle));
 
     if (INVALID_HANDLE == pcslHandle) {
         KNI_ThrowNew(midpIOException, "invalid handle during socket::available");
@@ -489,7 +499,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_available0(void) {
         int status;
 
         /* Check the push cache for a waiting packet. */
-        bytesAvailable = pushcacheddatasize((int)pcslHandle);
+        bytesAvailable = pushcacheddatasize(PCSL_TOKEN(pcslHandle));
         if (bytesAvailable <= 0) {
             status = pcsl_socket_available(pcslHandle, &bytesAvailable);
             /* status is only PCSL_NET_SUCCESS or PCSL_NET_IOERROR */
@@ -540,19 +550,20 @@ Java_com_sun_midp_io_j2me_socket_Protocol_close0(void) {
         } else {
             status = pcsl_socket_close_start(pcslHandle, &context);
 
-            SOCKET_SET_HANDLE(thisObject, (jint)INVALID_HANDLE);
+            SOCKET_SET_HANDLE(thisObject, INVALID_HANDLE);
 
-            midp_thread_signal(NETWORK_READ_SIGNAL, (int)pcslHandle, 0);
-            midp_thread_signal(NETWORK_WRITE_SIGNAL, (int)pcslHandle, 0);
+            midp_thread_signal(NETWORK_READ_SIGNAL, PCSL_TOKEN(pcslHandle), 0);
+            midp_thread_signal(NETWORK_WRITE_SIGNAL, PCSL_TOKEN(pcslHandle), 0);
         }
     } else {
         /* reinvocation */
-        pcslHandle = (void *)(info->descriptor);
+        pcslHandle = (void *)(intptr_t)info->descriptor;
         context = info->pResult;
         status = pcsl_socket_close_finish(pcslHandle, context);
     }
  
-    REPORT_INFO1(LC_PROTOCOL, "socket::close handle=%d\n", pcslHandle);
+    REPORT_INFO1(LC_PROTOCOL, "socket::close handle=%d\n",
+                 PCSL_TOKEN(pcslHandle));
 
     if (INVALID_HANDLE != pcslHandle) {
         if (status == PCSL_NET_SUCCESS) {
@@ -563,7 +574,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_close0(void) {
             REPORT_INFO1(LC_PROTOCOL, "socket::close = 0x%x blocked\n", 
                          pcslHandle);
             /* IMPL NOTE: unclear whether this is the right signal */
-            midp_thread_wait(NETWORK_READ_SIGNAL, (int)pcslHandle, context);
+            midp_thread_wait(NETWORK_READ_SIGNAL,
+                             PCSL_TOKEN(pcslHandle), context);
         } else {
             /* must be PCSL_NET_IOERROR */
             midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
@@ -599,12 +611,13 @@ Java_com_sun_midp_io_j2me_socket_Protocol_finalize(void) {
 
     pcslHandle = (void *)(intptr_t)SOCKET_GET_HANDLE(thisObject);
 
-    REPORT_INFO1(LC_PROTOCOL, "socket::finalize handle=%d\n", pcslHandle);
+    REPORT_INFO1(LC_PROTOCOL, "socket::finalize handle=%d\n",
+                 PCSL_TOKEN(pcslHandle));
 
     if (INVALID_HANDLE != pcslHandle) {
         status = pcsl_socket_close_start(pcslHandle, &context);
 
-        SOCKET_SET_HANDLE(thisObject, (jint)INVALID_HANDLE);
+        SOCKET_SET_HANDLE(thisObject, INVALID_HANDLE);
         if (midpDecResourceCount(RSC_TYPE_TCP_CLI, 1) == 0) {
             REPORT_INFO(LC_PROTOCOL, "Resource limit update error"); 
         }
@@ -670,11 +683,11 @@ Java_com_sun_midp_io_j2me_socket_Protocol_getIpNumber0(void) {
             pcsl_string_release_utf8_data(host_bytes, &host);
         RELEASE_PCSL_STRING_PARAMETER
     } else {  /* Reinvocation after unblocking the thread */
-        pcslHandle = (void*)info->descriptor;
+        pcslHandle = (void *)(intptr_t)info->descriptor;
         /* IMPL NOTE: Please see 6440539 for details. */
         /* All but windows implementations of pcsl_network_gethostbyname_finish */
         /*  ignore context parameter. Windows one expects status code there. */
-        context = (void*)info->status;
+        context = info->pResult;
         status = pcsl_network_gethostbyname_finish(ipBytes, MAX_ADDR_LENGTH,
                                                   &len, pcslHandle, context);
     }
@@ -682,7 +695,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_getIpNumber0(void) {
     if (status == PCSL_NET_SUCCESS) {
         KNI_SetRawArrayRegion(ipAddressObject, 0, len, (jbyte *)ipBytes);
     } else if (status == PCSL_NET_WOULDBLOCK) {
-        midp_thread_wait(HOST_NAME_LOOKUP_SIGNAL, (int)pcslHandle, context);
+        midp_thread_wait(HOST_NAME_LOOKUP_SIGNAL,
+                         (int)(intptr_t)pcslHandle, context);
     } else { /* must be PCSL_NET_IOERROR or PCSL_NET_INVALID */
         len = -1; 
     }
@@ -898,7 +912,8 @@ Java_com_sun_midp_io_j2me_socket_Protocol_shutdownOutput0(void) {
 
     KNI_EndHandles();
 
-    REPORT_INFO1(LC_PROTOCOL, "socket::shutdownOutput handle=%d\n", pcslHandle);
+    REPORT_INFO1(LC_PROTOCOL, "socket::shutdownOutput handle=%d\n",
+                 PCSL_TOKEN(pcslHandle));
 
     if (INVALID_HANDLE != pcslHandle) {
         /* Return value of shutdown() need not be checked */ 
@@ -977,7 +992,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_notifyClosedInput0(void) {
      * and all the blocked threads have alredy been notified.
      */
     if (INVALID_HANDLE != pcslHandle) {
-        midp_thread_signal(NETWORK_READ_SIGNAL, (int)pcslHandle, 0);
+        midp_thread_signal(NETWORK_READ_SIGNAL, PCSL_TOKEN(pcslHandle), 0);
     }
 
     KNI_EndHandles();
@@ -1005,7 +1020,7 @@ Java_com_sun_midp_io_j2me_socket_Protocol_notifyClosedOutput0(void) {
      * and all the blocked threads have alredy been notified.
      */
     if (INVALID_HANDLE != pcslHandle) {
-        midp_thread_signal(NETWORK_WRITE_SIGNAL, (int)pcslHandle, 0);
+        midp_thread_signal(NETWORK_WRITE_SIGNAL, PCSL_TOKEN(pcslHandle), 0);
     }
 
     KNI_EndHandles();

@@ -41,6 +41,60 @@
 /**
  * Platform specific code to name mapping table.
  */
+enum {
+    PHONEME_KEY_UP = 0,
+    PHONEME_KEY_DOWN,
+    PHONEME_KEY_LEFT,
+    PHONEME_KEY_RIGHT,
+    PHONEME_KEY_FIRE,
+    PHONEME_KEY_SOFT1,
+    PHONEME_KEY_SOFT2,
+    PHONEME_KEY_COUNT
+};
+
+static int phonemeKeyCodes[PHONEME_KEY_COUNT] = {
+    KEYMAP_KEY_UP,
+    KEYMAP_KEY_DOWN,
+    KEYMAP_KEY_LEFT,
+    KEYMAP_KEY_RIGHT,
+    KEYMAP_KEY_SELECT,
+    KEYMAP_KEY_SOFT1,
+    KEYMAP_KEY_SOFT2
+};
+
+void phoneme_ios_keymap_configure(
+        int up, int down, int left, int right,
+        int fire, int soft1, int soft2) {
+    phonemeKeyCodes[PHONEME_KEY_UP] = up;
+    phonemeKeyCodes[PHONEME_KEY_DOWN] = down;
+    phonemeKeyCodes[PHONEME_KEY_LEFT] = left;
+    phonemeKeyCodes[PHONEME_KEY_RIGHT] = right;
+    phonemeKeyCodes[PHONEME_KEY_FIRE] = fire;
+    phonemeKeyCodes[PHONEME_KEY_SOFT1] = soft1;
+    phonemeKeyCodes[PHONEME_KEY_SOFT2] = soft2;
+}
+
+int phoneme_ios_keymap_convert_key_code(int keyCode) {
+    switch (keyCode) {
+    case KEYMAP_KEY_UP:
+        return phonemeKeyCodes[PHONEME_KEY_UP];
+    case KEYMAP_KEY_DOWN:
+        return phonemeKeyCodes[PHONEME_KEY_DOWN];
+    case KEYMAP_KEY_LEFT:
+        return phonemeKeyCodes[PHONEME_KEY_LEFT];
+    case KEYMAP_KEY_RIGHT:
+        return phonemeKeyCodes[PHONEME_KEY_RIGHT];
+    case KEYMAP_KEY_SELECT:
+        return phonemeKeyCodes[PHONEME_KEY_FIRE];
+    case KEYMAP_KEY_SOFT1:
+        return phonemeKeyCodes[PHONEME_KEY_SOFT1];
+    case KEYMAP_KEY_SOFT2:
+        return phonemeKeyCodes[PHONEME_KEY_SOFT2];
+    default:
+        return keyCode;
+    }
+}
+
 static const KeymapKey Keys[] = {
     {KEYMAP_KEY_POWER,      "POWER"         }, /* 0 */
     {KEYMAP_KEY_SOFT1,      "SOFT1"         }, /* 1 */
@@ -109,19 +163,19 @@ keymap_get_key_code(int gameAction)
 
     switch (gameAction) {
     case  1: /* Canvas.UP */
-        return KEYMAP_KEY_UP;
+        return phonemeKeyCodes[PHONEME_KEY_UP];
 
     case  6: /* Canvas.DOWN */
-        return KEYMAP_KEY_DOWN;
+        return phonemeKeyCodes[PHONEME_KEY_DOWN];
 
     case  2: /* Canvas.LEFT */
-        return KEYMAP_KEY_LEFT;
+        return phonemeKeyCodes[PHONEME_KEY_LEFT];
 
     case  5: /* Canvas.RIGHT */
-        return KEYMAP_KEY_RIGHT;
+        return phonemeKeyCodes[PHONEME_KEY_RIGHT];
 
     case  8: /* Canvas.FIRE */
-        return KEYMAP_KEY_SELECT;
+        return phonemeKeyCodes[PHONEME_KEY_FIRE];
 
     case  9: /* Canvas.GAME_A */
         return KEYMAP_KEY_GAMEA;
@@ -150,27 +204,27 @@ keymap_get_game_action(int keyCode)
 {
     REPORT_CALL_TRACE1(LC_LOWUI, "LF:keymap_get_game_action(%d)\n", keyCode);
 
-    
-    switch (keyCode) {
-    case KEYMAP_KEY_UP:
-    case KEYMAP_KEY_GAME_UP: /* Customitem Game UP */
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_UP]
+            || keyCode == KEYMAP_KEY_GAME_UP) {
         return 1; /* Canvas.UP */
-
-    case KEYMAP_KEY_DOWN:
-    case KEYMAP_KEY_GAME_DOWN:/* Customitem Game DOWN */
+    }
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_DOWN]
+            || keyCode == KEYMAP_KEY_GAME_DOWN) {
         return 6; /* Canvas.DOWN */
-
-    case KEYMAP_KEY_LEFT:
-    case KEYMAP_KEY_GAME_LEFT:/* Customitem Game LEFT */
+    }
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_LEFT]
+            || keyCode == KEYMAP_KEY_GAME_LEFT) {
         return 2; /* Canvas.LEFT */
-
-    case KEYMAP_KEY_RIGHT:
-    case KEYMAP_KEY_GAME_RIGHT:/* Customitem Game RIGHT */
+    }
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_RIGHT]
+            || keyCode == KEYMAP_KEY_GAME_RIGHT) {
         return 5; /* Canvas.RIGHT */
-
-    case KEYMAP_KEY_SELECT:
+    }
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_FIRE]) {
         return 8; /* Canvas.FIRE */
+    }
 
+    switch (keyCode) {
     case KEYMAP_KEY_GAMEA:
     case KEYMAP_KEY_1:
         return 9;  /* Canvas.GAME_A */
@@ -235,6 +289,15 @@ keymap_get_key_name(int keyCode)
 {
     KeymapKey *map;
     REPORT_CALL_TRACE1(LC_LOWUI, "LF:keymap_get_key_name(%d)\n", keyCode);
+
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_UP]) return "Up";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_DOWN]) return "Down";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_LEFT]) return "Left";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_RIGHT]) return "Right";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_FIRE]) return "Select";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_SOFT1]) return "SOFT1";
+    if (keyCode == phonemeKeyCodes[PHONEME_KEY_SOFT2]) return "SOFT2";
+
     for (map = (KeymapKey *)Keys; map->keyCode != KEYMAP_KEY_INVALID; map++) {
         if (map->keyCode == keyCode) {
             return map->name;
@@ -259,7 +322,7 @@ keymap_is_invalid_key_code(int keyCode)
      * Valid within UNICODE and not 0x0 and 0xffff 
      * since they are defined to be invalid
      */
-    if ((keyCode == 0x0) || (keyCode >= 0xFFFF) || (keyCode < MIN_KEY_VALUE)) {
+    if ((keyCode == 0x0) || (keyCode >= 0xFFFF)) {
         return KNI_TRUE;
     }
 

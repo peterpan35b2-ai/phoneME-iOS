@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <stdint.h>
 #include <kni.h>
 #include <midpMalloc.h>
 #include <midp_logging.h>
@@ -256,7 +257,7 @@ primDrawHorzLine(gxj_screen_buffer *sbuf, gxj_pixel_type color,
     count = -count;
   }
   pPtr = &(sbuf->pixelData[y1 + x1]);
-  if (((unsigned int)pPtr & 0x3) && (count > 0)) {
+  if (((uintptr_t)pPtr & 0x3) && (count > 0)) {
     CHECK_PTR_CLIP(sbuf,pPtr);
     *pPtr++ = color;
     --count;
@@ -925,7 +926,7 @@ primDrawFilledRect(gxj_screen_buffer *sbuf, gxj_pixel_type color,
       y2 = y1+1;
     }
     for (lPtr = pPtr; y1 < y2; y1++) {
-      if (((unsigned int)pPtr & 0x3) && (count > 0)) {
+      if (((uintptr_t)pPtr & 0x3) && (count > 0)) {
         CHECK_PTR_CLIP(sbuf,pPtr);
         *pPtr++ = color;
         --count;

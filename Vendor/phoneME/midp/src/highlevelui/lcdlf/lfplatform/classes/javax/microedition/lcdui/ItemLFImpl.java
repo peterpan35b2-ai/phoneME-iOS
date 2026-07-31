@@ -200,6 +200,9 @@ abstract class ItemLFImpl implements ItemLF {
      * @param layout the new layout descriptor
      */
     public void lSetLayout(int layout) {
+        if (nativeId != DisplayableLFImpl.INVALID_NATIVE_ID) {
+            setLayout0(nativeId, layout);
+        }
         lRequestInvalidate(true, true);
     }
 
@@ -1044,6 +1047,14 @@ abstract class ItemLFImpl implements ItemLF {
      * @param label the new label set on this <code>Item</code>
      */
     native void setLabel0(int nativeId, String label);
+
+    /**
+     * Notifies the native peer that this Item's layout directives changed.
+     *
+     * @param nativeId native resource id of this <code>Item</code>
+     * @param layout the new layout descriptor
+     */
+    native void setLayout0(int nativeId, int layout);
 
     /**
      * Gets preferred width from the native resource corresponding to 

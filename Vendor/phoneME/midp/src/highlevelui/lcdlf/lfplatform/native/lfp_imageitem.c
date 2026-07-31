@@ -114,7 +114,7 @@ Java_javax_microedition_lcdui_ImageItemLFImpl_createNativeResource0() {
   err = lfpport_imageitem_create(itemPtr, ownerPtr, &label, layout,
 				 imgPtr, &altText, appearanceMode);
 #if PHONEME_IOS_NATIVE
-  if (err == KNI_OK && KNI_IsNullHandle(image) != KNI_TRUE) {
+  if (err == KNI_OK) {
     phoneme_ios_lcdui_capture_image(
         MidpComponentToId(&itemPtr->component),
         image
@@ -186,7 +186,7 @@ Java_javax_microedition_lcdui_ImageItemLFImpl_setContent0() {
     err = lfpport_imageitem_set_content(itemPtr, imgPtr, &altText,
 				        appearanceMode);
 #if PHONEME_IOS_NATIVE
-    if (err == KNI_OK && KNI_IsNullHandle(image) != KNI_TRUE) {
+    if (err == KNI_OK) {
       phoneme_ios_lcdui_capture_image(
           MidpComponentToId(&itemPtr->component),
           image

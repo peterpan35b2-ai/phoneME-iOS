@@ -25,6 +25,7 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #include <sni.h>
@@ -95,8 +96,8 @@ static int get_imagedata(const java_imagedata *img,
                             ? (ALPHA *)&(img->alphaData->elements[0])
                             : NULL;
     } else {
-        *pixelData = (PIXEL *)img->nativePixelData;
-        *alphaData = (ALPHA *)img->nativeAlphaData;
+        *pixelData = (PIXEL *)(intptr_t)img->nativePixelData;
+        *alphaData = (ALPHA *)(intptr_t)img->nativeAlphaData;
     }
 
     return KNI_TRUE;
@@ -665,7 +666,7 @@ KNIDECL(javax_microedition_lcdui_ImageDataFactory_loadJPEG) {
  */
 KNIEXPORT KNI_RETURNTYPE_BOOLEAN
 KNIDECL(javax_microedition_lcdui_ImageDataFactory_loadRomizedImage) {
-    int imageDataPtr = KNI_GetParameterAsInt(2);
+    jlong imageDataPtr = KNI_GetParameterAsLong(2);
     int imageDataLength = KNI_GetParameterAsInt(3);
 
     int alphaSize;
@@ -683,7 +684,7 @@ KNIDECL(javax_microedition_lcdui_ImageDataFactory_loadRomizedImage) {
     KNI_DeclareHandle(imageData);
     KNI_GetParameterAsObject(1, imageData);
 
-    rawBuffer = (imgdcd_image_buffer_raw*)imageDataPtr;
+    rawBuffer = (imgdcd_image_buffer_raw *)(intptr_t)imageDataPtr;
 
     do {
         if (rawBuffer == NULL) {
@@ -724,11 +725,11 @@ KNIDECL(javax_microedition_lcdui_ImageDataFactory_loadRomizedImage) {
         midpImageData->width = (jint)rawBuffer->width;
         midpImageData->height = (jint)rawBuffer->height;
 
-        midpImageData->nativePixelData = (jint)rawBuffer->data;
+        midpImageData->nativePixelData = (jlong)(intptr_t)rawBuffer->data;
 
         if (rawBuffer->hasAlpha) {
             midpImageData->nativeAlphaData =
-                (jint)(rawBuffer->data + pixelSize);
+                (jlong)(intptr_t)(rawBuffer->data + pixelSize);
         }
 
         status = KNI_TRUE;

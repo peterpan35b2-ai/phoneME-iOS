@@ -203,6 +203,39 @@
                 Value="1.1"
                 Scope="system"
                 Comment="Specification version number."/>
+  <property Key="microedition.media.version"
+                Value="1.1"
+                Scope="system"/>
+  <property Key="microedition.io.file.FileConnection.version"
+                Value="1.0"
+                Scope="system"/>
+  <property Key="supports.mixing"
+                Value="true"
+                Scope="system"/>
+  <property Key="supports.audio.capture"
+                Value="false"
+                Scope="system"/>
+  <property Key="supports.video.capture"
+                Value="false"
+                Scope="system"/>
+  <property Key="audio.encodings"
+                Value="encoding=pcm encoding=wav encoding=mp3 encoding=aac encoding=midi"
+                Scope="system"/>
+  <property Key="fileconn.dir.memorycard"
+                Value="file:///Phone/"
+                Scope="system"/>
+  <property Key="fileconn.dir.private"
+                Value="file:///Phone/private/"
+                Scope="system"/>
+  <property Key="fileconn.dir.photos"
+                Value="file:///Phone/Photos/"
+                Scope="system"/>
+  <property Key="fileconn.dir.videos"
+                Value="file:///Phone/Videos/"
+                Scope="system"/>
+  <property Key="fileconn.dir.tones"
+                Value="file:///Phone/Tones/"
+                Scope="system"/>
 
   <!-- CLDC implementation parameters -->
   <!-- use MIDP protocol implementations -->

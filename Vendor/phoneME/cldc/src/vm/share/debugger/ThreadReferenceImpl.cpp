@@ -151,8 +151,9 @@ void ThreadReferenceImpl::suspend_specific_thread(Thread *thread, int task_id,
 #endif
 #ifdef AZZERT
   if (TraceDebugger) {
-    tty->print_cr("ThreadSuspend: ObjectID=%lx, Thread: 0x%x, id = 0x%x", 
-                  JavaDebugger::get_thread_id_by_ref (thread), (int)thread->obj(), thread->id());
+    tty->print_cr("ThreadSuspend: ObjectID=%lx, Thread: %p, id = 0x%x",
+                  JavaDebugger::get_thread_id_by_ref(thread),
+                  thread->obj(), thread->id());
   }
 #endif
   thread->inc_suspend_count();
@@ -172,8 +173,9 @@ void ThreadReferenceImpl::resume_specific_thread(Thread *thread, int task_id)
 #endif
 #ifdef AZZERT
   if (TraceDebugger) {
-    tty->print_cr("ThreadResume: ObjectID=%lx, Thread: 0x%x, id = 0x%x", 
-                  JavaDebugger::get_thread_id_by_ref(thread), (int)thread->obj(), thread->id());
+    tty->print_cr("ThreadResume: ObjectID=%lx, Thread: %p, id = 0x%x",
+                  JavaDebugger::get_thread_id_by_ref(thread),
+                  thread->obj(), thread->id());
   }
 #endif
     if (thread->dec_suspend_count() <= 0) {

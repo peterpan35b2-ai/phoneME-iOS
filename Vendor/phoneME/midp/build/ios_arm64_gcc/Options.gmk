@@ -9,13 +9,20 @@ IOS_SDKROOT := $(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_TARGET_FLAGS := \
     -target arm64-apple-ios$(IOS_DEPLOYMENT_TARGET) \
     -isysroot $(IOS_SDKROOT)
-CMDLINE_CFLAGS += $(IOS_TARGET_FLAGS) -DPHONEME_IOS_NATIVE=1
+CMDLINE_CFLAGS += $(IOS_TARGET_FLAGS) -DPHONEME_IOS_NATIVE=1 \
+    -Werror=pointer-to-int-cast \
+    -Werror=int-to-pointer-cast \
+    -Werror=void-pointer-to-int-cast \
+    -Werror=int-to-void-pointer-cast \
+    -Werror=format
 LD_FLAGS += $(IOS_TARGET_FLAGS)
 USE_RFB = false
 USE_DIRECTFB = false
 
-USE_DEBUG = true
-USE_CLDC_RELEASE = false
+# Device builds must use the optimized VM. A debug phoneME core remains slow
+# even when the surrounding Swift app is archived with the Release scheme.
+USE_DEBUG = false
+USE_CLDC_RELEASE = true
 DISABLE_WERROR = true
 USE_WEAK_GCC_WARNINGS = true
 USE_MULTIPLE_ISOLATES = false

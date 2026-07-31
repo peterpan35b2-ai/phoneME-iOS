@@ -78,11 +78,11 @@ void TaskMirror::clinit_list_add(TaskMirror *tm){
 void TaskMirror::clinit_list_add(Task *task, TaskMirror *list,
                                  TaskMirror *tm) {
   if (Verbose) {
-    tty->print_cr("TaskM adding: tm: 0x%x, ic: 0x%x id: 0x%x, thrd: 0x%x, "
+    tty->print_cr("TaskM adding: tm: %p, ic: %p id: 0x%x, thrd: %p, "
                   "task: %d",
-                  (int)tm->obj(), (int)tm->containing_class(),
+                  tm->obj(), tm->containing_class(),
                   ((JavaClass)(tm->containing_class())).class_id(),
-                  (int)Thread::current()->obj(), TaskContext::current_task_id());
+                  Thread::current()->obj(), TaskContext::current_task_id());
   }
   TaskMirror::Raw new_head = tm;
   TaskMirror::Raw old_head = list->obj();
@@ -115,11 +115,11 @@ ReturnOop TaskMirror::clinit_list_remove(Oop *containing_class){
     task().set_clinit_list(next);
   }
   if (Verbose) {
-    tty->print_cr("TaskM: reming tm: 0x%x, ic: 0x%x id: 0x%x, thrd: 0x%x, "
+    tty->print_cr("TaskM: reming tm: %p, ic: %p id: 0x%x, thrd: %p, "
                   "task: %d",
-                  (int)found().obj(), (int)found().containing_class(),
+                  found().obj(), found().containing_class(),
                   ((JavaClass)(found().containing_class())).class_id(),
-                  (int)Thread::current()->obj(), TaskContext::current_task_id());
+                  Thread::current()->obj(), TaskContext::current_task_id());
   }
   found().clear_init_thread();
   return found.obj();

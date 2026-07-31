@@ -274,30 +274,30 @@ void report_unimplemented() {
 }
 #endif
 
-void find(int x) {
-  OopDesc** p = (OopDesc**) x;
+void find(address_word x) {
+  OopDesc** p = (OopDesc**)x;
   if (ObjectHeap::contains_live(p)) {
     Oop o = ObjectHeap::slow_object_start(p);
-    tty->print_cr("0x%p in object 0x%p", x, o.obj());
+    tty->print_cr("%p in object %p", (void*)x, o.obj());
     o.print();
   } else if (ObjectHeap::contains(p)) {
-    tty->print_cr("0x%p inside dead region of ObjectHeap", x);
+    tty->print_cr("%p inside dead region of ObjectHeap", (void*)x);
   } else {
-    tty->print_cr("0x%p unknown location", x);
+    tty->print_cr("%p unknown location", (void*)x);
   }
 }
 
-void ppv(int x) { 
+void ppv(address_word x) { 
   bool oldVerbose = Verbose;
   Verbose = true;
   pp(x);
   Verbose = oldVerbose;
 }
 
-void pp(int x) {
+void pp(address_word x) {
   DebugHandleMarker debug_handle_marker;
 
-  OopDesc** p = (OopDesc**) x;
+  OopDesc** p = (OopDesc**)x;
   Oop::Raw o;
 
   Oop::disable_on_stack_check();
@@ -342,34 +342,35 @@ void pp(int x) {
       }
 #endif
     } else {
-      tty->print_cr("0x%x points inside object 0x%lx + %ld",
-                    x, (long)o.obj(), x - (long)o.obj());
+      tty->print_cr("%p points inside object %p + " JVM_LLD,
+                    (void*)x, o.obj(),
+                    (jlong)((address)x - (address)o.obj()));
     }
   } else {
-    tty->print_cr("0x%x not in object space", x);
+    tty->print_cr("%p not in object space", (void*)x);
   }
 
   Oop::enable_on_stack_check();
 }
 
-static int pps_pointer;
+static address_word pps_pointer;
 static void pps_helper() {
   pp(pps_pointer);
 }
 
 // pps = Print on Primordial Stack. Use this while you get stuck on
 // the Java stack
-void pps(int x) {
+void pps(address_word x) {
   pps_pointer = x;
   call_on_primordial_stack(pps_helper);
 }
 
-void ppx(int x) {
+void ppx(address_word x) {
   Oop o = (OopDesc*)x;
   o.print();
 }
 
-void ppxv(int x) {
+void ppxv(address_word x) {
   bool oldVerbose = Verbose;
   Verbose = true;
   Oop o = (OopDesc*)x;
@@ -401,7 +402,7 @@ void poht( const int task_id ) {
 }
 #endif
 
-void ref(int x) {
+void ref(address_word x) {
   ObjectHeap::check_reach_root((OopDesc*)x, NULL, -1);
   ObjectHeap::find((OopDesc*)x, false);
 }

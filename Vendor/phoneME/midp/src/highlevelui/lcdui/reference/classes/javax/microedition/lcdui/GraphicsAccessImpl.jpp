@@ -47,7 +47,7 @@ class GraphicsAccessImpl implements com.sun.midp.lcdui.GraphicsAccess {
      * @return the romized Image, null if the identifier was invalid
      *         or the Image did not exist.
      */
-    public Image getRomizedImage(int imageDataArrayPtr,
+    public Image getRomizedImage(long imageDataArrayPtr,
             int imageDataArrayLength) {
         
         return Image.getRomizedImage(

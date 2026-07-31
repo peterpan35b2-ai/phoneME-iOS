@@ -249,12 +249,15 @@ void print_bitmap()
         }
         printf("\n};\n\n");
     }
-    printf("pfontbitmap FontBitmaps[] =\n"
-           "{ (pfontbitmap)%i",
-           rangeIndex+1);
+    printf("const int FontBitmapsCount = %i;\n"
+           "pfontbitmap FontBitmaps[] =\n"
+           "{ ", rangeIndex + 1);
     for (printRangeIndex = 0; printRangeIndex <= rangeIndex; printRangeIndex++) {
         fontbitmap_current = fontbitmaps[printRangeIndex];
-        printf(", TheFontBitmap%02x%02x",
+        if (printRangeIndex > 0) {
+            printf(", ");
+        }
+        printf("TheFontBitmap%02x%02x",
                fontbitmap_current[FONT_CODE_RANGE_HIGH],
                fontbitmap_current[FONT_CODE_FIRST_LOW]);
         free(fontbitmap_current);

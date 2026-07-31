@@ -71,10 +71,10 @@ public:
   static struct transport_type transport_types[1];
 
   transport_op_def_t * ops() {
-    return (transport_op_def_t *)int_field(ops_offset());
+    return (transport_op_def_t *)address_word_field(ops_offset());
   }
   void set_ops(transport_op_def_t *ops) {
-    int_field_put(ops_offset(), (int)ops);
+    address_word_field_put(ops_offset(), (address_word)ops);
   }
 
   ReturnOop next() const { return obj_field(next_offset()); }

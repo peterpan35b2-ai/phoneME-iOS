@@ -57,7 +57,7 @@ void EntryActivation::iterate(OopVisitor* visitor) {
     NamedField id("return_point", true);
     id.set_hex_output(true);
     id.set_is_pointer(true);
-    visitor->do_uint(&id, return_point_offset(), true);
+    visitor->do_address_word(&id, return_point_offset(), true);
   }
 #endif
   for (int index = 0; index < length(); index++) {
@@ -131,7 +131,7 @@ void EntryActivation::iterate_oopmaps(oopmaps_doer do_map, void* param) {
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, method);
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, next);
 #if USE_REFLECTION || ENABLE_JAVA_DEBUGGER || ENABLE_JNI
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    return_point);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, return_point);
 #endif
 #endif
 }

@@ -37,7 +37,8 @@ int32_t phoneme_ios_port_copy_frame_rgba(
     uint8_t* destination,
     int32_t capacity,
     int32_t* width,
-    int32_t* height
+    int32_t* height,
+    uint64_t* generation
 );
 
 #ifdef __cplusplus

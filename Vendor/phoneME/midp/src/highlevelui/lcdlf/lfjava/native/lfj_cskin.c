@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include <jvmconfig.h>
+#include <stdint.h>
 #include <kni.h>
 #include <jvm.h>
 #include <sni.h>
@@ -205,14 +206,14 @@ KNIDECL(com_sun_midp_chameleon_skins_resources_LoadedSkinData_finalize) {
     KNI_ReturnVoid();
 }
 
-KNIEXPORT KNI_RETURNTYPE_INT
+KNIEXPORT KNI_RETURNTYPE_LONG
 KNIDECL(com_sun_midp_chameleon_skins_resources_SkinResourcesImpl_getRomizedImageDataArrayPtr) {
     jint imageId = KNI_GetParameterAsInt(1);
     
     unsigned char* imageData;
     lfj_load_image_from_rom(imageId, &imageData);
 
-    KNI_ReturnInt((int)(void*)imageData);
+    KNI_ReturnLong((jlong)(intptr_t)imageData);
 }
 
 KNIEXPORT KNI_RETURNTYPE_INT

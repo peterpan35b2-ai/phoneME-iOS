@@ -41,6 +41,12 @@
 
 #include <gxp_image.h>
 
+#if PHONEME_IOS_NATIVE
+extern void phoneme_ios_lcdui_capture_image(
+        int32_t componentId,
+        jobject imageData);
+#endif
+
 /**
  * KNI function to create native dialog for Alert.
  * CLASS: javax.microedition.lcdui.AlertLFImpl
@@ -182,6 +188,15 @@ Java_javax_microedition_lcdui_AlertLFImpl_setNativeContents0() {
         /* Call platform dependent setContent() function */
         err = lfpport_alert_set_contents(alertPtr,
                          imgPtr, bounds, &text);
+
+#if PHONEME_IOS_NATIVE
+        if (err == KNI_OK) {
+            phoneme_ios_lcdui_capture_image(
+                MidpComponentToId(&alertPtr->frame.component),
+                imageJObject
+            );
+        }
+#endif
 
         if (err == KNI_OK) {
             /* Update the gauge bounds array in Java */

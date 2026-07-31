@@ -112,7 +112,7 @@ static gxj_pixel_type *cachedFontBuffer;
                          ((( x ) << 3) & 0x000000F8) )
 
 // pfontbitmap
-#define TheFontBitmap     FontBitmaps[1]
+#define TheFontBitmap     FontBitmaps[0]
 #define TheFontBitmapSize 2024 // IMPL_NOTE: must not be hardcoded!
 
 static int *compile_glyph(gxj_pixel_type *buf, int bufWidth, int fontWidth,

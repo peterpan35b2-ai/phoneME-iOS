@@ -155,7 +155,7 @@ void StackmapList::iterate(OopVisitor* visitor) {
     if (is_short_map(i)) {
       {
         NamedField id("short_map", true);
-        visitor->do_int(&id, entry_stat_offset(i), true);
+        visitor->do_address_word(&id, entry_stat_offset(i), true);
       }
     } else {
       {
@@ -198,7 +198,7 @@ int StackmapList::generate_fieldmap(TypeArray* field_map) {
       // the fields is a pointer to a TypeArray object
       field_map->byte_at_put(map_index++, T_OBJECT);
     } else {
-      field_map->byte_at_put(map_index++, T_INT);
+      field_map->byte_at_put(map_index++, T_ADDRESS_WORD);
     }
   }
 

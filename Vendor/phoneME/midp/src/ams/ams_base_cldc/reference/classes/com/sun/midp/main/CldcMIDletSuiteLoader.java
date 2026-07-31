@@ -285,8 +285,8 @@ abstract class CldcMIDletSuiteLoader extends AbstractMIDletSuiteLoader {
         }
 
         try {
-            byte[] manifest =
-                JarReader.readJarEntry(jarPath, MIDletSuite.JAR_MANIFEST);
+            byte[] manifest = JarReader.readJarEntry(
+                internalSecurityToken, jarPath, MIDletSuite.JAR_MANIFEST);
             jarProps = new ManifestProperties();
             jarProps.load(new ByteArrayInputStream(manifest));
         } catch (Throwable t) {

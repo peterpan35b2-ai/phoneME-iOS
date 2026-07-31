@@ -122,7 +122,8 @@ iOSInjectionProject/
 Packages
 xcuserdata
 *.xcodeproj
-
+!phoneME.xcodeproj/
+!phoneME.xcodeproj/project.pbxproj
 
 ### VisualStudioCode ###
 .vscode/*
@@ -144,3 +145,40 @@ xcuserdata
 .ionide
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,swift,swiftpm,visualstudiocode
+.sim-build/
+.device-build/
+
+# The generic build/ rule above must not hide phoneME's checked-in makefiles.
+# Re-include vendored build descriptions, then ignore only generated products.
+!Vendor/phoneME/**/build/
+!Vendor/phoneME/**/build/**
+
+# Generated phoneME vendor build output. Keep the vendored source and build
+# descriptions, but regenerate these artifacts with
+# Scripts/build-phoneME-core-ios.sh.
+Vendor/phoneME/pcsl/output/
+Vendor/phoneME/pcsl/output-ios/
+Vendor/phoneME/pcsl/output-ios-simulator/
+Vendor/phoneME/cldc/build/classes/
+Vendor/phoneME/cldc/build/classes.zip
+Vendor/phoneME/cldc/build/tmpclasses/
+Vendor/phoneME/cldc/build/ios_arm64/dist/
+Vendor/phoneME/cldc/build/ios_arm64/loopgen/
+Vendor/phoneME/cldc/build/ios_arm64/romgen/
+Vendor/phoneME/cldc/build/ios_arm64/target/
+Vendor/phoneME/cldc/build/ios_arm64/tools/
+Vendor/phoneME/cldc/build/ios_simulator_arm64/dist/
+Vendor/phoneME/cldc/build/ios_simulator_arm64/loopgen/
+Vendor/phoneME/cldc/build/ios_simulator_arm64/romgen/
+Vendor/phoneME/cldc/build/ios_simulator_arm64/target/
+Vendor/phoneME/cldc/build/ios_simulator_arm64/tools/
+Vendor/phoneME/midp/build/ios_arm64_gcc/output/
+Vendor/phoneME/midp/build/ios_simulator_arm64_gcc/output/
+Vendor/phoneME/midp/build/darwin_ios_native_gcc/output/
+Vendor/phoneME/preverifier/build/darwin/*.o
+Vendor/phoneME/preverifier/build/darwin/preverify
+
+Artifacts/
+.agent-derived*/
+build/
+tmp*/

@@ -488,7 +488,8 @@ void JavaDebugger::vendor_get_stepping_info(PacketInputStream *in,
 {
   UsingFastOops fast_oops;
 
-  StepModifier *sm = (StepModifier *)(in->read_int());
+  StepModifier::Raw sm = get_object_by_id(in->read_int());
+  GUARANTEE(!sm.is_null(), "Invalid step modifier ID");
 
 #ifdef AZZERT
   if (TraceDebugger) {
@@ -496,9 +497,9 @@ void JavaDebugger::vendor_get_stepping_info(PacketInputStream *in,
   }
 #endif
 
-  sm->set_step_target_offset(in->read_long());
-  sm->set_dup_current_line_offset(in->read_long());
-  sm->set_post_dup_line_offset(in->read_long());
+  sm().set_step_target_offset(in->read_long());
+  sm().set_dup_current_line_offset(in->read_long());
+  sm().set_post_dup_line_offset(in->read_long());
   out->send_packet();
   set_loop_count(-1);
 }
@@ -729,7 +730,7 @@ bool JavaDebugger::dispatch(int timeout)
         }
         f2Array = (void **)(func_array[in.cmd_set()]);
       }
-      if (f2Array == NULL || in.cmd() > (int)f2Array[0]) {
+      if (f2Array == NULL || in.cmd() > (int)(intptr_t)f2Array[0]) {
         if (TraceDebugger) {
           jvm_fprintf(stderr, "Unknown KDWP command");
         }
@@ -863,7 +864,7 @@ bool JavaDebugger::initialize_java_debugger(JVM_SINGLE_ARG_TRAPS) {
       Transport::transport_op_def_t *ops = t().ops();
 #ifdef AZZERT
       if (TraceDebugger) {
-        tty->print_cr("JavaDebugger: init: transport 0x%x", (int)t().obj());
+        tty->print_cr("JavaDebugger: init: transport %p", t().obj());
       }
 #endif
       // Setup some free packet buffers

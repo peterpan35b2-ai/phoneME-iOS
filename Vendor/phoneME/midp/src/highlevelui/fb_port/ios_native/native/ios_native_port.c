@@ -4,10 +4,15 @@
  * RGBA8888 snapshot through the small C ABI.
  */
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 #include <fbport_export.h>
 #include <gxj_putpixel.h>
@@ -33,9 +38,18 @@ typedef struct {
 gxj_screen_buffer gxj_system_screen_buffer;
 
 static pthread_mutex_t portMutex = PTHREAD_MUTEX_INITIALIZER;
+/*
+ * Host frame conversion is serialized separately so the VM only holds
+ * portMutex for a fast RGB565 snapshot copy, not for the more expensive
+ * RGB565 -> RGBA conversion.
+ */
+static pthread_mutex_t frameCopyMutex = PTHREAD_MUTEX_INITIALIZER;
 static gxj_pixel_type* framePixels;
+static gxj_pixel_type* frameSnapshotPixels;
+static size_t frameSnapshotCapacity;
 static int frameWidth;
 static int frameHeight;
+static uint64_t frameGeneration;
 static int configuredWidth = 240;
 static int configuredHeight = 320;
 static PhoneMEIOSKeyEvent keyQueue[PHONEME_IOS_QUEUE_SIZE];
@@ -48,6 +62,13 @@ static int stopRequested;
 
 static unsigned int queue_next(unsigned int index) {
     return (index + 1U) % PHONEME_IOS_QUEUE_SIZE;
+}
+
+static void advance_frame_generation_locked(void) {
+    ++frameGeneration;
+    if (frameGeneration == 0U) {
+        ++frameGeneration;
+    }
 }
 
 static int clip_rectangle(
@@ -84,6 +105,7 @@ static int ensure_frame_buffer_locked(int width, int height) {
     framePixels = replacement;
     frameWidth = width;
     frameHeight = height;
+    advance_frame_generation_locked();
     return 1;
 }
 
@@ -93,6 +115,55 @@ static uint8_t expand5(unsigned int value) {
 
 static uint8_t expand6(unsigned int value) {
     return (uint8_t)((value << 2) | (value >> 4));
+}
+
+static void convert_rgb565_to_rgba(
+        const gxj_pixel_type* source,
+        uint8_t* destination,
+        size_t pixelCount) {
+    size_t index = 0;
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    const uint16x8_t mask5 = vdupq_n_u16(0x1fU);
+    const uint16x8_t mask6 = vdupq_n_u16(0x3fU);
+    const uint8x8_t alpha = vdup_n_u8(0xffU);
+
+    for (; index + 8U <= pixelCount; index += 8U) {
+        const uint16x8_t pixels = vld1q_u16(
+            (const uint16_t*)(source + index)
+        );
+        const uint16x8_t red5 = vshrq_n_u16(pixels, 11);
+        const uint16x8_t green6 = vandq_u16(
+            vshrq_n_u16(pixels, 5),
+            mask6
+        );
+        const uint16x8_t blue5 = vandq_u16(pixels, mask5);
+        uint8x8x4_t rgba;
+
+        rgba.val[0] = vmovn_u16(vorrq_u16(
+            vshlq_n_u16(red5, 3),
+            vshrq_n_u16(red5, 2)
+        ));
+        rgba.val[1] = vmovn_u16(vorrq_u16(
+            vshlq_n_u16(green6, 2),
+            vshrq_n_u16(green6, 4)
+        ));
+        rgba.val[2] = vmovn_u16(vorrq_u16(
+            vshlq_n_u16(blue5, 3),
+            vshrq_n_u16(blue5, 2)
+        ));
+        rgba.val[3] = alpha;
+        vst4_u8(destination + index * 4U, rgba);
+    }
+#endif
+
+    for (; index < pixelCount; ++index) {
+        unsigned int pixel = (unsigned int)source[index];
+        destination[index * 4U + 0U] = expand5((pixel >> 11) & 0x1fU);
+        destination[index * 4U + 1U] = expand6((pixel >> 5) & 0x3fU);
+        destination[index * 4U + 2U] = expand5(pixel & 0x1fU);
+        destination[index * 4U + 3U] = 0xffU;
+    }
 }
 
 void phoneme_ios_port_configure_display(int32_t width, int32_t height) {
@@ -130,27 +201,27 @@ void phoneme_ios_port_reset(void) {
             0,
             (size_t)frameWidth * (size_t)frameHeight * sizeof(gxj_pixel_type)
         );
+        advance_frame_generation_locked();
     }
     keyReadIndex = 0;
     keyWriteIndex = 0;
     pointerReadIndex = 0;
     pointerWriteIndex = 0;
-    stopRequested = 0;
+    __atomic_store_n(&stopRequested, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&portMutex);
 }
 
 void phoneme_ios_port_request_stop(void) {
-    pthread_mutex_lock(&portMutex);
-    stopRequested = 1;
-    pthread_mutex_unlock(&portMutex);
+    /*
+     * This flag is read both from the MIDP event loop and directly from the
+     * CLDC interpreter. Keep it lock-free so a host-side stop request cannot
+     * wait behind a VM thread that happens to be holding portMutex.
+     */
+    __atomic_store_n(&stopRequested, 1, __ATOMIC_RELEASE);
 }
 
 int phoneme_ios_port_should_stop(void) {
-    int result;
-    pthread_mutex_lock(&portMutex);
-    result = stopRequested;
-    pthread_mutex_unlock(&portMutex);
-    return result;
+    return __atomic_load_n(&stopRequested, __ATOMIC_ACQUIRE);
 }
 
 void phoneme_ios_port_send_key(int32_t key_code, int32_t pressed) {
@@ -267,34 +338,66 @@ int32_t phoneme_ios_port_copy_frame_rgba(
         uint8_t* destination,
         int32_t capacity,
         int32_t* width,
-        int32_t* height) {
+        int32_t* height,
+        uint64_t* generation) {
     int32_t required;
-    int index;
+    size_t pixelCount;
 
-    pthread_mutex_lock(&portMutex);
-    if (width != NULL) *width = frameWidth;
-    if (height != NULL) *height = frameHeight;
+    pthread_mutex_lock(&frameCopyMutex);
 
-    if (framePixels == NULL || frameWidth <= 0 || frameHeight <= 0 ||
-            (size_t)frameWidth * (size_t)frameHeight > INT32_MAX / 4) {
+    for (;;) {
+        gxj_pixel_type* replacement;
+
+        pthread_mutex_lock(&portMutex);
+        if (width != NULL) *width = frameWidth;
+        if (height != NULL) *height = frameHeight;
+        if (generation != NULL) *generation = frameGeneration;
+
+        if (framePixels == NULL || frameWidth <= 0 || frameHeight <= 0 ||
+                (size_t)frameWidth * (size_t)frameHeight > INT32_MAX / 4) {
+            pthread_mutex_unlock(&portMutex);
+            pthread_mutex_unlock(&frameCopyMutex);
+            return 0;
+        }
+
+        pixelCount = (size_t)frameWidth * (size_t)frameHeight;
+        required = (int32_t)(pixelCount * 4U);
+        if (destination == NULL || capacity < required) {
+            pthread_mutex_unlock(&portMutex);
+            pthread_mutex_unlock(&frameCopyMutex);
+            return required;
+        }
+
+        if (frameSnapshotCapacity >= pixelCount) {
+            memcpy(
+                frameSnapshotPixels,
+                framePixels,
+                pixelCount * sizeof(gxj_pixel_type)
+            );
+            pthread_mutex_unlock(&portMutex);
+            break;
+        }
         pthread_mutex_unlock(&portMutex);
-        return 0;
+
+        replacement = (gxj_pixel_type*)realloc(
+            frameSnapshotPixels,
+            pixelCount * sizeof(gxj_pixel_type)
+        );
+        if (replacement == NULL) {
+            pthread_mutex_unlock(&frameCopyMutex);
+            return 0;
+        }
+        frameSnapshotPixels = replacement;
+        frameSnapshotCapacity = pixelCount;
+        /* Re-read dimensions and pixels after allocation in case of resize. */
     }
 
-    required = frameWidth * frameHeight * 4;
-    if (destination == NULL || capacity < required) {
-        pthread_mutex_unlock(&portMutex);
-        return required;
-    }
-
-    for (index = 0; index < frameWidth * frameHeight; ++index) {
-        unsigned int pixel = (unsigned int)framePixels[index];
-        destination[index * 4 + 0] = expand5((pixel >> 11) & 0x1fU);
-        destination[index * 4 + 1] = expand6((pixel >> 5) & 0x3fU);
-        destination[index * 4 + 2] = expand5(pixel & 0x1fU);
-        destination[index * 4 + 3] = 0xffU;
-    }
-    pthread_mutex_unlock(&portMutex);
+    convert_rgb565_to_rgba(
+        frameSnapshotPixels,
+        destination,
+        pixelCount
+    );
+    pthread_mutex_unlock(&frameCopyMutex);
     return required;
 }
 
@@ -349,6 +452,7 @@ void clearScreen(void) {
             0,
             (size_t)frameWidth * (size_t)frameHeight * sizeof(gxj_pixel_type)
         );
+        advance_frame_generation_locked();
     }
     pthread_mutex_unlock(&portMutex);
 }
@@ -387,6 +491,7 @@ void refreshScreenNormal(int x1, int y1, int x2, int y2) {
             (size_t)(x2 - x1) * sizeof(gxj_pixel_type)
         );
     }
+    advance_frame_generation_locked();
     pthread_mutex_unlock(&portMutex);
 }
 
@@ -416,15 +521,22 @@ void refreshScreenRotated(int x1, int y1, int x2, int y2) {
                 source[y * width + x];
         }
     }
+    advance_frame_generation_locked();
     pthread_mutex_unlock(&portMutex);
 }
 
 void finalizeFrameBuffer(void) {
+    pthread_mutex_lock(&frameCopyMutex);
     pthread_mutex_lock(&portMutex);
     free(framePixels);
     framePixels = NULL;
     frameWidth = 0;
     frameHeight = 0;
     pthread_mutex_unlock(&portMutex);
+
+    free(frameSnapshotPixels);
+    frameSnapshotPixels = NULL;
+    frameSnapshotCapacity = 0;
+    pthread_mutex_unlock(&frameCopyMutex);
     gxj_free_screen_buffer();
 }

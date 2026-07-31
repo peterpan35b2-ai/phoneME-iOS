@@ -44,7 +44,7 @@ final class ImageData implements AbstractImageData {
     /**
      * Native image data pointer.
      */
-    private int nativeImageData;
+    private long nativeImageData;
 
 
     /**

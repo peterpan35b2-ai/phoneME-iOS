@@ -157,7 +157,7 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_open0(void) {
                 SERVER_SOCKET_SET_HANDLE(thisObject, pcslHandle);
                 REPORT_INFO2(LC_PROTOCOL,
                              "serversocket::open port = %d handle = %d\n",
-                             port, pcslHandle);
+                             port, (int)(intptr_t)pcslHandle);
 
                 if (midpIncResourceCount(RSC_TYPE_TCP_SER, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL,
@@ -212,7 +212,7 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_close0(void) {
          * If serverSocketHandle is invalid, the socket has already been closed,
          * so per specification we do nothing and return.
          */
-        if (serverSocketHandle == (int)INVALID_HANDLE) {
+        if (serverSocketHandle == (int)(intptr_t)INVALID_HANDLE) {
             REPORT_INFO(LC_PROTOCOL, "serversocket::close Invalid handle\n");
         } else {
             /*
@@ -224,8 +224,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_close0(void) {
              * IMPL NOTE: how to do resource accounting for the push case?
              */
             if (pushcheckin(serverSocketHandle) == -1) {
-                status = pcsl_socket_close_start((void*)serverSocketHandle,
-                                                 &context);
+                status = pcsl_socket_close_start(
+                    SERVER_SOCKET_HANDLE(serverSocketHandle), &context);
                 resUpdate = 1;
             } else {
                 status = PCSL_NET_SUCCESS;
@@ -239,12 +239,13 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_close0(void) {
         /* reinvocation */
         serverSocketHandle = info->descriptor;
         context = info->pResult;
-        status = pcsl_socket_close_finish((void*)serverSocketHandle, context);
+        status = pcsl_socket_close_finish(
+            SERVER_SOCKET_HANDLE(serverSocketHandle), context);
     }
 
     REPORT_INFO1(LC_PROTOCOL, "serversocket::close handle=%d\n", serverSocketHandle);
 
-    if (serverSocketHandle != (int)INVALID_HANDLE) {
+    if (serverSocketHandle != (int)(intptr_t)INVALID_HANDLE) {
         if (status == PCSL_NET_SUCCESS) {
           if (resUpdate) {
             if (midpDecResourceCount(RSC_TYPE_TCP_SER, 1) == 0) {
@@ -261,7 +262,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_close0(void) {
         } else {
             midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
                           "IOError in serversocket::close = %d\n",
-                          pcsl_network_error((void*)serverSocketHandle));
+                          pcsl_network_error(
+                              SERVER_SOCKET_HANDLE(serverSocketHandle)));
             REPORT_INFO1(LC_PROTOCOL, "%s", gKNIBuffer);
             KNI_ThrowNew(midpIOException, gKNIBuffer);
         }
@@ -321,7 +323,7 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
 
     serverSocketHandle = SERVER_SOCKET_GET_HANDLE(thisObject);
 
-    if (serverSocketHandle == (int)INVALID_HANDLE) {
+    if (serverSocketHandle == (int)(intptr_t)INVALID_HANDLE) {
         KNI_ThrowNew(midpIOException, "Socket was closed");
     } else {
         info = (MidpReentryData*)SNI_GetReentryData(NULL);
@@ -338,8 +340,9 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
              *
              * IMPL NOTE: how to do resource accounting for the push case?
              */
-            connectionHandle = (void*)pushcheckoutaccept(serverSocketHandle);
-            if (connectionHandle == (void*)-1) {
+            connectionHandle = (void *)(intptr_t)
+                pushcheckoutaccept(serverSocketHandle);
+            if (connectionHandle == (void *)(intptr_t)-1) {
                 /*
                  * An incoming socket connection counts against the client socket
                  * resource limit.
@@ -351,7 +354,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
                                  "Resource limit exceeded for TCP client sockets");
                 } else {
                     status = pcsl_serversocket_accept_start(
-                        (void*)serverSocketHandle, &connectionHandle, &context);
+                        SERVER_SOCKET_HANDLE(serverSocketHandle),
+                        &connectionHandle, &context);
 
                     processStatus = KNI_TRUE;
                 }
@@ -372,7 +376,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
                                  "Resource limit exceeded for TCP client sockets");
                 } else {
                     status = pcsl_serversocket_accept_finish(
-                        (void*)serverSocketHandle, &connectionHandle, &context);
+                        SERVER_SOCKET_HANDLE(serverSocketHandle),
+                        &connectionHandle, &context);
 
                     processStatus = KNI_TRUE;
                 }
@@ -382,7 +387,7 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
         if (processStatus) {
             REPORT_INFO1(LC_PROTOCOL,
                          "serversocket::accept connection handle=%d\n",
-                         connectionHandle);
+                         (int)(intptr_t)connectionHandle);
             if (status == PCSL_NET_SUCCESS) {
                 if (midpIncResourceCount(RSC_TYPE_TCP_CLI, 1) == 0) {
                     REPORT_INFO(LC_PROTOCOL,
@@ -394,7 +399,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
             } else if (status == PCSL_NET_IOERROR) {
                 midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
                               "IOError in serversocket::accept = %d\n",
-                              pcsl_network_error((void*)serverSocketHandle));
+                              pcsl_network_error(
+                                  SERVER_SOCKET_HANDLE(serverSocketHandle)));
                 REPORT_INFO1(LC_PROTOCOL, "%s\n", gKNIBuffer);
                 KNI_ThrowNew(midpIOException, gKNIBuffer);
             } else {
@@ -403,7 +409,7 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_accept0(void) {
             }
         }
 
-        if (connectionHandle != (void*)-1) {
+        if (connectionHandle != (void *)(intptr_t)-1) {
             /*
              * We got a valid connection, either by checking it out of the
              * push registry, or by accepting an incoming connection from the
@@ -441,10 +447,10 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_finalize(void) {
     REPORT_INFO1(LC_PROTOCOL, "serversocket::finalize handle=%d",
         serverSocketHandle);
 
-    if (serverSocketHandle != (int)INVALID_HANDLE) {
+    if (serverSocketHandle != (int)(intptr_t)INVALID_HANDLE) {
         if (pushcheckin(serverSocketHandle) == -1) {
             status = pcsl_socket_close_start(
-                (void*)serverSocketHandle, &context);
+                SERVER_SOCKET_HANDLE(serverSocketHandle), &context);
             if (midpDecResourceCount(RSC_TYPE_TCP_SER, 1) == 0) {
                 REPORT_INFO(LC_PROTOCOL,
                     "TCP Server : Resource limit update error");
@@ -453,7 +459,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_finalize(void) {
             if (status == PCSL_NET_IOERROR) {
                 midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
                               "IOError in serversocket::finalize error=%d\n",
-                              pcsl_network_error((void*)serverSocketHandle));
+                              pcsl_network_error(
+                                  SERVER_SOCKET_HANDLE(serverSocketHandle)));
                 REPORT_ERROR1(LC_PROTOCOL, "%s", gKNIBuffer);
             } else if (status == PCSL_NET_WOULDBLOCK) {
                 /* blocking during finalize is not supported */
@@ -538,7 +545,8 @@ Java_com_sun_midp_io_j2me_serversocket_Socket_getLocalPort0(void) {
          * because on Linux and Win32, the old porting layer and PCSL both use
          * a socket descriptor as the handle.
          */
-        status = pcsl_network_getlocalport((void *) serverSocketHandle, &port);
+        status = pcsl_network_getlocalport(
+            SERVER_SOCKET_HANDLE(serverSocketHandle), &port);
         if (status != PCSL_NET_SUCCESS) {
             KNI_ThrowNew(midpIOException, "I/O error");
         }

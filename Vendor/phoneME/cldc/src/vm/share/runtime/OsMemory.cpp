@@ -80,25 +80,29 @@ static int _cnt[MAX_CHUNKS] = {0, 0};
 static void mark_unused_chunk_space(int i) {
   _cnt[i] ++;
 
-  unsigned int base = (int)chunks[i];
-  int *start = (int *)((base + cur_chunk_size[i]) + 0x03 & (~0x03));
-  int *end   = (int *)((base + max_chunk_size[i])        & (~0x03));
+  const address_word base = (address_word)chunks[i];
+  int *start = (int *)align_size_up(
+      base + cur_chunk_size[i], sizeof(int));
+  int *end = (int *)align_size_down(
+      base + max_chunk_size[i], sizeof(int));
   int *p;
 
   int marker = _cnt[i] + 0xdeadbeef;
-  for (p = start; p<end; p++) {
+  for (p = start; p < end; p++) {
     *p = marker;
   }
 }
 
 static void check_unused_chunk_space(int i) {
-  unsigned int base = (unsigned int)chunks[i];
-  int *start = (int *)((base + cur_chunk_size[i]) + 0x03 & (~0x03));
-  int *end   = (int *)((base + max_chunk_size[i])        & (~0x03));
+  const address_word base = (address_word)chunks[i];
+  int *start = (int *)align_size_up(
+      base + cur_chunk_size[i], sizeof(int));
+  int *end = (int *)align_size_down(
+      base + max_chunk_size[i], sizeof(int));
   int *p;
 
   int marker = _cnt[i] + 0xdeadbeef;
-  for (p = start; p<end; p++) {
+  for (p = start; p < end; p++) {
     GUARANTEE(*p == marker, "Uncommitted chunk was written into");
   }
   AZZERT_ONLY_VAR(marker);

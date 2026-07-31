@@ -60,20 +60,20 @@ public:
 
   static void network_initialized_callback(int isInit, int status);
 
-  int debugger_socket() {
-    return int_field(debugger_socket_offset());
+  address_word debugger_socket() {
+    return address_word_field(debugger_socket_offset());
   }
 
-  void set_debugger_socket(int socket) {
-    int_field_put(debugger_socket_offset(), socket);
+  void set_debugger_socket(address_word socket) {
+    address_word_field_put(debugger_socket_offset(), socket);
   }
 
-  int listener_socket() {
-    return int_field(listener_socket_offset());
+  address_word listener_socket() {
+    return address_word_field(listener_socket_offset());
   }
 
-  void set_listener_socket(int socket) {
-    int_field_put(listener_socket_offset(), socket);
+  void set_listener_socket(address_word socket) {
+    address_word_field_put(listener_socket_offset(), socket);
   }
 
   static ReturnOop allocate(JVM_SINGLE_ARG_TRAPS) {

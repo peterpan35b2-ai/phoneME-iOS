@@ -37,6 +37,7 @@
  * storagePosix_md.h.
  */
 
+#include <stdint.h>
 #include <string.h>
 
 #ifndef UNDER_CE
@@ -62,6 +63,9 @@
 static int initializeConfigRoot (char*);
 static char* getLastError(char*);
 static char* storage_get_last_file_error(char*, const pcsl_string*);
+
+#define STORAGE_HANDLE_FROM_PCSL(handle) ((int)(intptr_t)(handle))
+#define STORAGE_HANDLE_TO_PCSL(handle) ((void *)(intptr_t)(handle))
 
 static const char* const OUT_OF_MEM_ERROR =
     "out of memory, cannot perform file operation";
@@ -462,7 +466,8 @@ storage_open(char** ppszError, const pcsl_string* filename_str, int ioMode) {
 
     openStatus = pcsl_file_open(filename_str, flags, &handle);
 
-    REPORT_INFO1(LC_CORE, "storage_open allocated file_desc %d\n", (int)handle);
+    REPORT_INFO1(LC_CORE, "storage_open allocated file_desc %d\n",
+                 STORAGE_HANDLE_FROM_PCSL(handle));
 
     if (-1 == openStatus) {
         *ppszError = storage_get_last_file_error("storage_open()", filename_str);
@@ -478,7 +483,7 @@ storage_open(char** ppszError, const pcsl_string* filename_str, int ioMode) {
     DEBUGP2F("created %s\n", filename_str);
 #endif
 
-    return (int)handle;
+    return STORAGE_HANDLE_FROM_PCSL(handle);
 }
 
 /*
@@ -492,7 +497,7 @@ storageClose(char** ppszError, int handle) {
     int status;
 
     *ppszError = NULL;
-    status = pcsl_file_close((void *)handle);
+    status = pcsl_file_close(STORAGE_HANDLE_TO_PCSL(handle));
 
     REPORT_INFO2(LC_CORE, "storageClose on file_desc %d returns %d\n",
           handle, status);
@@ -524,7 +529,8 @@ storageRead(char** ppszError, int handle, char* buffer, long length) {
         return 0;
     }
 
-    bytesRead = pcsl_file_read((void *)handle, (unsigned char*)buffer, length);
+    bytesRead = pcsl_file_read(STORAGE_HANDLE_TO_PCSL(handle),
+                               (unsigned char*)buffer, length);
 
     REPORT_INFO2(LC_CORE, "storageRead on fd %d res = %ld\n",
           handle, bytesRead);
@@ -551,7 +557,8 @@ storageWrite(char** ppszError, int handle, char* buffer, long length) {
     long bytesWritten;
 
     *ppszError = NULL;
-    bytesWritten = pcsl_file_write((void *)handle, (unsigned char*)buffer, length);
+    bytesWritten = pcsl_file_write(STORAGE_HANDLE_TO_PCSL(handle),
+                                   (unsigned char*)buffer, length);
 
     REPORT_INFO2(LC_CORE, "storageWrite on fd %d res = %ld\n",
           handle, bytesWritten);
@@ -579,7 +586,7 @@ storageCommitWrite(char** ppszError, int handle) {
 
     REPORT_INFO1(LC_CORE, "trying to flush pending writes on file handle %d\n", handle);
 
-    status = pcsl_file_commitwrite((void *)handle);
+    status = pcsl_file_commitwrite(STORAGE_HANDLE_TO_PCSL(handle));
 
     if (status < 0) {
         *ppszError = getLastError("storageCommit()");
@@ -600,7 +607,7 @@ void
 storagePosition(char** ppszError, int handle, long absolutePosition) {
     long newPosition;
 
-    newPosition = pcsl_file_seek((void *)handle, absolutePosition,
+    newPosition = pcsl_file_seek(STORAGE_HANDLE_TO_PCSL(handle), absolutePosition,
                                   PCSL_FILE_SEEK_SET);
 
     REPORT_INFO2(LC_CORE, "storagePostion on fd %d res = %d\n",
@@ -627,7 +634,8 @@ long
 storageRelativePosition(char** ppszError, int handle, long offset) {
     long newPosition;
 
-    newPosition = pcsl_file_seek((void *)handle, offset, PCSL_FILE_SEEK_CUR);
+    newPosition = pcsl_file_seek(STORAGE_HANDLE_TO_PCSL(handle), offset,
+                                 PCSL_FILE_SEEK_CUR);
 
     REPORT_INFO2(LC_CORE, "storageRelativePostion on fd %d res = %d\n",
          handle, newPosition);
@@ -654,7 +662,7 @@ long
 storageSizeOf(char** ppszError, int handle) {
     long size;
 
-    size = pcsl_file_sizeofopenfile((void *)handle);
+    size = pcsl_file_sizeofopenfile(STORAGE_HANDLE_TO_PCSL(handle));
     if (size < 0) {
         *ppszError = getLastError("storageSizeOf()");
     } else {
@@ -694,7 +702,7 @@ void
 storageTruncate(char** ppszError, int handle, long size) {
     int rv;
 
-    rv = pcsl_file_truncate((void *)handle, size);
+    rv = pcsl_file_truncate(STORAGE_HANDLE_TO_PCSL(handle), size);
     if (rv == -1) {
         *ppszError = getLastError("storageTruncate()");
     } else {

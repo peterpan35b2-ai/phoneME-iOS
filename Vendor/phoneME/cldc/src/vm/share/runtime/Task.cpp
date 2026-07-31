@@ -350,9 +350,8 @@ ReturnOop Task::allocate_task(int id JVM_TRAPS) {
   Universe::task_list()->obj_at_put(id, &task);
   _num_tasks++;
   if (TraceGC) {
-    TTY_TRACE(("Task: new task id %d, class_list 0x%x, mirror_list 0x%x",
-               id, (int)task().class_list(),
-               (int)task().mirror_list()));
+    TTY_TRACE(("Task: new task id %d, class_list %p, mirror_list %p",
+               id, task().class_list(), task().mirror_list()));
 #if ENABLE_OOP_TAG
     TTY_TRACE_CR((", seq %d", task().seq()));
 #else
@@ -440,8 +439,8 @@ void Task::cleanup_terminated_task(int id JVM_TRAPS) {
 #else
       TTY_TRACE_CR((""));
 #endif
-      TTY_TRACE_CR(("Task: class_list 0x%x, mirror_base 0x%x",
-                    (int)task().class_list(), (int)task().mirror_list()));
+      TTY_TRACE_CR(("Task: class_list %p, mirror_base %p",
+                    task().class_list(), task().mirror_list()));
     }
 
     JarFileParser::flush_caches();
@@ -882,8 +881,8 @@ void Task::free_binary_images( void ) const {
   {
     TypeArray::Raw handles = mapped_image_handles();    
     for( int i = 0; i < length; i++ ) {      
-      OsFile_MappedImageHandle handle = 
-          (OsFile_MappedImageHandle)handles().int_at(i);      
+      OsFile_MappedImageHandle handle =
+          (OsFile_MappedImageHandle)(address_word)handles().long_at(i);
       OsFile_UnmapImage(handle);
     }
   }
@@ -957,8 +956,8 @@ void Task::add_binary_image(ROMBundle* bun JVM_TRAPS) {
 #endif //ENABLE_LIB_IMAGES
 #if USE_IMAGE_MAPPING && !ENABLE_LIB_IMAGES
 void Task::add_binary_image_handle(void* image_handle JVM_TRAPS) {
-  TypeArray::Raw new_img_handles = Universe::new_int_array(1 JVM_CHECK);
-  new_img_handles().int_at_put(0, (int)image_handle);
+  TypeArray::Raw new_img_handles = Universe::new_long_array(1 JVM_CHECK);
+  new_img_handles().long_at_put(0, (jlong)(address_word)image_handle);
   set_mapped_image_handles(&new_img_handles);  
 }
 #endif //IMAGE_MAPPING && !ENABLE_LIB_IMAGES

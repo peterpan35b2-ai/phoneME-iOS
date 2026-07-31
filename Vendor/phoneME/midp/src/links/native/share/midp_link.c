@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <stdint.h>
 #include <jvm.h>
 #include <kni.h>
 #include <kni_globals.h>
@@ -248,8 +249,8 @@ setNativePointer(jobject linkObj, rendezvous *rp)
     KNI_DeclareHandle(linkClass);
 
     KNI_GetObjectClass(linkObj, linkClass);
-    nativePointerField = KNI_GetFieldID(linkClass, "nativePointer", "I");
-    KNI_SetIntField(linkObj, nativePointerField, (jint)rp);
+    nativePointerField = KNI_GetFieldID(linkClass, "nativePointer", "J");
+    KNI_SetLongField(linkObj, nativePointerField, (jlong)(intptr_t)rp);
 
     KNI_EndHandles();
 }
@@ -265,8 +266,9 @@ getNativePointer(jobject linkObj)
     KNI_DeclareHandle(linkClass);
 
     KNI_GetObjectClass(linkObj, linkClass);
-    nativePointerField = KNI_GetFieldID(linkClass, "nativePointer", "I");
-    rp = (rendezvous *)KNI_GetIntField(linkObj, nativePointerField);
+    nativePointerField = KNI_GetFieldID(linkClass, "nativePointer", "J");
+    rp = (rendezvous *)(intptr_t)
+        KNI_GetLongField(linkObj, nativePointerField);
 
     KNI_EndHandles();
     return rp;

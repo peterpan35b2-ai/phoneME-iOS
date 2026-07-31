@@ -31,6 +31,7 @@
 /*
 #pragma O0
 */
+#include <stdint.h>
 #include <string.h>
 
 #ifdef __cplusplus
@@ -362,11 +363,11 @@ void unclipped_blit(unsigned short *dstRaster, int dstSpan,
     }
 #else
   dstSpan >>= 1; srcSpan >>= 1;
-  if (((unsigned int)dstRaster | (unsigned int)srcRaster | 
-       dstSpan<<1 | srcSpan<<1) & 0x2) {
+  if (((uintptr_t)dstRaster | (uintptr_t)srcRaster |
+       (uintptr_t)(dstSpan << 1) | (uintptr_t)(srcSpan << 1)) & 0x2) {
     for ( ; height > 0; height--) {
       CHECK_PTR_CLIP(dst, dstRaster); CHECK_PTR_CLIP(dst, dstRaster+(width>>1)-1);
-      if (((unsigned int)dstRaster | (unsigned int)srcRaster) & 0x2) {
+      if (((uintptr_t)dstRaster | (uintptr_t)srcRaster) & 0x2) {
         memcpy(dstRaster, srcRaster, width);
       } else {
 #ifdef USE_RT_MEMCPY_W

@@ -42,6 +42,16 @@
 #include <lfp_registry.h>
 #include "lfp_intern_registry.h"
 
+#if defined(__GNUC__)
+/*
+ * Optional host-renderer metadata hook. Ports that do not provide a native
+ * LCDUI host renderer keep the original Form behavior unchanged.
+ */
+extern void phoneme_lfpport_form_set_screen_kind(
+        MidpDisplayable* form,
+        int screenKind) __attribute__((weak));
+#endif
+
 /**
  * Sub types of peer notification events
  *
@@ -57,13 +67,15 @@ enum {
  * KNI function that makes native form visible.
  * CLASS:         javax.microedition.lcdui.FormLFImpl
  * Java Prototype: int createNativeResource0(String title,
- * 	                                    String tickerText)
+ * 	                                    String tickerText,
+ *                                          int screenKind)
  */
 KNIEXPORT KNI_RETURNTYPE_INT
 Java_javax_microedition_lcdui_FormLFImpl_createNativeResource0() {
 
     MidpError err = KNI_OK;
     MidpDisplayable *formPtr = NULL;
+    int screenKind = KNI_GetParameterAsInt(3);
 
     KNI_StartHandles(2);
 
@@ -78,6 +90,12 @@ Java_javax_microedition_lcdui_FormLFImpl_createNativeResource0() {
 	    /* Fill in platform dependent portion of form structure */
 	    err = lfpport_form_create((MidpDisplayable *)formPtr,
 				      &title, &tickerText);
+#if defined(__GNUC__)
+            if (err == KNI_OK &&
+                    phoneme_lfpport_form_set_screen_kind != NULL) {
+                phoneme_lfpport_form_set_screen_kind(formPtr, screenKind);
+            }
+#endif
 	    /*
 	      IMPL_NOTE: Move this to midp_displayable.c
 	      extern C in mscreen.cpp:
@@ -310,6 +328,29 @@ void MidpFormItemPeerStateChanged(PlatformItemWidgetPtr itemWidgetPtr, int hint)
             storePeerChangedEvent(PEER_ITEM_CHANGED, (MidpComponent *)itemPtr, hint);
         }
     }
+}
+
+void MidpFormItemPeerStateChangedByItem(MidpItem* itemPtr, int hint)
+{
+    MidpDisplayable* ownerPtr;
+    MidpEvent event;
+
+    if (itemPtr == NULL || itemPtr->ownerPtr == NULL) {
+        return;
+    }
+
+    ownerPtr = itemPtr->ownerPtr;
+    if (ownerPtr->frame.component.type != MIDP_FORM_TYPE) {
+        return;
+    }
+
+    MIDP_EVENT_INITIALIZE(event);
+    event.type = MIDP_PEER_CHANGED_EVENT;
+    event.intParam1 = ownerPtr->frame.component.modelVersion;
+    event.intParam2 = PEER_ITEM_CHANGED;
+    event.intParam3 = MidpComponentToId(&itemPtr->component);
+    event.intParam5 = hint;
+    midpStoreEventAndSignalForeground(event);
 }
 
 /**

@@ -80,7 +80,7 @@ void Thread::setup_lightweight_stack(JVM_SINGLE_ARG_TRAPS) {
   // uncommented.  Run mintck uses CreateProcess to run the mintck tests.
   // If I run the mintck tests using a .lnk file it works without the
   // following line
-  sp = (address)((int)sp |_system_address);
+  sp = (address)((address_word)sp | (address_word)_system_address);
 #endif
   set_execution_stack(&stack);
   stack().set_thread(this);
@@ -520,7 +520,7 @@ void Thread::stack_oops_do(void do_oop(OopDesc**)) {
 
 void Thread::nonstack_oops_do(void do_oop(OopDesc**)) {
   if (_debugger_active) {
-    OopDesc *step = (OopDesc *)int_field(step_info_offset());
+    OopDesc *step = (OopDesc *)obj_field(step_info_offset());
     if (step != NULL) {
       do_oop(&step);
     }
@@ -713,7 +713,7 @@ void Thread::set_stack_limit() {
 
 void Thread::set_stack_limit(address value) {
 #ifdef UNDER_CE
-  value = (address)((int)value | _system_address);
+  value = (address)((address_word)value | (address_word)_system_address);
 #endif
   address_word_field_put(stack_limit_offset(), (address_word)value);
   if (Scheduler::get_gc_current_thread() != NULL) {
@@ -750,8 +750,9 @@ void Thread::grow_execution_stack(int new_stack_size JVM_TRAPS) {
     address old_stack_end = (address)old_stack().field_base(old_stack_size);
     address new_stack_end = (address)new_stack().field_base(new_stack_size);
 #ifdef UNDER_CE
-    stack_used_size = (address)((int)old_stack_end | _system_address)
-                                    - old_stack_ptr;
+    stack_used_size =
+        (address)((address_word)old_stack_end |
+                  (address_word)_system_address) - old_stack_ptr;
 #else
     stack_used_size = old_stack_end - old_stack_ptr;
 #endif
@@ -762,7 +763,8 @@ void Thread::grow_execution_stack(int new_stack_size JVM_TRAPS) {
     address   new_stack_start = (address)new_stack().field_base(offset);
 #ifdef UNDER_CE
     stack_used_size = old_stack_ptr -
-        (address)((int)old_stack_start | _system_address);
+        (address)((address_word)old_stack_start |
+                  (address_word)_system_address);
 #else
     stack_used_size = old_stack_ptr - old_stack_start;
 #endif
@@ -780,7 +782,7 @@ void Thread::grow_execution_stack(int new_stack_size JVM_TRAPS) {
   } else {
     jvm_memcpy(new_stack_ptr - stack_used_size,
                old_stack_ptr - stack_used_size,
-               stack_used_size + 4);
+               stack_used_size + BytesPerStackElement);
   }
   old_stack().clear_thread();
 
@@ -945,13 +947,13 @@ void Thread::iterate_oopmaps(oopmaps_doer do_map, void *param) {
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, async_info);
   OOPMAP_ENTRY_4(do_map, param, T_OBJECT, cached_async_info);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    id);
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    last_java_sp);
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    last_java_fp);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, last_java_sp);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, last_java_fp);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    async_redo);
   OOPMAP_ENTRY_4(do_map, param, T_LONG,   wakeup_time);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    wait_stack_lock);
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    stack_limit);
-  OOPMAP_ENTRY_4(do_map, param, T_INT,    stack_pointer);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, stack_limit);
+  OOPMAP_ENTRY_4(do_map, param, T_ADDRESS_WORD, stack_pointer);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    status);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    suspend_count);
   OOPMAP_ENTRY_4(do_map, param, T_INT,    int1_value);

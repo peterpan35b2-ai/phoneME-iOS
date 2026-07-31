@@ -1130,7 +1130,7 @@ void ROMWriter::stream_method(Method* method JVM_TRAPS) {
 
     if (is_current_subtype(method) && 
         sm.not_null() && sm().entry_count() == 1 && sm().is_short_map(0)) {
-      juint n = sm().uint_field(sm().entry_stat_offset(0));
+      juint n = (juint)sm().entry_word(0);
       if (n < 0x80000000) {
         n = (juint)((n << 1) | 0x01); // to be decoded in Method::stackmaps().
         visitor()->put_int(method, (int)n JVM_CHECK);

@@ -1,0 +1,462 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* PhoneMEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* PhoneMEApp.swift */; };
+		A00000000000000000000002 /* Game.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* Game.swift */; };
+		A00000000000000000000003 /* J2MEKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000003 /* J2MEKey.swift */; };
+		A00000000000000000000004 /* GameLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* GameLibrary.swift */; };
+		A00000000000000000000005 /* PhoneMECAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000005 /* PhoneMECAPI.swift */; };
+		A00000000000000000000006 /* EmbeddedPhoneMEEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* EmbeddedPhoneMEEngine.swift */; };
+		A00000000000000000000007 /* EmulatorSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000007 /* EmulatorSession.swift */; };
+		A00000000000000000000008 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* ContentView.swift */; };
+		A00000000000000000000009 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000009 /* LibraryView.swift */; };
+		A0000000000000000000000A /* EmulatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000A /* EmulatorView.swift */; };
+		A0000000000000000000000B /* KeypadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000B /* KeypadView.swift */; };
+		A0000000000000000000000C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000C /* SettingsView.swift */; };
+		A0000000000000000000000D /* GameProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000E /* GameProfile.swift */; };
+		A0000000000000000000000E /* GameProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000F /* GameProfileStore.swift */; };
+		A0000000000000000000000F /* GameProfileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* GameProfileEditorView.swift */; };
+		A00000000000000000000010 /* JarMetadataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* JarMetadataReader.swift */; };
+		A00000000000000000000011 /* JarArchive.c in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* JarArchive.c */; };
+		A00000000000000000000012 /* ProfileTemplateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000015 /* ProfileTemplateStore.swift */; };
+		A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000016 /* PhoneMERuntimeResources.swift */; };
+		A00000000000000000000014 /* PhoneMECore.c in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000017 /* PhoneMECore.c */; };
+		A00000000000000000000015 /* PhoneMERuntime in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* PhoneMERuntime */; };
+		A00000000000000000000016 /* LCDUIState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* LCDUIState.swift */; };
+		A00000000000000000000017 /* NativeLCDUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001C /* NativeLCDUIView.swift */; };
+		A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001D /* JarCompatibilityPatcher.swift */; };
+		A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001F /* PhoneMEMediaBridge.m */; };
+		A00000000000000000000021 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000020 /* AVFoundation.framework */; };
+		A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */; };
+		A00000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001E /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B00000000000000000000001 /* PhoneMEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMEApp.swift; sourceTree = "<group>"; };
+		B00000000000000000000002 /* Game.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Game.swift; sourceTree = "<group>"; };
+		B00000000000000000000003 /* J2MEKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = J2MEKey.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* GameLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameLibrary.swift; sourceTree = "<group>"; };
+		B00000000000000000000005 /* PhoneMECAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMECAPI.swift; sourceTree = "<group>"; };
+		B00000000000000000000006 /* EmbeddedPhoneMEEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedPhoneMEEngine.swift; sourceTree = "<group>"; };
+		B00000000000000000000007 /* EmulatorSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorSession.swift; sourceTree = "<group>"; };
+		B00000000000000000000008 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B00000000000000000000009 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		B0000000000000000000000A /* EmulatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorView.swift; sourceTree = "<group>"; };
+		B0000000000000000000000B /* KeypadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeypadView.swift; sourceTree = "<group>"; };
+		B0000000000000000000000C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B0000000000000000000000D /* phoneME.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = phoneME.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B0000000000000000000000E /* GameProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfile.swift; sourceTree = "<group>"; };
+		B0000000000000000000000F /* GameProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfileStore.swift; sourceTree = "<group>"; };
+		B00000000000000000000010 /* GameProfileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfileEditorView.swift; sourceTree = "<group>"; };
+		B00000000000000000000011 /* JarMetadataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarMetadataReader.swift; sourceTree = "<group>"; };
+		B00000000000000000000012 /* JarArchive.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = JarArchive.c; sourceTree = "<group>"; };
+		B00000000000000000000013 /* JarArchive.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = JarArchive.h; sourceTree = "<group>"; };
+		B00000000000000000000014 /* phoneME-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "phoneME-Bridging-Header.h"; sourceTree = "<group>"; };
+		B00000000000000000000015 /* ProfileTemplateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileTemplateStore.swift; sourceTree = "<group>"; };
+		B00000000000000000000016 /* PhoneMERuntimeResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMERuntimeResources.swift; sourceTree = "<group>"; };
+		B00000000000000000000017 /* PhoneMECore.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PhoneMECore.c; sourceTree = "<group>"; };
+		B00000000000000000000018 /* PhoneMECore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PhoneMECore.h; sourceTree = "<group>"; };
+		B00000000000000000000019 /* libphoneMECore.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libphoneMECore.a; sourceTree = "<group>"; };
+		B0000000000000000000001A /* PhoneMERuntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PhoneMERuntime; sourceTree = "<group>"; };
+		B0000000000000000000001B /* LCDUIState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LCDUIState.swift; sourceTree = "<group>"; };
+		B0000000000000000000001C /* NativeLCDUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLCDUIView.swift; sourceTree = "<group>"; };
+		B0000000000000000000001D /* JarCompatibilityPatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarCompatibilityPatcher.swift; sourceTree = "<group>"; };
+		B0000000000000000000001F /* PhoneMEMediaBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEMediaBridge.m; sourceTree = "<group>"; };
+		B00000000000000000000020 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */ = {isa = PBXFileReference; lastKnownFileType = file; path = AvatarLAPROStackMaps.pmpatch; sourceTree = "<group>"; };
+		B0000000000000000000001E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C00000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000021 /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D00000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				D00000000000000000000002 /* phoneME */,
+				D00000000000000000000007 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D00000000000000000000002 /* phoneME */ = {
+			isa = PBXGroup;
+			children = (
+				D00000000000000000000003 /* App */,
+				D00000000000000000000004 /* Models */,
+				D00000000000000000000005 /* Services */,
+				D00000000000000000000006 /* Runtime */,
+				D00000000000000000000008 /* Views */,
+				D00000000000000000000009 /* Support */,
+				D0000000000000000000000A /* Core */,
+				D0000000000000000000000B /* Resources */,
+			);
+			path = phoneME;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000003 /* App */ = {
+			isa = PBXGroup;
+			children = (B00000000000000000000001 /* PhoneMEApp.swift */,);
+			path = App;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000004 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000002 /* Game.swift */,
+				B00000000000000000000003 /* J2MEKey.swift */,
+				B0000000000000000000000E /* GameProfile.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000005 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000004 /* GameLibrary.swift */,
+				B0000000000000000000000F /* GameProfileStore.swift */,
+				B00000000000000000000011 /* JarMetadataReader.swift */,
+				B0000000000000000000001D /* JarCompatibilityPatcher.swift */,
+				B00000000000000000000015 /* ProfileTemplateStore.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000006 /* Runtime */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000005 /* PhoneMECAPI.swift */,
+				B00000000000000000000016 /* PhoneMERuntimeResources.swift */,
+				B00000000000000000000006 /* EmbeddedPhoneMEEngine.swift */,
+				B00000000000000000000007 /* EmulatorSession.swift */,
+				B0000000000000000000001B /* LCDUIState.swift */,
+			);
+			path = Runtime;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000007 /* Products */ = {
+			isa = PBXGroup;
+			children = (B0000000000000000000000D /* phoneME.app */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000008 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000008 /* ContentView.swift */,
+				B00000000000000000000009 /* LibraryView.swift */,
+				B0000000000000000000000A /* EmulatorView.swift */,
+				B0000000000000000000000B /* KeypadView.swift */,
+				B0000000000000000000000C /* SettingsView.swift */,
+				B00000000000000000000010 /* GameProfileEditorView.swift */,
+				B0000000000000000000001C /* NativeLCDUIView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		D0000000000000000000000A /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000017 /* PhoneMECore.c */,
+				B00000000000000000000018 /* PhoneMECore.h */,
+				B00000000000000000000019 /* libphoneMECore.a */,
+				B0000000000000000000001F /* PhoneMEMediaBridge.m */,
+				B00000000000000000000020 /* AVFoundation.framework */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		D0000000000000000000000B /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B0000000000000000000001E /* Assets.xcassets */,
+				B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */,
+				B0000000000000000000001A /* PhoneMERuntime */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000009 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000012 /* JarArchive.c */,
+				B00000000000000000000013 /* JarArchive.h */,
+				B00000000000000000000014 /* phoneME-Bridging-Header.h */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E00000000000000000000001 /* phoneME */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00000000000000000000002 /* Build configuration list for PBXNativeTarget "phoneME" */;
+			buildPhases = (
+				C00000000000000000000004 /* Prepare phoneME Core */,
+				C00000000000000000000002 /* Sources */,
+				C00000000000000000000001 /* Frameworks */,
+				C00000000000000000000003 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = phoneME;
+			productName = phoneME;
+			productReference = B0000000000000000000000D /* phoneME.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E00000000000000000000002 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2630;
+				LastUpgradeCheck = 2630;
+				TargetAttributes = { E00000000000000000000001 = { CreatedOnToolsVersion = 26.3; }; };
+			};
+			buildConfigurationList = F00000000000000000000001 /* Build configuration list for PBXProject "phoneME" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = D00000000000000000000001;
+			productRefGroup = D00000000000000000000007 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (E00000000000000000000001 /* phoneME */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C00000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000019 /* Assets.xcassets in Resources */,
+				A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */,
+				A00000000000000000000015 /* PhoneMERuntime in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C00000000000000000000004 /* Prepare phoneME Core */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/phoneME/Core/libphoneMECore.a",
+				"$(SRCROOT)/phoneME/Core/libphoneMECoreSimulator.a",
+			);
+			name = "Prepare phoneME Core";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "case \"$PLATFORM_NAME\" in\n  iphoneos)\n    SOURCE_ARCHIVE=\"$SRCROOT/phoneME/Core/libphoneMECore.a\"\n    ;;\n  iphonesimulator)\n    SOURCE_ARCHIVE=\"$SRCROOT/phoneME/Core/libphoneMECoreSimulator.a\"\n    ;;\n  *)\n    exit 0\n    ;;\nesac\ncp \"$SOURCE_ARCHIVE\" \"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C00000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000001 /* PhoneMEApp.swift in Sources */,
+				A00000000000000000000002 /* Game.swift in Sources */,
+				A00000000000000000000003 /* J2MEKey.swift in Sources */,
+				A00000000000000000000004 /* GameLibrary.swift in Sources */,
+				A00000000000000000000005 /* PhoneMECAPI.swift in Sources */,
+				A00000000000000000000006 /* EmbeddedPhoneMEEngine.swift in Sources */,
+				A00000000000000000000007 /* EmulatorSession.swift in Sources */,
+				A00000000000000000000008 /* ContentView.swift in Sources */,
+				A00000000000000000000009 /* LibraryView.swift in Sources */,
+				A0000000000000000000000A /* EmulatorView.swift in Sources */,
+				A0000000000000000000000B /* KeypadView.swift in Sources */,
+				A0000000000000000000000C /* SettingsView.swift in Sources */,
+				A0000000000000000000000D /* GameProfile.swift in Sources */,
+				A0000000000000000000000E /* GameProfileStore.swift in Sources */,
+				A0000000000000000000000F /* GameProfileEditorView.swift in Sources */,
+				A00000000000000000000010 /* JarMetadataReader.swift in Sources */,
+				A00000000000000000000011 /* JarArchive.c in Sources */,
+				A00000000000000000000012 /* ProfileTemplateStore.swift in Sources */,
+				A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */,
+				A00000000000000000000014 /* PhoneMECore.c in Sources */,
+				A00000000000000000000016 /* LCDUIState.swift in Sources */,
+				A00000000000000000000017 /* NativeLCDUIView.swift in Sources */,
+				A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */,
+				A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		F00000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		F00000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		F00000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				"ARCHS[sdk=iphonesimulator*]" = arm64;
+				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
+				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
+				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
+				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				ENABLE_HARDENED_RUNTIME = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
+				MARKETING_VERSION = 0.2.1;
+				OTHER_LDFLAGS = "-lz";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"-lz",
+					"-lc++",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"-lz",
+					"-lc++",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "J2ME Loader";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		F00000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				"ARCHS[sdk=iphonesimulator*]" = arm64;
+				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
+				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
+				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
+				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				ENABLE_HARDENED_RUNTIME = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
+				MARKETING_VERSION = 0.2.1;
+				OTHER_LDFLAGS = "-lz";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"-lz",
+					"-lc++",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"-lz",
+					"-lc++",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "J2ME Loader";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F00000000000000000000001 /* Build configuration list for PBXProject "phoneME" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (F00000000000000000000003 /* Debug */, F00000000000000000000004 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F00000000000000000000002 /* Build configuration list for PBXNativeTarget "phoneME" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (F00000000000000000000005 /* Debug */, F00000000000000000000006 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E00000000000000000000002 /* Project object */;
+}

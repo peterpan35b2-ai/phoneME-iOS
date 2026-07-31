@@ -140,7 +140,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_open0(void) {
                     &context);
             } else {
                 /* reinvocation */
-                socketHandle = (void *)info->descriptor;
+                socketHandle = DATAGRAM_HANDLE(info->descriptor);
                 context = info->pResult;
                 status = pcsl_datagram_open_finish(socketHandle, context);
             }
@@ -153,8 +153,8 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_open0(void) {
                 DATAGRAM_SET_HANDLE(thisObject, socketHandle);
                 ANC_DEC_NETWORK_INDICATOR;
             } else if (status == PCSL_NET_WOULDBLOCK) {
-                midp_thread_wait(NETWORK_WRITE_SIGNAL, (int)socketHandle,
-                    context);
+                midp_thread_wait(NETWORK_WRITE_SIGNAL,
+                                 (int)(intptr_t)socketHandle, context);
             } else {
                 /* status == PCSL_NET_IOERROR */
                 midp_snprintf(gKNIBuffer, KNI_BUFFER_SIZE,
@@ -212,7 +212,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_send0(void) {
 
     REPORT_INFO5(LC_PROTOCOL,
         "datagram::send0 off=%d len=%d port=%d ip=0x%x handle=0x%x",
-        offset, length, port, ipAddress, (int)socketHandle);
+        offset, length, port, ipAddress, (int)(intptr_t)socketHandle);
 
     /* Convert ipAddress(integer) to ipBytes */
     memcpy(ipBytes, &ipAddress, sizeof(ipBytes));
@@ -234,7 +234,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_send0(void) {
             SNI_END_RAW_POINTERS;
         } else {
             /* reinvocation */
-            if ((void *)info->descriptor != socketHandle) {
+            if (DATAGRAM_HANDLE(info->descriptor) != socketHandle) {
                 REPORT_CRIT2(LC_PROTOCOL,
                     "datagram::send0 handle mismatch 0x%x != 0x%x\n",
                         socketHandle, info->descriptor);
@@ -251,7 +251,8 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_send0(void) {
         if (status == PCSL_NET_SUCCESS) {
             ANC_DEC_NETWORK_INDICATOR;
         } else if (status == PCSL_NET_WOULDBLOCK) {
-            midp_thread_wait(NETWORK_WRITE_SIGNAL, (int)socketHandle, context);
+            midp_thread_wait(NETWORK_WRITE_SIGNAL,
+                             (int)(intptr_t)socketHandle, context);
         } else if (status == PCSL_NET_INTERRUPTED) {
             KNI_ThrowNew(midpInterruptedIOException, NULL);
             ANC_DEC_NETWORK_INDICATOR;
@@ -329,7 +330,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_receive0(void) {
 
     REPORT_INFO3(LC_PROTOCOL,
         "datagram::receive0 off=%d len=%d handle=0x%x",
-	offset, length, (int)socketHandle);
+	offset, length, (int)(intptr_t)socketHandle);
 
     if (socketHandle != INVALID_HANDLE) {
         int ipAddress;
@@ -345,7 +346,8 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_receive0(void) {
          * datagram and has set ipAddress and port to valid values.
          */
         SNI_BEGIN_RAW_POINTERS;
-        bytesReceived = pushgetcachedpacket((int)socketHandle, &ipAddress,
+        bytesReceived = pushgetcachedpacket((int)(intptr_t)socketHandle,
+            &ipAddress,
             &port, (char*)&(JavaByteArray(bufferObject)[offset]), length);
         SNI_END_RAW_POINTERS;
 
@@ -365,7 +367,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_receive0(void) {
                 SNI_END_RAW_POINTERS;
             } else {
                 /* reinvocation */
-                if ((void *)info->descriptor != socketHandle) {
+                if (DATAGRAM_HANDLE(info->descriptor) != socketHandle) {
                     REPORT_CRIT2(LC_PROTOCOL,
                         "datagram::send0 handle mismatch 0x%x != 0x%x\n",
                             socketHandle, info->descriptor);
@@ -384,7 +386,8 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_receive0(void) {
                 lres = pack_recv_retval(ipAddress, port, bytesReceived);
                 ANC_DEC_NETWORK_INDICATOR;
             } else if (status == PCSL_NET_WOULDBLOCK) {
-                midp_thread_wait(NETWORK_READ_SIGNAL, (int)socketHandle, context);
+                midp_thread_wait(NETWORK_READ_SIGNAL,
+                                 (int)(intptr_t)socketHandle, context);
             } else if (status == PCSL_NET_INTERRUPTED) {
                 KNI_ThrowNew(midpInterruptedIOException, NULL);
                 ANC_DEC_NETWORK_INDICATOR;
@@ -437,12 +440,12 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_close0(void) {
     info = (MidpReentryData*)SNI_GetReentryData(NULL);
 
     REPORT_INFO1(LC_PROTOCOL, "datagram::close handle=0x%x",
-        (int)socketHandle);
+        (int)(intptr_t)socketHandle);
 
     if (socketHandle != INVALID_HANDLE) {
         int status;
 
-        status = pushcheckin((int)socketHandle);
+        status = pushcheckin((int)(intptr_t)socketHandle);
         if (status == -1) {
             void *context = NULL;
 
@@ -453,19 +456,21 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_close0(void) {
 
                 DATAGRAM_SET_HANDLE(thisObject, INVALID_HANDLE);
 
-                midp_thread_signal(NETWORK_READ_SIGNAL, (int)socketHandle, 0);
-                midp_thread_signal(NETWORK_WRITE_SIGNAL, (int)socketHandle, 0);
+                midp_thread_signal(NETWORK_READ_SIGNAL,
+                                   (int)(intptr_t)socketHandle, 0);
+                midp_thread_signal(NETWORK_WRITE_SIGNAL,
+                                   (int)(intptr_t)socketHandle, 0);
             } else {
                 /* reinvocation */
-                socketHandle = (void *)(info->descriptor);
+                socketHandle = DATAGRAM_HANDLE(info->descriptor);
                 context = info->pResult;
                 status = pcsl_datagram_close_finish(socketHandle, context);
             }
 
             if (status == PCSL_NET_WOULDBLOCK) {
                 /* IMPL NOTE: unclear whether this is the right signal */
-                midp_thread_wait(NETWORK_READ_SIGNAL, (int)socketHandle,
-                    context);
+                midp_thread_wait(NETWORK_READ_SIGNAL,
+                                 (int)(intptr_t)socketHandle, context);
             } else {
                 /* PCSL_NET_SUCCESS or PCSL_NET_IOERROR */
                 ANC_DEC_NETWORK_INDICATOR;
@@ -485,8 +490,10 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_close0(void) {
             /* it was checked into push; don't really close the socket
                but notify a possible listeners to be unblocked */
             DATAGRAM_SET_HANDLE(thisObject, INVALID_HANDLE);
-            midp_thread_signal(NETWORK_READ_SIGNAL, (int)socketHandle, 0);
-            midp_thread_signal(NETWORK_WRITE_SIGNAL, (int)socketHandle, 0);
+            midp_thread_signal(NETWORK_READ_SIGNAL,
+                               (int)(intptr_t)socketHandle, 0);
+            midp_thread_signal(NETWORK_WRITE_SIGNAL,
+                               (int)(intptr_t)socketHandle, 0);
         }
     } else {
         if (info == NULL) {
@@ -574,11 +581,11 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_getIpNumber(void) {
         RELEASE_PCSL_STRING_PARAMETER
         KNI_EndHandles();
     } else {  /* Reinvocation after unblocking the thread */
-        handle = (void*)info->descriptor;
+        handle = (void *)(intptr_t)info->descriptor;
         /* IMPL NOTE: Please see 6440539 for details. */
         /* All but windows implementations of pcsl_network_gethostbyname_finish */
         /*  ignore context parameter. Windows one expects status code there. */
-        context = (void*)info->status;
+        context = info->pResult;
         status = pcsl_network_gethostbyname_finish(ipBytes, MAX_ADDR_LENGTH,
                                                   &len, handle, context);
     }
@@ -591,7 +598,8 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_getIpNumber(void) {
         //ipn = pcsl_network_getRawIpNumber(ipBytes);
         memcpy(&ipn, ipBytes, MAX_ADDR_LENGTH);
     } else if (status == PCSL_NET_WOULDBLOCK) {
-        midp_thread_wait(HOST_NAME_LOOKUP_SIGNAL, (int)handle, context);
+        midp_thread_wait(HOST_NAME_LOOKUP_SIGNAL,
+                         (int)(intptr_t)handle, context);
     } else {
         /* status is either PCSL_NET_IOERROR or PCSL_NET_INVALID */
         /* or (in the case of out-of-memory) PCSL_NET_NOSTATUS */
@@ -648,7 +656,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_getMaximumLength0(void) {
 
     REPORT_INFO2(LC_PROTOCOL,
         "datagram::getMaximumLength0 handle=%d len=%d %d\n",
-        (int)socketHandle, len);
+        (int)(intptr_t)socketHandle, len);
 
     KNI_EndHandles();
     KNI_ReturnInt((jint)len);
@@ -700,7 +708,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_getNominalLength0(void) {
 
     REPORT_INFO2(LC_PROTOCOL,
         "datagram::getNominalLength0 handle=%d len=%d\n",
-        (int)socketHandle, len);
+        (int)(intptr_t)socketHandle, len);
 
     KNI_EndHandles();
     KNI_ReturnInt((jint)len);
@@ -727,7 +735,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_finalize(void) {
     handle = DATAGRAM_HANDLE(DATAGRAM_GET_HANDLE(thisObject));
 
     if (handle != INVALID_HANDLE) {
-        if (pushcheckin((int)handle) == -1) {
+        if (pushcheckin((int)(intptr_t)handle) == -1) {
             status = pcsl_datagram_close_start(handle, &context);
             if (status == PCSL_NET_SUCCESS) {
                 if (midpDecResourceCount(RSC_TYPE_UDP, 1) == 0) {
@@ -737,11 +745,11 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_finalize(void) {
             } else if (status == PCSL_NET_IOERROR) {
                 REPORT_INFO2(LC_PROTOCOL,
                     "datagram::finalize handle 0x%x I/O error code %d",
-                    (int)handle, pcsl_network_error(handle));
+                    (int)(intptr_t)handle, pcsl_network_error(handle));
             } else if (status == PCSL_NET_WOULDBLOCK) {
                 REPORT_ERROR1(LC_PROTOCOL,
                     "datagram::finalize handle 0x%x WOULDBLOCK not supported",
-                    (int)handle);
+                    (int)(intptr_t)handle);
             }
             DATAGRAM_SET_HANDLE(thisObject, INVALID_HANDLE);
         }
@@ -771,7 +779,7 @@ Java_com_sun_midp_io_j2me_datagram_Protocol_getHost0(void) {
 
     status = pcsl_network_getLocalIPAddressAsString(value);
 
-    if ((status == PCSL_NET_SUCCESS) && (value != NULL)) {
+    if (status == PCSL_NET_SUCCESS) {
         KNI_NewStringUTF(value, result);
     } else {
         KNI_ReleaseHandle(result);

@@ -640,6 +640,11 @@ typedef uintptr_t      address_word; // unsigned integer which will hold a
                                      // one of those to be placed in
                                      // this type anyway.
 
+typedef char VMWordMustMatchPointerSize[
+    BytesPerWord == sizeof(void*) ? 1 : -1];
+typedef char AddressWordMustMatchPointerSize[
+    sizeof(address_word) == sizeof(void*) ? 1 : -1];
+
 //  Utility functions to "portably" (?) bit twiddle pointers
 //  Where portable means keep ANSI C++ compilers quiet
 
@@ -891,6 +896,9 @@ public:
 #define BytesPerStackElement (BytesPerWord * WordsPerStackElement)
 #define LogBytesPerStackElement (LogBytesPerWord + LogWordsPerStackElement)
 
+typedef char JavaStackElementMustHoldPointer[
+    BytesPerStackElement >= sizeof(void*) ? 1 : -1];
+
 // Use of this type is like a comment that we know we are dealing with
 // a UTF-8 string pointed to by a 'char *'
 typedef char *utf8;
@@ -977,6 +985,12 @@ enum BasicType {
   T_ILLEGAL   = 32,
   _force_32bit_BasicType = 0x70000000
 };
+
+#if JVM_64BIT
+#define T_ADDRESS_WORD T_LONG
+#else
+#define T_ADDRESS_WORD T_INT
+#endif
 
 enum FailureMode {
   ExceptionOnFailure = 0,
@@ -2041,9 +2055,9 @@ extern "C" {
 #endif
 
 #if ENABLE_JNI
-  void    invoke_entry_void();
-  jint    invoke_entry_word();
-  jlong   invoke_entry_long();
+  void         invoke_entry_void();
+  address_word invoke_entry_word();
+  jlong        invoke_entry_long();
   jfloat  invoke_entry_float();
   jdouble invoke_entry_double();
   void    invoke_entry_return_point();

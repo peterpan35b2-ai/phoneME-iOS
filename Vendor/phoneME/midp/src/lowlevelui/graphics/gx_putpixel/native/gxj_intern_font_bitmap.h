@@ -47,11 +47,12 @@
 
 typedef unsigned char* pfontbitmap;
 
-/* the 0-th element is the number of bitmap tables;
- * the parameters: width, height, ascent,descent, leading
- * MUST be the same for all bitmap tables pointed to from
- * this array.
+/* The parameters width, height, ascent, descent and leading MUST be the
+ * same for every bitmap table in this array. Keep the count separate from
+ * the pointer array: encoding an integer in FontBitmaps[0] was a 32-bit-era
+ * convention that is not type-safe on 64-bit targets.
  */
+extern const int FontBitmapsCount;
 extern pfontbitmap FontBitmaps[];
 
 #endif /* _GXJ_INTERN_FONT_BITMAP_H_ */

@@ -216,7 +216,7 @@ public class SkinResourcesImpl extends SkinResources {
                 if (Constants.CHAM_ROMIZED_IMAGES && graphicsAccess != null) {
                     int romIndex = skinData.romizedImageIndexes[imageIdx];
                     if (romIndex != -1) {
-                        int imageDataPtr = getRomizedImageDataArrayPtr(
+                        long imageDataPtr = getRomizedImageDataArrayPtr(
                                 romIndex);
                         int imageDataLength = getRomizedImageDataArrayLength(
                                 romIndex);
@@ -457,13 +457,13 @@ public class SkinResourcesImpl extends SkinResources {
     public native static boolean ifLoadAllResources0();
 
     /**
-     * Returns native pointer to romized image data array as Java int
+     * Returns native pointer to romized image data array as Java long
      *
      * @param imageId romized image id
-     * @return native pointer to romized image data array as Java int,
+     * @return native pointer to romized image data array as Java long,
      * if image is not romized the return value is 0
      */
-    private native static int getRomizedImageDataArrayPtr(int imageId);
+    private native static long getRomizedImageDataArrayPtr(int imageId);
 
     /**
      * Returns length of native romized image data array

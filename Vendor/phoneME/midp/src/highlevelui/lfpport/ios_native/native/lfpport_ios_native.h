@@ -26,7 +26,8 @@ typedef enum {
     PHONEME_LCDUI_EVENT_CHOICE_ELEMENT = 12,
     PHONEME_LCDUI_EVENT_CHOICE_DELETED = 13,
     PHONEME_LCDUI_EVENT_COMMANDS_RESET = 14,
-    PHONEME_LCDUI_EVENT_COMMAND = 15
+    PHONEME_LCDUI_EVENT_COMMAND = 15,
+    PHONEME_LCDUI_EVENT_ITEM_FOCUSED = 16
 } PhoneMELCDUIEventKind;
 
 typedef struct {
@@ -39,6 +40,7 @@ typedef struct {
     int32_t arg1;
     int32_t arg2;
     int32_t arg3;
+    int64_t value64;
     uint64_t generation;
     char text[PHONEME_LCDUI_TEXT_CAPACITY];
     char detail[PHONEME_LCDUI_TEXT_CAPACITY];
@@ -47,6 +49,8 @@ typedef struct {
 void phoneme_ios_lcdui_reset(void);
 int32_t phoneme_ios_lcdui_poll_event(PhoneMELCDUIEvent* event_out);
 void phoneme_ios_lcdui_select_command(int32_t command_id);
+void phoneme_ios_lcdui_focus_item(int32_t component_id);
+void phoneme_ios_lcdui_activate_item(int32_t component_id);
 void phoneme_ios_lcdui_set_text(
     int32_t component_id,
     const char* utf8_text,
@@ -63,6 +67,11 @@ void phoneme_ios_lcdui_set_scroll_position(int32_t position);
 
 void phoneme_ios_lcdui_capture_image(
     int32_t component_id,
+    jobject image_data
+);
+void phoneme_ios_lcdui_capture_choice_image(
+    int32_t component_id,
+    int32_t choice_index,
     jobject image_data
 );
 int32_t phoneme_ios_lcdui_copy_image_rgba(

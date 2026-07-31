@@ -200,7 +200,8 @@ address Natives::load_dynamic_native_code(Method* method JVM_TRAPS) {
       Natives::get_native_function_name(method JVM_CHECK_0);
     const char * name = (const char *)name_array.data();
     for (i = 0; i < Universe::dynamic_lib_count; i++) {
-      handle = (address)Universe::dynamic_lib_handles()->int_at(i);
+      handle = (address)(address_word)
+          Universe::dynamic_lib_handles()->long_at(i);
       address fptr = (address)Os::getSymbol(handle, name);
       if (fptr != NULL) {
         method->set_native_code(fptr);
@@ -299,7 +300,7 @@ void Java_com_sun_cldchi_jvm_JVM_loadLibrary(JVM_SINGLE_ARG_TRAPS) {
   void* handle;
   if(Universe::dynamic_lib_handles()->is_null()) {
     const int task = ObjectHeap::start_system_allocation();
-    *Universe::dynamic_lib_handles() = Universe::new_int_array(4 JVM_NO_CHECK);
+    *Universe::dynamic_lib_handles() = Universe::new_long_array(4 JVM_NO_CHECK);
     ObjectHeap::finish_system_allocation(task);
     JVM_DELAYED_CHECK;
   }
@@ -307,7 +308,7 @@ void Java_com_sun_cldchi_jvm_JVM_loadLibrary(JVM_SINGLE_ARG_TRAPS) {
   int length = Universe::dynamic_lib_handles()->length();
   if(Universe::dynamic_lib_count == length) {
     const int task = ObjectHeap::start_system_allocation();
-    TypeArray::Raw new_array = Universe::new_int_array(length + 4 JVM_NO_CHECK);
+    TypeArray::Raw new_array = Universe::new_long_array(length + 4 JVM_NO_CHECK);
     ObjectHeap::finish_system_allocation(task);
     JVM_DELAYED_CHECK;
     TypeArray::array_copy(Universe::dynamic_lib_handles(), 0, &new_array, 0, length);
@@ -324,8 +325,8 @@ void Java_com_sun_cldchi_jvm_JVM_loadLibrary(JVM_SINGLE_ARG_TRAPS) {
     Throw::error(unsatisfied_link_error JVM_THROW);
   }
 
-  Universe::dynamic_lib_handles()->int_at_put(Universe::dynamic_lib_count++,
-                                              (int)handle);
+  Universe::dynamic_lib_handles()->long_at_put(
+      Universe::dynamic_lib_count++, (jlong)(address_word)handle);
 #else
   JVM_IGNORE_TRAPS;
   Throw::error(unsatisfied_link_error JVM_THROW);

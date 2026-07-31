@@ -852,7 +852,7 @@ public class Image {
      * @param imageDataArrayLength length of image data array
      * @return image created. Null if no romized image matches the id.
      */
-    static Image getRomizedImage(int imageDataArrayPtr, 
+    static Image getRomizedImage(long imageDataArrayPtr,
             int imageDataArrayLength) {
 
         try {

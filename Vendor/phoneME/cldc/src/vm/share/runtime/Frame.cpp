@@ -750,9 +750,11 @@ void JavaFrame::gc_prologue(void do_oop(OopDesc**)) {
     address actual_bcp = DERIVED(address, rm, actual_bci);
     jint    flags      = DISTANCE(actual_bcp, frame_bcp);
     GUARANTEE(actual_bci >= Method::base_offset(), "Sanity check");
-    GUARANTEE((juint)actual_bci < rm->object_size(), 
+    GUARANTEE((juint)actual_bci < rm->object_size(),
               "Must be within appropriate limits");
-    set_raw_bcp((address)(flags + (actual_bci - Method::base_offset())));
+    const intptr_t encoded_bcp =
+        flags + (actual_bci - Method::base_offset());
+    set_raw_bcp((address)encoded_bcp);
     // This is just to make sure that we really do fix it up after the GC.
     AZZERT_ONLY(set_cpool((address)0xdeadc0de));
   }
@@ -809,7 +811,8 @@ void JavaFrame::gc_epilogue(void) {
 void EntryFrame::caller_is(Frame& result) const {
   address caller_fp       = *(address*)(fp() + stored_last_fp_offset());
   address caller_sp       = *(address*)(fp() + stored_last_sp_offset());
-  address* caller_pc_addr =  (address*)(caller_sp + JavaStackDirection * (int)sizeof(jint));
+  address* caller_pc_addr =
+      (address*)(caller_sp + JavaStackDirection * BytesPerWord);
   result.set_values(_thread, _stack_base, caller_pc_addr, caller_sp , caller_fp);
 }
 */
@@ -1249,7 +1252,7 @@ bool Frame::is_plausible_fp(address start, address top, address bottom,
     }
     
     pc_addr = fp + JavaFrame::return_address_offset();
-    last_sp = pc_addr - JavaStackDirection * (int)sizeof(jint);
+    last_sp = pc_addr - JavaStackDirection * BytesPerWord;
 
     if (!is_within_stack_range(pc_addr, top, bottom)) {
       return false;

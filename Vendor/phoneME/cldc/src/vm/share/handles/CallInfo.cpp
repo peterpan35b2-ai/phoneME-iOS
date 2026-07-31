@@ -348,8 +348,9 @@ void CallInfoRecord::init(const CompiledMethod * const compiled_method,
   _compiled_method = compiled_method;
 
 #if ENABLE_THUMB_COMPILER
-  const int code_offset = DISTANCE(compiled_method->entry(), 
-                                   (unsigned int)pc & ~1);
+  const int code_offset = DISTANCE(
+      compiled_method->entry(),
+      (address)((uintptr_t)pc & ~(uintptr_t)1));
 #else
   const int code_offset = DISTANCE(compiled_method->entry(), pc);
 #endif // ENABLE_THUMB_COMPILER

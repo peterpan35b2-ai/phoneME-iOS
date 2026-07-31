@@ -35,6 +35,7 @@ import com.sun.j2me.security.AccessController;
 import com.sun.midp.io.Util;
 
 import com.sun.midp.security.Permissions;
+import com.sun.midp.security.SecurityToken;
 
 /**
  * This class provides a Java API for reading an entry from a Jar file stored
@@ -62,7 +63,28 @@ public class JarReader {
     public static byte[] readJarEntry(String jarFilePath, String entryName)
             throws IOException {
         AccessController.checkPermission(Permissions.AMS_PERMISSION_NAME);
+        return readJarEntryUnchecked(jarFilePath, entryName);
+    }
 
+    /**
+     * Reads an entry on behalf of trusted AMS code during suite bootstrap,
+     * before the MIDlet access-control context has been installed.
+     *
+     * @param token trusted caller token
+     * @param jarFilePath file pathname of the JAR file to read
+     * @param entryName name of the entry to return
+     * @return entry contents, or null when absent
+     * @throws IOException if the JAR cannot be read
+     */
+    public static byte[] readJarEntry(SecurityToken token,
+            String jarFilePath, String entryName) throws IOException {
+        token.checkIfPermissionAllowed(Permissions.AMS);
+        return readJarEntryUnchecked(jarFilePath, entryName);
+    }
+
+    /** Performs entry-name normalization shared by both security paths. */
+    private static byte[] readJarEntryUnchecked(String jarFilePath,
+            String entryName) throws IOException {
         if (entryName.charAt(0) == '/') {
             /*
              * Strip off the leading directory separator, or the

@@ -255,13 +255,13 @@ extern void save_java_stack_snapshot();
 #ifndef PRODUCT
 
 // Try to figure out what x is and print it
-extern void find(int x);
+extern void find(address_word x);
 
 // Pretty print object
-extern void pp(int x);
+extern void pp(address_word x);
 
 // Pretty print object verbosely
-extern void ppv(int x);
+extern void ppv(address_word x);
 
 // Print compiled method being compiled
 extern void dis();
@@ -290,7 +290,7 @@ extern void poht( const int task_id );
 #endif
 
 // Find references to heap object
-extern void ref(int x);
+extern void ref(address_word x);
 
 #endif // NOT PRODUCT
 

@@ -210,9 +210,9 @@ void entry_return_object() {}
 #endif
 
 #if ENABLE_JNI
-void    invoke_entry_void()   {}
-jint    invoke_entry_word()   { return 0; }
-jlong   invoke_entry_long()   { return 0; }
+void         invoke_entry_void()   {}
+address_word invoke_entry_word()   { return 0; }
+jlong        invoke_entry_long()   { return 0; }
 jfloat  invoke_entry_float()  { return 0; }
 jdouble invoke_entry_double() { return 0; }
 void    invoke_entry_return_point() {}

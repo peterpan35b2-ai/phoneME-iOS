@@ -36,6 +36,8 @@
 
 #ifndef _ROM_IMAGE_HPP_
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,7 +47,7 @@ extern "C" {
  * been renamed to ".unknown." to save space.
  */
 struct OriginalMethodInfo {
-  int          method;    /* MethodDesc*, points the method (must be in
+  intptr_t     method;    /* MethodDesc*, points the method (must be in
                              TEXT_BLOCK) */
   const char * name;      /* 0-terminated UTF8 string of the original name */
 };

@@ -65,10 +65,10 @@ midp_get_field_id(KNIDECLARGS jclass classHandle,
 {
     jfieldID id = KNI_GetFieldID(classHandle, name, signature);
 
-    if (id == NULL) {
+    if (id == 0) {
         REPORT_CRIT3(LC_CORE,
-            "midp_get_field_id: can't find field, clazz=0x%x name=%s sig=%s",
-            (unsigned int)classHandle, name, signature);
+            "midp_get_field_id: can't find field, clazz=%p name=%s sig=%s",
+            (void *)classHandle, name, signature);
     }
 
     return id;
@@ -89,11 +89,11 @@ midp_get_static_field_id(KNIDECLARGS jclass classHandle,
 {
     jfieldID id = KNI_GetStaticFieldID(classHandle, name, signature);
 
-    if (id == NULL) {
+    if (id == 0) {
         REPORT_CRIT3(LC_CORE,
             "midp_get_static_field_id: "
-            "can't find field, clazz=0x%x name=%s sig=%s",
-            (unsigned int)classHandle, name, signature);
+            "can't find field, clazz=%p name=%s sig=%s",
+            (void *)classHandle, name, signature);
     }
 
     return id;

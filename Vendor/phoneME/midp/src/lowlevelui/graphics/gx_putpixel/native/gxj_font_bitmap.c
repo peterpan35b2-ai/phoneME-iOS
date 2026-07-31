@@ -205,6 +205,7 @@ unsigned char TheFontBitmap2026[24] = {
 };
 
 
+const int FontBitmapsCount = 4;
 pfontbitmap FontBitmaps[] =
-{ (pfontbitmap)4, TheFontBitmap0000, TheFontBitmap0080, TheFontBitmap20ac, TheFontBitmap2026 };
+{ TheFontBitmap0000, TheFontBitmap0080, TheFontBitmap20ac, TheFontBitmap2026 };
 

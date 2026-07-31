@@ -147,6 +147,18 @@ void
 MidpFormItemPeerStateChanged(PlatformItemWidgetPtr itemWidgetPtr, int hint);
 
 /**
+ * Notifies the owning Form directly when the native port already has the
+ * corresponding MidpItem. This avoids a second widget-to-item lookup and is
+ * useful for host-rendered controls whose actions originate outside the VM
+ * event loop.
+ *
+ * @param itemPtr item whose state changed.
+ * @param hint an implementation-specific value interpreted by the Java peer.
+ */
+void
+MidpFormItemPeerStateChangedByItem(MidpItem* itemPtr, int hint);
+
+/**
  * Notify Java platform peer that viewport location or size has changed
  *
  * This is NOT a platform dependent function and does NOT need to be ported.
