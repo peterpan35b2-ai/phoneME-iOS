@@ -1,0 +1,25 @@
+# PCSL target for physical iOS arm64 devices.
+
+PCSL_OS=darwin
+PCSL_CPU=arm64
+
+FILE_MODULE=posix
+NETWORK_MODULE=bsd/generic
+MEMORY_MODULE=malloc
+MEMORY_PORT_MODULE=malloc
+PRINT_MODULE=stdout
+STRING_MODULE=utf16
+
+PCSL_CHUNKMEM_IMPL=pcsl_chunkheap
+PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/heap
+
+include $(PCSL_DIR)/makefiles/share/gcc.gmk
+include $(PCSL_DIR)/makefiles/share/darwin.gmk
+
+IOS_SDKROOT := $(shell xcrun --sdk iphoneos --show-sdk-path)
+IOS_CLANG = xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot $(IOS_SDKROOT) -miphoneos-version-min=16.0
+CC = $(IOS_CLANG)
+CPP = $(IOS_CLANG)
+LD = $(IOS_CLANG)
+AR = xcrun --sdk iphoneos ar -rc
+CFLAGS += -DPHONEME_IOS_NATIVE=1

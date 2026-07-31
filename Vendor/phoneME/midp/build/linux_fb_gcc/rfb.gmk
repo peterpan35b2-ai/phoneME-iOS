@@ -1,0 +1,3 @@
+# Compatibility note: the RFB build flags now live in
+# midp/src/highlevelui/fb_port/rfb/lib.gmk so they are not hidden by
+# repositories that ignore generated build/ paths.

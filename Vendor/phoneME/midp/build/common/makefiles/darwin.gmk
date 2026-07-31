@@ -1,0 +1,13 @@
+# Native Darwin/macOS platform definitions.
+
+ifndef _DARWIN_GMK_
+_DARWIN_GMK_ = true
+
+PATHSEP = :
+EXE =
+BAT =
+WHOAMI = whoami
+
+EXTRA_CFLAGS += -DDARWIN -DUNIX -D_DARWIN_C_SOURCE
+
+endif

@@ -1,0 +1,22 @@
+# Native SDL3 framebuffer backend for macOS and other desktop targets.
+
+FB_PORT_DIR=$(SUBSYSTEM_DIR)/highlevelui/fb_port/sdl3
+
+SDL3_CFLAGS := $(shell pkg-config --cflags sdl3 2>/dev/null)
+SDL3_LIBS := $(shell pkg-config --libs sdl3 2>/dev/null)
+
+ifeq ($(strip $(SDL3_LIBS)),)
+    SDL3_CFLAGS = -I/opt/homebrew/include
+    SDL3_LIBS = -L/opt/homebrew/lib -lSDL3
+endif
+
+vpath % $(FB_PORT_DIR)/native
+
+SUBSYSTEM_APP_NATIVE_FILES += \
+    sdl3_port.c
+
+SUBSYSTEM_APP_EXTRA_INCLUDES += \
+    -I$(FB_PORT_DIR)/native
+
+EXTRA_CFLAGS += $(SDL3_CFLAGS) -DPHONEME_SDL3 -DSDL_MAIN_HANDLED
+LIBS += $(SDL3_LIBS)

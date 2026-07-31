@@ -1,0 +1,13 @@
+# Native keypad and pointer queues paired with the iOS framebuffer port.
+
+IOS_NATIVE_INPUT_DIR=$(SUBSYSTEM_EVENTS_DIR)/input_port/ios_native
+IOS_NATIVE_FB_PORT_DIR=$(SUBSYSTEM_DIR)/highlevelui/fb_port/ios_native
+
+vpath % $(IOS_NATIVE_INPUT_DIR)/native
+
+SUBSYSTEM_EVENTS_NATIVE_FILES += \
+    ios_native_handle_input.c
+
+SUBSYSTEM_EVENTS_EXTRA_INCLUDES += \
+    -I$(IOS_NATIVE_INPUT_DIR)/native \
+    -I$(IOS_NATIVE_FB_PORT_DIR)/native

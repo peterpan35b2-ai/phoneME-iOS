@@ -1,0 +1,16 @@
+# iOS native LCDUI platform-widget port.
+
+LFPPORT_IOS_NATIVE_DIR = $(LFPPORT_DIR)/ios_native
+
+SUBSYSTEM_LFPPORT_EXTRA_INCLUDES += \
+    -I$(LFPPORT_IOS_NATIVE_DIR)/native \
+    -I$(LCDLF_P_DIR)/native
+
+SUBSYSTEM_LCDLF_EXTRA_INCLUDES += \
+    -I$(SUBSYSTEM_DIR)/lowlevelui/graphics/gx_platform/include \
+    -I$(SUBSYSTEM_DIR)/lowlevelui/platform_graphics_port/include
+
+SUBSYSTEM_LFPPORT_NATIVE_FILES += \
+    lfpport_ios_native.c
+
+vpath % $(LFPPORT_IOS_NATIVE_DIR)/native

@@ -1,0 +1,14 @@
+This directory is the source-of-truth phoneME core used by phoneME-iOS.
+
+Included:
+- CLDC VM source and iOS arm64 build files
+- MIDP source and platform-widget LCDUI bridge
+- PCSL file/memory/network/string/print layers
+- preverifier and host generators
+
+Excluded:
+- CDC
+- desktop emulator frontends
+- generated object files and build output
+- unrelated platform build products
+- test and benchmark trees

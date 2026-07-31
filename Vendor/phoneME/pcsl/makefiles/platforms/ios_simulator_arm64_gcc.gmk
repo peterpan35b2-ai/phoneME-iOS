@@ -1,0 +1,26 @@
+# PCSL target for the arm64 iOS Simulator.
+
+PCSL_OS=darwin
+PCSL_CPU=arm64
+
+FILE_MODULE=posix
+NETWORK_MODULE=bsd/generic
+MEMORY_MODULE=malloc
+MEMORY_PORT_MODULE=malloc
+PRINT_MODULE=stdout
+STRING_MODULE=utf16
+
+PCSL_CHUNKMEM_IMPL=pcsl_chunkheap
+PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/heap
+
+include $(PCSL_DIR)/makefiles/share/gcc.gmk
+include $(PCSL_DIR)/makefiles/share/darwin.gmk
+
+IOS_DEPLOYMENT_TARGET ?= 16.0
+IOS_SDKROOT := $(shell xcrun --sdk iphonesimulator --show-sdk-path)
+IOS_CLANG = xcrun --sdk iphonesimulator clang -target arm64-apple-ios$(IOS_DEPLOYMENT_TARGET)-simulator -isysroot $(IOS_SDKROOT) -mios-simulator-version-min=$(IOS_DEPLOYMENT_TARGET)
+CC = $(IOS_CLANG)
+CPP = $(IOS_CLANG)
+LD = $(IOS_CLANG)
+AR = xcrun --sdk iphonesimulator ar -rc
+CFLAGS += -DPHONEME_IOS_NATIVE=1
