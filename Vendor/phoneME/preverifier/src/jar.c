@@ -102,7 +102,7 @@ static bool_t inflateStored(inflaterState *state);
 #endif
 
 bool_t 
-inflate(JarCompressedType compData, /* compressed data source */
+phoneme_preverify_inflate(JarCompressedType compData, /* compressed data source */
     int compLen,        /* length of compressed data */
     unsigned char *decompData, /* buffer to store decompressed data */
     int decompLen)        /* length of decompression buffer */

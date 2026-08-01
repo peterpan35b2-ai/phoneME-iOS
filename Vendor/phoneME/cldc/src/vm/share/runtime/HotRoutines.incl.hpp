@@ -257,10 +257,19 @@ int Field::find_field_index(InstanceClass* ic, Symbol* name,
   address cp_base = ((address)cp.obj()) + ConstantPool::base_offset();
 
   for (int index = 0; index < fields_length; index += Field::NUMBER_OF_SLOTS) {
-    const int name_index      = ((jushort*)field_base)[NAME_OFFSET];
-    if (((OopDesc**)cp_base)[name_index] == name_obj) {
-      const int signature_index = ((jushort*)field_base)[SIGNATURE_OFFSET];
-      if (((OopDesc**)cp_base)[signature_index] == sig_obj) {
+    const int name_index = ((jushort*)field_base)[NAME_OFFSET];
+    OopDesc* candidate_name = ((OopDesc**)cp_base)[name_index];
+    if (candidate_name == name_obj ||
+        (candidate_name != NULL && candidate_name->is_symbol() &&
+         name->matches((SymbolDesc*)candidate_name))) {
+      const int signature_index =
+          ((jushort*)field_base)[SIGNATURE_OFFSET];
+      OopDesc* candidate_signature =
+          ((OopDesc**)cp_base)[signature_index];
+      if (candidate_signature == sig_obj ||
+          (candidate_signature != NULL &&
+           candidate_signature->is_symbol() &&
+           signature->matches((SymbolDesc*)candidate_signature))) {
         return index;
       }
     }
@@ -626,8 +635,11 @@ void ConstantPool::resolve_helper_0(int index, Symbol* name, Symbol* signature,
   } else {
     GUARANTEE(ConstantTag::is_resolved_klass(tag_value_at(class_index)), 
               "sanity");
-    jint class_id = int_field(offset_from_index(class_index));
-    JavaClass::Raw k = Universe::class_from_id(class_id);
+    JavaClass::Raw k = resolved_klass_at(
+        class_index JVM_NO_CHECK_AT_BOTTOM);
+    if (k.is_null()) {
+      return;
+    }
     if (klass != NULL) {
       *klass = k.obj();
     } else {

@@ -25,6 +25,7 @@
  */
 
 
+#include <limits.h>
 #include <kni.h>
 #include <sni.h>
 #include <commonKNIMacros.h>
@@ -99,8 +100,9 @@ getBlockedThreadFromHandle(long handle, int waitingFor) {
             return blocked_threads[i].thread_id;
         }
 
-        if ((p->waitingFor == PUSH_SIGNAL) && 
-            (findPushBlockedHandle(handle) != 0)) {
+        if ((p->waitingFor == PUSH_SIGNAL) &&
+            handle >= INT_MIN && handle <= INT_MAX &&
+            (findPushBlockedHandle((int)handle) != 0)) {
             /*
              * Slave Mode (Qt-sockets only)
              * No need to explicitly disable the read and write notifiers 

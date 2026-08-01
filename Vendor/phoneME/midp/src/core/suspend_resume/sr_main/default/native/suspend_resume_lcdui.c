@@ -24,6 +24,9 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <string.h>
+
 #include <suspend_resume_lcdui.h>
 #include <lcdlf_export.h>
 #include <midpEventUtil.h>
@@ -38,7 +41,7 @@ const char _locale_str[] = "microedition.locale";
  */
 MIDPError suspend_lcdui(void *resource) {
     const char* locale;
-    int len;
+    size_t len;
 
     LCDUIState *st = (LCDUIState*) resource;
     /* Saving lcdui state */
@@ -46,14 +49,24 @@ MIDPError suspend_lcdui(void *resource) {
         lcdlf_get_reverse_orientation(lcdlf_get_current_hardwareId());
 
     locale = getSystemProperty(_locale_str);
+    if (locale == NULL) {
+        locale = "";
+    }
     len = strlen(locale);
+    if (len >= UINT_MAX) {
+        return OUT_OF_MEMORY;
+    }
 
     if (st->locale != NULL) {
         midpFree(st->locale);
+        st->locale = NULL;
     }
-    st->locale = midpMalloc(len + 1);
+    st->locale = midpMalloc((unsigned int)(len + 1U));
+    if (st->locale == NULL) {
+        return OUT_OF_MEMORY;
+    }
 
-    strcpy(st->locale, locale);
+    memcpy(st->locale, locale, len + 1U);
 
     return ALL_OK;
 }
@@ -63,7 +76,7 @@ MIDPError suspend_lcdui(void *resource) {
  */
 MIDPError resume_lcdui(void *resource) {
     const char* locale;
-    int len;
+    size_t len;
     MidpEvent midpEvent;    
     LCDUIState *st = (LCDUIState*) resource;
     /* Restoring lcdui state */
@@ -76,9 +89,14 @@ MIDPError resume_lcdui(void *resource) {
     }
     
     locale = getSystemProperty(_locale_str);
+    if (locale == NULL) {
+        locale = "";
+    }
     len = strlen(locale);
       
-    if (len != (int)strlen(st->locale) || strncmp(locale, st->locale, len) != 0) {
+    if (st->locale == NULL ||
+            len != strlen(st->locale) ||
+            memcmp(locale, st->locale, len) != 0) {
        MIDP_EVENT_INITIALIZE(midpEvent);
        midpEvent.type    = CHANGE_LOCALE_EVENT;
        StoreMIDPEventInVmThread(midpEvent, -1);

@@ -477,13 +477,13 @@ setupArgToStartMidlet(int argc, char* argv[]) {
     }
 
     do {
-        int i, len;
+        size_t i, len;
 
         /* if the storage name only digits, convert it */
         int onlyDigits = 1;
         len = strlen(argv[0]);
         for (i = 0; i < len; i++) {
-            if (!isdigit((argv[0])[i])) {
+            if (!isdigit((unsigned char)(argv[0])[i])) {
                 onlyDigits = 0;
                 break;
             }

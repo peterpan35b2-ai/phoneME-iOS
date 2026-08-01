@@ -335,9 +335,11 @@ public:
 
 private:
   enum {
-    // Max length of JAR entry names. If your JAR file contains an entry
-    // whose name is longer than 256 bytes, it will fail to be read.
-    MAX_ENTRY_NAME = 256,
+    // Merged and heavily obfuscated MIDlet JARs can contain class/resource
+    // entry names hundreds of bytes long. The original 256-byte limit made
+    // those entries invisible to the class loader. Keep a practical bound
+    // rather than allocating the ZIP format's full 16-bit maximum on stack.
+    MAX_ENTRY_NAME = 4096,
 
     // Max number of JarFileParser objects to be cached. Change this number
     // if your application is likely to access a large number of Jar files

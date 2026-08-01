@@ -5,17 +5,39 @@
 #if TARGET_OS_IOS || TARGET_OS_TV
 #import <UIKit/UIKit.h>
 #endif
+#if TARGET_OS_IOS
+#import <MediaPlayer/MediaPlayer.h>
+#endif
 
 #include <math.h>
 #include <stdint.h>
+
+@class PMMediaEntry;
+
+static void PMReevaluateNowPlaying(PMMediaEntry *preferredEntry);
+static void PMClearNowPlaying(void);
+
+static uint8_t gPMMediaQueueSpecificKey;
 
 static dispatch_queue_t PMMediaQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         queue = dispatch_queue_create("dev.phoneme.media", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(queue,
+                                    &gPMMediaQueueSpecificKey,
+                                    &gPMMediaQueueSpecificKey,
+                                    NULL);
     });
     return queue;
+}
+
+static void PMPerformMediaQueueSync(dispatch_block_t block) {
+    if (dispatch_get_specific(&gPMMediaQueueSpecificKey) != NULL) {
+        block();
+    } else {
+        dispatch_sync(PMMediaQueue(), block);
+    }
 }
 
 static NSMutableDictionary<NSNumber *, id> *PMMediaRegistry(void) {
@@ -37,7 +59,15 @@ static NSMutableSet *PMTonePlayers(void) {
 }
 
 static int32_t gNextMediaHandle = 1;
+static uint64_t gPMPlaybackSequence = 0;
 static void *PMStreamStatusContext = &PMStreamStatusContext;
+
+#if TARGET_OS_IOS
+static NSString *gPMMediaApplicationTitle;
+static NSString *gPMMediaApplicationArtist;
+static UIImage *gPMMediaApplicationArtwork;
+static int32_t gPMNowPlayingHandle = 0;
+#endif
 
 static void PMConfigureAudioSession(void) {
 #if TARGET_OS_IOS || TARGET_OS_TV
@@ -51,14 +81,21 @@ static void PMConfigureAudioSession(void) {
         NSLog(@"phoneME media: unable to configure audio session: %@",
               categoryError.localizedDescription);
     }
+#endif
+}
 
+static BOOL PMActivateAudioSession(void) {
+#if TARGET_OS_IOS || TARGET_OS_TV
+    PMConfigureAudioSession();
     NSError *activationError = nil;
-    [session setActive:YES error:&activationError];
+    [AVAudioSession.sharedInstance setActive:YES error:&activationError];
     if (activationError != nil) {
         NSLog(@"phoneME media: unable to activate audio session: %@",
               activationError.localizedDescription);
+        return NO;
     }
 #endif
+    return YES;
 }
 
 static NSString *PMStringFromUTF8(const char *value) {
@@ -106,6 +143,19 @@ static NSURL *PMURLFromLocator(NSString *locator) {
     return [NSURL fileURLWithPath:trimmed];
 }
 
+static NSString *PMMediaTitleFromURL(NSURL *url) {
+    NSString *name = url.lastPathComponent.stringByDeletingPathExtension;
+    name = name.stringByRemovingPercentEncoding ?: name;
+    name = [name stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (name.length > 0) {
+        return name;
+    }
+    NSString *host = [url.host stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return host.length > 0 ? host : nil;
+}
+
 @interface PMMediaEntry : NSObject <AVAudioPlayerDelegate>
 @property(nonatomic, strong) AVAudioPlayer *audioPlayer;
 @property(nonatomic, strong) AVMIDIPlayer *midiPlayer;
@@ -117,6 +167,7 @@ static NSURL *PMURLFromLocator(NSString *locator) {
 @property(nonatomic) BOOL hasPendingSeek;
 @property(nonatomic) int64_t pendingSeekMicroseconds;
 @property(nonatomic) BOOL resumeAfterPendingSeek;
+@property(nonatomic) BOOL resumeAfterSystemSuspend;
 @property(nonatomic) NSUInteger seekGeneration;
 @property(nonatomic) int32_t handle;
 @property(nonatomic) NSInteger loopCount;
@@ -126,6 +177,9 @@ static NSURL *PMURLFromLocator(NSString *locator) {
 @property(nonatomic) float volume;
 @property(nonatomic) NSUInteger playbackGeneration;
 @property(nonatomic) BOOL transientTone;
+@property(nonatomic) BOOL hasStartedPlayback;
+@property(nonatomic) uint64_t startedSequence;
+@property(nonatomic, copy) NSString *mediaTitle;
 @end
 
 @implementation PMMediaEntry
@@ -166,7 +220,9 @@ static NSURL *PMURLFromLocator(NSString *locator) {
 }
 
 - (BOOL)start {
-    PMConfigureAudioSession();
+    if (!PMActivateAudioSession()) {
+        return NO;
+    }
     self.ended = NO;
     self.streamFailed = NO;
     self.playbackGeneration += 1;
@@ -178,7 +234,12 @@ static NSURL *PMURLFromLocator(NSString *locator) {
             self.audioPlayer.currentTime = 0;
         }
         [self applyVolume];
-        return [self.audioPlayer play];
+        BOOL started = [self.audioPlayer play];
+        if (started) {
+            self.hasStartedPlayback = YES;
+            self.startedSequence = ++gPMPlaybackSequence;
+        }
+        return started;
     }
 
     if (self.midiPlayer != nil) {
@@ -188,6 +249,8 @@ static NSURL *PMURLFromLocator(NSString *locator) {
         }
         self.midiLoopsRemaining = self.loopCount;
         [self applyVolume];
+        self.hasStartedPlayback = YES;
+        self.startedSequence = ++gPMPlaybackSequence;
         [self playMIDIGeneration:generation];
         return YES;
     }
@@ -206,6 +269,8 @@ static NSURL *PMURLFromLocator(NSString *locator) {
         [self applyVolume];
         if (self.hasPendingSeek) {
             self.resumeAfterPendingSeek = YES;
+            self.hasStartedPlayback = YES;
+            self.startedSequence = ++gPMPlaybackSequence;
             [self applyPendingSeekIfPossible];
             return YES;
         }
@@ -214,6 +279,8 @@ static NSURL *PMURLFromLocator(NSString *locator) {
             self.streamFailed = YES;
             return NO;
         }
+        self.hasStartedPlayback = YES;
+        self.startedSequence = ++gPMPlaybackSequence;
         return YES;
     }
 
@@ -242,6 +309,7 @@ static NSURL *PMURLFromLocator(NSString *locator) {
                 [strongSelf playMIDIGeneration:generation];
             } else {
                 strongSelf.ended = YES;
+                PMReevaluateNowPlaying(nil);
             }
         });
     }];
@@ -431,8 +499,10 @@ static NSURL *PMURLFromLocator(NSString *locator) {
             strongSelf.hasPendingSeek = NO;
             NSLog(@"phoneME media: player item failed: %@",
                   item.error.localizedDescription ?: @"unknown error");
+            PMReevaluateNowPlaying(nil);
         } else if (item.status == AVPlayerItemStatusReadyToPlay) {
             [strongSelf applyPendingSeekIfPossible];
+            PMReevaluateNowPlaying(nil);
         }
     });
 }
@@ -444,6 +514,7 @@ static NSURL *PMURLFromLocator(NSString *locator) {
             [PMTonePlayers() removeObject:self];
         } else if (player == self.audioPlayer) {
             self.ended = YES;
+            PMReevaluateNowPlaying(nil);
         }
     });
 }
@@ -473,6 +544,306 @@ static int32_t PMRegisterEntry(PMMediaEntry *entry) {
     return handle;
 }
 
+#if TARGET_OS_IOS
+static MPRemoteCommandHandlerStatus PMRemotePlay(void) {
+    __block MPRemoteCommandHandlerStatus status =
+        MPRemoteCommandHandlerStatusNoSuchContent;
+    PMPerformMediaQueueSync(^{
+        PMMediaEntry *entry = PMEntryForHandle(gPMNowPlayingHandle);
+        if (entry == nil) return;
+        if ([entry start]) {
+            PMReevaluateNowPlaying(entry);
+            status = MPRemoteCommandHandlerStatusSuccess;
+        } else {
+            status = MPRemoteCommandHandlerStatusCommandFailed;
+        }
+    });
+    return status;
+}
+
+static MPRemoteCommandHandlerStatus PMRemotePause(void) {
+    __block MPRemoteCommandHandlerStatus status =
+        MPRemoteCommandHandlerStatusNoSuchContent;
+    PMPerformMediaQueueSync(^{
+        PMMediaEntry *entry = PMEntryForHandle(gPMNowPlayingHandle);
+        if (entry == nil) return;
+        if ([entry stop]) {
+            PMReevaluateNowPlaying(nil);
+            status = MPRemoteCommandHandlerStatusSuccess;
+        } else {
+            status = MPRemoteCommandHandlerStatusCommandFailed;
+        }
+    });
+    return status;
+}
+
+static MPRemoteCommandHandlerStatus PMRemoteToggle(void) {
+    __block BOOL playing = NO;
+    PMPerformMediaQueueSync(^{
+        playing = [PMEntryForHandle(gPMNowPlayingHandle) isPlaying];
+    });
+    return playing ? PMRemotePause() : PMRemotePlay();
+}
+
+static MPRemoteCommandHandlerStatus PMRemoteSetPosition(NSTimeInterval seconds) {
+    if (!isfinite(seconds) || seconds < 0) {
+        return MPRemoteCommandHandlerStatusCommandFailed;
+    }
+    __block MPRemoteCommandHandlerStatus status =
+        MPRemoteCommandHandlerStatusNoSuchContent;
+    PMPerformMediaQueueSync(^{
+        PMMediaEntry *entry = PMEntryForHandle(gPMNowPlayingHandle);
+        if (entry == nil) return;
+        [entry setMediaTimeMicroseconds:
+            (int64_t)llround(seconds * 1000000.0)];
+        PMReevaluateNowPlaying(nil);
+        status = MPRemoteCommandHandlerStatusSuccess;
+    });
+    return status;
+}
+
+static MPRemoteCommandHandlerStatus PMRemoteSkip(NSTimeInterval interval) {
+    __block NSTimeInterval target = -1;
+    PMPerformMediaQueueSync(^{
+        PMMediaEntry *entry = PMEntryForHandle(gPMNowPlayingHandle);
+        if (entry == nil) return;
+        target = MAX(0, (double)[entry mediaTimeMicroseconds] / 1000000.0 +
+                        interval);
+    });
+    return target >= 0
+        ? PMRemoteSetPosition(target)
+        : MPRemoteCommandHandlerStatusNoSuchContent;
+}
+
+static void PMEnsureRemoteCommandsInstalled(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MPRemoteCommandCenter *center =
+                MPRemoteCommandCenter.sharedCommandCenter;
+            [center.playCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    (void)event;
+                    return PMRemotePlay();
+                }];
+            [center.pauseCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    (void)event;
+                    return PMRemotePause();
+                }];
+            [center.togglePlayPauseCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    (void)event;
+                    return PMRemoteToggle();
+                }];
+            [center.stopCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    (void)event;
+                    return PMRemotePause();
+                }];
+            [center.changePlaybackPositionCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    if (![event isKindOfClass:
+                            MPChangePlaybackPositionCommandEvent.class]) {
+                        return MPRemoteCommandHandlerStatusCommandFailed;
+                    }
+                    MPChangePlaybackPositionCommandEvent *positionEvent =
+                        (MPChangePlaybackPositionCommandEvent *)event;
+                    return PMRemoteSetPosition(positionEvent.positionTime);
+                }];
+            [center.skipForwardCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    NSTimeInterval interval = 10;
+                    if ([event isKindOfClass:MPSkipIntervalCommandEvent.class]) {
+                        interval = ((MPSkipIntervalCommandEvent *)event).interval;
+                    }
+                    return PMRemoteSkip(interval);
+                }];
+            [center.skipBackwardCommand addTargetWithHandler:
+                ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+                    NSTimeInterval interval = 10;
+                    if ([event isKindOfClass:MPSkipIntervalCommandEvent.class]) {
+                        interval = ((MPSkipIntervalCommandEvent *)event).interval;
+                    }
+                    return PMRemoteSkip(-interval);
+                }];
+            center.skipForwardCommand.preferredIntervals = @[@10];
+            center.skipBackwardCommand.preferredIntervals = @[@10];
+            center.nextTrackCommand.enabled = NO;
+            center.previousTrackCommand.enabled = NO;
+            center.seekForwardCommand.enabled = NO;
+            center.seekBackwardCommand.enabled = NO;
+        });
+    });
+}
+
+static BOOL PMEntryIsNowPlayingEligible(PMMediaEntry *entry) {
+    if (entry == nil || entry.transientTone || !entry.hasStartedPlayback ||
+        entry.ended || entry.streamFailed) {
+        return NO;
+    }
+    int64_t duration = [entry durationMicroseconds];
+    return entry.streamPlayer != nil || entry.midiPlayer != nil ||
+           entry.loopCount != 1 || duration >= 2000000;
+}
+
+static NSInteger PMNowPlayingScore(PMMediaEntry *entry,
+                                   PMMediaEntry *preferredEntry,
+                                   PMMediaEntry *currentEntry) {
+    NSInteger score = [entry isPlaying] ? 300 : 0;
+    if (entry.streamPlayer != nil) score += 400;
+    if (entry.midiPlayer != nil) score += 180;
+    if (entry.loopCount == -1) {
+        score += 500;
+    } else if (entry.loopCount > 1) {
+        score += 180;
+    }
+
+    int64_t duration = [entry durationMicroseconds];
+    if (duration < 0) {
+        score += 150;
+    } else if (duration >= 600000000) {
+        score += 600;
+    } else if (duration >= 60000000) {
+        score += 450;
+    } else if (duration >= 10000000) {
+        score += 300;
+    } else if (duration >= 2000000) {
+        score += 100;
+    }
+
+    if (entry == currentEntry) score += 80;
+    if (entry == preferredEntry) score += 120;
+    return score;
+}
+
+static void PMPublishNowPlaying(PMMediaEntry *entry) {
+    PMEnsureRemoteCommandsInstalled();
+
+    NSString *applicationTitle = gPMMediaApplicationTitle.length > 0
+        ? gPMMediaApplicationTitle
+        : (NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"]
+            ?: NSBundle.mainBundle.infoDictionary[@"CFBundleName"]
+            ?: @"J2ME Loader");
+    NSString *applicationArtist = gPMMediaApplicationArtist.length > 0
+        ? gPMMediaApplicationArtist
+        : @"J2ME Loader";
+    NSString *mediaTitle = entry.mediaTitle.length > 0
+        ? entry.mediaTitle
+        : nil;
+    NSString *title = mediaTitle ?: applicationTitle;
+    NSString *artist = mediaTitle != nil ? applicationTitle : applicationArtist;
+    UIImage *artworkImage = gPMMediaApplicationArtwork;
+    int64_t durationMicroseconds = [entry durationMicroseconds];
+    NSTimeInterval duration = durationMicroseconds > 0
+        ? (double)durationMicroseconds / 1000000.0
+        : 0;
+    NSTimeInterval elapsed =
+        MAX(0, (double)[entry mediaTimeMicroseconds] / 1000000.0);
+    BOOL playing = [entry isPlaying];
+    BOOL liveStream = entry.streamPlayer != nil && duration <= 0;
+    int32_t handle = entry.handle;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSMutableDictionary<NSString *, id> *info =
+            [[NSMutableDictionary alloc] init];
+        info[MPMediaItemPropertyTitle] = title;
+        info[MPMediaItemPropertyArtist] = artist;
+        info[MPMediaItemPropertyAlbumTitle] = @"J2ME Loader";
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(elapsed);
+        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? @1.0 : @0.0;
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = @1.0;
+        info[MPNowPlayingInfoPropertyMediaType] =
+            @(MPNowPlayingInfoMediaTypeAudio);
+        info[MPNowPlayingInfoPropertyIsLiveStream] = @(liveStream);
+        info[MPNowPlayingInfoPropertyExternalContentIdentifier] =
+            [NSString stringWithFormat:@"phoneme-media-%d", handle];
+        if (duration > 0) {
+            info[MPMediaItemPropertyPlaybackDuration] = @(duration);
+        }
+        if (artworkImage != nil) {
+            info[MPMediaItemPropertyArtwork] = [[MPMediaItemArtwork alloc]
+                initWithBoundsSize:artworkImage.size
+                requestHandler:^UIImage * _Nonnull(CGSize size) {
+                    (void)size;
+                    return artworkImage;
+                }];
+        }
+
+        MPNowPlayingInfoCenter *center = MPNowPlayingInfoCenter.defaultCenter;
+        center.nowPlayingInfo = info;
+        center.playbackState = playing
+            ? MPNowPlayingPlaybackStatePlaying
+            : MPNowPlayingPlaybackStatePaused;
+
+        MPRemoteCommandCenter *commands =
+            MPRemoteCommandCenter.sharedCommandCenter;
+        commands.playCommand.enabled = !playing;
+        commands.pauseCommand.enabled = playing;
+        commands.togglePlayPauseCommand.enabled = YES;
+        commands.stopCommand.enabled = playing;
+        BOOL seekable = duration > 0;
+        commands.changePlaybackPositionCommand.enabled = seekable;
+        commands.skipForwardCommand.enabled = seekable;
+        commands.skipBackwardCommand.enabled = seekable;
+    });
+}
+#endif
+
+static void PMReevaluateNowPlaying(PMMediaEntry *preferredEntry) {
+#if TARGET_OS_IOS
+    PMMediaEntry *currentEntry = PMEntryForHandle(gPMNowPlayingHandle);
+    PMMediaEntry *bestEntry = nil;
+    NSInteger bestScore = NSIntegerMin;
+    uint64_t bestSequence = 0;
+
+    for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
+        if (!PMEntryIsNowPlayingEligible(entry)) continue;
+        if (![entry isPlaying] && entry != currentEntry) continue;
+        NSInteger score = PMNowPlayingScore(entry,
+                                            preferredEntry,
+                                            currentEntry);
+        if (bestEntry == nil || score > bestScore ||
+            (score == bestScore && entry.startedSequence > bestSequence)) {
+            bestEntry = entry;
+            bestScore = score;
+            bestSequence = entry.startedSequence;
+        }
+    }
+
+    if (bestEntry == nil) {
+        PMClearNowPlaying();
+        return;
+    }
+    gPMNowPlayingHandle = bestEntry.handle;
+    PMPublishNowPlaying(bestEntry);
+#else
+    (void)preferredEntry;
+#endif
+}
+
+static void PMClearNowPlaying(void) {
+#if TARGET_OS_IOS
+    gPMNowPlayingHandle = 0;
+    PMEnsureRemoteCommandsInstalled();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        MPNowPlayingInfoCenter *center = MPNowPlayingInfoCenter.defaultCenter;
+        center.nowPlayingInfo = nil;
+        center.playbackState = MPNowPlayingPlaybackStateStopped;
+
+        MPRemoteCommandCenter *commands =
+            MPRemoteCommandCenter.sharedCommandCenter;
+        commands.playCommand.enabled = NO;
+        commands.pauseCommand.enabled = NO;
+        commands.togglePlayPauseCommand.enabled = NO;
+        commands.stopCommand.enabled = NO;
+        commands.changePlaybackPositionCommand.enabled = NO;
+        commands.skipForwardCommand.enabled = NO;
+        commands.skipBackwardCommand.enabled = NO;
+    });
+#endif
+}
+
 static PMMediaEntry *PMEntryWithData(NSData *data, NSString *contentType) {
     if (data == nil || data.length == 0) return nil;
     PMConfigureAudioSession();
@@ -498,6 +869,7 @@ static PMMediaEntry *PMEntryWithURL(NSURL *url, NSString *contentType) {
     PMConfigureAudioSession();
 
     PMMediaEntry *entry = [[PMMediaEntry alloc] init];
+    entry.mediaTitle = PMMediaTitleFromURL(url);
     NSError *error = nil;
     if (url.isFileURL) {
         if (PMIsMIDIType(contentType) ||
@@ -548,6 +920,7 @@ static PMMediaEntry *PMEntryWithURL(NSURL *url, NSString *contentType) {
                 AVPlayerItemFailedToPlayToEndTimeErrorKey];
             NSLog(@"phoneME media: remote stream failed: %@",
                   error.localizedDescription ?: url.absoluteString);
+            PMReevaluateNowPlaying(nil);
         });
     }];
     entry.streamEndObserver = [NSNotificationCenter.defaultCenter
@@ -569,6 +942,7 @@ static PMMediaEntry *PMEntryWithURL(NSURL *url, NSString *contentType) {
                 }];
             } else {
                 strongEntry.ended = YES;
+                PMReevaluateNowPlaying(nil);
             }
         });
     }];
@@ -628,6 +1002,29 @@ static NSData *PMToneWAVData(int32_t note, int32_t durationMilliseconds,
     return data;
 }
 
+void phoneme_ios_media_set_application_metadata(const char *title,
+                                                const char *artist,
+                                                const char *artwork_path) {
+#if TARGET_OS_IOS
+    NSString *applicationTitle = [PMStringFromUTF8(title) copy];
+    NSString *applicationArtist = [PMStringFromUTF8(artist) copy];
+    NSString *artworkPath = PMStringFromUTF8(artwork_path);
+    UIImage *artwork = artworkPath.length > 0
+        ? [UIImage imageWithContentsOfFile:artworkPath]
+        : nil;
+    PMPerformMediaQueueSync(^{
+        gPMMediaApplicationTitle = applicationTitle;
+        gPMMediaApplicationArtist = applicationArtist;
+        gPMMediaApplicationArtwork = artwork;
+        PMReevaluateNowPlaying(nil);
+    });
+#else
+    (void)title;
+    (void)artist;
+    (void)artwork_path;
+#endif
+}
+
 int32_t phoneme_ios_media_create_data(const uint8_t *data, int32_t length,
                                       const char *content_type) {
     if (data == NULL || length <= 0) return 0;
@@ -655,7 +1052,11 @@ int32_t phoneme_ios_media_create_locator(const char *locator,
 int32_t phoneme_ios_media_start(int32_t handle) {
     __block BOOL result = NO;
     dispatch_sync(PMMediaQueue(), ^{
-        result = [PMEntryForHandle(handle) start];
+        PMMediaEntry *entry = PMEntryForHandle(handle);
+        result = [entry start];
+        if (result) {
+            PMReevaluateNowPlaying(entry);
+        }
     });
     return result ? 1 : 0;
 }
@@ -664,6 +1065,7 @@ int32_t phoneme_ios_media_stop(int32_t handle) {
     __block BOOL result = NO;
     dispatch_sync(PMMediaQueue(), ^{
         result = [PMEntryForHandle(handle) stop];
+        PMReevaluateNowPlaying(nil);
     });
     return result ? 1 : 0;
 }
@@ -673,12 +1075,14 @@ void phoneme_ios_media_close(int32_t handle) {
         PMMediaEntry *entry = PMEntryForHandle(handle);
         [entry stop];
         [PMMediaRegistry() removeObjectForKey:@(handle)];
+        PMReevaluateNowPlaying(nil);
     });
 }
 
 void phoneme_ios_media_set_loop_count(int32_t handle, int32_t count) {
     dispatch_sync(PMMediaQueue(), ^{
         [PMEntryForHandle(handle) configureLoopCount:count];
+        PMReevaluateNowPlaying(nil);
     });
 }
 
@@ -702,6 +1106,7 @@ int64_t phoneme_ios_media_set_time(int32_t handle, int64_t microseconds) {
     __block int64_t result = 0;
     dispatch_sync(PMMediaQueue(), ^{
         result = [PMEntryForHandle(handle) setMediaTimeMicroseconds:microseconds];
+        PMReevaluateNowPlaying(nil);
     });
     return result;
 }
@@ -746,6 +1151,37 @@ int32_t phoneme_ios_media_has_error(int32_t handle) {
     return result ? 1 : 0;
 }
 
+int32_t phoneme_ios_media_has_active_playback(void) {
+    __block BOOL result = NO;
+    PMPerformMediaQueueSync(^{
+        for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
+            if ([entry isPlaying]) {
+                result = YES;
+                return;
+            }
+            if (entry.streamPlayer != nil) {
+                BOOL waitingForData = entry.resumeAfterPendingSeek;
+                if (@available(iOS 10.0, macOS 10.12, tvOS 10.0, *)) {
+                    waitingForData = waitingForData ||
+                        entry.streamPlayer.timeControlStatus ==
+                            AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
+                }
+                if (waitingForData && !entry.streamFailed && !entry.ended) {
+                    result = YES;
+                    return;
+                }
+            }
+        }
+        for (PMMediaEntry *entry in PMTonePlayers()) {
+            if ([entry isPlaying]) {
+                result = YES;
+                return;
+            }
+        }
+    });
+    return result ? 1 : 0;
+}
+
 int32_t phoneme_ios_media_play_tone(int32_t note, int32_t duration_ms,
                                     int32_t volume) {
     if (note < 0 || note > 127 || duration_ms <= 0) return 0;
@@ -769,6 +1205,47 @@ static uint64_t gPMLightGeneration = 0;
 static BOOL gPMKeepScreenAwake = NO;
 #endif
 
+void phoneme_ios_media_suspend(void) {
+    dispatch_sync(PMMediaQueue(), ^{
+        for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
+            entry.resumeAfterSystemSuspend = [entry isPlaying];
+            if (entry.resumeAfterSystemSuspend) {
+                [entry stop];
+            }
+        }
+        for (PMMediaEntry *entry in PMTonePlayers()) {
+            [entry stop];
+        }
+        [PMTonePlayers() removeAllObjects];
+        PMReevaluateNowPlaying(nil);
+    });
+
+#if TARGET_OS_IOS || TARGET_OS_TV
+    NSError *deactivationError = nil;
+    [AVAudioSession.sharedInstance
+        setActive:NO
+        withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+        error:&deactivationError];
+    if (deactivationError != nil) {
+        NSLog(@"phoneME media: unable to suspend audio session: %@",
+              deactivationError.localizedDescription);
+    }
+#endif
+}
+
+void phoneme_ios_media_resume(void) {
+    dispatch_sync(PMMediaQueue(), ^{
+        for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
+            if (!entry.resumeAfterSystemSuspend) {
+                continue;
+            }
+            entry.resumeAfterSystemSuspend = NO;
+            (void)[entry start];
+        }
+        PMReevaluateNowPlaying(nil);
+    });
+}
+
 void phoneme_ios_media_reset(void) {
     dispatch_sync(PMMediaQueue(), ^{
         for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
@@ -779,6 +1256,12 @@ void phoneme_ios_media_reset(void) {
             [entry stop];
         }
         [PMTonePlayers() removeAllObjects];
+#if TARGET_OS_IOS
+        gPMMediaApplicationTitle = nil;
+        gPMMediaApplicationArtist = nil;
+        gPMMediaApplicationArtwork = nil;
+#endif
+        PMClearNowPlaying();
     });
 
 #if TARGET_OS_IOS || TARGET_OS_TV

@@ -75,10 +75,15 @@ gxj_screen_buffer* gxj_get_image_screen_buffer_impl(const java_imagedata *img,
     /* Only use nativePixelData and nativeAlphaData if
      * pixelData is null */
     if (img->pixelData != NULL) {
-	sbuf->pixelData = (gxj_pixel_type *)&(img->pixelData->elements[0]);
-	sbuf->alphaData = (img->alphaData != NULL)
-			    ? (gxj_alpha_type *)&(img->alphaData->elements[0])
-			    : NULL;
+        uintptr_t pixelAddress =
+            (uintptr_t)(void*)&img->pixelData->elements[0];
+        if ((pixelAddress & (sizeof (gxj_pixel_type) - 1U)) != 0U) {
+            return NULL;
+        }
+        sbuf->pixelData = (gxj_pixel_type*)pixelAddress;
+        sbuf->alphaData = (img->alphaData != NULL)
+            ? (gxj_alpha_type*)(uintptr_t)(void*)&img->alphaData->elements[0]
+            : NULL;
     } else {
 	sbuf->pixelData = (gxj_pixel_type *)(intptr_t)img->nativePixelData;
 	sbuf->alphaData = (gxj_alpha_type *)(intptr_t)img->nativeAlphaData;
@@ -162,7 +167,8 @@ static unsigned short alphaComposition(jint src,
     (unsigned char)( div(pBr) );
 
   /* compose RGB from separate color components */
-  return ((Rr & 0xF8) << 8) + ((Gr & 0xFC) << 3) + (Br >> 3);
+  return (unsigned short)(((Rr & 0xF8U) << 8) +
+                          ((Gr & 0xFCU) << 3) + (Br >> 3));
 }
 
 
@@ -427,9 +433,9 @@ gx_draw_rect(jint color, const jshort *clip,
 
 
 #if (UNDER_ADS || UNDER_CE) || (defined(__GNUC__) && defined(ARM))
-extern void fast_pixel_set(unsigned * mem, unsigned value, int number_of_pixels);
+extern void fast_pixel_set(void* mem, unsigned value, int number_of_pixels);
 #else
-void fast_pixel_set(unsigned * mem, unsigned value, int number_of_pixels)
+void fast_pixel_set(void* mem, unsigned value, int number_of_pixels)
 {
    int i;
    gxj_pixel_type* pBuf = (gxj_pixel_type*)mem;
@@ -455,7 +461,7 @@ void fastFill_rect(unsigned short color, gxj_screen_buffer *sbuf, int x, int y, 
 
 	raster=sbuf->pixelData + y*screen_horiz+x;
 	for(;height>0;height--) {
-		fast_pixel_set((unsigned *)raster, color, width);
+        fast_pixel_set(raster, color, width);
 		raster+=screen_horiz;
 	}
 }

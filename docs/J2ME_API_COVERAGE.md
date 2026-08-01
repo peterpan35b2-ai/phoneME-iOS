@@ -1,6 +1,6 @@
 # J2ME API Coverage on iOS
 
-Last audited: 2026-07-31
+Last audited: 2026-08-01
 
 This document records the API surface actually packaged in `PhoneMERuntime/classes.zip`, the iOS/native backend status, and the remaining compatibility gaps. A Java class being present does **not** automatically mean its backend works; each section distinguishes real runtime support from interface-only compatibility.
 
@@ -17,6 +17,7 @@ This document records the API surface actually packaged in `PhoneMERuntime/class
 | --- | --- | --- |
 | CLDC 1.1 | Working | ARM64 phoneME VM, Java core libraries, threads, collections, streams, math and networking primitives. |
 | MIDP 2.x MIDlet lifecycle | Working | Start, pause, destroy, exit and VM cleanup are bridged to the iOS host. |
+| `MIDlet.platformRequest()` | Working | Opens supported HTTP/HTTPS, telephone, SMS, email and registered URL handlers through `UIApplication`; unsupported handlers raise `ConnectionNotFoundException`. |
 | LCDUI | Working/ongoing refinement | Canvas, Form, List, Alert, TextBox, Items, Commands and native iOS display bridge are packaged. Mapping/layout correctness is maintained separately from this API audit. |
 | LCDUI Game API | Working | GameCanvas, Sprite, TiledLayer, Layer and LayerManager are packaged. |
 | RMS | Working | RecordStore and related enumeration/listener APIs are packaged. |
@@ -31,7 +32,7 @@ This document records the API surface actually packaged in `PhoneMERuntime/class
 | `serversocket://` | Working | Server socket support is enabled. |
 | `datagram://` | Working | UDP datagram implementation is packaged. |
 | `file://` / JSR-75 FileConnection | Working | Implemented in this audit; details below. |
-| `https://` | Missing backend | Public `HttpsConnection`, `SecureConnection` and `SecurityInfo` interfaces exist, but no internal HTTPS/SSL protocol class is packaged and `USE_SSL=false`. |
+| `https://` | Working | iOS-native `HttpsConnection` backed by `URLSession`: GET/POST/HEAD, request/response headers, body, redirects, timeout, system certificate validation and `SecurityInfo`. Responses are buffered with a 64 MB safety limit. |
 | raw `ssl://` | Missing | No TLS stream protocol backend. |
 | `comm://` | Missing | Serial-port access is not applicable to the current iOS sandbox. |
 | PushRegistry | Partial/unverified | Public/internal classes are packaged, but alarm wake-up and background network activation still need device-level validation against iOS lifecycle restrictions. |
@@ -141,7 +142,7 @@ Implemented behavior:
 | MIDP vibration | Working | Annunciator backend calls iOS vibration and supports stop/cancellation generation. |
 | Nokia vibration | Working | Frequency is mapped to pulse interval; duration and cancellation are honored. |
 | Backlight / keep-awake | Working approximation | Maps to `UIApplication.idleTimerDisabled`; iOS does not expose arbitrary hardware backlight control to apps. |
-| MIDP alert sounds | Working | Mapped to generated tones through the media backend. |
+| MIDP alert sounds | Intentionally disabled | LCDUI alerts and validation warnings are silent on iOS; game media and tone APIs remain available. |
 
 ## Missing optional JSRs and vendor APIs
 
@@ -172,18 +173,19 @@ These APIs are not currently packaged and require separate modules/backends. The
 
 ## Validation completed
 
-- ARM64 simulator phoneME static core built with MMAPI, Nokia and FileConnection classes/native tables.
-- ARM64 device phoneME static core/package rebuilt.
+- ARM64 simulator phoneME static core built with MMAPI, Nokia, FileConnection and iOS-native HTTPS/platform-request backends.
+- ARM64 device phoneME static core/package rebuilt with the same native backends.
+- `classes.zip`, generated native function table and static archives were inspected for `HttpsConnection`, HTTPS KNI entries and platform-request symbol binding.
 - Full iOS Simulator app build: succeeded.
-- Full `iphoneos` app build with code signing disabled: succeeded.
+- Full `iphoneos` Release app build with code signing disabled: succeeded.
 - AVFoundation WAV smoke test: create player, duration, seek, volume/mute, close and reset passed.
 - FileConnection MIDlet smoke test inside the phoneME VM: passed and exited with code 0.
 - `classes.zip` and generated native function table were inspected to ensure the public classes and KNI entries are actually packaged.
 
 ## Priority order for remaining compatibility work
 
-1. HTTPS/TLS GCF backend, because it directly affects online games and login/update endpoints.
-2. Device-level PushRegistry/background lifecycle validation.
+1. Device-level PushRegistry/background lifecycle validation.
+2. Raw `ssl://` stream support for the smaller set of MIDlets that bypass `HttpsConnection`.
 3. JSR-179 Location and JSR-75 PIM, using permission-gated native bridges.
 4. Game-driven vendor API implementation based on real missing-class logs.
 5. JSR-184 M3G, as a separate renderer project rather than a placeholder API.

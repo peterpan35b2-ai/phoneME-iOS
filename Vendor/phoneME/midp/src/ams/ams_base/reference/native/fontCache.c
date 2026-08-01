@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <string.h>
 
 #include <kni.h>
@@ -116,19 +117,23 @@ static jboolean font_filter(const pcsl_string * entry) {
  */
 static jboolean font_cache_action(const pcsl_string * entry) {
     unsigned char *fontBufPtr = NULL;
+    long fontBufLength;
     int fontBufLen = 0;
     jboolean status = KNI_FALSE;
 
     do {
-        fontBufLen = midpGetJarEntry(handle, entry, &fontBufPtr);
-        if (fontBufLen < 0) {
+        fontBufLength = midpGetJarEntry(handle, entry, &fontBufPtr);
+        if (fontBufLength < 0 || fontBufLength > INT_MAX) {
             break;
         }
+        fontBufLen = (int)fontBufLength;
 
         /* write native buffer to persistent store */
         /* status = KNI_TRUE on success */
         status = storeFileToCache(globalSuiteId, globalStorageId, entry,
-                                   fontBufPtr, fontBufLen);
+                                  fontBufPtr, fontBufLen)
+            ? KNI_TRUE
+            : KNI_FALSE;
 
     } while (0);
 

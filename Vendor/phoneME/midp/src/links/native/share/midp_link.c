@@ -138,6 +138,7 @@ typedef struct _rendezvous {
     jint        msg;        /* refId for the sender's pending message */
     int         sender;     /* the isolate ID of the sender */
     int         receiver;   /* the isolate ID of the receiver */
+    int         descriptor; /* pointer-independent thread wait key */
 } rendezvous;
 
 
@@ -161,6 +162,16 @@ typedef struct _portal {
  * IMPL_NOTE: need to deal with initialization and finalization.
  */
 static portal *portals = NULL;
+
+/* midp_thread_wait() still exposes a 32-bit descriptor. The original code
+ * used the rendezvous address as that descriptor, which truncates pointers on
+ * arm64 and can wake the wrong isolate. Allocate a stable integer key instead. */
+static volatile int next_rendezvous_descriptor = 1;
+
+static int
+rp_next_descriptor(void) {
+    return __sync_fetch_and_add(&next_rendezvous_descriptor, 1);
+}
 
 
 #if ENABLE_I3_TEST
@@ -187,6 +198,7 @@ rp_create(int sender, int receiver) {
     rp->msg = INVALID_REFERENCE_ID;
     rp->sender = sender;
     rp->receiver = receiver;
+    rp->descriptor = rp_next_descriptor();
 
     return rp;
 }
@@ -442,7 +454,7 @@ Java_com_sun_midp_links_Link_close(void)
         }
 
         rp->state = CLOSED;
-        midp_thread_signal(LINK_READY_SIGNAL, (int)rp, 0);
+        midp_thread_signal(LINK_READY_SIGNAL, rp->descriptor, 0);
         setNativePointer(thisObj, NULL);
         rp_decref(rp);
     }
@@ -554,7 +566,7 @@ Java_com_sun_midp_links_Link_receive0(void)
         switch (rp->state) {
             case IDLE:
                 rp->state = RECEIVING;
-                midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 break;
 
             case SENDING:
@@ -568,7 +580,7 @@ Java_com_sun_midp_links_Link_receive0(void)
                     KNI_ThrowNew(midpIOException, NULL);
                 }
                 rp->state = DONE;
-                midp_thread_signal(LINK_READY_SIGNAL, (int)rp, 0);
+                midp_thread_signal(LINK_READY_SIGNAL, rp->descriptor, 0);
                 break;
 
             case RENDEZVOUS:
@@ -581,13 +593,13 @@ Java_com_sun_midp_links_Link_receive0(void)
                     KNI_ThrowNew(midpIOException, NULL);
                 }
                 rp->state = DONE;
-                midp_thread_signal(LINK_READY_SIGNAL, (int)rp, 0);
+                midp_thread_signal(LINK_READY_SIGNAL, rp->descriptor, 0);
 
                 break;
 
             case RECEIVING:
             case DONE:
-                midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 break;
 
             case CLOSED:
@@ -640,19 +652,19 @@ Java_com_sun_midp_links_Link_send0(void)
             case IDLE:
                 rp->msg = SNI_AddStrongReference(messageObj);
                 rp->state = SENDING;
-                midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 break;
 
             case RECEIVING:
                 rp->msg = SNI_AddStrongReference(messageObj);
                 rp->state = RENDEZVOUS;
-                midp_thread_signal(LINK_READY_SIGNAL, (int)rp, 0);
-                midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                midp_thread_signal(LINK_READY_SIGNAL, rp->descriptor, 0);
+                midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 break;
 
             case SENDING:
             case RENDEZVOUS:
-                midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 break;
 
             case DONE:
@@ -662,13 +674,13 @@ Java_com_sun_midp_links_Link_send0(void)
                     SNI_DeleteReference(rp->msg);
                     rp->msg = INVALID_REFERENCE_ID;
                     rp->state = IDLE;
-                    midp_thread_signal(LINK_READY_SIGNAL, (int)rp, 0);
+                    midp_thread_signal(LINK_READY_SIGNAL, rp->descriptor, 0);
                     if (rp->retcode != OK) {
                         KNI_ThrowNew(midpIOException, NULL);
                     }
                 } else {
                     /* somebody else's message, just go back to sleep */
-                    midp_thread_wait(LINK_READY_SIGNAL, (int)rp, NULL);
+                    midp_thread_wait(LINK_READY_SIGNAL, rp->descriptor, NULL);
                 }
 
                 break;

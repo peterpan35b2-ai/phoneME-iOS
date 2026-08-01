@@ -111,6 +111,10 @@
  * </table>
  */
 
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include <kni.h>
 #include <string.h> /* for NULL */
 #include <midpInit.h>
@@ -586,7 +590,7 @@ read_suites_data(char** ppszError) {
 
     /* parse contents of the suite database */
     pos = 0;
-    numOfSuites = *(int*)&buffer[pos];
+    memcpy(&numOfSuites, &buffer[pos], sizeof (numOfSuites));
     ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(int));
 
     for (i = 0; i < numOfSuites; i++) {
@@ -652,6 +656,8 @@ read_suites_data(char** ppszError) {
         {
             int i;
             jint strLen;
+            jchar* utf16Buffer;
+            size_t utf16Bytes;
             pcsl_string* pStrings[8];
 
             pStrings[0] = &pData->varSuiteData.midletClassName;
@@ -675,16 +681,20 @@ read_suites_data(char** ppszError) {
                     break;
                 }
 
-                /*
-                 * We have to guarantee 4 - bytes alignment to use this:
-                 *     strLen = *(jint*)&buffer[pos];
-                 * on RISC CPUs.
-                 */
                 pos = SUITESTORE_ALIGN_4(pos);
-                strLen = *(jint*)&buffer[pos];
+                memcpy(&strLen, &buffer[pos], sizeof (strLen));
                 ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(jint));
 
-                if (bufferLen < (long)strLen) {
+                if (strLen > 0 &&
+                        ((size_t)strLen > SIZE_MAX / sizeof (jchar) ||
+                         (size_t)strLen * sizeof (jchar) > (size_t)LONG_MAX)) {
+                    status = SUITE_CORRUPTED_ERROR;
+                    break;
+                }
+                utf16Bytes = strLen > 0
+                    ? (size_t)strLen * sizeof (jchar)
+                    : 0U;
+                if (strLen > 0 && bufferLen < (long)utf16Bytes) {
                     /* _suites.dat is corrupted */
                     status = SUITE_CORRUPTED_ERROR;
                     REPORT_ERROR(LC_AMS, "read_suites_data(): failed to read "
@@ -693,8 +703,15 @@ read_suites_data(char** ppszError) {
                 }
 
                 if (strLen > 0) {
+                    utf16Buffer = (jchar*)pcsl_mem_malloc(utf16Bytes);
+                    if (utf16Buffer == NULL) {
+                        status = OUT_OF_MEMORY;
+                        break;
+                    }
+                    memcpy(utf16Buffer, &buffer[pos], utf16Bytes);
                     rc = pcsl_string_convert_from_utf16(
-                        (jchar*)&buffer[pos], strLen, pStrings[i]);
+                        utf16Buffer, strLen, pStrings[i]);
+                    pcsl_mem_free(utf16Buffer);
 
                     if (rc != PCSL_STRING_OK) {
                         status = OUT_OF_MEMORY;
@@ -702,7 +719,7 @@ read_suites_data(char** ppszError) {
                                     "read_suites_data(): OUT OF MEMORY !! (4)");
                         break;
                     }
-                    ADJUST_POS_IN_BUF(pos, bufferLen, strLen * sizeof(jchar));
+                    ADJUST_POS_IN_BUF(pos, bufferLen, (long)utf16Bytes);
                 } else {
                     *pStrings[i] = strLen ?
                         PCSL_STRING_NULL : PCSL_STRING_EMPTY;
@@ -766,12 +783,80 @@ write_suites_data(char** ppszError) {
         return status;        
     }
 
-    /* allocate a buffer where the information about all suites will be saved */
-    bufferLen = g_numberOfSuites * (sizeof(MidletSuiteData) +
-        MAX_VAR_SUITE_DATA_LEN);
-    /* space to store the number of suites */
-    bufferLen += sizeof(int);
-    buffer = pcsl_mem_malloc(bufferLen);
+    /*
+     * Allocate from the actual serialized size. The original implementation
+     * reserved only 128 UTF-16 characters for each variable field (and even
+     * counted seven strings while VariableLenSuiteData contains eight). Long
+     * obfuscated MIDlet class names and sandbox paths on iOS legitimately
+     * exceed that feature-phone limit and were reported as OUT_OF_MEMORY.
+     */
+    {
+        size_t requiredLen = sizeof(int);
+        MidletSuiteData* sizeData = g_pSuitesData;
+
+        while (sizeData != NULL) {
+            int i;
+            pcsl_string* strings[8];
+
+            if (requiredLen > SIZE_MAX - MIDLET_SUITE_DATA_SIZE) {
+                pcsl_string_free(&suitesDataFile);
+                return OUT_OF_MEMORY;
+            }
+            requiredLen += MIDLET_SUITE_DATA_SIZE;
+
+            if (sizeData->jarHashLen > 0) {
+                if ((size_t)sizeData->jarHashLen > SIZE_MAX - requiredLen) {
+                    pcsl_string_free(&suitesDataFile);
+                    return OUT_OF_MEMORY;
+                }
+                requiredLen += (size_t)sizeData->jarHashLen;
+            }
+
+            strings[0] = &sizeData->varSuiteData.midletClassName;
+            strings[1] = &sizeData->varSuiteData.displayName;
+            strings[2] = &sizeData->varSuiteData.iconName;
+            strings[3] = &sizeData->varSuiteData.suiteVendor;
+            strings[4] = &sizeData->varSuiteData.suiteName;
+            strings[5] = &sizeData->varSuiteData.suiteVersion;
+            strings[6] = &sizeData->varSuiteData.pathToJar;
+            strings[7] = &sizeData->varSuiteData.pathToSettings;
+
+            for (i = 0; i < 8; ++i) {
+                jint stringLen = pcsl_string_utf16_length(strings[i]);
+                size_t stringBytes = 0;
+
+                requiredLen = SUITESTORE_ALIGN_4(requiredLen);
+                if (requiredLen > SIZE_MAX - sizeof(jint)) {
+                    pcsl_string_free(&suitesDataFile);
+                    return OUT_OF_MEMORY;
+                }
+                requiredLen += sizeof(jint);
+
+                if (stringLen > 0) {
+                    if ((size_t)stringLen > SIZE_MAX / sizeof(jchar)) {
+                        pcsl_string_free(&suitesDataFile);
+                        return OUT_OF_MEMORY;
+                    }
+                    stringBytes = (size_t)stringLen * sizeof(jchar);
+                    if (stringBytes > SIZE_MAX - requiredLen) {
+                        pcsl_string_free(&suitesDataFile);
+                        return OUT_OF_MEMORY;
+                    }
+                    requiredLen += stringBytes;
+                }
+            }
+
+            sizeData = sizeData->nextEntry;
+        }
+
+        if (requiredLen > LONG_MAX) {
+            pcsl_string_free(&suitesDataFile);
+            return OUT_OF_MEMORY;
+        }
+        bufferLen = (long)requiredLen;
+    }
+
+    buffer = pcsl_mem_malloc((size_t)bufferLen);
     if (buffer == NULL) {
         pcsl_string_free(&suitesDataFile);
         return OUT_OF_MEMORY;
@@ -781,7 +866,7 @@ write_suites_data(char** ppszError) {
     pos = 0;
     pData = g_pSuitesData;
 
-    *(int*)&buffer[pos] = g_numberOfSuites;
+    memcpy(&buffer[pos], &g_numberOfSuites, sizeof (g_numberOfSuites));
     ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(int));
 
     while (pData != NULL) {
@@ -799,6 +884,10 @@ write_suites_data(char** ppszError) {
         {
             int i, convertedLen;
             jint strLen;
+            jchar* utf16Buffer;
+            size_t utf16Bytes;
+            size_t conversionBytes;
+            jsize conversionUnits;
             pcsl_string* pStrings[8];
 
             pStrings[0] = &pData->varSuiteData.midletClassName;
@@ -815,28 +904,51 @@ write_suites_data(char** ppszError) {
             for (i = 0; i < (int) (sizeof(pStrings) / sizeof(pStrings[0]));
                     i++) {
                 strLen = pcsl_string_utf16_length(pStrings[i]);
-                /*
-                 * We have to guarantee 4 - bytes alignment to use this:
-                 *     *(jint*)&buffer[pos] = strLen;
-                 * on RISC CPUs.
-                 */
                 pos = SUITESTORE_ALIGN_4(pos);
-                *(jint*)&buffer[pos] = strLen;
+                memcpy(&buffer[pos], &strLen, sizeof (strLen));
                 ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(jint));
 
                 /* assert(bufferLen > 0); */
                 if (strLen > 0) {
+                    /*
+                     * pcsl_string_utf16_length() excludes the terminating NUL,
+                     * while pcsl_string_convert_to_utf16() copies and requires
+                     * it. Serialize only strLen units, but give the converter
+                     * strLen + 1 units.
+                     */
+                    if ((size_t)strLen > (size_t)INT_MAX - 1U ||
+                            (size_t)strLen > SIZE_MAX / sizeof (jchar)) {
+                        status = OUT_OF_MEMORY;
+                        break;
+                    }
+                    utf16Bytes = (size_t)strLen * sizeof (jchar);
+                    if (utf16Bytes > (size_t)bufferLen ||
+                            (size_t)strLen + 1U >
+                                SIZE_MAX / sizeof (jchar)) {
+                        status = OUT_OF_MEMORY;
+                        break;
+                    }
+                    conversionUnits = (jsize)(strLen + 1);
+                    conversionBytes = (size_t)conversionUnits * sizeof (jchar);
+                    utf16Buffer = (jchar*)pcsl_mem_malloc(conversionBytes);
+                    if (utf16Buffer == NULL) {
+                        status = OUT_OF_MEMORY;
+                        break;
+                    }
                     rc = pcsl_string_convert_to_utf16(pStrings[i],
-                        (jchar*)&buffer[pos], bufferLen / sizeof(jchar),
-                            &convertedLen);
+                        utf16Buffer, conversionUnits, &convertedLen);
 
-                    if (rc != PCSL_STRING_OK) {
+                    if (rc != PCSL_STRING_OK || convertedLen < 0 ||
+                            convertedLen > strLen) {
+                        pcsl_mem_free(utf16Buffer);
                         status = OUT_OF_MEMORY;
                         break;
                     }
 
-                    ADJUST_POS_IN_BUF(pos, bufferLen,
-                        convertedLen * sizeof(jchar));
+                    utf16Bytes = (size_t)convertedLen * sizeof (jchar);
+                    memcpy(&buffer[pos], utf16Buffer, utf16Bytes);
+                    pcsl_mem_free(utf16Buffer);
+                    ADJUST_POS_IN_BUF(pos, bufferLen, (long)utf16Bytes);
                 }
             }
         }
@@ -1100,7 +1212,8 @@ read_settings(char** ppszError, SuiteIdType suiteId, jboolean* pEnabled,
              jbyte** ppPermissions, int* pNumberOfPermissions) {
     pcsl_string filename;
     int handle;
-    int bytesRead;
+    long bytesRead;
+    long permissionBytes;
     char* pszTemp;
     MIDPError status;
 
@@ -1120,7 +1233,7 @@ read_settings(char** ppszError, SuiteIdType suiteId, jboolean* pEnabled,
     }
 
     bytesRead = storageRead(ppszError, handle, (char*)pEnabled,
-        sizeof (jboolean));
+        (long)sizeof (jboolean));
     do {
         if (*ppszError != NULL) {
             status = IO_ERROR;
@@ -1128,31 +1241,39 @@ read_settings(char** ppszError, SuiteIdType suiteId, jboolean* pEnabled,
         }
 
         bytesRead = storageRead(ppszError, handle, (char*)pPushInterrupt,
-                                sizeof (jbyte));
+                                (long)sizeof (jbyte));
         if (*ppszError != NULL) {
             status = IO_ERROR;
             break;
         }
 
         bytesRead = storageRead(ppszError, handle, (char*)pNumberOfPermissions,
-                                sizeof (int));
+                                (long)sizeof (int));
 
-        if (bytesRead != sizeof (int) || *pNumberOfPermissions == 0) {
+        if (bytesRead != (long)sizeof (int) ||
+                *pNumberOfPermissions <= 0) {
             status = IO_ERROR;
             break;
         }
 
-        *ppPermissions = (jbyte*)pcsl_mem_malloc(
-                *pNumberOfPermissions * sizeof (jbyte));
+        if ((size_t)*pNumberOfPermissions > SIZE_MAX / sizeof (jbyte) ||
+                (size_t)*pNumberOfPermissions * sizeof (jbyte) >
+                    (size_t)LONG_MAX) {
+            status = SUITE_CORRUPTED_ERROR;
+            break;
+        }
+        permissionBytes = (long)((size_t)*pNumberOfPermissions *
+                                 sizeof (jbyte));
+        *ppPermissions = (jbyte*)pcsl_mem_malloc((size_t)permissionBytes);
         if (*ppPermissions == NULL) {
             status = OUT_OF_MEMORY;
             break;
         }
 
         bytesRead = storageRead(ppszError, handle, (char*)(*ppPermissions),
-                                *pNumberOfPermissions * sizeof (jbyte));
+                                permissionBytes);
 
-        if (bytesRead != *pNumberOfPermissions) {
+        if (bytesRead != permissionBytes) {
             *pNumberOfPermissions = 0;
             pcsl_mem_free(*ppPermissions);
             status = SUITE_CORRUPTED_ERROR;
@@ -1163,7 +1284,7 @@ read_settings(char** ppszError, SuiteIdType suiteId, jboolean* pEnabled,
         status = ALL_OK;
         *pPushOptions = 0;
         bytesRead = storageRead(ppszError, handle, (char*)pPushOptions,
-                                sizeof (jint));
+                                (long)sizeof (jint));
         if (*ppszError != NULL) {
             storageFreeError(*ppszError);
             *ppszError = NULL;
@@ -1614,30 +1735,35 @@ MIDPError begin_transaction(MIDPTransactionType transactionType,
     pcsl_string transDataFile;
     char *pszError = NULL;
     MIDPError status = ALL_OK;
-    char pBuffer[MAX_FILENAME_LENGTH * sizeof(jchar) + sizeof(int) /* file name length */ + 
+    char pBuffer[MAX_FILENAME_LENGTH * sizeof(jchar) + sizeof(int) /* file name length */ +
                  sizeof(suiteId) + sizeof(transactionType)];
     char *p = pBuffer;
-    int len = sizeof(suiteId) + sizeof(transactionType);
+    int len = (int)(sizeof(suiteId) + sizeof(transactionType));
 
-    *(MIDPTransactionType*)p = transactionType;
+    memcpy(p, &transactionType, sizeof (transactionType));
     p += sizeof(MIDPTransactionType);
-    *(SuiteIdType*)p = suiteId;
+    memcpy(p, &suiteId, sizeof (suiteId));
     p += sizeof(SuiteIdType);
 
     if (pFilename != NULL) {
         int strLen;
+        size_t filenameBytes;
+        jchar filenameBuffer[MAX_FILENAME_LENGTH];
 
         rc = pcsl_string_convert_to_utf16(pFilename,
-                        (jchar*)(p + sizeof(int)),
+                        filenameBuffer,
                         MAX_FILENAME_LENGTH,
                         &strLen);
-        if (rc != PCSL_STRING_OK) {
+        if (rc != PCSL_STRING_OK || strLen < 0 ||
+                strLen > MAX_FILENAME_LENGTH) {
             return OUT_OF_MEMORY;
         }
 
-        *(int*)p = strLen;
+        filenameBytes = (size_t)strLen * sizeof (jchar);
+        memcpy(p, &strLen, sizeof (strLen));
+        memcpy(p + sizeof (strLen), filenameBuffer, filenameBytes);
 
-        len += strLen;
+        len += (int)(sizeof (strLen) + filenameBytes);
     }
 
     /* get a full path to the transaction data file */

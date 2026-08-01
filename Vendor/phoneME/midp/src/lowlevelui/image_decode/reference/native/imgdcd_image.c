@@ -28,6 +28,7 @@
  * @file
  * @brief Common internal functions of image.
  */
+#include <stddef.h>
 #include <midpError.h>
 #include <string.h>
 #include <imgdcd_image_util.h>
@@ -63,6 +64,7 @@ MIDP_ERROR imgdcd_image_get_info(unsigned char *imgBuf,
 			        imgdcd_image_format *format,
 			        unsigned int *width,
 			        unsigned int *height) {
+    imgdcd_image_buffer_raw rawHeader;
 
     /* check for a PNG header signature */
     if ((length >= 4 + 8) &&
@@ -70,9 +72,10 @@ MIDP_ERROR imgdcd_image_get_info(unsigned char *imgBuf,
 
 	*format = IMGDCD_IMAGE_FORMAT_RAW;
 
-	/* Assume default endian */
-	*width  = ((imgdcd_image_buffer_raw *)imgBuf)->width;
-	*height = ((imgdcd_image_buffer_raw *)imgBuf)->height;
+	/* Assume default endian, but do not require aligned input. */
+    memcpy(&rawHeader, imgBuf, offsetof(imgdcd_image_buffer_raw, data));
+	*width = rawHeader.width;
+	*height = rawHeader.height;
 
 	return MIDP_ERROR_NONE;
 

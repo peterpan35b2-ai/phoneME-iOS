@@ -24,6 +24,8 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 #include <midpEvents.h>
 #include <midpEventUtil.h>
@@ -145,13 +147,19 @@ int midp_ams_uncaught_exception(int isolateId,
 
     evt.stringParam1 = strExceptionClassName;
 
-    /* convert exceptionClassName to pcslString */
+    /* convert exceptionMessage to pcslString */
     if (exceptionMessage != NULL) {
-        res = pcsl_string_convert_from_utf8((const jbyte*)exceptionClassName,
-                                            strlen(exceptionMessage),
-                                            &strExceptionMessage);
-        if (res != PCSL_STRING_OK) {
+        size_t messageLength = strlen(exceptionMessage);
+        if (messageLength > (size_t)INT_MAX) {
             strExceptionMessage = PCSL_STRING_NULL;
+        } else {
+            res = pcsl_string_convert_from_utf8(
+                (const jbyte*)exceptionMessage,
+                (jsize)messageLength,
+                &strExceptionMessage);
+            if (res != PCSL_STRING_OK) {
+                strExceptionMessage = PCSL_STRING_NULL;
+            }
         }
     } else {
         strExceptionMessage = PCSL_STRING_NULL;

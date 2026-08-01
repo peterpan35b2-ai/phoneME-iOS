@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <kni.h>
 #include <commonKNIMacros.h>
 #include <ROMStructs.h>
@@ -299,7 +300,7 @@ KNIDECL(com_sun_midp_rms_RecordStoreFile_spaceAvailableRecordStore) {
  */
 KNIEXPORT KNI_RETURNTYPE_VOID
 KNIDECL(com_sun_midp_rms_RecordStoreFile_setPosition) {
-    long  absolutePosition = (long)KNI_GetParameterAsInt(2);
+    int   absolutePosition = KNI_GetParameterAsInt(2);
     int   handle           = KNI_GetParameterAsInt(1);
     char* pszError;
 
@@ -387,7 +388,7 @@ KNIDECL(com_sun_midp_rms_RecordStoreFile_readBytes) {
     int   length = KNI_GetParameterAsInt(4);
     int   offset = KNI_GetParameterAsInt(3);
     int   handle = KNI_GetParameterAsInt(1);
-    int   bytesRead;
+    long  bytesRead;
     char* pszError;
 
     KNI_StartHandles(1);
@@ -401,6 +402,9 @@ KNIDECL(com_sun_midp_rms_RecordStoreFile_readBytes) {
     if (pszError != NULL) {
         KNI_ThrowNew(midpIOException, pszError);
         recordStoreFreeError(pszError);
+    } else if (bytesRead < 0 || bytesRead > INT_MAX) {
+        KNI_ThrowNew(midpIOException, "Invalid RMS read length");
+        bytesRead = 0;
     }
 
     KNI_ReturnInt((jint)bytesRead);

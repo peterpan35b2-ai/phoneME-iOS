@@ -126,7 +126,7 @@ midp_suite_read_secure_resource(SuiteIdType suiteId,
     pcsl_string filename = PCSL_STRING_NULL;
     char *pszError = NULL;
     MIDPError errorCode;
-    int bytesRead;
+    long bytesRead;
     int handle;
 
     *returnValue = NULL;
@@ -147,20 +147,27 @@ midp_suite_read_secure_resource(SuiteIdType suiteId,
 
     do {
         bytesRead = storageRead(&pszError, handle,
-            (char*)valueSize, sizeof (int));
-        if (bytesRead != sizeof (int) || *valueSize == 0)
+            (char*)valueSize, (long)sizeof (int));
+        if (pszError != NULL || bytesRead != (long)sizeof (int) ||
+                *valueSize < 0) {
+            errorCode = SUITE_CORRUPTED_ERROR;
             break;
+        }
+        if (*valueSize == 0) {
+            break;
+        }
 
-        *returnValue = (jbyte*)pcsl_mem_malloc(*valueSize * sizeof (jbyte));
+        *returnValue = (jbyte*)pcsl_mem_malloc(
+            (size_t)*valueSize * sizeof (jbyte));
         if (*returnValue == NULL) {
             errorCode = OUT_OF_MEMORY;
             break;
         }
 
         bytesRead = storageRead(&pszError, handle, (char*)(*returnValue),
-            *valueSize * sizeof (jbyte));
+            (long)*valueSize * (long)sizeof (jbyte));
 
-        if (pszError != NULL || bytesRead != *valueSize) {
+        if (pszError != NULL || bytesRead != (long)*valueSize) {
             errorCode = SUITE_CORRUPTED_ERROR;
             pcsl_mem_free(*returnValue);
             *returnValue = NULL;

@@ -1,6 +1,7 @@
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
+import Photos
 #elseif canImport(AppKit)
 import AppKit
 #endif
@@ -26,12 +27,11 @@ struct EmulatorView: View {
     @State private var keyboardObscuresDisplay = false
     @State private var activeVirtualKeyCount = 0
     @State private var keyboardHideTask: Task<Void, Never>?
-    @State private var keyboardChangeSnapshot: GameProfile?
-    @State private var showSaveKeyboardChanges = false
     @State private var showKeyboardLayoutPicker = false
     @State private var showHiddenKeysEditor = false
     @State private var hiddenKeyDraft: Set<String> = []
-    @State private var hiddenKeyChangesApplied = false
+    @State private var showScreenshotSaved = false
+    @State private var nativeLCDUICaptureRect = CGRect.zero
     @State private var showExitConfirmation = false
     @State private var showError = false
     @State private var errorMessage = ""
@@ -64,7 +64,12 @@ struct EmulatorView: View {
     }
 
     private var presentsFullscreenSurface: Bool {
-        runtimeProfile.forceFullscreen
+        guard !session.isPresentingNativeLCDUI else { return false }
+        return runtimeProfile.forceFullscreen || session.lcdUI.isCanvasFullScreen
+    }
+
+    private var showsCanvasCommandBar: Bool {
+        !presentsFullscreenSurface && !session.lcdUI.commands.isEmpty
     }
 
     var body: some View {
@@ -73,6 +78,34 @@ struct EmulatorView: View {
                 ZStack {
                     Color.playSurfaceBackground
                         .ignoresSafeArea()
+
+                    // Keep the system menu outside the frequently invalidated
+                    // Canvas subtree. Otherwise FPS/LCDUI updates can dismiss
+                    // an open toolbar menu or its nested submenu on iOS.
+                    EmulatorToolbarAnchor(
+                        title: navigationTitle,
+                        keyboardDisabled: session.isPresentingNativeLCDUI,
+                        keyboardAdjustmentMode: keyboardAdjustmentMode,
+                        isRotationLocked: runtimeProfile.lockedOrientation != nil,
+                        hideAction: hideApplication,
+                        exitAction: { showExitConfirmation = true },
+                        toggleRotationLockAction: toggleRotationLock,
+                        toggleKeyboardAction: toggleKeyboard,
+                        screenshotAction: saveScreenshot,
+                        beginKeyboardPositionAction: {
+                            beginKeyboardAdjustment(.position)
+                        },
+                        beginKeyboardResizeAction: {
+                            beginKeyboardAdjustment(.size)
+                        },
+                        finishKeyboardAdjustmentAction: finishKeyboardAdjustment,
+                        switchKeyboardLayoutAction: {
+                            showKeyboardLayoutPicker = true
+                        },
+                        hideKeyboardButtonsAction: openHiddenKeysEditor,
+                        resetKeyboardLayoutAction: resetKeyboardLayout
+                    )
+                    .equatable()
 
                     if session.isPresentingNativeLCDUI {
                         NativeLCDUIScreenView(
@@ -84,6 +117,16 @@ struct EmulatorView: View {
                         )
                             .environmentObject(session)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background {
+                                GeometryReader { captureGeometry in
+                                    Color.clear.preference(
+                                        key: NativeLCDUICaptureRectPreferenceKey.self,
+                                        value: captureGeometry.frame(
+                                            in: .named("emulatorCaptureWindow")
+                                        )
+                                    )
+                                }
+                            }
                     } else {
                         VStack(spacing: 0) {
                             GeometryReader { canvasGeometry in
@@ -124,7 +167,7 @@ struct EmulatorView: View {
                                 }
                             }
 
-                            if session.lcdUI.isCanvasVisible {
+                            if showsCanvasCommandBar {
                                 LCDUICommandBar(state: session.lcdUI)
                                     .environmentObject(session)
                             }
@@ -135,15 +178,25 @@ struct EmulatorView: View {
                        !session.isPresentingNativeLCDUI {
                         VStack {
                             HStack(spacing: 10) {
-                                Label(
-                                    keyboardAdjustmentMode == .position
-                                        ? "Move virtual keys"
-                                        : "Resize virtual keys",
-                                    systemImage: keyboardAdjustmentMode == .position
-                                        ? "arrow.up.and.down.and.arrow.left.and.right"
-                                        : "arrow.up.left.and.arrow.down.right"
-                                )
-                                .font(.callout.weight(.semibold))
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Label(
+                                        keyboardAdjustmentMode == .position
+                                            ? "Move virtual keys"
+                                            : "Resize virtual key groups",
+                                        systemImage: keyboardAdjustmentMode == .position
+                                            ? "arrow.up.and.down.and.arrow.left.and.right"
+                                            : "arrow.up.left.and.arrow.down.right"
+                                    )
+                                    .font(.callout.weight(.semibold))
+
+                                    Text(
+                                        keyboardAdjustmentMode == .position
+                                            ? "Snaps to a 4 pt grid"
+                                            : "Drag sideways or vertically in 5% steps"
+                                    )
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                }
 
                                 Spacer()
 
@@ -164,18 +217,7 @@ struct EmulatorView: View {
                     if runtimeProfile.showFPS,
                        session.state == .running,
                        !session.isPresentingNativeLCDUI {
-                        Text(String(format: "%.1f FPS", session.framesPerSecond))
-                            .font(.caption.monospacedDigit().weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(.regularMaterial, in: Capsule())
-                            .frame(
-                                maxWidth: .infinity,
-                                maxHeight: .infinity,
-                                alignment: .topTrailing
-                            )
-                            .padding(10)
-                            .allowsHitTesting(false)
+                        EmulatorFPSOverlay(fpsStore: session.fpsStore)
                     }
 
                     if session.state == .starting {
@@ -185,7 +227,13 @@ struct EmulatorView: View {
                 }
                 .coordinateSpace(name: "emulatorSurface")
                 .contentShape(Rectangle())
-                .simultaneousGesture(backGesture)
+                .simultaneousGesture(
+                    backGesture,
+                    including: keyboardAdjustmentMode == .none ? .all : .none
+                )
+            }
+            .onPreferenceChange(NativeLCDUICaptureRectPreferenceKey.self) { rect in
+                nativeLCDUICaptureRect = rect
             }
             .ignoresSafeArea(
                 .container,
@@ -204,68 +252,8 @@ struct EmulatorView: View {
 #else
             .navigationTitle(navigationTitle)
 #endif
-            .toolbar {
-#if os(iOS)
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Text(navigationTitle)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityAddTraits(.isHeader)
-                }
-#endif
-
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        toggleKeyboard()
-                    } label: {
-                        Image(systemName: "keyboard")
-                    }
-                    .accessibilityLabel("Keyboard (IME)")
-                    .disabled(session.isPresentingNativeLCDUI)
-
-                    Button {
-                        saveScreenshot()
-                    } label: {
-                        Image(systemName: "camera")
-                    }
-                    .accessibilityLabel("Take screenshot")
-
-                    Menu {
-                        Button("Exit") { showExitConfirmation = true }
-                        Button("Save log") { saveLog() }
-                        Button("Lock screen rotate") {}
-                        Divider()
-                        Button("Keyboard (IME)") { toggleKeyboard() }
-                        Button("Take screenshot") { saveScreenshot() }
-                        Button("Limit FPS") {}
-                        Menu("Virtual keyboard") {
-                            Button("Keylayout edit mode") {
-                                beginKeyboardAdjustment(.position)
-                            }
-                            Button("Keylayout resize mode") {
-                                beginKeyboardAdjustment(.size)
-                            }
-                            if keyboardAdjustmentMode != .none {
-                                Button("Finish edit mode") {
-                                    finishKeyboardAdjustment()
-                                }
-                            }
-                            Button("Switch keylayout") {
-                                showKeyboardLayoutPicker = true
-                            }
-                            .disabled(keyboardAdjustmentMode != .none)
-                            Button("Hide buttons") {
-                                openHiddenKeysEditor()
-                            }
-                            .disabled(keyboardAdjustmentMode != .none)
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                    }
-                }
-            }
         }
+        .coordinateSpace(name: "emulatorCaptureWindow")
 #if os(iOS)
         .statusBarHidden(!enableStatusBar || presentsFullscreenSurface)
 #endif
@@ -277,7 +265,7 @@ struct EmulatorView: View {
             }
 
             configureScreenAwake(true)
-            applyPreferredOrientation(runtimeProfile.orientation)
+            applyEffectiveOrientation()
             scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
             guard !hasStarted else { return }
             hasStarted = true
@@ -285,10 +273,10 @@ struct EmulatorView: View {
         }
         .onDisappear {
             keyboardHideTask?.cancel()
-            profiles.save(persistedProfile, for: game)
+            persistRuntimeProfile()
             configureScreenAwake(false)
             resetPreferredOrientation()
-            session.stop()
+            session.hideCurrent()
         }
         .onChange(of: showKeypad) { visible in
             if visible {
@@ -327,10 +315,7 @@ struct EmulatorView: View {
                 }
             }
         }
-        .sheet(
-            isPresented: $showHiddenKeysEditor,
-            onDismiss: hiddenKeysEditorDidDismiss
-        ) {
+        .sheet(isPresented: $showHiddenKeysEditor) {
             NavigationStack {
                 KeyboardVisibilityEditor(
                     controls: KeyboardLayoutCatalog.controlChoices(for: runtimeProfile),
@@ -339,15 +324,10 @@ struct EmulatorView: View {
                 )
             }
         }
-        .alert("Confirmation required", isPresented: $showSaveKeyboardChanges) {
-            Button("Don't save", role: .cancel) {
-                keepKeyboardChangesForSession()
-            }
-            Button("Save") {
-                saveKeyboardChanges()
-            }
+        .alert("Screenshot saved", isPresented: $showScreenshotSaved) {
+            Button("OK", role: .cancel) {}
         } message: {
-            Text("Save the changed virtual keyboard layout for this game?")
+            Text("The screenshot was added to Photos.")
         }
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) {}
@@ -356,9 +336,6 @@ struct EmulatorView: View {
         }
         .alert("Confirmation required", isPresented: $showExitConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Settings") {
-                close()
-            }
             Button("OK", role: .destructive) {
                 close()
             }
@@ -409,9 +386,13 @@ struct EmulatorView: View {
             finishKeyboardAdjustment()
             return
         }
+
+        let visible = !showKeypad
         withAnimation(.easeInOut(duration: 0.15)) {
-            showKeypad.toggle()
+            showKeypad = visible
         }
+        runtimeProfile.showVirtualKeyboard = visible
+        persistRuntimeProfile()
     }
 
     private func handleVirtualKeyActivity(
@@ -455,12 +436,9 @@ struct EmulatorView: View {
 
     private func beginKeyboardAdjustment(_ mode: KeyboardAdjustmentMode) {
         keyboardHideTask?.cancel()
-        if keyboardAdjustmentMode == .none {
-            keyboardChangeSnapshot = runtimeProfile
-            prepareKeyboardForEditing()
-        }
-        runtimeProfile.keyboardTuning = nil
+        prepareKeyboardForEditing()
         keyboardAdjustmentMode = mode
+        runtimeProfile.showVirtualKeyboard = true
         withAnimation(.easeInOut(duration: 0.15)) {
             showKeypad = true
         }
@@ -469,53 +447,42 @@ struct EmulatorView: View {
     private func finishKeyboardAdjustment() {
         guard keyboardAdjustmentMode != .none else { return }
         keyboardAdjustmentMode = .none
-        showSaveKeyboardChanges = true
+        runtimeProfile.makeKeyboardLayoutCustom()
+        persistRuntimeProfile()
+        scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
     }
 
     private func selectKeyboardLayout(_ layout: GameProfile.VirtualKeyboardType) {
         keyboardHideTask?.cancel()
         keyboardAdjustmentMode = .none
         runtimeProfile.virtualKeyboardType = layout
+        runtimeProfile.showVirtualKeyboard = true
         if layout != .custom {
             runtimeProfile.keyboardTuning = nil
         }
         withAnimation(.easeInOut(duration: 0.15)) {
             showKeypad = true
         }
+        persistRuntimeProfile()
         scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
     }
 
     private func openHiddenKeysEditor() {
         keyboardHideTask?.cancel()
         keyboardAdjustmentMode = .none
-        keyboardChangeSnapshot = runtimeProfile
-        prepareKeyboardForEditing()
         hiddenKeyDraft = runtimeProfile.effectiveKeyboardLayoutCustomization.hiddenControlIDs
-        hiddenKeyChangesApplied = false
         showHiddenKeysEditor = true
-        showKeypad = true
     }
 
     private func applyHiddenKeyChanges() {
+        prepareKeyboardForEditing()
         runtimeProfile.updateKeyboardLayoutCustomization { customization in
             customization.hiddenControlIDs = hiddenKeyDraft
         }
-        hiddenKeyChangesApplied = true
+        runtimeProfile.showVirtualKeyboard = true
+        showKeypad = true
         showHiddenKeysEditor = false
-    }
-
-    private func hiddenKeysEditorDidDismiss() {
-        guard hiddenKeyChangesApplied else {
-            if let snapshot = keyboardChangeSnapshot {
-                runtimeProfile = snapshot
-            }
-            keyboardChangeSnapshot = nil
-            return
-        }
-        hiddenKeyChangesApplied = false
-        DispatchQueue.main.async {
-            showSaveKeyboardChanges = true
-        }
+        persistRuntimeProfile()
     }
 
     private func prepareKeyboardForEditing() {
@@ -526,20 +493,20 @@ struct EmulatorView: View {
         runtimeProfile.virtualKeyboardType = .custom
     }
 
-    private func saveKeyboardChanges() {
-        let baseType = keyboardChangeSnapshot?.resolvedKeyboardBaseType
-            ?? runtimeProfile.resolvedKeyboardBaseType
-        runtimeProfile.makeKeyboardLayoutCustom(baseType: baseType)
-        persistedProfile = runtimeProfile
-        profiles.save(persistedProfile, for: game)
-        keyboardChangeSnapshot = nil
-        scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
+    private func resetKeyboardLayout() {
+        keyboardHideTask?.cancel()
+        keyboardAdjustmentMode = .none
+        runtimeProfile.resetKeyboardLayoutCustomization()
+        runtimeProfile.virtualKeyboardType = .arrowsNumbers
+        runtimeProfile.showVirtualKeyboard = true
+        showKeypad = true
+        persistRuntimeProfile()
     }
 
-    private func keepKeyboardChangesForSession() {
-        keyboardChangeSnapshot = nil
-        keyboardAdjustmentMode = .none
-        scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
+    private func persistRuntimeProfile() {
+        runtimeProfile.normalize()
+        persistedProfile = runtimeProfile
+        profiles.save(persistedProfile, for: game)
     }
 
     private func layoutPickerTitle(_ layout: GameProfile.VirtualKeyboardType) -> String {
@@ -554,6 +521,7 @@ struct EmulatorView: View {
             session.launch(
                 game: game,
                 jarURL: jarURL,
+                artworkURL: library.iconURL(for: game),
                 profile: runtimeProfile
             )
         } catch {
@@ -562,11 +530,24 @@ struct EmulatorView: View {
         }
     }
 
+    private func hideApplication() {
+        guard !isClosing else { return }
+        isClosing = true
+        keyboardHideTask?.cancel()
+        persistRuntimeProfile()
+        session.hideCurrent()
+        if let closeAction {
+            closeAction()
+        } else {
+            dismiss()
+        }
+    }
+
     private func close(stopSession: Bool = true) {
         guard !isClosing else { return }
         isClosing = true
         keyboardHideTask?.cancel()
-        profiles.save(persistedProfile, for: game)
+        persistRuntimeProfile()
         if stopSession {
             session.stop()
         }
@@ -577,17 +558,142 @@ struct EmulatorView: View {
         }
     }
 
-    private func saveLog() {
-        do {
-            try library.saveLog()
-        } catch {
-            errorMessage = error.localizedDescription
+    private func saveScreenshot() {
+#if os(iOS)
+        guard let image = captureCurrentScreen() else {
+            errorMessage = "Unable to capture the current screen."
             showError = true
+            return
+        }
+
+        let saveImage = {
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }) { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        showScreenshotSaved = true
+                    } else {
+                        errorMessage = error?.localizedDescription
+                            ?? "Unable to save the screenshot to Photos."
+                        showError = true
+                    }
+                }
+            }
+        }
+
+        switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
+        case .authorized, .limited:
+            saveImage()
+        case .notDetermined:
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                DispatchQueue.main.async {
+                    if status == .authorized || status == .limited {
+                        saveImage()
+                    } else {
+                        errorMessage = "Photos access is required to save screenshots."
+                        showError = true
+                    }
+                }
+            }
+        default:
+            errorMessage = "Photos access is required to save screenshots."
+            showError = true
+        }
+#endif
+    }
+
+#if os(iOS)
+    private func captureCurrentScreen() -> UIImage? {
+        if !session.isPresentingNativeLCDUI {
+            guard let frame = session.frame else { return nil }
+            return UIImage(cgImage: frame, scale: 1, orientation: .up)
+        }
+
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }),
+              let window = scene.windows.first(where: \.isKeyWindow),
+              let captureRect = alignedCaptureRect(
+                nativeLCDUICaptureRect,
+                inside: window.bounds,
+                scale: scene.screen.scale
+              ) else {
+            return nil
+        }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scene.screen.scale
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: captureRect.size, format: format)
+        return renderer.image { _ in
+            window.drawHierarchy(
+                in: window.bounds.offsetBy(
+                    dx: -captureRect.minX,
+                    dy: -captureRect.minY
+                ),
+                afterScreenUpdates: true
+            )
         }
     }
 
-    private func saveScreenshot() {
-        guard session.frame != nil else { return }
+    private func alignedCaptureRect(
+        _ rect: CGRect,
+        inside bounds: CGRect,
+        scale: CGFloat
+    ) -> CGRect? {
+        let clippedRect = rect.standardized.intersection(bounds)
+        guard !clippedRect.isNull,
+              clippedRect.width > 0,
+              clippedRect.height > 0,
+              scale > 0 else {
+            return nil
+        }
+
+        let minX = floor(clippedRect.minX * scale) / scale
+        let minY = floor(clippedRect.minY * scale) / scale
+        let maxX = ceil(clippedRect.maxX * scale) / scale
+        let maxY = ceil(clippedRect.maxY * scale) / scale
+        let alignedRect = CGRect(
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        ).intersection(bounds)
+
+        guard !alignedRect.isNull,
+              alignedRect.width > 0,
+              alignedRect.height > 0 else {
+            return nil
+        }
+        return alignedRect
+    }
+#endif
+
+    private func toggleRotationLock() {
+#if os(iOS)
+        if runtimeProfile.lockedOrientation == nil {
+            runtimeProfile.lockedOrientation = currentInterfaceOrientation()
+        } else {
+            runtimeProfile.lockedOrientation = nil
+        }
+        persistRuntimeProfile()
+        applyEffectiveOrientation()
+#endif
+    }
+
+    private func currentInterfaceOrientation() -> GameProfile.Orientation {
+#if os(iOS)
+        guard let orientation = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })?
+            .interfaceOrientation else {
+            return .portrait
+        }
+        return orientation.isLandscape ? .landscape : .portrait
+#else
+        return .portrait
+#endif
     }
 
     private func configureScreenAwake(_ active: Bool) {
@@ -596,14 +702,20 @@ struct EmulatorView: View {
 #endif
     }
 
+    private func applyEffectiveOrientation() {
+        applyPreferredOrientation(
+            runtimeProfile.lockedOrientation ?? runtimeProfile.orientation
+        )
+    }
+
     private func applyPreferredOrientation(_ orientation: GameProfile.Orientation) {
 #if os(iOS)
         let mask: UIInterfaceOrientationMask
         switch orientation {
-        case .defaultValue, .portrait:
-            mask = .portrait
-        case .auto:
+        case .defaultValue, .auto:
             mask = .allButUpsideDown
+        case .portrait:
+            mask = .portrait
         case .landscape:
             mask = .landscape
         }
@@ -619,21 +731,152 @@ struct EmulatorView: View {
 
 #if os(iOS)
     private func requestOrientation(_ mask: UIInterfaceOrientationMask) {
+        PhoneMEAppDelegate.supportedOrientationMask = mask
+
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }) else {
             return
         }
 
-        scene.requestGeometryUpdate(
-            .iOS(interfaceOrientations: mask)
-        ) { _ in }
         scene.windows
             .first(where: \.isKeyWindow)?
             .rootViewController?
             .setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations: mask)
+        ) { _ in }
     }
 #endif
+}
+
+private struct NativeLCDUICaptureRectPreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect { .zero }
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
+private struct EmulatorFPSOverlay: View {
+    @ObservedObject var fpsStore: EmulatorFPSStore
+
+    var body: some View {
+        Text(String(format: "%.1f FPS", fpsStore.value))
+            .font(.caption.monospacedDigit().weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(.regularMaterial, in: Capsule())
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topTrailing
+            )
+            .padding(10)
+            .allowsHitTesting(false)
+    }
+}
+
+private struct EmulatorToolbarAnchor: View, Equatable {
+    let title: String
+    let keyboardDisabled: Bool
+    let keyboardAdjustmentMode: KeyboardAdjustmentMode
+    let isRotationLocked: Bool
+    let hideAction: () -> Void
+    let exitAction: () -> Void
+    let toggleRotationLockAction: () -> Void
+    let toggleKeyboardAction: () -> Void
+    let screenshotAction: () -> Void
+    let beginKeyboardPositionAction: () -> Void
+    let beginKeyboardResizeAction: () -> Void
+    let finishKeyboardAdjustmentAction: () -> Void
+    let switchKeyboardLayoutAction: () -> Void
+    let hideKeyboardButtonsAction: () -> Void
+    let resetKeyboardLayoutAction: () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.title == rhs.title
+            && lhs.keyboardDisabled == rhs.keyboardDisabled
+            && lhs.keyboardAdjustmentMode == rhs.keyboardAdjustmentMode
+            && lhs.isRotationLocked == rhs.isRotationLocked
+    }
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .toolbar {
+#if os(iOS)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    PhoneMEToolbarTitle(title)
+                }
+#endif
+
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button(action: toggleKeyboardAction) {
+                        Image(systemName: "keyboard")
+                    }
+                    .accessibilityLabel("Keyboard (IME)")
+                    .disabled(keyboardDisabled)
+
+                    Button(action: screenshotAction) {
+                        Image(systemName: "camera")
+                    }
+                    .accessibilityLabel("Take screenshot")
+
+                    Menu {
+                        Button(action: hideAction) {
+                            Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                        Button("Exit", role: .destructive, action: exitAction)
+                        Button(action: toggleRotationLockAction) {
+                            Label(
+                                isRotationLocked
+                                    ? "Unlock screen rotation"
+                                    : "Lock screen rotation",
+                                systemImage: isRotationLocked
+                                    ? "lock.rotation.open"
+                                    : "lock.rotation"
+                            )
+                        }
+                        Divider()
+                        Menu("Virtual keyboard") {
+                            Button(
+                                "Move keys",
+                                action: beginKeyboardPositionAction
+                            )
+                            Button(
+                                "Resize key groups",
+                                action: beginKeyboardResizeAction
+                            )
+                            if keyboardAdjustmentMode != .none {
+                                Button(
+                                    "Finish editing",
+                                    action: finishKeyboardAdjustmentAction
+                                )
+                            }
+                            Divider()
+                            Button(
+                                "Choose layout",
+                                action: switchKeyboardLayoutAction
+                            )
+                            .disabled(keyboardAdjustmentMode != .none)
+                            Button(
+                                "Visible buttons",
+                                action: hideKeyboardButtonsAction
+                            )
+                            .disabled(keyboardAdjustmentMode != .none)
+                            Button(
+                                "Reset keyboard layout",
+                                role: .destructive,
+                                action: resetKeyboardLayoutAction
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                }
+            }
+    }
 }
 
 private struct KeyboardVisibilityEditor: View {
@@ -723,20 +966,10 @@ private struct FrameSurface: View {
         .accessibilityLabel("J2ME display")
     }
 
-    @ViewBuilder
     private func renderedFrame(_ frame: CGImage) -> some View {
-        let image = Image(decorative: frame, scale: 1, orientation: .up)
+        Image(decorative: frame, scale: 1, orientation: .up)
             .resizable()
             .interpolation(profile.filtering ? .high : .none)
-
-        switch profile.graphicsMode {
-        case .software:
-            image
-        case .openGLES:
-            image.drawingGroup(opaque: true, colorMode: .nonLinear)
-        case .window:
-            image.compositingGroup()
-        }
     }
 
     private func pointerGesture(
@@ -925,6 +1158,23 @@ private enum FrameLayout {
                 y: availableSize.height - renderedSize.height
             )
         }
+    }
+}
+
+struct PhoneMEToolbarTitle: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.headline)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: 150, alignment: .leading)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 

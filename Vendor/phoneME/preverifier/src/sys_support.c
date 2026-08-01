@@ -54,6 +54,7 @@
 
 static cpe_t **saved_classpath;
 static cpe_t **saved_classpath_end;
+static char *saved_classpath_string;
 
 extern zip_t * getZipEntry(char *zipFile, int len);
 
@@ -81,9 +82,11 @@ sysGetClassPath(void)
         if ((cps = getenv("CLASSPATH")) == 0) {
             cps = ".";
         }
-        if ((cps = strdup(cps)) == 0) {
+        saved_classpath_string = strdup(cps);
+        if (saved_classpath_string == 0) {
             return 0;
         }
+        cps = saved_classpath_string;
         for (s = cps; *s != '\0'; s++) {
             if (*s == PATH_SEPARATOR) {
                 ncpe++;
@@ -99,6 +102,7 @@ sysGetClassPath(void)
         if (cpp == 0) {
             return 0;
         }
+        *cpp = 0;
         while (cps && *cps) {
             char *path = cps;
             cpe_t *cpe;
@@ -129,6 +133,7 @@ sysGetClassPath(void)
 
                 /* restore only for a valid directory */
                 *cpp++ = cpe;
+                *cpp = 0;
                 
                 if (JAR_DEBUG && verbose)
                     jio_fprintf(stderr, "SysGetClassPath: Found directory [%s]\n", path);
@@ -159,6 +164,7 @@ sysGetClassPath(void)
                     cpe->u.zip = zipEntry; 
                     /* restore entry only for a valid JAR */
                     *cpp++ = cpe;
+                    *cpp = 0;
                 }
             }
         }
@@ -167,6 +173,7 @@ sysGetClassPath(void)
             cpe->type = CPE_DIR;
             cpe->u.dir = ".";
             *cpp++ = cpe;
+            *cpp = 0;
         }
         *cpp = 0;
         saved_classpath_end = cpp;
@@ -231,6 +238,44 @@ popClassPath()
         /* This copies all of the elements, including the NULL at the end */
         ptr[0] = ptr[1];
     }
+}
+
+void
+phoneme_preverify_abandon_classpath(void)
+{
+    /*
+     * A failed legacy verification can leave ZIP/classpath objects referenced
+     * by partially initialized classes. Detach the globals without walking or
+     * freeing that graph; the next pass will build a fresh classpath.
+     */
+    saved_classpath = 0;
+    saved_classpath_end = 0;
+    saved_classpath_string = 0;
+}
+
+void
+phoneme_preverify_reset_classpath(void)
+{
+    cpe_t **entry;
+
+    if (saved_classpath != 0) {
+        for (entry = saved_classpath; *entry != 0; entry++) {
+            cpe_t *element = *entry;
+            if (element->type == CPE_ZIP && element->u.zip != 0) {
+                sysFree(element->u.zip);
+            }
+            sysFree(element);
+        }
+        sysFree(saved_classpath);
+    }
+
+    if (saved_classpath_string != 0) {
+        sysFree(saved_classpath_string);
+    }
+
+    saved_classpath = 0;
+    saved_classpath_end = 0;
+    saved_classpath_string = 0;
 }
 
 /*=========================================================================

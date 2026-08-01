@@ -4,11 +4,14 @@
  * RGBA8888 snapshot through the small C ABI.
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
@@ -44,6 +47,9 @@ static pthread_mutex_t portMutex = PTHREAD_MUTEX_INITIALIZER;
  * RGB565 -> RGBA conversion.
  */
 static pthread_mutex_t frameCopyMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t wakePipeOnce = PTHREAD_ONCE_INIT;
+static int wakeReadFD = -1;
+static int wakeWriteFD = -1;
 static gxj_pixel_type* framePixels;
 static gxj_pixel_type* frameSnapshotPixels;
 static size_t frameSnapshotCapacity;
@@ -62,6 +68,58 @@ static int stopRequested;
 
 static unsigned int queue_next(unsigned int index) {
     return (index + 1U) % PHONEME_IOS_QUEUE_SIZE;
+}
+
+static void initialize_wake_pipe(void) {
+    int descriptors[2];
+    int flags;
+
+    if (pipe(descriptors) != 0) {
+        return;
+    }
+
+    flags = fcntl(descriptors[0], F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(descriptors[0], F_SETFL, flags | O_NONBLOCK);
+    }
+    flags = fcntl(descriptors[1], F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(descriptors[1], F_SETFL, flags | O_NONBLOCK);
+    }
+    (void)fcntl(descriptors[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(descriptors[1], F_SETFD, FD_CLOEXEC);
+
+    wakeReadFD = descriptors[0];
+    wakeWriteFD = descriptors[1];
+}
+
+static void signal_event_waiter(void) {
+    uint8_t marker = 1U;
+    ssize_t result;
+
+    (void)pthread_once(&wakePipeOnce, initialize_wake_pipe);
+    if (wakeWriteFD < 0) {
+        return;
+    }
+
+    do {
+        result = write(wakeWriteFD, &marker, sizeof(marker));
+    } while (result < 0 && errno == EINTR);
+    /* EAGAIN only means the pipe is already readable, which is sufficient. */
+}
+
+void phoneme_ios_port_drain_wakeup(void) {
+    uint8_t buffer[64];
+    ssize_t result;
+
+    (void)pthread_once(&wakePipeOnce, initialize_wake_pipe);
+    if (wakeReadFD < 0) {
+        return;
+    }
+
+    do {
+        result = read(wakeReadFD, buffer, sizeof(buffer));
+    } while (result > 0 || (result < 0 && errno == EINTR));
 }
 
 static void advance_frame_generation_locked(void) {
@@ -194,6 +252,7 @@ int32_t phoneme_ios_port_configured_height(void) {
 }
 
 void phoneme_ios_port_reset(void) {
+    phoneme_ios_port_drain_wakeup();
     pthread_mutex_lock(&portMutex);
     if (framePixels != NULL) {
         memset(
@@ -218,6 +277,7 @@ void phoneme_ios_port_request_stop(void) {
      * wait behind a VM thread that happens to be holding portMutex.
      */
     __atomic_store_n(&stopRequested, 1, __ATOMIC_RELEASE);
+    signal_event_waiter();
 }
 
 int phoneme_ios_port_should_stop(void) {
@@ -236,6 +296,7 @@ void phoneme_ios_port_send_key(int32_t key_code, int32_t pressed) {
     keyQueue[keyWriteIndex].pressed = pressed != 0;
     keyWriteIndex = next;
     pthread_mutex_unlock(&portMutex);
+    signal_event_waiter();
 }
 
 int phoneme_ios_port_has_pending_key(void) {
@@ -288,6 +349,7 @@ void phoneme_ios_port_send_pointer(
     pointerQueue[pointerWriteIndex].action = action;
     pointerWriteIndex = next;
     pthread_mutex_unlock(&portMutex);
+    signal_event_waiter();
 }
 
 int phoneme_ios_port_has_pending_pointer(void) {
@@ -402,7 +464,8 @@ int32_t phoneme_ios_port_copy_frame_rgba(
 }
 
 int getKeyboardFd(void) {
-    return -1;
+    (void)pthread_once(&wakePipeOnce, initialize_wake_pipe);
+    return wakeReadFD;
 }
 
 int getMouseFd(void) {

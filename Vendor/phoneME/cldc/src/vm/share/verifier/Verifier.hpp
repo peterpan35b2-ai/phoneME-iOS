@@ -47,6 +47,7 @@ public:
     VLOCALS_CACHE_SIZE             =  40
   };
   static void verify_class(InstanceClass* klass JVM_TRAPS);
+  static void compress_stackmaps(InstanceClass* klass JVM_TRAPS);
   static bool flush_cache();
 
 #if ENABLE_VERIFY_ONLY

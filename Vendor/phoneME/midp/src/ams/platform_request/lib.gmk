@@ -33,7 +33,11 @@
 
 #Default settings
 AMS_PLATFORM_REQUEST_DIR = $(SUBSYSTEM_AMS_DIR)/platform_request
+ifeq ($(USE_IOS_NATIVE), true)
+AMS_PLATFORM_REQUEST_IMPL_DIR := $(AMS_PLATFORM_REQUEST_DIR)/ios_native
+else
 AMS_PLATFORM_REQUEST_IMPL_DIR ?= $(AMS_PLATFORM_REQUEST_DIR)/$(PLATFORM)
+endif
 
 
 # Include path for the sub-system

@@ -347,7 +347,10 @@ ClassFileParser::validate_and_fixup_constant_pool_entries(ConstantPool* cp
           if (signature().is_valid_method_signature(&name)) {
             if (name().byte_at(0) == '<') {
               // Only <init> can be in constant pool
-              cpf_check(name.equals(Symbols::object_initializer_name()),
+              Symbol::Raw initializer_name =
+                  Symbols::object_initializer_name()->obj();
+              cpf_check(name.equals(&initializer_name) ||
+                        name().matches(&initializer_name),
                         invalid_field_name);
             }
             cpf_check(name().is_valid_method_name(), invalid_method_name);
@@ -510,14 +513,16 @@ ClassFileParser::parse_field_attributes(ConstantPool* cp,
     juint attribute_length = get_u4(JVM_SINGLE_ARG_CHECK);
     Symbol::Raw attribute_name = cp->checked_symbol_at(attribute_name_index
                                                        JVM_CHECK);
-    if (attribute_name.equals(Symbols::tag_constant_value())) {
+    if (attribute_name.equals(Symbols::tag_constant_value()) ||
+        attribute_name().matches(Symbols::tag_constant_value())) {
       cpf_check((constantvalue_index == 0) &&
                 (attribute_length == 2), invalid_attribute);
       constantvalue_index = get_u2(JVM_SINGLE_ARG_CHECK);
       cpf_check((constantvalue_index != 0) &&
                 (constantvalue_index < cp->length()), invalid_attribute);
       cp->check_constant_at(constantvalue_index, type JVM_CHECK);
-    } else if (attribute_name.equals(Symbols::tag_synthetic())) {
+    } else if (attribute_name.equals(Symbols::tag_synthetic()) ||
+               attribute_name().matches(Symbols::tag_synthetic())) {
       cpf_check(attribute_length == 0, invalid_synthetic_attribute);
       is_synthetic = true;
     } else {
@@ -726,7 +731,10 @@ inline bool ClassFileParser::are_valid_method_access_flags(
       }
     }
   }
-  if (name->equals(Symbols::object_initializer_name())) {
+  Symbol::Raw object_initializer =
+      Symbols::object_initializer_name()->obj();
+  if (name->equals(&object_initializer) ||
+      name->matches(&object_initializer)) {
     int other_flags = flags & ~(JVM_ACC_PUBLIC | JVM_ACC_PROTECTED | JVM_ACC_PRIVATE);
     if (other_flags != 0 && other_flags != JVM_ACC_STRICT) {
       return false;
@@ -941,7 +949,10 @@ ClassFileParser::parse_method(ClassParserState *state, ConstantPool* cp,
   LineVarTable::Fast line_var_table;
 
   cpf_check_0(name().is_valid_method_name(), invalid_method_name);
-  if (name.equals(Symbols::class_initializer_name())) {
+  Symbol::Raw class_initializer =
+      Symbols::class_initializer_name()->obj();
+  if (name.equals(&class_initializer) ||
+      name().matches(&class_initializer)) {
     // We ignore the access flags for a class initializer. (JVM Spec. p. 116)
     access_flags.set_flags(JVM_ACC_STATIC);
   } else {
@@ -986,7 +997,8 @@ ClassFileParser::parse_method(ClassParserState *state, ConstantPool* cp,
 
     method_attribute_name = cp->checked_symbol_at(method_attribute_name_index
                                                   JVM_CHECK_0);
-    if (method_attribute_name.equals(Symbols::tag_code())) {
+    if (method_attribute_name.equals(Symbols::tag_code()) ||
+        method_attribute_name().matches(Symbols::tag_code())) {
       // Parse Code attribute
       cpf_check_0(is_code_required, superfluous_code_attribute);
       is_code_required = false;
@@ -1010,7 +1022,8 @@ ClassFileParser::parse_method(ClassParserState *state, ConstantPool* cp,
       stackmaps = parse_code_attributes(cp, max_stack, max_locals,
                                         code_length, &line_var_table
                                         JVM_CHECK_0);
-    } else if (method_attribute_name.equals(Symbols::tag_exceptions())) {
+    } else if (method_attribute_name.equals(Symbols::tag_exceptions()) ||
+               method_attribute_name().matches(Symbols::tag_exceptions())) {
       cpf_check_0(!parsed_checked_exceptions_attribute, 
                   duplicate_exception_table);
       parsed_checked_exceptions_attribute = true;
@@ -1026,7 +1039,8 @@ ClassFileParser::parse_method(ClassParserState *state, ConstantPool* cp,
         thrown_exceptions().ushort_at_put(i, exception_index);
 #endif
       }
-    } else if (method_attribute_name.equals(Symbols::tag_synthetic())) {
+    } else if (method_attribute_name.equals(Symbols::tag_synthetic()) ||
+               method_attribute_name().matches(Symbols::tag_synthetic())) {
       // Should we check that there hasn't already been a synthetic attribute?
       access_flags.set_is_synthetic();
     } else {
@@ -1171,7 +1185,8 @@ inline ReturnOop ClassFileParser::parse_code_attributes(ConstantPool* cp,
 #if ENABLE_ROM_JAVA_DEBUGGER
     // See if this is a line number table If so, then read in the table
     if (GenerateROMImage &&
-        attribute_name_sym.equals(Symbols::tag_line_number_table())) {
+        (attribute_name_sym.equals(Symbols::tag_line_number_table()) ||
+         attribute_name_sym().matches(Symbols::tag_line_number_table()))) {
       jushort line_number_entries = get_u2(JVM_SINGLE_ARG_CHECK_0);
       jushort start_pc, line_number;
       cpf_check_0((((line_number_entries * 2 * sizeof(jushort)) +
@@ -1195,7 +1210,8 @@ inline ReturnOop ClassFileParser::parse_code_attributes(ConstantPool* cp,
         }
       }
     } else if (GenerateROMImage &&
-               attribute_name_sym.equals(Symbols::tag_local_var_table())) {
+               (attribute_name_sym.equals(Symbols::tag_local_var_table()) ||
+                attribute_name_sym().matches(Symbols::tag_local_var_table()))) {
       jushort local_var_entries = get_u2(JVM_SINGLE_ARG_CHECK_0);
       jushort start_pc, code_length, slot_index;
       cpf_check_0((((local_var_entries * 5 * sizeof(jushort)) +
@@ -1224,7 +1240,8 @@ inline ReturnOop ClassFileParser::parse_code_attributes(ConstantPool* cp,
 #else
     (void)line_var_table;
 #endif
-    if (attribute_name_sym.equals(Symbols::tag_stackmap())) {
+    if (attribute_name_sym.equals(Symbols::tag_stackmap()) ||
+        attribute_name_sym().matches(Symbols::tag_stackmap())) {
       // parse for the stackmap attribute
       if (stackmaps.not_null()) {
         // Duplicate stackmap attribute
@@ -1582,7 +1599,7 @@ inline bool ClassFileParser::parse_class_0(ClassParserState *stack JVM_TRAPS) {
 
   // Checks if name in class file matches requested name
   cpf_check_0(!class_name.is_null(), wrong_class_name);
-  if (!class_name().equals(name())) {
+  if (!class_name().equals(name()) && !class_name().matches(name())) {
     Throw::class_not_found(name(), ErrorOnFailure JVM_THROW_0);
   }
 
@@ -1592,7 +1609,9 @@ inline bool ClassFileParser::parse_class_0(ClassParserState *stack JVM_TRAPS) {
       // In a romized product build, you can't redefine java/lang/Object
       classfile_parse_error(invalid_superclass JVM_THROW_0);
     } else {
-      cpf_check_0(class_name.equals(Symbols::java_lang_Object()),
+      Symbol::Raw object_name = Symbols::java_lang_Object()->obj();
+      cpf_check_0(class_name.equals(&object_name) ||
+                  class_name().matches(&object_name),
                   invalid_superclass);
     }
   } else {
@@ -1604,8 +1623,10 @@ inline bool ClassFileParser::parse_class_0(ClassParserState *stack JVM_TRAPS) {
     // requires that we perform the following check BEFORE trying to
     // resolve a bogus superclass for an interface in the next
     // statement
-    cpf_check_0(!access_flags.is_interface() || 
-            super_class_name.equals(Symbols::java_lang_Object()),
+    Symbol::Raw object_name = Symbols::java_lang_Object()->obj();
+    cpf_check_0(!access_flags.is_interface() ||
+            super_class_name.equals(&object_name) ||
+            super_class_name().matches(&object_name),
             interfaces_must_extend_JLO);
 
     // Find the superclass

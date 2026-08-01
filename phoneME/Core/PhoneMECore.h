@@ -9,6 +9,21 @@ extern "C" {
 
 typedef void* PhoneMERuntimeRef;
 
+typedef struct {
+    int32_t attempted;
+    int32_t succeeded;
+    int32_t failed;
+    int32_t skipped;
+} PhoneMEPreverifyResult;
+
+int32_t phoneme_preverify_jar_classes(
+    const char* runtime_classes_path,
+    const char* jar_path,
+    const char* class_list_path,
+    const char* output_directory,
+    PhoneMEPreverifyResult* result_out
+);
+
 #define PHONEME_LCDUI_TEXT_CAPACITY 768
 
 typedef enum {
@@ -52,8 +67,19 @@ enum {
     PHONEME_ERROR_INVALID_ARGUMENT = -1,
     PHONEME_ERROR_ALREADY_RUNNING = -2,
     PHONEME_ERROR_NOT_CONFIGURED = -3,
-    PHONEME_ERROR_THREAD_CREATE = -4
+    PHONEME_ERROR_THREAD_CREATE = -4,
+    PHONEME_ERROR_NOT_RUNNING = -5,
+    PHONEME_ERROR_SYSTEM_START = -6,
+    PHONEME_ERROR_INSTALL = -7
 };
+
+typedef enum {
+    PHONEME_APP_STATE_NONE = 0,
+    PHONEME_APP_STATE_ACTIVE = 1,
+    PHONEME_APP_STATE_PAUSED = 2,
+    PHONEME_APP_STATE_DESTROYED = 3,
+    PHONEME_APP_STATE_ERROR = 4
+} PhoneMEAppState;
 
 PhoneMERuntimeRef phoneme_create(void);
 void phoneme_destroy(PhoneMERuntimeRef runtime);
@@ -75,7 +101,46 @@ int32_t phoneme_configure_keymap(
     int32_t soft2
 );
 
-/** Starts the VM worker and returns after the worker thread is created. */
+/* Installs a JAR into the shared suite store. Installation must happen before
+ * the MVM system is started. Existing suites are reused and return the same ID. */
+int32_t phoneme_install_jar(
+    PhoneMERuntimeRef runtime,
+    const char* jar_path,
+    int32_t* suite_id_out
+);
+int32_t phoneme_last_install_stage(void);
+int32_t phoneme_last_suite_store_stage(void);
+
+/* Starts one phoneME MVM. Every launched J2ME application below runs in its
+ * own CLDC isolate inside this VM. */
+int32_t phoneme_start_system(PhoneMERuntimeRef runtime);
+int32_t phoneme_start_midlet(
+    PhoneMERuntimeRef runtime,
+    int32_t suite_id,
+    const char* main_class,
+    int32_t app_id,
+    int32_t screen_width,
+    int32_t screen_height
+);
+int32_t phoneme_set_foreground(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t screen_width,
+    int32_t screen_height
+);
+int32_t phoneme_pause_midlet(PhoneMERuntimeRef runtime, int32_t app_id);
+int32_t phoneme_resume_midlet(PhoneMERuntimeRef runtime, int32_t app_id);
+int32_t phoneme_destroy_midlet(PhoneMERuntimeRef runtime, int32_t app_id);
+int32_t phoneme_midlet_state(PhoneMERuntimeRef runtime, int32_t app_id);
+int32_t phoneme_foreground_app_id(PhoneMERuntimeRef runtime);
+/** Approximate Java object-heap bytes currently owned by one MIDlet isolate. */
+int64_t phoneme_midlet_used_memory(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t timeout_milliseconds
+);
+
+/** Compatibility convenience: installs and launches one app as app ID 1. */
 int32_t phoneme_start_jar(
     PhoneMERuntimeRef runtime,
     const char* jar_path,
@@ -84,8 +149,21 @@ int32_t phoneme_start_jar(
     int32_t screen_height
 );
 void phoneme_stop(PhoneMERuntimeRef runtime);
+void phoneme_suspend(PhoneMERuntimeRef runtime);
+void phoneme_resume(PhoneMERuntimeRef runtime);
 int32_t phoneme_is_running(PhoneMERuntimeRef runtime);
+int32_t phoneme_is_suspended(PhoneMERuntimeRef runtime);
 int32_t phoneme_last_exit_code(PhoneMERuntimeRef runtime);
+
+/** Metadata shown by iOS Now Playing while a J2ME media player is active. */
+void phoneme_ios_media_set_application_metadata(
+    const char* title,
+    const char* artist,
+    const char* artwork_path
+);
+
+/** Returns non-zero while any J2ME audio player is actively producing audio. */
+int32_t phoneme_ios_media_has_active_playback(void);
 
 void phoneme_send_key(
     PhoneMERuntimeRef runtime,

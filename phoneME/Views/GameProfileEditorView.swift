@@ -38,16 +38,15 @@ struct GameProfileEditorView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                screenOptions
-                fontOptions
-                inputDevices
-            }
-            .padding(8)
+        Form {
+            displaySection
+            fontSection
+            inputSection
         }
-        .background(Color.phoneMEConfigBackground)
         .navigationTitle(title)
+#if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+#endif
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if game != nil {
@@ -58,21 +57,15 @@ struct GameProfileEditorView: View {
                 }
 
                 Menu {
-                    if game != nil {
-                        Button("Clear data") {}
-                    }
-                    Button("Reset settings") {
+                    Button("Reset settings", role: .destructive) {
                         profile = .default
                     }
-                    Button("Reset keylayout") {
+                    Button("Reset key layout") {
                         profile.keyLayout = .nokiaSE
                         profile.resetCustomKeyMappings()
                         profile.virtualKeyboardType = .arrowsNumbers
                         profile.resetKeyboardLayoutCustomization()
                     }
-                    Divider()
-                    Button("Load profile") {}
-                    Button("Save profile") {}
                 } label: {
                     Image(systemName: "ellipsis")
                 }
@@ -81,20 +74,28 @@ struct GameProfileEditorView: View {
         .onDisappear {
             persistProfile()
         }
-        .confirmationDialog("Presets", isPresented: $showScreenPresets, titleVisibility: .visible) {
-            ForEach(Array(GameProfile.screenPresets.enumerated()), id: \.offset) { _, preset in
-                Button("\(preset.width) x \(preset.height)") {
+        .confirmationDialog(
+            "Screen size",
+            isPresented: $showScreenPresets,
+            titleVisibility: .visible
+        ) {
+            ForEach(GameProfile.screenPresets, id: \.height) { preset in
+                Button("\(preset.width) × \(preset.height)") {
                     profile.screenWidth = preset.width
                     profile.screenHeight = preset.height
                 }
             }
         }
-        .confirmationDialog("Presets", isPresented: $showFontPresets, titleVisibility: .visible) {
-            Button("128 x 128") { setFontPreset(9, 13, 15) }
-            Button("128 x 160") { setFontPreset(13, 15, 20) }
-            Button("176 x 220") { setFontPreset(15, 18, 22) }
-            Button("240 x 320") { setFontPreset(18, 22, 26) }
-            Button("360 x 640") { setFontPreset(22, 26, 30) }
+        .confirmationDialog(
+            "Font size preset",
+            isPresented: $showFontPresets,
+            titleVisibility: .visible
+        ) {
+            Button("128 × 128") { setFontPreset(9, 13, 15) }
+            Button("128 × 160") { setFontPreset(13, 15, 20) }
+            Button("176 × 220") { setFontPreset(15, 18, 22) }
+            Button("240 × 320") { setFontPreset(18, 22, 26) }
+            Button("360 × 640") { setFontPreset(22, 26, 30) }
         }
         .sheet(isPresented: $showKeyMappings) {
             NavigationStack {
@@ -103,18 +104,13 @@ struct GameProfileEditorView: View {
         }
     }
 
-    private var screenOptions: some View {
-        ConfigCard(title: "Display options") {
+    private var displaySection: some View {
+        Section("Display") {
             HStack(spacing: 10) {
-                Button {
-                    showScreenPresets = true
-                } label: {
-                    Image(systemName: "list.bullet")
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.borderless)
-
                 IntegerTextField(value: $profile.screenWidth, placeholder: "Width")
+                Text("×")
+                    .foregroundStyle(.secondary)
+                IntegerTextField(value: $profile.screenHeight, placeholder: "Height")
 
                 Button {
                     let width = profile.screenWidth
@@ -122,129 +118,137 @@ struct GameProfileEditorView: View {
                     profile.screenHeight = width
                 } label: {
                     Image(systemName: "arrow.left.arrow.right")
-                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Swap width and height")
+            }
 
-                IntegerTextField(value: $profile.screenHeight, placeholder: "Height")
-
-                Button {
-                    showScreenPresets = true
-                } label: {
-                    Image(systemName: "text.badge.plus")
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.borderless)
+            Button {
+                showScreenPresets = true
+            } label: {
+                Label("Screen size presets", systemImage: "rectangle.on.rectangle")
             }
 
             Toggle("Keep Canvas aspect ratio", isOn: $profile.preserveAspectRatio)
 
-            HStack {
-                Text("Canvas scale (%)")
-                Slider(value: Binding(
-                    get: { Double(profile.scalePercent) },
-                    set: { profile.scalePercent = Int($0) }
-                ), in: 10...300, step: 1)
-                Text("\(profile.scalePercent)")
-                    .monospacedDigit()
-                    .frame(width: 38, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Canvas scale")
+                    Spacer()
+                    Text("\(profile.scalePercent)%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(profile.scalePercent) },
+                        set: { profile.scalePercent = Int($0.rounded()) }
+                    ),
+                    in: 10...300,
+                    step: 1
+                )
             }
 
-            ConfigPicker("Screen orientation", selection: $profile.orientation)
-            ConfigPicker("Canvas gravity", selection: $profile.screenGravity)
-            ConfigPicker("Canvas scale type", selection: $profile.scaleType)
+            NativeProfilePicker("Screen orientation", selection: $profile.orientation)
+            NativeProfilePicker("Canvas gravity", selection: $profile.screenGravity)
+            NativeProfilePicker("Canvas scale type", selection: $profile.scaleType)
 
-            Toggle("Filter", isOn: $profile.filtering)
-            Toggle("Immediate processing mode", isOn: $profile.immediateProcessing)
-            ConfigPicker("Graphics mode:", selection: $profile.graphicsMode)
-            Toggle("Parallel screen redrawing", isOn: $profile.parallelScreenRedrawing)
+            Toggle("Image filtering", isOn: $profile.filtering)
             Toggle("Force Canvas fullscreen", isOn: $profile.forceFullscreen)
             Toggle("Show FPS", isOn: $profile.showFPS)
 
             HStack {
-                Text("Limit FPS")
+                Text("Frame rate limit")
                 Spacer()
                 IntegerTextField(
                     value: $profile.frameRateLimit,
-                    placeholder: "unlimited",
-                    width: 110
+                    placeholder: "Auto (60)",
+                    width: 108
                 )
             }
+
+            Text("Canvas output supports up to 60 FPS. Enter 0 to use the 60 FPS default.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
-    private var fontOptions: some View {
-        ConfigCard(title: "Font options") {
+    private var fontSection: some View {
+        Section("Fonts") {
             HStack(spacing: 8) {
                 IntegerTextField(value: $profile.fontSmall, placeholder: "Small")
-                Text("-")
                 IntegerTextField(value: $profile.fontMedium, placeholder: "Medium")
-                Text("-")
                 IntegerTextField(value: $profile.fontLarge, placeholder: "Large")
             }
 
-            Button("Presets") {
+            Button {
                 showFontPresets = true
+            } label: {
+                Label("Font size presets", systemImage: "textformat.size")
             }
-            .frame(maxWidth: .infinity)
-            .buttonStyle(.bordered)
 
-            Toggle("Values are in Scaled Pixels", isOn: $profile.fontValuesAreScaledPixels)
-            Toggle("Anti-Aliasing", isOn: $profile.fontAntialiasing)
+            Toggle(
+                "Use Dynamic Type scaling",
+                isOn: $profile.fontValuesAreScaledPixels
+            )
         }
     }
 
-    private var inputDevices: some View {
-        ConfigCard(title: "Input devices") {
+    private var inputSection: some View {
+        Section("Input") {
             Toggle("Touch input", isOn: $profile.touchInput)
-            ConfigPicker("Layout", selection: $profile.keyLayout)
+            NativeProfilePicker("J2ME key layout", selection: $profile.keyLayout)
 
-            Button("Key mappings") {
+            Button {
                 showKeyMappings = true
+            } label: {
+                Label("Key mappings", systemImage: "keyboard.badge.ellipsis")
             }
-            .frame(maxWidth: .infinity)
-            .buttonStyle(.bordered)
 
             Toggle("Virtual keyboard", isOn: $profile.showVirtualKeyboard)
-            ConfigPicker("Virtual keyboard", selection: $profile.virtualKeyboardType)
+
+            NativeProfilePicker(
+                "Virtual keyboard layout",
+                selection: $profile.virtualKeyboardType
+            )
+            .disabled(!profile.showVirtualKeyboard)
+
+            NativeProfilePicker("Button shape", selection: $profile.buttonShape)
                 .disabled(!profile.showVirtualKeyboard)
-            ConfigPicker("Button shape", selection: $profile.buttonShape)
-                .disabled(!profile.showVirtualKeyboard)
+
             Toggle("Haptic feedback", isOn: $profile.hapticFeedback)
                 .disabled(!profile.showVirtualKeyboard)
 
-            HStack {
-                Text("Opacity")
-                Slider(value: $profile.keyboardOpacity, in: 0.05...1)
-                Text("\(Int(profile.keyboardOpacity * 100))%")
-                    .monospacedDigit()
-                    .frame(width: 48, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Keyboard opacity")
+                    Spacer()
+                    Text("\(Int((profile.keyboardOpacity * 100).rounded()))%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $profile.keyboardOpacity, in: 0.05...1, step: 0.05)
             }
             .disabled(!profile.showVirtualKeyboard)
 
             Toggle(
-                "Force opacity for off-screen keys",
+                "Keep off-screen keys fully visible",
                 isOn: $profile.forceOpacityForOffscreenKeys
             )
             .disabled(!profile.showVirtualKeyboard)
 
             HStack {
-                Text("Hide delay: ")
+                Text("Auto-hide delay")
                 Spacer()
                 IntegerTextField(
                     value: $profile.keyboardHideDelayMilliseconds,
-                    placeholder: "",
-                    width: 100
+                    placeholder: "0",
+                    width: 88
                 )
                 Text("ms")
+                    .foregroundStyle(.secondary)
             }
             .disabled(!profile.showVirtualKeyboard)
-
-            ColorValueRow(title: "Labels", value: $profile.keyboardForegroundHex)
-            ColorValueRow(title: "Buttons", value: $profile.keyboardBackgroundHex)
-            ColorValueRow(title: "Labels (P)", value: $profile.keyboardSelectedForegroundHex)
-            ColorValueRow(title: "Buttons (P)", value: $profile.keyboardSelectedBackgroundHex)
-            ColorValueRow(title: "Outline", value: $profile.keyboardOutlineHex)
         }
     }
 
@@ -264,37 +268,11 @@ struct GameProfileEditorView: View {
     }
 }
 
-private struct ConfigCard<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text(title)
-                .font(.title3)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-
-            VStack(spacing: 12) {
-                content
-            }
-            .padding(10)
-        }
-        .background(Color.phoneMECardBackground)
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.accentColor.opacity(0.65), lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct ConfigPicker<Value>: View where Value: Hashable & CaseIterable & Identifiable, Value.AllCases: RandomAccessCollection, Value: RawRepresentable, Value.RawValue == String {
+private struct NativeProfilePicker<Value>: View where
+    Value: Hashable & CaseIterable & Identifiable & RawRepresentable,
+    Value.AllCases: RandomAccessCollection,
+    Value.RawValue == String
+{
     let title: String
     @Binding var selection: Value
 
@@ -304,15 +282,10 @@ private struct ConfigPicker<Value>: View where Value: Hashable & CaseIterable & 
     }
 
     var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Picker(title, selection: $selection) {
-                ForEach(Array(Value.allCases)) { value in
-                    Text(displayTitle(value)).tag(value)
-                }
+        Picker(title, selection: $selection) {
+            ForEach(Array(Value.allCases)) { value in
+                Text(displayTitle(value)).tag(value)
             }
-            .labelsHidden()
         }
     }
 
@@ -321,7 +294,6 @@ private struct ConfigPicker<Value>: View where Value: Hashable & CaseIterable & 
         case let value as GameProfile.Orientation: return value.title
         case let value as GameProfile.ScreenGravity: return value.title
         case let value as GameProfile.ScaleType: return value.title
-        case let value as GameProfile.GraphicsMode: return value.title
         case let value as GameProfile.KeyLayout: return value.title
         case let value as GameProfile.VirtualKeyboardType: return value.title
         case let value as GameProfile.ButtonShape: return value.title
@@ -337,6 +309,8 @@ private struct IntegerTextField: View {
 
     var body: some View {
         TextField(placeholder, value: $value, format: .number)
+            .foregroundStyle(.primary)
+            .tint(.accentColor)
             .multilineTextAlignment(.center)
             .textFieldStyle(.roundedBorder)
             .frame(maxWidth: width ?? .infinity)
@@ -346,32 +320,12 @@ private struct IntegerTextField: View {
     }
 }
 
-private struct ColorValueRow: View {
-    let title: String
-    @Binding var value: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            TextField("000000", text: $value)
-                .multilineTextAlignment(.trailing)
-                .textFieldStyle(.roundedBorder)
-                .monospaced()
-                .frame(width: 100)
-            RoundedRectangle(cornerRadius: 3)
-                .fill(Color(hex: value) ?? .clear)
-                .frame(width: 30, height: 30)
-        }
-    }
-}
-
 private struct KeyMappingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var profile: GameProfile
 
     var body: some View {
-        List {
+        Form {
             Picker("Layout", selection: $profile.keyLayout) {
                 ForEach(GameProfile.KeyLayout.allCases) { layout in
                     Text(layout.title).tag(layout)
@@ -389,6 +343,8 @@ private struct KeyMappingsView: View {
                                 value: customBinding(for: key),
                                 format: .number
                             )
+                            .foregroundStyle(.primary)
+                            .tint(.accentColor)
                             .multilineTextAlignment(.trailing)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 110)
@@ -405,12 +361,15 @@ private struct KeyMappingsView: View {
             }
 
             if profile.keyLayout == .custom {
-                Button("Reset custom mappings") {
+                Button("Reset custom mappings", role: .destructive) {
                     profile.resetCustomKeyMappings()
                 }
             }
         }
         .navigationTitle("Key mappings")
+#if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+#endif
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") { dismiss() }
@@ -427,34 +386,6 @@ private struct KeyMappingsView: View {
                     profile.setCustomKeyCode(clamped, for: key)
                 }
             }
-        )
-    }
-}
-
-private extension Color {
-    static var phoneMEConfigBackground: Color {
-#if os(macOS)
-        Color(nsColor: .windowBackgroundColor)
-#else
-        Color(uiColor: .systemGroupedBackground)
-#endif
-    }
-
-    static var phoneMECardBackground: Color {
-#if os(macOS)
-        Color(nsColor: .controlBackgroundColor)
-#else
-        Color(uiColor: .secondarySystemGroupedBackground)
-#endif
-    }
-
-    init?(hex: String) {
-        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard cleaned.count == 6, let value = UInt64(cleaned, radix: 16) else { return nil }
-        self.init(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255
         )
     }
 }

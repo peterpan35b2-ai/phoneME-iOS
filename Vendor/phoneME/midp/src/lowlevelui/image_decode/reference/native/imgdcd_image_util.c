@@ -23,6 +23,9 @@
  * Clara, CA 95054 or visit www.sun.com if you need additional
  * information or have any questions. 
  */
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <kni.h>
 #include <string.h>
 
@@ -55,12 +58,12 @@ typedef struct _imgDst {
   jboolean       hasAlpha;
   jboolean       hasColorMap;
   jboolean       hasTransMap;
-  long           cmap[256];
+  uint32_t       cmap[256];
   /*
    * IMPL NOTE: investigate if 'unsigned char' type could be used for storing
    * transparency map instead of 'long' type.
    */
-  long           tmap[256]; 
+  uint8_t        tmap[256];
 } _imageDstData, *_imageDstPtr;
 
 
@@ -80,8 +83,17 @@ setImageColormap(imageDstPtr self, long *map, int length) {
   REPORT_CALL_TRACE(LC_LOWUI,
                     "LF:STUB:setImageColormap()\n");
 
+  int i;
+
   p->hasColorMap = KNI_TRUE;
-  memcpy(p->cmap, map, length * sizeof(long));
+  if (length < 0) {
+    length = 0;
+  } else if (length > 256) {
+    length = 256;
+  }
+  for (i = 0; i < length; i++) {
+    p->cmap[i] = (uint32_t)(unsigned long)map[i];
+  }
 }
 
 /**
@@ -115,7 +127,7 @@ setImageTransparencyMap(imageDstPtr self, unsigned char *map,
      * entries is assumed to be 255.
      */
     for (i = 0; i < length; i++) {
-        p->tmap[i] = map[i];
+        p->tmap[i] = (uint8_t)map[i];
     }
     if (length >= 0) { 
         for (i = length; i < palLength; i++) {
@@ -144,8 +156,20 @@ setImageSize(imageDstPtr self, int width, int height) {
         p->width = width;
         p->height = height;
 
+        size_t pixelCount;
+        size_t pixelBytes;
+
+        if (width <= 0 || height <= 0 ||
+                (size_t)width > SIZE_MAX / (size_t)height) {
+            return;
+        }
+        pixelCount = (size_t)width * (size_t)height;
+        if (pixelCount > (size_t)UINT_MAX / sizeof (imgdcd_pixel_type)) {
+            return;
+        }
+        pixelBytes = pixelCount * sizeof (imgdcd_pixel_type);
         p->pixelData = (imgdcd_pixel_type *)
-	    midpMalloc(width*height*sizeof(imgdcd_pixel_type));
+            midpMalloc((unsigned int)pixelBytes);
     } else {
         if (p->width != width || p->height != height) {
             /* JAVA_TRACE("IMAGE DIMENSION IS INCORRECT!!\n"); */
@@ -153,8 +177,12 @@ setImageSize(imageDstPtr self, int width, int height) {
     }
 
     if (p->alphaData == NULL) {
-        p->alphaData = (imgdcd_alpha_type *)
-            midpMalloc(width*height*sizeof(imgdcd_alpha_type));
+        size_t pixelCount = (size_t)width * (size_t)height;
+        if (pixelCount > (size_t)UINT_MAX / sizeof (imgdcd_alpha_type)) {
+            return;
+        }
+        p->alphaData = (imgdcd_alpha_type *)midpMalloc(
+            (unsigned int)(pixelCount * sizeof (imgdcd_alpha_type)));
     }
 }
 
@@ -196,8 +224,9 @@ sendPixelsColor(imageDstPtr self, int y, uchar *pixels, int pixelType) {
       pixels += 3;
 
       // p->pixelData[y*p->width + x] = (r<<16) + (g<<8) + b;
-      p->pixelData[y*p->width + x] = IMGDCD_RGB2PIXEL(r, g, b);
-      p->alphaData[y*p->width + x] = alpha;
+      p->pixelData[y*p->width + x] =
+          (imgdcd_pixel_type)IMGDCD_RGB2PIXEL(r, g, b);
+      p->alphaData[y*p->width + x] = (imgdcd_alpha_type)alpha;
       if (alpha != 0xff) {
           p->hasAlpha = KNI_TRUE;
       }
@@ -206,7 +235,7 @@ sendPixelsColor(imageDstPtr self, int y, uchar *pixels, int pixelType) {
     for (x = 0; x < p->width; ++x) {
       int cmapIndex = *pixels++;
 
-      int color = p->cmap[cmapIndex];
+      uint32_t color = p->cmap[cmapIndex];
 
       int r = ((color >> 16) & 0xff) >> 3;
       int g = ((color >>  8) & 0xff) >> 2;
@@ -224,13 +253,14 @@ sendPixelsColor(imageDstPtr self, int y, uchar *pixels, int pixelType) {
         if ((pixelType & CT_COLOR) == 0) { /* grayscale */
           alpha = *pixels++;
         } else { /* indexed color */
-          alpha = p->tmap[cmapIndex];
+          alpha = (int)p->tmap[cmapIndex];
         }
       }
 
       // p->pixelData[y*p->width + x] = (r<<16) + (g<<8) + b;
-      p->pixelData[y*p->width + x] = IMGDCD_RGB2PIXEL(r, g, b);
-      p->alphaData[y*p->width + x] = alpha;
+      p->pixelData[y*p->width + x] =
+          (imgdcd_pixel_type)IMGDCD_RGB2PIXEL(r, g, b);
+      p->alphaData[y*p->width + x] = (imgdcd_alpha_type)alpha;
       if (alpha != 0xff) {
           p->hasAlpha = KNI_TRUE;
       }

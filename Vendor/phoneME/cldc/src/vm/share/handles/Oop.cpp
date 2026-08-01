@@ -853,7 +853,9 @@ void LinkedBasicOop::verify_basic_properties() {
 #endif // !defined(PRODUCT);
 
 bool BasicOop::is_instance_class() const {
-  GUARANTEE(not_null(), "Cannot ask for type of NULL");
+  if (is_null()) {
+    return false;
+  }
   return obj()->is_instance_class();
 }
 

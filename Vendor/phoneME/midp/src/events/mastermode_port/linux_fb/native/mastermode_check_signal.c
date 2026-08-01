@@ -140,7 +140,8 @@ static jboolean checkForSocketPointerAndKeyboardSignal(MidpReentryData* pNewSign
         handlePointer(pNewSignal, pNewMidpEvent);
         return KNI_TRUE;
     }
-    if (timeout64 < 0 || timeout64 > 16) {
+    /* Preserve the old bounded polling fallback only if pipe creation failed. */
+    if (keyboard_fd == -1 && (timeout64 < 0 || timeout64 > 16)) {
         timeout64 = 16;
     }
 #endif
@@ -211,6 +212,17 @@ static jboolean checkForSocketPointerAndKeyboardSignal(MidpReentryData* pNewSign
 #endif
 
 #ifdef PHONEME_IOS_NATIVE
+    if (num_ready > 0 && keyboard_fd != -1 &&
+            FD_ISSET(keyboard_fd, &read_fds)) {
+        /*
+         * The iOS host uses one nonblocking pipe to wake select() for key,
+         * pointer and stop requests. Drain and remove it from the descriptor
+         * result before dispatching the actual queued event below.
+         */
+        phoneme_ios_port_drain_wakeup();
+        FD_CLR(keyboard_fd, &read_fds);
+        --num_ready;
+    }
     stop_vm_if_requested();
     if (phoneme_ios_port_has_pending_key()) {
         handleKey(pNewSignal, pNewMidpEvent);

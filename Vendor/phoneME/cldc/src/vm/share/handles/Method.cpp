@@ -34,6 +34,17 @@
 
 HANDLE_CHECK(Method, is_method())
 
+bool MethodDesc::symbols_match(const OopDesc* left, const OopDesc* right) {
+  if (left == right) {
+    return true;
+  }
+  if (left == NULL || right == NULL ||
+      !left->is_symbol() || !right->is_symbol()) {
+    return false;
+  }
+  return ((const SymbolDesc*)left)->matches((const SymbolDesc*)right);
+}
+
 int Method::vtable_index(void) const {
   // Retrieve the vtbale index from the vtable by searching
   const InstanceClass::Raw klass = holder();
@@ -820,7 +831,17 @@ bool Method::try_resolve_field_access(int index, BasicType& type,
 }
 
 bool Method::is_object_initializer() const {
-  return Symbols::object_initializer_name()->obj() == name();
+  OopDesc* method_name_object = name();
+  OopDesc* initializer_object = Symbols::object_initializer_name()->obj();
+  if (method_name_object == initializer_object) {
+    return true;
+  }
+  if (method_name_object == NULL || !method_name_object->is_symbol()) {
+    return false;
+  }
+  Symbol::Raw method_name = method_name_object;
+  Symbol::Raw initializer_name = initializer_object;
+  return method_name().matches(&initializer_name);
 }
 
 void Method::check_access_by(InstanceClass* sender_class,
@@ -860,8 +881,128 @@ bool Method::can_access_by(InstanceClass* sender_class,
   return false;
 }
 
+static ReturnOop phoneme_signature_class_at(Signature* signature,
+                                             int position) {
+  const int class_id = signature->decode_ushort_at(position);
+#if ENABLE_ISOLATES
+  int task_id = ObjectHeap::owner_task_id(signature->obj());
+  if (task_id == MAX_TASKS) {
+    task_id = TaskContext::current_task_id();
+  }
+  const TaskGCContext context(task_id);
+#endif
+  return Universe::class_from_id(class_id);
+}
+
+static bool phoneme_signature_classes_match(JavaClass* left,
+                                            JavaClass* right) {
+  if (left->is_null() || right->is_null()) {
+    return left->is_null() && right->is_null();
+  }
+
+  if (left->is_instance_class() && right->is_instance_class()) {
+    InstanceClass::Raw left_class = left->obj();
+    InstanceClass::Raw right_class = right->obj();
+    Symbol::Raw left_name = left_class().original_name();
+    Symbol::Raw right_name = right_class().original_name();
+    return left_name.not_null() && right_name.not_null() &&
+           (left_name.equals(&right_name) ||
+            left_name().matches(&right_name));
+  }
+
+  if (left->is_obj_array_class() && right->is_obj_array_class()) {
+    ObjArrayClass::Raw left_array = left->obj();
+    ObjArrayClass::Raw right_array = right->obj();
+    JavaClass::Raw left_element = left_array().element_class();
+    JavaClass::Raw right_element = right_array().element_class();
+    return phoneme_signature_classes_match(&left_element, &right_element);
+  }
+
+  if (left->is_type_array_class() && right->is_type_array_class()) {
+    TypeArrayClass::Raw left_array = left->obj();
+    TypeArrayClass::Raw right_array = right->obj();
+    return left_array().type() == right_array().type();
+  }
+
+  return false;
+}
+
+static bool phoneme_signature_type_at_matches(Signature* left,
+                                              int left_position,
+                                              Signature* right,
+                                              int right_position) {
+  const juint left_byte = (juint)left->byte_at(left_position);
+  const juint right_byte = (juint)right->byte_at(right_position);
+  if (left_byte < 0x80 || right_byte < 0x80) {
+    return left_byte == right_byte;
+  }
+
+  JavaClass::Raw left_class =
+      phoneme_signature_class_at(left, left_position);
+  JavaClass::Raw right_class =
+      phoneme_signature_class_at(right, right_position);
+  return phoneme_signature_classes_match(&left_class, &right_class);
+}
+
+static int phoneme_signature_type_size(Signature* signature, int position) {
+  return ((juint)signature->byte_at(position) < 0x80) ? 1 : 2;
+}
+
+static bool phoneme_signature_types_match(Signature* left,
+                                          Signature* right) {
+  if (left->decode_ushort_at(0) != right->decode_ushort_at(0) ||
+      !phoneme_signature_type_at_matches(left, 2, right, 2)) {
+    return false;
+  }
+
+  int left_position = 2 + phoneme_signature_type_size(left, 2);
+  int right_position = 2 + phoneme_signature_type_size(right, 2);
+  const int left_length = left->length();
+  const int right_length = right->length();
+
+  while (left_position < left_length && right_position < right_length) {
+    if (!phoneme_signature_type_at_matches(
+            left, left_position, right, right_position)) {
+      return false;
+    }
+    left_position += phoneme_signature_type_size(left, left_position);
+    right_position += phoneme_signature_type_size(right, right_position);
+  }
+
+  return left_position == left_length && right_position == right_length;
+}
+
 bool Method::match(Symbol* name, Symbol* signature) const {
-  return ((MethodDesc*)obj())->match(name->obj(), signature->obj());
+  MethodDesc* descriptor = (MethodDesc*)obj();
+  OopDesc* signature_object = signature == NULL ? NULL : signature->obj();
+  if (descriptor->match(name->obj(), signature_object)) {
+    return true;
+  }
+
+  Oop::Raw method_name_object = this->name();
+  if (method_name_object.is_null() || !method_name_object.is_symbol()) {
+    return false;
+  }
+  Symbol::Raw method_name = method_name_object.obj();
+  if (!method_name.equals(name) && !method_name().matches(name)) {
+    return false;
+  }
+
+  if (signature == NULL) {
+    return true;
+  }
+
+  Oop::Raw method_signature_object = this->signature();
+  if (method_signature_object.is_null() ||
+      !method_signature_object.is_symbol() ||
+      !signature->is_valid_method_signature(NULL)) {
+    return false;
+  }
+
+  Signature::Raw method_signature = method_signature_object.obj();
+  Signature::Raw requested_signature = signature->obj();
+  return phoneme_signature_types_match(
+      &method_signature, &requested_signature);
 }
 
 int Method::itable_index() const {

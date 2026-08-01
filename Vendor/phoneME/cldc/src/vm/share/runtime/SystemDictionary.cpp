@@ -316,11 +316,16 @@ void SystemDictionary::update_fake_class(InstanceClass *real_cls,
     // fake classes in ROM ???
     GUARANTEE(ac().class_id() >= ROM::number_of_system_classes(),
               "fake class in ROM");
-    if (!(GenerateROMImage && !ENABLE_MONET) &&
-        element_class().class_id() < ROM::number_of_system_classes()) {
-      // This is an arrayclass whose element class is in ROM, need a TaskMirror
+    if (!Universe::java_lang_Class_class()->is_null() &&
+        !(GenerateROMImage && !ENABLE_MONET) &&
+        (!UseROM ||
+         element_class().class_id() < ROM::number_of_system_classes())) {
+      // A non-ROM runtime also requires per-task mirrors because the shared
+      // bootstrap class list is reused by every isolate.
       TaskMirror::Raw tm = ac().task_mirror_no_check();
-      if (tm().is_being_initialized_mirror()) {
+      if (tm.is_null()) {
+        ac().setup_task_mirror(0, 0, false JVM_CHECK);
+      } else if (tm().is_being_initialized_mirror()) {
         tm = TaskMirror::clinit_list_lookup(&ac);
         if (tm.is_null()) {
           ac().setup_task_mirror(0, 0, false JVM_CHECK);
@@ -331,10 +336,14 @@ void SystemDictionary::update_fake_class(InstanceClass *real_cls,
       // the containing class in the TaskMirror.  So we need to remove
       // the Task Mirror from the list and create a new one
       tm = fake_cls->task_mirror_no_check();
-      //      GUARANTEE(!tm.is_null(), "Task mirror is null");
-      if (tm().is_being_initialized_mirror()) {
-        // class is being initialized, remove fake class TaskMirror
-        TaskMirror::clinit_list_remove(fake_cls);
+      if (tm.not_null() && tm().is_being_initialized_mirror()) {
+        // A barrier marker does not guarantee that the fake class has already
+        // been linked into the clinit list during early non-ROM bootstrap.
+        TaskMirror::Raw initializing =
+            TaskMirror::clinit_list_lookup(fake_cls);
+        if (initializing.not_null()) {
+          TaskMirror::clinit_list_remove(fake_cls);
+        }
         Universe::mirror_list()->obj_at_put(real_cls->class_id(),
                                            Universe::task_class_init_marker());
       }

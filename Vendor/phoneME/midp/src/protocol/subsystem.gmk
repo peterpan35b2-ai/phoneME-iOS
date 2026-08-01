@@ -62,6 +62,12 @@ include $(SUBSYSTEM_PROTOCOL_DIR)/http/$(LIB_MAKE_FILE)
 include $(SUBSYSTEM_PROTOCOL_DIR)/https/$(LIB_MAKE_FILE)
 
 #####################################################################
+# Wireless Messaging API
+# Description: Minimal JSR-120 public interfaces for optional WMA code paths
+#####################################################################
+include $(SUBSYSTEM_PROTOCOL_DIR)/wma_api/$(LIB_MAKE_FILE)
+
+#####################################################################
 # Serial
 # Description: GCF Serial (comm) protocol.
 #####################################################################
@@ -114,6 +120,7 @@ SUBSYSTEM_PROTOCOL_JAVA_FILES = $(SUBSYSTEM_GCF_JAVA_FILES) \
 	$(SUBSYSTEM_FILE_JAVA_FILES) \
 	$(SUBSYSTEM_HTTP_JAVA_FILES) \
 	$(SUBSYSTEM_HTTPS_JAVA_FILES) \
+	$(SUBSYSTEM_WMA_API_JAVA_FILES) \
 	$(SUBSYSTEM_SERIAL_JAVA_FILES) \
 	$(SUBSYSTEM_SERIAL_PORT_JAVA_FILES) \
 	$(SUBSYSTEM_SOCKET_JAVA_FILES) \

@@ -276,8 +276,8 @@ runMidlet(int argc, char** commandlineArgs) {
 
     do {
         int onlyDigits;
-        int len;
-        int i;
+        size_t len;
+        size_t i;
 
         if (argc > 5) {
             if (PCSL_STRING_OK != pcsl_string_from_chars(argv[5], &arg2)) {
@@ -312,7 +312,7 @@ runMidlet(int argc, char** commandlineArgs) {
         onlyDigits = 1;
         len = strlen(argv[1]);
         for (i = 0; i < len; i++) {
-            if (!isdigit((argv[1])[i])) {
+            if (!isdigit((unsigned char)(argv[1])[i])) {
                 onlyDigits = 0;
                 break;
             }

@@ -24,6 +24,8 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 #include <midpMalloc.h>
 #include <midpString.h>
@@ -207,6 +209,7 @@ char* midpJcharsToCharsImpl(MidpString in, char* filename, int line) {
  */
 MidpString midpCharsToJcharsImpl(char* in, char* filename, int line) {
     MidpString out;
+    size_t inputLength;
     int i;
 
     (void)filename;                               /* Avoid compiler warnings */
@@ -218,21 +221,29 @@ MidpString midpCharsToJcharsImpl(char* in, char* filename, int line) {
         return out;
     }
 
-    out.len = strlen(in);
-    if (out.len == 0) {
+    inputLength = strlen(in);
+    if (inputLength == 0) {
+        out.len = 0;
+        out.data = NULL;
+        return out;
+    }
+    if (inputLength > (size_t)INT_MAX ||
+            inputLength > (size_t)UINT_MAX / sizeof (jchar)) {
+        out.len = OUT_OF_MEM_LEN;
         out.data = NULL;
         return out;
     }
 
-    out.data = (jchar*)midpMallocImpl(out.len * sizeof (jchar), filename,
-                                      line);
+    out.len = (jint)inputLength;
+    out.data = (jchar*)midpMallocImpl(
+        (unsigned int)(inputLength * sizeof (jchar)), filename, line);
     if (out.data == NULL) {
         out.len = OUT_OF_MEM_LEN;
         return out;
     }
 
     for (i = 0; i < out.len; i++) {
-        out.data[i] = (jchar)in[i];
+        out.data[i] = (jchar)(unsigned char)in[i];
     }
 
     return out;
@@ -449,41 +460,45 @@ MidpString midpStringTrimImpl(MidpString in, char* filename, int line) {
  * @return MidpString representation of the inputInt
  */
 MidpString midpStringValueOfInt(int inputInt) {
-    int base = 10;
+    const unsigned int base = 10U;
+    unsigned int magnitude;
     int neg = 0;
     int len = 0;
+    int outputIndex = 0;
     jchar buffer[21];
     jchar *pstr = buffer;
     MidpString res = {0, NULL};
 
     if (inputInt < 0) {
         neg = 1;
-        inputInt*=(-1);
+        magnitude = 0U - (unsigned int)inputInt;
+    } else {
+        magnitude = (unsigned int)inputInt;
     }
 
     do {
-        *pstr++ = ((inputInt % base)+'0');
-        inputInt = inputInt/base;
+        *pstr++ = (jchar)((magnitude % base) + (unsigned int)'0');
+        magnitude /= base;
         len++;
-    } while (inputInt > 0);
+    } while (magnitude > 0U);
 
     pstr--;
 
     if (neg) {
-        *++pstr = '-';
+        *++pstr = (jchar)'-';
         len++;
     }
 
-    res.data = (jchar*)midpMalloc((len+1)*sizeof(jchar));
+    res.data = (jchar*)midpMalloc(
+        (unsigned int)((len + 1) * (int)sizeof (jchar)));
     if (!res.data) {
         return res;
     }
-    memset(res.data,0,(len+1)*sizeof(jchar));
+    memset(res.data, 0, (size_t)(len + 1) * sizeof (jchar));
 
     res.len = len;
-    base = 0;
     while (len-- > 0) {
-        *(res.data+base++) = *pstr--;
+        res.data[outputIndex++] = *pstr--;
     }
     return res;
 } /* midpStringValueOfInt */

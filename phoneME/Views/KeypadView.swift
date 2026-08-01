@@ -329,18 +329,31 @@ struct KeypadView: View {
 
     @State private var positionDragOrigins: [String: GameProfile.KeyboardControlOffset] = [:]
     @State private var resizeDragOrigins: [String: GameProfile.KeyboardGroupScale] = [:]
+    @State private var resizeDragAxes: [String: ResizeAxis] = [:]
     @State private var selectedGroupID: String?
+    @State private var draftCustomization = GameProfile.KeyboardLayoutCustomization()
+
+    private let movementGridSize: CGFloat = 4
+    private let scaleGridSize = 0.05
+
+    private enum ResizeAxis {
+        case horizontal
+        case vertical
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let definition = KeyboardLayoutCatalog.definition(for: profile)
+            let customization = editMode == .none
+                ? profile.effectiveKeyboardLayoutCustomization
+                : draftCustomization
             let frames = layoutFrames(
                 definition: definition,
                 size: geometry.size,
                 layoutRect: layoutRect,
-                customization: profile.effectiveKeyboardLayoutCustomization
+                customization: customization
             )
-            let hidden = profile.effectiveKeyboardLayoutCustomization.hiddenControlIDs
+            let hidden = customization.hiddenControlIDs
             let visibleFrames = frames.filter { !hidden.contains($0.key) }
             let obscuresDisplay = visibleFrames.values.contains { $0.intersects(displayRect) }
 
@@ -382,12 +395,23 @@ struct KeypadView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .onAppear {
+                draftCustomization = profile.effectiveKeyboardLayoutCustomization
                 onObscuresDisplayChange(obscuresDisplay)
+            }
+            .onChange(of: editMode) { mode in
+                positionDragOrigins.removeAll(keepingCapacity: true)
+                resizeDragOrigins.removeAll(keepingCapacity: true)
+                resizeDragAxes.removeAll(keepingCapacity: true)
+                selectedGroupID = nil
+                if mode != .none {
+                    draftCustomization = profile.effectiveKeyboardLayoutCustomization
+                }
             }
             .onChange(of: obscuresDisplay) { value in
                 onObscuresDisplayChange(value)
             }
         }
+        .coordinateSpace(name: "keyboardEditor")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Virtual keyboard")
     }
@@ -457,7 +481,7 @@ struct KeypadView: View {
         size: CGSize
     ) {
         guard size.width > 0, size.height > 0 else { return }
-        let currentCustomization = profile.effectiveKeyboardLayoutCustomization
+        let currentCustomization = draftCustomization
         let origin: GameProfile.KeyboardControlOffset
         if let existing = positionDragOrigins[control.id] {
             origin = existing
@@ -467,9 +491,13 @@ struct KeypadView: View {
             positionDragOrigins[control.id] = origin
         }
 
+        let gridTranslation = CGSize(
+            width: snapped(translation.width, step: movementGridSize),
+            height: snapped(translation.height, step: movementGridSize)
+        )
         var candidateOffset = GameProfile.KeyboardControlOffset(
-            x: origin.x + Double(translation.width / size.width),
-            y: origin.y + Double(translation.height / size.height)
+            x: origin.x + Double(gridTranslation.width / size.width),
+            y: origin.y + Double(gridTranslation.height / size.height)
         )
         var candidateCustomization = currentCustomization
         candidateCustomization.controlOffsets[control.id] = candidateOffset
@@ -484,23 +512,38 @@ struct KeypadView: View {
             let otherFrames = candidateFrames
                 .filter { $0.key != control.id && !candidateCustomization.hiddenControlIDs.contains($0.key) }
                 .map(\.value)
-            let snap = snapDelta(
+            let alignmentDelta = snapDelta(
                 movingFrame: candidateFrame,
                 otherFrames: otherFrames,
                 containerSize: size
             )
-            candidateOffset.x += Double(snap.width / size.width)
-            candidateOffset.y += Double(snap.height / size.height)
+            let alignedFrame = candidateFrame.offsetBy(
+                dx: alignmentDelta.width,
+                dy: alignmentDelta.height
+            )
+            let boundsDelta = containmentDelta(
+                for: alignedFrame,
+                in: CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+            )
+            let totalDelta = CGSize(
+                width: alignmentDelta.width + boundsDelta.width,
+                height: alignmentDelta.height + boundsDelta.height
+            )
+            candidateOffset.x += Double(totalDelta.width / size.width)
+            candidateOffset.y += Double(totalDelta.height / size.height)
         }
 
-        profile.updateKeyboardLayoutCustomization { customization in
-            customization.controlOffsets[control.id] = candidateOffset.isDefault
-                ? nil
-                : candidateOffset
+        let storedOffset = candidateOffset.isDefault ? nil : candidateOffset
+        if draftCustomization.controlOffsets[control.id] != storedOffset {
+            draftCustomization.controlOffsets[control.id] = storedOffset
         }
 
         if ended {
             positionDragOrigins[control.id] = nil
+            profile.updateKeyboardLayoutCustomization { customization in
+                customization.controlOffsets[control.id] = storedOffset
+            }
+            draftCustomization = profile.effectiveKeyboardLayoutCustomization
         }
     }
 
@@ -510,7 +553,7 @@ struct KeypadView: View {
         ended: Bool,
         size: CGSize
     ) {
-        let currentCustomization = profile.effectiveKeyboardLayoutCustomization
+        let currentCustomization = draftCustomization
         let origin: GameProfile.KeyboardGroupScale
         if let existing = resizeDragOrigins[groupID] {
             origin = existing
@@ -520,35 +563,92 @@ struct KeypadView: View {
             resizeDragOrigins[groupID] = origin
         }
 
-        selectedGroupID = groupID
-        let divisor = max(min(size.width, size.height), 1)
-        var result = origin
-        if abs(translation.width) > abs(translation.height) {
-            result.width = snappedScale(origin.width + Double(translation.width / divisor))
+        let axis: ResizeAxis
+        if let existing = resizeDragAxes[groupID] {
+            axis = existing
         } else {
-            result.height = snappedScale(origin.height - Double(translation.height / divisor))
+            axis = abs(translation.width) >= abs(translation.height)
+                ? .horizontal
+                : .vertical
+            resizeDragAxes[groupID] = axis
         }
 
-        profile.updateKeyboardLayoutCustomization { customization in
-            customization.groupScales[groupID] = result.isDefault ? nil : result
+        if selectedGroupID != groupID {
+            selectedGroupID = groupID
+        }
+        let divisor = max(min(size.width, size.height), 1)
+        var result = origin
+        switch axis {
+        case .horizontal:
+            result.width = snappedScale(
+                origin.width + Double(translation.width / divisor)
+            )
+        case .vertical:
+            result.height = snappedScale(
+                origin.height + Double(translation.height / divisor)
+            )
+        }
+
+        let storedScale = result.isDefault ? nil : result
+        if draftCustomization.groupScales[groupID] != storedScale {
+            draftCustomization.groupScales[groupID] = storedScale
         }
 
         if ended {
             resizeDragOrigins[groupID] = nil
+            resizeDragAxes[groupID] = nil
+            selectedGroupID = nil
+            profile.updateKeyboardLayoutCustomization { customization in
+                customization.groupScales[groupID] = storedScale
+            }
+            draftCustomization = profile.effectiveKeyboardLayoutCustomization
         }
     }
 
     private func snappedScale(_ scale: Double) -> Double {
         let clamped = min(max(scale, 0.5), 1.8)
-        if abs(clamped - 1) <= 0.06 {
+        let gridScale = (clamped / scaleGridSize).rounded() * scaleGridSize
+        if abs(gridScale - 1) <= scaleGridSize {
             return 1
         }
-        let otherScales = profile.effectiveKeyboardLayoutCustomization.groupScales.values
+        let otherScales = draftCustomization.groupScales.values
             .flatMap { [$0.width, $0.height] }
-        if let match = otherScales.first(where: { abs($0 - clamped) <= 0.06 }) {
+        if let match = otherScales.first(where: {
+            abs($0 - gridScale) <= scaleGridSize / 2
+        }) {
             return match
         }
-        return clamped
+        return gridScale
+    }
+
+    private func snapped(_ value: CGFloat, step: CGFloat) -> CGFloat {
+        guard step > 0 else { return value }
+        return (value / step).rounded() * step
+    }
+
+    private func containmentDelta(for frame: CGRect, in bounds: CGRect) -> CGSize {
+        let horizontal: CGFloat
+        if frame.width >= bounds.width {
+            horizontal = bounds.midX - frame.midX
+        } else if frame.minX < bounds.minX {
+            horizontal = bounds.minX - frame.minX
+        } else if frame.maxX > bounds.maxX {
+            horizontal = bounds.maxX - frame.maxX
+        } else {
+            horizontal = 0
+        }
+
+        let vertical: CGFloat
+        if frame.height >= bounds.height {
+            vertical = bounds.midY - frame.midY
+        } else if frame.minY < bounds.minY {
+            vertical = bounds.minY - frame.minY
+        } else if frame.maxY > bounds.maxY {
+            vertical = bounds.maxY - frame.maxY
+        } else {
+            vertical = 0
+        }
+        return CGSize(width: horizontal, height: vertical)
     }
 
     private func snapDelta(
@@ -609,12 +709,20 @@ private struct VirtualKeyButton: View {
     @State private var isPressed = false
 
     var body: some View {
-        GeometryReader { geometry in
-            keyContent(
-                effectiveOpacity: effectiveOpacity(
-                    for: geometry.frame(in: .named("emulatorSurface"))
-                )
-            )
+        Group {
+            if editMode == .none {
+                GeometryReader { geometry in
+                    keyContent(
+                        effectiveOpacity: effectiveOpacity(
+                            for: geometry.frame(in: .named("emulatorSurface"))
+                        )
+                    )
+                }
+            } else {
+                // Editing always renders opaque controls and avoids one
+                // GeometryReader per key while the drag gesture is active.
+                keyContent(effectiveOpacity: 1)
+            }
         }
         .frame(width: width, height: height)
         .onDisappear {
@@ -631,10 +739,9 @@ private struct VirtualKeyButton: View {
             .frame(width: width, height: height)
             .background { buttonBackground(effectiveOpacity: effectiveOpacity) }
             .overlay {
-                if editMode == .position {
+                if editMode != .none {
                     editOutline
-                } else if editMode == .size && isGroupSelected {
-                    editOutline
+                        .opacity(editMode == .size && !isGroupSelected ? 0.55 : 1)
                 }
             }
             .contentShape(Rectangle())
@@ -642,8 +749,10 @@ private struct VirtualKeyButton: View {
             .animation(.easeOut(duration: 0.06), value: isPressed)
             .highPriorityGesture(
                 DragGesture(
-                    minimumDistance: 0,
-                    coordinateSpace: .local
+                    minimumDistance: editMode == .none ? 0 : 3,
+                    coordinateSpace: editMode == .none
+                        ? .local
+                        : .named("keyboardEditor")
                 )
                     .onChanged { value in
                         switch editMode {

@@ -74,7 +74,19 @@ ReturnOop ConstantPool::unresolved_klass_at(int index JVM_TRAPS) const {
 ReturnOop ConstantPool::resolved_klass_at(int index JVM_TRAPS) const {
   int offset = offset_from_checked_index(index JVM_ZCHECK_0(offset));
   cp_check_0(ConstantTag::is_resolved_klass(tag_value_at(index)));
-  return Universe::class_from_id(int_field(offset));
+  const int class_id = int_field(offset);
+#if ENABLE_ISOLATES
+  TaskGCContext owner_context(obj());
+#endif
+  OopDesc* klass = Universe::class_from_id(class_id);
+#if ENABLE_ISOLATES
+  ObjArray::Raw system_classes = Universe::system_class_list();
+  if (klass == NULL && system_classes.not_null() && class_id >= 0 &&
+      class_id < system_classes().length()) {
+    klass = system_classes().obj_at(class_id);
+  }
+#endif
+  return klass;
 }
 
 BasicType ConstantPool::resolved_virtual_method_at(int index, int& vtable_index, 
@@ -152,7 +164,9 @@ void ConstantPool::check_constant_at(int index, FieldType* type JVM_TRAPS) const
         ConstantTag::is_unresolved_string(t)) {
       JavaClass::Raw cls = type->object_type();
       Symbol::Raw class_name = cls().name();
-      if (class_name.equals(Symbols::java_lang_String())) {
+      Symbol::Raw string_name = Symbols::java_lang_String()->obj();
+      if (class_name.equals(&string_name) ||
+          class_name().matches(&string_name)) {
         return;
       }
     }
@@ -418,12 +432,25 @@ ConstantPool::lookup_method_at(InstanceClass *sender_class, int index,
     name->print_value_on(tty);
     signature->print_value_on(tty);
     tty->cr();
+    tty->print("  requested decoded signature: ");
+    ((TypeSymbol*)signature)->print_decoded_on(tty);
+    tty->cr();
     ObjArray::Raw available_methods = static_receiver_class->methods();
     for (int i = 0; i < available_methods().length(); i++) {
       Method::Raw available = available_methods().obj_at(i);
       if (available.not_null()) {
         tty->print("  available: ");
         available().print_value_on(tty);
+        Symbol::Raw available_name = available().name();
+        if (available_name.equals(name) || available_name().matches(name)) {
+          Signature::Raw available_signature = available().signature();
+          tty->print(" decoded=");
+          available_signature().print_decoded_on(tty);
+          tty->print(" params=%d return=%d",
+                     available_signature().parameter_word_size(
+                         available().is_static()),
+                     available_signature().return_type(true));
+        }
         tty->cr();
       }
     }

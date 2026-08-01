@@ -25,14 +25,12 @@ enum AppTheme: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var backgroundExecution: BackgroundExecutionController
+
     @AppStorage("appTheme") private var appTheme = AppTheme.system.rawValue
-    @AppStorage("blackBackground") private var blackBackground = false
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
     @AppStorage("keepScreenOn") private var keepScreenOn = false
-    @AppStorage("rawScreenshot") private var rawScreenshot = false
-    @AppStorage("enableVibration") private var enableVibration = true
-    @AppStorage("detectMascotCapsule") private var detectMascotCapsule = false
 
     var body: some View {
         Form {
@@ -42,10 +40,6 @@ struct SettingsView: View {
                 }
             } label: {
                 SettingsLabel(title: "Theme", systemImage: "paintpalette", tint: .red)
-            }
-
-            Toggle(isOn: $blackBackground) {
-                SettingsLabel(title: "Black background", subtitle: "For the dark theme", systemImage: "circle.lefthalf.filled", tint: .black)
             }
 
             Toggle(isOn: $enableActionBar) {
@@ -60,13 +54,38 @@ struct SettingsView: View {
                 SettingsLabel(title: "Keep screen on", systemImage: "sun.max.fill", tint: .yellow)
             }
 
-            Toggle(isOn: $rawScreenshot) {
-                SettingsLabel(title: "Raw screenshot", subtitle: "Disable scaling and filtering for screenshots", systemImage: "camera.fill", tint: .orange)
+#if os(iOS)
+            Toggle(isOn: backgroundExecutionBinding) {
+                SettingsLabel(
+                    title: "Run in Background",
+                    subtitle: "Uses low-accuracy Location Services while an app is running",
+                    systemImage: "location.fill",
+                    tint: .blue
+                )
             }
 
-            Toggle(isOn: $enableVibration) {
-                SettingsLabel(title: "Enable vibration", systemImage: "iphone.radiowaves.left.and.right", tint: .purple)
+            if backgroundExecution.isEnabled {
+                LabeledContent {
+                    Text(backgroundExecution.status.description)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    SettingsLabel(
+                        title: "Background status",
+                        systemImage: backgroundExecution.isKeepingAlive
+                            ? "checkmark.circle.fill"
+                            : "info.circle.fill",
+                        tint: backgroundExecution.isKeepingAlive ? .green : .secondary
+                    )
+                }
+
+                if backgroundExecution.status.requiresSystemSettings {
+                    Button("Open Location Settings") {
+                        backgroundExecution.openSystemSettings()
+                    }
+                }
             }
+#endif
 
             NavigationLink {
                 ProfilesView()
@@ -82,19 +101,18 @@ struct SettingsView: View {
                 SettingsLabel(title: "Working directory", systemImage: "folder.fill", tint: .yellow)
             }
 
-            Section("Experimental/temporary options") {
-                Toggle(isOn: $detectMascotCapsule) {
-                    SettingsLabel(
-                        title: "Detect Mascot Capsule 3D",
-                        subtitle: "Show message when using",
-                        systemImage: "message.fill",
-                        tint: .indigo
-                    )
-                }
-            }
         }
         .navigationTitle("Settings")
     }
+
+#if os(iOS)
+    private var backgroundExecutionBinding: Binding<Bool> {
+        Binding(
+            get: { backgroundExecution.isEnabled },
+            set: { backgroundExecution.setEnabled($0) }
+        )
+    }
+#endif
 }
 
 private struct SettingsLabel: View {
@@ -174,7 +192,9 @@ struct ProfilesView: View {
             }
         }
         .alert("Enter name", isPresented: $showAddDialog) {
-            TextField("", text: $enteredName)
+            TextField("Profile name", text: $enteredName)
+                .foregroundStyle(.primary)
+                .tint(.accentColor)
             Button("Cancel", role: .cancel) {}
             Button("OK") {
                 if let template = templates.add(name: enteredName) {
@@ -183,7 +203,9 @@ struct ProfilesView: View {
             }
         }
         .alert("Enter new name", isPresented: renameDialogBinding) {
-            TextField("", text: $enteredName)
+            TextField("New profile name", text: $enteredName)
+                .foregroundStyle(.primary)
+                .tint(.accentColor)
             Button("Cancel", role: .cancel) {}
             Button("OK") {
                 if let renamingTemplate {

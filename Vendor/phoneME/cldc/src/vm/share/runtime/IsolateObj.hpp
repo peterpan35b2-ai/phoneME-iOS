@@ -61,23 +61,23 @@ public:
 
   INT_FIELD ( priority,             0 )
   OBJ_FIELD ( next,                 1, IsolateObj )
-  LONG_FIELD( unique_id,            2 )
-  INT_FIELD ( is_terminated,        4 )
-  INT_FIELD ( saved_exit_code,      5 )
-  OBJ_FIELD ( main_class,           6, String     )
-  OBJ_FIELD ( main_args,            7, ObjArray   )
-  OBJ_FIELD ( app_classpath,        8, ObjArray   )
-  OBJ_FIELD ( sys_classpath,        9, ObjArray   )
-  OBJ_FIELD ( hidden_packages,     10, ObjArray   )
-  OBJ_FIELD ( restricted_packages, 11, ObjArray   )
-  INT_FIELD ( memory_reserve,      12 )
-  INT_FIELD ( memory_limit,        13 )
-  INT_FIELD ( api_access_init,     14 )
-  INT_FIELD ( connect_debugger,    15 )
-  INT_FIELD ( use_verifier,        16 )
-  INT_FIELD ( profile_id,          17 )  
+  LONG_FIELD( unique_id,            3 )
+  INT_FIELD ( is_terminated,        5 )
+  INT_FIELD ( saved_exit_code,      6 )
+  OBJ_FIELD ( main_class,           7, String     )
+  OBJ_FIELD ( main_args,            9, ObjArray   )
+  OBJ_FIELD ( app_classpath,       11, ObjArray   )
+  OBJ_FIELD ( sys_classpath,       13, ObjArray   )
+  OBJ_FIELD ( hidden_packages,     15, ObjArray   )
+  OBJ_FIELD ( restricted_packages, 17, ObjArray   )
+  INT_FIELD ( memory_reserve,      19 )
+  INT_FIELD ( memory_limit,        20 )
+  INT_FIELD ( api_access_init,     21 )
+  INT_FIELD ( connect_debugger,    22 )
+  INT_FIELD ( use_verifier,        23 )
+  INT_FIELD ( profile_id,          24 )
 #if ENABLE_WTK_PROFILER
-  INT_FIELD ( use_profiler,        18 )
+  INT_FIELD ( use_profiler,        25 )
 #endif
 
   STATIC_INT_FIELD( api_access, 0 )
@@ -92,6 +92,11 @@ public:
 
   jint static_int_field(int offset) const;
   void static_int_field_put(int offset, const jint value);
+
+  // Set a task-local static field on com.sun.cldc.isolate.Isolate for the
+  // currently executing task. This avoids resolving the represented Task
+  // through an Isolate object while bootstrap mirrors are still changing.
+  static void set_current_api_access(const jint value);
 
   void notify_all_waiters(JVM_SINGLE_ARG_TRAPS);
   void terminate(int exit_code JVM_TRAPS);

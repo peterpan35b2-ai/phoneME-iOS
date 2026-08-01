@@ -10,6 +10,7 @@ struct LCDUIState: Equatable, Sendable {
         var contentHeight: Int
         var scrollPosition: Int
         var isVisible: Bool
+        var isFullScreen: Bool
         var nativeKind: ScreenKind?
     }
 
@@ -147,6 +148,7 @@ struct LCDUIState: Equatable, Sendable {
 
     private static let imageMetadataMarker: Int32 = -1004
     private static let screenKindMetadataMarker: Int32 = -1006
+    private static let screenModeMetadataMarker: Int32 = -1007
 
     private enum EventKind: Int32 {
         case reset = 1
@@ -192,6 +194,10 @@ struct LCDUIState: Equatable, Sendable {
     var hasNativeScreen: Bool {
         guard let screen else { return false }
         return screen.isVisible && screen.type != .canvas
+    }
+
+    var isCanvasFullScreen: Bool {
+        isCanvasVisible && screen?.isFullScreen == true
     }
 
     var screenKind: ScreenKind {
@@ -356,6 +362,7 @@ struct LCDUIState: Equatable, Sendable {
                 contentHeight: 0,
                 scrollPosition: 0,
                 isVisible: false,
+                isFullScreen: false,
                 nativeKind: nil
             )
 
@@ -364,6 +371,8 @@ struct LCDUIState: Equatable, Sendable {
         value.detail = event.detail
         if event.arguments.3 == Self.screenKindMetadataMarker {
             value.nativeKind = ScreenKind(rawValue: event.arguments.0)
+        } else if event.arguments.3 == Self.screenModeMetadataMarker {
+            value.isFullScreen = event.arguments.0 != 0
         } else if event.arguments.3 == Self.imageMetadataMarker {
             // Pixel data is transferred separately through lcdUIImages.
         } else if kind == .screenShown || kind == .screenUpdated {

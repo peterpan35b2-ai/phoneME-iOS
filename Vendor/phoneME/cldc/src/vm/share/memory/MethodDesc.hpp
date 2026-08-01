@@ -126,6 +126,8 @@ class MethodDesc: public OopDesc {
     return x._max_locals;
   }
 
+  static bool symbols_match(const OopDesc* left, const OopDesc* right);
+
   // This method is called a lot during class loading.
   bool match(const OopDesc* name, const OopDesc* signature) const {
     AllocationDisabler raw_pointers_used_in_this_function;
@@ -139,13 +141,20 @@ class MethodDesc: public OopDesc {
     const OopDesc* const* const cpbase =
       (const OopDesc* const*)(cp + ConstantPoolDesc::header_size());
 
-    if( cpbase[_name_index] != name ) {
+    const OopDesc* method_name = cpbase[_name_index];
+    if (!symbols_match(method_name, name)) {
       return false;
     }
 
-    // Empty signature means that any method with the same name will match
-    if( signature && cpbase[_signature_index] != signature ) {
-      return false;
+    // Empty signature means that any method with the same name will match.
+    // Non-ROM class loading may create equivalent compact TypeSymbols that
+    // are not pointer-identical, so retain the fast path and compare symbol
+    // contents only when identity differs.
+    if (signature) {
+      const OopDesc* method_signature = cpbase[_signature_index];
+      if (!symbols_match(method_signature, signature)) {
+        return false;
+      }
     }
 
     return true;

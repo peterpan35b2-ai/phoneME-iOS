@@ -1,5 +1,11 @@
 import CoreGraphics
 import Foundation
+import OSLog
+
+private let phoneMEMultitaskingLogger = Logger(
+    subsystem: "dev.phoneme.emulator",
+    category: "J2MEMultitasking"
+)
 
 enum EmulatorState: Equatable {
     case idle
@@ -26,6 +32,44 @@ final class EmbeddedPhoneMEEngine: NSObject {
     var onLCDUIImages: (([Int32: CGImage]) -> Void)?
     var onStateChange: ((EmulatorState) -> Void)?
     var onFPSChange: ((Double) -> Void)?
+    var onApplicationStateChange: ((UUID, PhoneMECAPI.AppState) -> Void)?
+    var onForegroundApplicationChange: ((UUID?) -> Void)?
+
+    private final class RuntimeContext: @unchecked Sendable {
+        var api: PhoneMECAPI?
+        var runtime: PhoneMECAPI.RuntimeHandle?
+        var suiteIDs: [UUID: Int32] = [:]
+        var appIDs: [UUID: Int32] = [:]
+        var gameIDsByAppID: [Int32: UUID] = [:]
+        var nextAppID: Int32 = 1
+
+        func nextAvailableAppID() -> Int32? {
+            for _ in 0..<64 {
+                let candidate = nextAppID
+                nextAppID = candidate >= 64 ? 1 : candidate + 1
+                if gameIDsByAppID[candidate] == nil {
+                    return candidate
+                }
+            }
+            return nil
+        }
+
+        func removeApplication(gameID: UUID) {
+            guard let appID = appIDs.removeValue(forKey: gameID) else {
+                return
+            }
+            gameIDsByAppID.removeValue(forKey: appID)
+        }
+
+        func reset() {
+            api = nil
+            runtime = nil
+            suiteIDs.removeAll(keepingCapacity: true)
+            appIDs.removeAll(keepingCapacity: true)
+            gameIDsByAppID.removeAll(keepingCapacity: true)
+            nextAppID = 1
+        }
+    }
 
     private struct VisibleScreen: Equatable, Sendable {
         let id: Int32
@@ -151,12 +195,23 @@ final class EmbeddedPhoneMEEngine: NSObject {
         var visibleScreen: VisibleScreen?
         var nextFrameDeadline: UInt64 = 0
         var didReportRuntimeExit = false
+        var consecutiveIdleNativePolls = 0
+        var usesIdleNativeCadence = false
 
         let frameIntervalNanoseconds: UInt64
+        let activePollIntervalNanoseconds: UInt64
+        let idleNativePollIntervalNanoseconds: UInt64 = 100_000_000
+        let idleNativePollThreshold: Int
 
         init(framesPerSecond: Int) {
+            let normalizedFrameRate = min(
+                max(framesPerSecond, 1),
+                GameProfile.maximumFrameRate
+            )
             frameIntervalNanoseconds = 1_000_000_000
-                / UInt64(max(framesPerSecond, 1))
+                / UInt64(normalizedFrameRate)
+            activePollIntervalNanoseconds = frameIntervalNanoseconds
+            idleNativePollThreshold = max(normalizedFrameRate / 2, 1)
         }
     }
 
@@ -213,6 +268,12 @@ final class EmbeddedPhoneMEEngine: NSObject {
             lock.unlock()
         }
 
+        func invalidateFrameGeneration() {
+            lock.lock()
+            frameGeneration = 0
+            lock.unlock()
+        }
+
         func completeIteration() -> Bool {
             lock.lock()
             let shouldContinue = hasPendingRequest
@@ -234,20 +295,27 @@ final class EmbeddedPhoneMEEngine: NSObject {
     )
     private let pollQueue = DispatchQueue(
         label: "com.phoneme.runtime.lcdui-poll",
-        qos: .userInteractive
+        qos: .userInitiated
     )
     private let renderQueue = DispatchQueue(
         label: "com.phoneme.runtime.render",
         qos: .userInitiated
     )
+    private let runtimeContext = RuntimeContext()
     private var api: PhoneMECAPI?
     private var runtime: PhoneMECAPI.RuntimeHandle?
+    private var foregroundGameID: UUID?
+    private var foregroundAppID: Int32?
     private var pollTimer: DispatchSourceTimer?
+    private var pollTimerIsSuspended = false
+    private var runtimeIsSuspended = false
+    private var runtimeSuspensionRequested = false
+    private var shouldRunInForeground = true
     private var lastFrameGeneration: UInt64 = 0
     private var launchIdentifier = UUID()
     private let continuousInputBuffer = ContinuousInputBuffer()
     private var renderRequestBuffer = RenderRequestBuffer()
-    private var framePollingFramesPerSecond = 60
+    private var framePollingFramesPerSecond = GameProfile.maximumFrameRate
     private var fpsFrameCount = 0
     private var fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
 
@@ -265,6 +333,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
         gameID: UUID,
         jarURL: URL,
         mainClass: String,
+        mediaTitle: String,
+        mediaArtist: String,
+        mediaArtworkPath: String?,
         screenWidth: Int,
         screenHeight: Int,
         frameRateLimit: Int,
@@ -280,27 +351,30 @@ final class EmbeddedPhoneMEEngine: NSObject {
     ) {
         let previousAPI = api
         let previousRuntime = runtime
-        // Request cooperative VM shutdown immediately instead of placing the
-        // request behind already queued frame/input work. Destruction remains
-        // serialized on runtimeQueue so captured handles cannot be freed while
-        // an older operation is still using them.
-        if let previousAPI, let previousRuntime {
-            previousAPI.stop(previousRuntime)
-        }
+        let previousNeedsResume = runtimeIsSuspended
+            || runtimeSuspensionRequested
+        // Remove the public handles and stop polling immediately. The actual
+        // resume/stop/destroy sequence stays on runtimeQueue so it cannot race
+        // an in-flight suspend request or framebuffer operation.
         clearCurrentRuntime()
 
         let requestedFPS = frameRateLimit > 0
-            ? min(max(frameRateLimit, 1), 240)
-            : (immediateProcessing ? 120 : 60)
-        // LCDUI events are polled independently at 120 Hz. This value only
-        // controls framebuffer copies, preserving the user's FPS profile
-        // without slowing native Form/List/Alert interaction.
-        framePollingFramesPerSecond = min(max(requestedFPS, 1), 120)
+            ? min(
+                max(frameRateLimit, 1),
+                GameProfile.maximumFrameRate
+            )
+            : GameProfile.maximumFrameRate
+        // Native input wakes the MIDP select loop directly, so the host bridge
+        // does not need a 120 Hz polling floor. Framebuffer delivery and active
+        // LCDUI synchronization follow the profile cadence up to 60 FPS without
+        // changing the MIDlet's own timing or game-loop speed.
+        framePollingFramesPerSecond = requestedFPS
         fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
         setState(.starting)
 
-        // Frame reads always run outside the main thread now. Keep accepting
-        // this profile setting for compatibility with existing saved profiles.
+        // Frame reads always run outside the main thread. These legacy fields
+        // remain decodable for existing profiles but no longer raise cadence.
+        _ = immediateProcessing
         _ = parallelScreenRedrawing
 
         let currentLaunchIdentifier = UUID()
@@ -319,6 +393,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 inputQueue.sync { }
                 pollQueue.sync { }
                 renderQueue.sync { }
+                if previousNeedsResume {
+                    previousAPI.resume(previousRuntime)
+                }
+                previousAPI.stop(previousRuntime)
                 previousAPI.destroyRuntime(previousRuntime)
             }
 
@@ -355,6 +433,12 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     throw PhoneMECoreError.launchFailed(result)
                 }
 
+                Self.configureMediaMetadata(
+                    title: mediaTitle,
+                    artist: mediaArtist,
+                    artworkPath: mediaArtworkPath
+                )
+
                 DispatchQueue.main.async {
                     guard
                         let self,
@@ -369,12 +453,17 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                     self.api = loadedAPI
                     self.runtime = createdRuntime
+                    self.runtimeIsSuspended = false
+                    self.runtimeSuspensionRequested = false
                     self.setState(.running)
                     self.startPolling(
                         api: loadedAPI,
                         runtime: createdRuntime,
                         launchIdentifier: currentLaunchIdentifier
                     )
+                    if !self.shouldRunInForeground {
+                        self.enterBackground()
+                    }
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -391,16 +480,406 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    func prepareApplications(_ applications: [UUID: URL]) {
+        guard !applications.isEmpty else { return }
+        let context = runtimeContext
+
+        runtimeQueue.async { [weak self] in
+            do {
+                let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
+                    in: context
+                )
+
+                // fileInstaller owns MIDP initialization/finalization and is
+                // intentionally used only before the MVM begins running.
+                // Already prepared suites remain available for every isolate.
+                guard !loadedAPI.isRunning(createdRuntime) else { return }
+
+                for (gameID, jarURL) in applications
+                    where context.suiteIDs[gameID] == nil {
+                    let install = loadedAPI.installJar(
+                        createdRuntime,
+                        jarURL: jarURL
+                    )
+                    phoneMEMultitaskingLogger.info(
+                        "Prepared game \(gameID.uuidString, privacy: .public): status=\(install.status), suite=\(install.suiteID ?? 0), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
+                    )
+                    guard install.status == 0, let suiteID = install.suiteID else {
+                        // A corrupt or unsupported JAR must not abort preparation
+                        // for every other library item. Keep it unmapped so a
+                        // later explicit launch reports the error for this game
+                        // only, while valid suites remain available to MVM.
+                        phoneMEMultitaskingLogger.error(
+                            "Skipped game \(gameID.uuidString, privacy: .public) during preparation: status=\(install.status), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
+                        )
+                        continue
+                    }
+                    context.suiteIDs[gameID] = suiteID
+                }
+
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.api = loadedAPI
+                    self.runtime = createdRuntime
+                }
+            } catch {
+                // Library preparation is opportunistic. Do not poison the
+                // foreground session if runtime setup fails here; launching a
+                // selected app will retry and surface a game-specific error.
+                phoneMEMultitaskingLogger.error(
+                    "Preparation failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    func launchApplication(
+        gameID: UUID,
+        jarURL: URL,
+        mainClass: String,
+        mediaTitle: String,
+        mediaArtist: String,
+        mediaArtworkPath: String?,
+        screenWidth: Int,
+        screenHeight: Int,
+        frameRateLimit: Int,
+        immediateProcessing: Bool,
+        parallelScreenRedrawing: Bool,
+        keyUp: Int32,
+        keyDown: Int32,
+        keyLeft: Int32,
+        keyRight: Int32,
+        keyFire: Int32,
+        keySoftLeft: Int32,
+        keySoftRight: Int32
+    ) {
+        let requestedFPS = frameRateLimit > 0
+            ? min(max(frameRateLimit, 1), GameProfile.maximumFrameRate)
+            : GameProfile.maximumFrameRate
+        framePollingFramesPerSecond = requestedFPS
+        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        _ = immediateProcessing
+        _ = parallelScreenRedrawing
+
+        let currentLaunchIdentifier = UUID()
+        launchIdentifier = currentLaunchIdentifier
+        setState(.starting)
+
+        let context = runtimeContext
+        runtimeQueue.async { [weak self] in
+            do {
+                let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
+                    in: context
+                )
+
+                var suiteID = context.suiteIDs[gameID]
+                if suiteID == nil {
+                    guard !loadedAPI.isRunning(createdRuntime) else {
+                        throw PhoneMECoreError.applicationNotPrepared
+                    }
+                    let install = loadedAPI.installJar(
+                        createdRuntime,
+                        jarURL: jarURL
+                    )
+                    phoneMEMultitaskingLogger.info(
+                        "Prepared launch game \(gameID.uuidString, privacy: .public): status=\(install.status), suite=\(install.suiteID ?? 0), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
+                    )
+                    guard install.status == 0, let installedSuiteID = install.suiteID else {
+                        throw PhoneMECoreError.launchFailed(install.status)
+                    }
+                    context.suiteIDs[gameID] = installedSuiteID
+                    suiteID = installedSuiteID
+                }
+
+                let keymapResult = loadedAPI.configureKeymap(
+                    createdRuntime,
+                    up: keyUp,
+                    down: keyDown,
+                    left: keyLeft,
+                    right: keyRight,
+                    fire: keyFire,
+                    softLeft: keySoftLeft,
+                    softRight: keySoftRight
+                )
+                guard keymapResult == 0 else {
+                    throw PhoneMECoreError.launchFailed(keymapResult)
+                }
+
+                let appID: Int32
+                if let existingAppID = context.appIDs[gameID] {
+                    let existingState = loadedAPI.midletState(
+                        createdRuntime,
+                        appID: existingAppID
+                    )
+                    if existingState == .destroyed || existingState == .error {
+                        context.removeApplication(gameID: gameID)
+                        guard let replacementAppID = context.nextAvailableAppID() else {
+                            throw PhoneMECoreError.tooManyApplications
+                        }
+                        appID = replacementAppID
+                        context.appIDs[gameID] = replacementAppID
+                        context.gameIDsByAppID[replacementAppID] = gameID
+                        let result = loadedAPI.startMidlet(
+                            createdRuntime,
+                            suiteID: suiteID!,
+                            mainClass: mainClass,
+                            appID: replacementAppID,
+                            screenWidth: screenWidth,
+                            screenHeight: screenHeight
+                        )
+                        guard result == 0 else {
+                            context.removeApplication(gameID: gameID)
+                            throw PhoneMECoreError.launchFailed(result)
+                        }
+                    } else {
+                        appID = existingAppID
+                        if existingState == .paused {
+                            let resumeResult = loadedAPI.resumeMidlet(
+                                createdRuntime,
+                                appID: existingAppID
+                            )
+                            guard resumeResult == 0 else {
+                                throw PhoneMECoreError.launchFailed(resumeResult)
+                            }
+                        }
+                        let foregroundResult = loadedAPI.setForeground(
+                            createdRuntime,
+                            appID: existingAppID,
+                            screenWidth: screenWidth,
+                            screenHeight: screenHeight
+                        )
+                        guard foregroundResult == 0 else {
+                            throw PhoneMECoreError.launchFailed(foregroundResult)
+                        }
+                    }
+                } else {
+                    guard let newAppID = context.nextAvailableAppID() else {
+                        throw PhoneMECoreError.tooManyApplications
+                    }
+                    appID = newAppID
+                    context.appIDs[gameID] = newAppID
+                    context.gameIDsByAppID[newAppID] = gameID
+                    let result = loadedAPI.startMidlet(
+                        createdRuntime,
+                        suiteID: suiteID!,
+                        mainClass: mainClass,
+                        appID: newAppID,
+                        screenWidth: screenWidth,
+                        screenHeight: screenHeight
+                    )
+                    phoneMEMultitaskingLogger.info(
+                        "Started game \(gameID.uuidString, privacy: .public): app=\(newAppID), suite=\(suiteID!), status=\(result)"
+                    )
+                    guard result == 0 else {
+                        context.removeApplication(gameID: gameID)
+                        throw PhoneMECoreError.launchFailed(result)
+                    }
+                }
+
+                Self.configureMediaMetadata(
+                    title: mediaTitle,
+                    artist: mediaArtist,
+                    artworkPath: mediaArtworkPath
+                )
+
+                DispatchQueue.main.async {
+                    guard
+                        let self,
+                        self.launchIdentifier == currentLaunchIdentifier
+                    else {
+                        return
+                    }
+                    self.api = loadedAPI
+                    self.runtime = createdRuntime
+                    self.foregroundGameID = gameID
+                    self.foregroundAppID = appID
+                    self.runtimeIsSuspended = false
+                    self.runtimeSuspensionRequested = false
+                    self.setState(.running)
+                    self.onApplicationStateChange?(gameID, .active)
+                    self.onForegroundApplicationChange?(gameID)
+                    self.startPolling(
+                        api: loadedAPI,
+                        runtime: createdRuntime,
+                        launchIdentifier: currentLaunchIdentifier,
+                        gameID: gameID,
+                        appID: appID
+                    )
+                    if !self.shouldRunInForeground {
+                        self.enterBackground()
+                    }
+                }
+            } catch {
+                phoneMEMultitaskingLogger.error(
+                    "Launch failed for \(gameID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                DispatchQueue.main.async { [weak self] in
+                    guard
+                        let self,
+                        self.launchIdentifier == currentLaunchIdentifier
+                    else {
+                        return
+                    }
+                    self.setState(.failed(error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    func hideCurrentApplication() {
+        guard let api, let runtime, let gameID = foregroundGameID else {
+            return
+        }
+
+        launchIdentifier = UUID()
+        stopForegroundPolling()
+        foregroundGameID = nil
+        foregroundAppID = nil
+        onApplicationStateChange?(gameID, .active)
+        onForegroundApplicationChange?(nil)
+
+        runtimeQueue.async {
+            _ = api.setForeground(
+                runtime,
+                appID: nil,
+                screenWidth: 1,
+                screenHeight: 1
+            )
+        }
+    }
+
+    func terminateApplication(gameID: UUID) {
+        let context = runtimeContext
+        let wasForeground = foregroundGameID == gameID
+        if wasForeground {
+            launchIdentifier = UUID()
+            stopForegroundPolling()
+            foregroundGameID = nil
+            foregroundAppID = nil
+            onForegroundApplicationChange?(nil)
+        }
+
+        runtimeQueue.async { [weak self] in
+            guard
+                let loadedAPI = context.api,
+                let createdRuntime = context.runtime,
+                let appID = context.appIDs[gameID]
+            else {
+                return
+            }
+
+            _ = loadedAPI.destroyMidlet(createdRuntime, appID: appID)
+            context.removeApplication(gameID: gameID)
+            let shouldShutdown = context.appIDs.isEmpty
+            if shouldShutdown {
+                loadedAPI.stop(createdRuntime)
+                loadedAPI.destroyRuntime(createdRuntime)
+                context.reset()
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.onApplicationStateChange?(gameID, .destroyed)
+                if wasForeground {
+                    self.setState(.stopped)
+                }
+                if shouldShutdown {
+                    self.api = nil
+                    self.runtime = nil
+                    self.runtimeIsSuspended = false
+                    self.runtimeSuspensionRequested = false
+                }
+            }
+        }
+    }
+
+    func measureApplicationMemoryUsage(
+        gameIDs: Set<UUID>,
+        completion: @escaping ([UUID: UInt64]) -> Void
+    ) {
+        guard !gameIDs.isEmpty else {
+            completion([:])
+            return
+        }
+
+        let context = runtimeContext
+        runtimeQueue.async {
+            guard
+                let loadedAPI = context.api,
+                let createdRuntime = context.runtime
+            else {
+                DispatchQueue.main.async { completion([:]) }
+                return
+            }
+
+            var usageByGameID: [UUID: UInt64] = [:]
+            usageByGameID.reserveCapacity(gameIDs.count)
+            for gameID in gameIDs {
+                guard let appID = context.appIDs[gameID] else { continue }
+                if let usedMemory = loadedAPI.midletUsedMemory(
+                    createdRuntime,
+                    appID: appID,
+                    timeoutMilliseconds: 150
+                ) {
+                    usageByGameID[gameID] = usedMemory
+                }
+            }
+
+            DispatchQueue.main.async {
+                completion(usageByGameID)
+            }
+        }
+    }
+
+    nonisolated private static func ensureRuntime(
+        in context: RuntimeContext
+    ) throws -> (PhoneMECAPI, PhoneMECAPI.RuntimeHandle) {
+        if let api = context.api, let runtime = context.runtime {
+            return (api, runtime)
+        }
+        let api = try PhoneMECAPI.load()
+        guard let runtime = api.createRuntime() else {
+            throw PhoneMECoreError.runtimeCreationFailed
+        }
+        context.api = api
+        context.runtime = runtime
+        return (api, runtime)
+    }
+
+    nonisolated private static func configureMediaMetadata(
+        title: String,
+        artist: String,
+        artworkPath: String?
+    ) {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        title.withCString { titlePointer in
+            artist.withCString { artistPointer in
+                guard let artworkPath else {
+                    phoneme_ios_media_set_application_metadata(
+                        titlePointer,
+                        artistPointer,
+                        nil
+                    )
+                    return
+                }
+                artworkPath.withCString { artworkPointer in
+                    phoneme_ios_media_set_application_metadata(
+                        titlePointer,
+                        artistPointer,
+                        artworkPointer
+                    )
+                }
+            }
+        }
+    }
+
     func stop() {
         let currentAPI = api
         let currentRuntime = runtime
+        let needsResume = runtimeIsSuspended
+            || runtimeSuspensionRequested
         launchIdentifier = UUID()
-        // Set the global stop flag now. Waiting to enqueue this behind pending
-        // polls/input can leave the VM alive long enough for the next launch to
-        // appear stuck in its loading state.
-        if let currentAPI, let currentRuntime {
-            currentAPI.stop(currentRuntime)
-        }
         clearCurrentRuntime()
         setState(.stopped)
 
@@ -415,8 +894,133 @@ final class EmbeddedPhoneMEEngine: NSObject {
             inputQueue.sync { }
             pollQueue.sync { }
             renderQueue.sync { }
+            if needsResume {
+                currentAPI.resume(currentRuntime)
+            }
+            currentAPI.stop(currentRuntime)
             currentAPI.destroyRuntime(currentRuntime)
         }
+    }
+
+    func enterBackground() {
+        shouldRunInForeground = false
+        pauseHostPollingForBackground()
+
+        // Do not call midp_suspend() for an iOS scene transition. MIDP turns
+        // that into PAUSE_ALL_EVENT/pauseApp(), and many online games close
+        // their TCP socket from pauseApp() even though the user only pressed
+        // Home. Let iOS suspend the process naturally instead. When the
+        // optional Core Location keeper is enabled, the VM thread continues
+        // running in the background while rendering and LCDUI polling remain
+        // stopped.
+    }
+
+    func enterForeground() {
+        shouldRunInForeground = true
+        if runtimeSuspensionRequested {
+            resume()
+        } else {
+            resumeHostPollingAfterBackground()
+        }
+    }
+
+    func suspend() {
+        shouldRunInForeground = false
+        suspendRuntimeIfNeeded()
+    }
+
+    private func suspendRuntimeIfNeeded() {
+        guard
+            !runtimeSuspensionRequested,
+            let api,
+            let runtime
+        else {
+            return
+        }
+
+        runtimeSuspensionRequested = true
+        pauseHostPollingForBackground()
+
+        let currentLaunchIdentifier = launchIdentifier
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
+        runtimeQueue.async { [weak self] in
+            // Stop all host-side C access before changing MIDP's global
+            // suspend state. midp_suspend()/midp_resume() are not safe to race
+            // framebuffer copies or Displayable event polling.
+            inputQueue.sync { }
+            pollQueue.sync { }
+            renderQueue.sync { }
+            api.suspend(runtime)
+
+            DispatchQueue.main.async {
+                guard
+                    let self,
+                    self.launchIdentifier == currentLaunchIdentifier,
+                    self.runtime == runtime
+                else {
+                    return
+                }
+                self.runtimeIsSuspended = true
+            }
+        }
+    }
+
+    func resume() {
+        shouldRunInForeground = true
+        guard
+            runtimeSuspensionRequested,
+            let api,
+            let runtime
+        else {
+            resumeHostPollingAfterBackground()
+            return
+        }
+
+        runtimeSuspensionRequested = false
+        let currentLaunchIdentifier = launchIdentifier
+        runtimeQueue.async { [weak self] in
+            // This command is serialized behind any pending suspend command.
+            api.resume(runtime)
+
+            DispatchQueue.main.async {
+                guard
+                    let self,
+                    self.launchIdentifier == currentLaunchIdentifier,
+                    self.runtime == runtime
+                else {
+                    return
+                }
+
+                self.runtimeIsSuspended = false
+                guard !self.runtimeSuspensionRequested else {
+                    return
+                }
+                self.resumeHostPollingAfterBackground()
+            }
+        }
+    }
+
+    private func pauseHostPollingForBackground() {
+        if let pollTimer, !pollTimerIsSuspended {
+            pollTimer.suspend()
+            pollTimerIsSuspended = true
+        }
+        fpsFrameCount = 0
+        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        onFPSChange?(0)
+    }
+
+    private func resumeHostPollingAfterBackground() {
+        // The MIDlet may continue without repainting while iOS is backgrounded.
+        // Force the first visible poll to publish the retained screen again.
+        renderRequestBuffer.invalidateFrameGeneration()
+        if let pollTimer, pollTimerIsSuspended {
+            pollTimer.resume()
+            pollTimerIsSuspended = false
+        }
+        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
     }
 
     func sendKey(_ key: J2MEKey, pressed: Bool) {
@@ -581,9 +1185,17 @@ final class EmbeddedPhoneMEEngine: NSObject {
     private func startPolling(
         api: PhoneMECAPI,
         runtime: PhoneMECAPI.RuntimeHandle,
-        launchIdentifier: UUID
+        launchIdentifier: UUID,
+        gameID: UUID? = nil,
+        appID: Int32? = nil
     ) {
-        pollTimer?.cancel()
+        if let pollTimer {
+            if pollTimerIsSuspended {
+                pollTimer.resume()
+                pollTimerIsSuspended = false
+            }
+            pollTimer.cancel()
+        }
 
         let context = PollContext(
             framesPerSecond: framePollingFramesPerSecond
@@ -592,13 +1204,21 @@ final class EmbeddedPhoneMEEngine: NSObject {
         let renderQueue = renderQueue
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
 
-        // Native LCDUI is an event surface, not a framebuffer. Poll it at a
-        // stable 120 Hz on a background queue so touches and UIKit tracking do
-        // not pause the bridge. Frame copies retain the profile's own cadence.
+        // Poll at the capped Canvas cadence. Static native Form/List/Alert
+        // screens back off to 10 Hz after half a second without bridge events;
+        // key and pointer input still wake the VM immediately through the native
+        // event pipe and do not depend on this timer.
         timer.schedule(
             deadline: .now(),
-            repeating: .nanoseconds(8_333_333),
-            leeway: .nanoseconds(500_000)
+            repeating: .nanoseconds(
+                Int(context.activePollIntervalNanoseconds)
+            ),
+            leeway: .nanoseconds(
+                Int(min(
+                    max(context.activePollIntervalNanoseconds / 8, 500_000),
+                    2_000_000
+                ))
+            )
         )
         timer.setEventHandler { [weak self] in
             guard !context.didReportRuntimeExit else { return }
@@ -621,6 +1241,27 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     )
                 }
                 return
+            }
+
+            if let gameID, let appID {
+                let applicationState = api.midletState(runtime, appID: appID)
+                if applicationState == .destroyed || applicationState == .error {
+                    context.didReportRuntimeExit = true
+                    DispatchQueue.main.async {
+                        guard
+                            let self,
+                            self.launchIdentifier == launchIdentifier,
+                            self.runtime == runtime
+                        else {
+                            return
+                        }
+                        self.finishApplication(
+                            gameID: gameID,
+                            state: applicationState
+                        )
+                    }
+                    return
+                }
             }
 
             let lcdUIEvents = api.drainLCDUIEvents(
@@ -658,6 +1299,47 @@ final class EmbeddedPhoneMEEngine: NSObject {
             }
 
             context.visibleScreen = resolvedVisibleScreen
+
+            let isIdleNativeScreen =
+                resolvedVisibleScreen?.usesNativeLCDUI == true
+                && lcdUIEvents.isEmpty
+            if isIdleNativeScreen {
+                context.consecutiveIdleNativePolls += 1
+                if !context.usesIdleNativeCadence,
+                   context.consecutiveIdleNativePolls
+                    >= context.idleNativePollThreshold {
+                    context.usesIdleNativeCadence = true
+                    timer.schedule(
+                        deadline: .now() + .nanoseconds(
+                            Int(context.idleNativePollIntervalNanoseconds)
+                        ),
+                        repeating: .nanoseconds(
+                            Int(context.idleNativePollIntervalNanoseconds)
+                        ),
+                        leeway: .milliseconds(4)
+                    )
+                }
+            } else {
+                context.consecutiveIdleNativePolls = 0
+                if context.usesIdleNativeCadence {
+                    context.usesIdleNativeCadence = false
+                    timer.schedule(
+                        deadline: .now(),
+                        repeating: .nanoseconds(
+                            Int(context.activePollIntervalNanoseconds)
+                        ),
+                        leeway: .nanoseconds(
+                            Int(min(
+                                max(
+                                    context.activePollIntervalNanoseconds / 8,
+                                    500_000
+                                ),
+                                2_000_000
+                            ))
+                        )
+                    )
+                }
+            }
 
             if !lcdUIEvents.isEmpty {
                 DispatchQueue.main.async {
@@ -755,6 +1437,26 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    private func finishApplication(
+        gameID: UUID,
+        state: PhoneMECAPI.AppState
+    ) {
+        let context = runtimeContext
+        stopForegroundPolling()
+        foregroundGameID = nil
+        foregroundAppID = nil
+        onApplicationStateChange?(gameID, state)
+        onForegroundApplicationChange?(nil)
+        setState(
+            state == .error
+                ? .failed("The J2ME application stopped unexpectedly.")
+                : .stopped
+        )
+        runtimeQueue.async {
+            context.removeApplication(gameID: gameID)
+        }
+    }
+
     private func finishRuntime(
         api: PhoneMECAPI,
         runtime: PhoneMECAPI.RuntimeHandle,
@@ -768,11 +1470,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
         let inputQueue = inputQueue
         let pollQueue = pollQueue
         let renderQueue = renderQueue
+        let context = runtimeContext
         runtimeQueue.async {
             inputQueue.sync { }
             pollQueue.sync { }
             renderQueue.sync { }
             api.destroyRuntime(runtime)
+            context.reset()
         }
 
         if exitCode < 0 {
@@ -784,9 +1488,35 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
-    private func clearCurrentRuntime() {
-        pollTimer?.cancel()
+    private func stopForegroundPolling() {
+        if let pollTimer {
+            if pollTimerIsSuspended {
+                pollTimer.resume()
+            }
+            pollTimer.cancel()
+        }
         pollTimer = nil
+        pollTimerIsSuspended = false
+        lastFrameGeneration = 0
+        continuousInputBuffer.reset()
+        renderRequestBuffer = RenderRequestBuffer()
+        fpsFrameCount = 0
+        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        onFPSChange?(0)
+    }
+
+    private func clearCurrentRuntime() {
+        if let pollTimer {
+            // Dispatch sources must be resumed before their final cancellation.
+            if pollTimerIsSuspended {
+                pollTimer.resume()
+            }
+            pollTimer.cancel()
+        }
+        pollTimer = nil
+        pollTimerIsSuspended = false
+        runtimeIsSuspended = false
+        runtimeSuspensionRequested = false
         lastFrameGeneration = 0
         continuousInputBuffer.reset()
         // Give the next launch a fresh coalescing state. Any old render worker

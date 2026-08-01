@@ -1,9 +1,118 @@
 import CoreGraphics
 import Foundation
 
+private final class PhoneMEPixelBufferPool: @unchecked Sendable {
+    private struct Buffer {
+        let pointer: UnsafeMutableRawPointer
+        let capacity: Int
+    }
+
+    private let lock = NSLock()
+    private let maximumRetainedBuffers: Int
+    private var available: [Buffer] = []
+
+    init(maximumRetainedBuffers: Int) {
+        self.maximumRetainedBuffers = max(maximumRetainedBuffers, 1)
+    }
+
+    func acquire(minimumCapacity: Int) -> PhoneMEPixelBufferLease {
+        let requiredCapacity = max(minimumCapacity, 1)
+        lock.lock()
+        var bestIndex: Int?
+        for index in available.indices
+            where available[index].capacity >= requiredCapacity {
+            guard let currentBest = bestIndex else {
+                bestIndex = index
+                continue
+            }
+            if available[index].capacity < available[currentBest].capacity {
+                bestIndex = index
+            }
+        }
+
+        if let bestIndex {
+            let buffer = available.remove(at: bestIndex)
+            lock.unlock()
+            return PhoneMEPixelBufferLease(
+                pointer: buffer.pointer,
+                capacity: buffer.capacity,
+                pool: self
+            )
+        }
+        lock.unlock()
+
+        let roundedCapacity = (requiredCapacity + 4_095) & ~4_095
+        return PhoneMEPixelBufferLease(
+            pointer: UnsafeMutableRawPointer.allocate(
+                byteCount: roundedCapacity,
+                alignment: 64
+            ),
+            capacity: roundedCapacity,
+            pool: self
+        )
+    }
+
+    fileprivate func recycle(
+        pointer: UnsafeMutableRawPointer,
+        capacity: Int
+    ) {
+        lock.lock()
+        if available.count < maximumRetainedBuffers {
+            available.append(Buffer(pointer: pointer, capacity: capacity))
+            lock.unlock()
+        } else {
+            lock.unlock()
+            pointer.deallocate()
+        }
+    }
+
+    deinit {
+        for buffer in available {
+            buffer.pointer.deallocate()
+        }
+    }
+}
+
+private final class PhoneMEPixelBufferLease: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+    let capacity: Int
+    private var pool: PhoneMEPixelBufferPool?
+
+    init(
+        pointer: UnsafeMutableRawPointer,
+        capacity: Int,
+        pool: PhoneMEPixelBufferPool
+    ) {
+        self.pointer = pointer
+        self.capacity = capacity
+        self.pool = pool
+    }
+
+    deinit {
+        pool?.recycle(pointer: pointer, capacity: capacity)
+        pool = nil
+    }
+}
+
+private let phoneMEPixelBufferRelease: CGDataProviderReleaseDataCallback = {
+    info,
+    _,
+    _ in
+    guard let info else { return }
+    Unmanaged<PhoneMEPixelBufferLease>.fromOpaque(info).release()
+}
+
 final class PhoneMECAPI: @unchecked Sendable {
     struct RuntimeHandle: @unchecked Sendable, Equatable {
         fileprivate let rawValue: UnsafeMutableRawPointer
+    }
+
+    enum AppState: Int32, Sendable {
+        case none = 0
+        case active = 1
+        case paused = 2
+        case destroyed = 3
+        case error = 4
     }
 
     struct LCDUIEvent: Sendable {
@@ -22,13 +131,24 @@ final class PhoneMECAPI: @unchecked Sendable {
     private static let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
 
     private let layout: PhoneMERuntimeLayout
+    private let frameBufferPool = PhoneMEPixelBufferPool(
+        maximumRetainedBuffers: 3
+    )
+    private let imageBufferPool = PhoneMEPixelBufferPool(
+        maximumRetainedBuffers: 12
+    )
 
     private init(layout: PhoneMERuntimeLayout) {
         self.layout = layout
     }
 
+    static func load() throws -> PhoneMECAPI {
+        PhoneMECAPI(layout: try PhoneMERuntimeResources.prepare())
+    }
+
     static func load(gameID: UUID) throws -> PhoneMECAPI {
-        PhoneMECAPI(layout: try PhoneMERuntimeResources.prepare(for: gameID))
+        _ = gameID
+        return try load()
     }
 
     func createRuntime() -> RuntimeHandle? {
@@ -75,6 +195,101 @@ final class PhoneMECAPI: @unchecked Sendable {
         )
     }
 
+    func installJar(
+        _ runtime: RuntimeHandle?,
+        jarURL: URL
+    ) -> (status: Int32, suiteID: Int32?) {
+        var suiteID: Int32 = 0
+        let status = jarURL.path.withCString { path in
+            phoneme_install_jar(runtime?.rawValue, path, &suiteID)
+        }
+        return (status, status == 0 ? suiteID : nil)
+    }
+
+    func lastInstallStage() -> Int32 {
+        phoneme_last_install_stage()
+    }
+
+    func lastSuiteStoreStage() -> Int32 {
+        phoneme_last_suite_store_stage()
+    }
+
+    func startSystem(_ runtime: RuntimeHandle?) -> Int32 {
+        phoneme_start_system(runtime?.rawValue)
+    }
+
+    func startMidlet(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        mainClass: String,
+        appID: Int32,
+        screenWidth: Int,
+        screenHeight: Int
+    ) -> Int32 {
+        mainClass.withCString { className in
+            phoneme_start_midlet(
+                runtime?.rawValue,
+                suiteID,
+                className,
+                appID,
+                Int32(clamping: screenWidth),
+                Int32(clamping: screenHeight)
+            )
+        }
+    }
+
+    func setForeground(
+        _ runtime: RuntimeHandle?,
+        appID: Int32?,
+        screenWidth: Int,
+        screenHeight: Int
+    ) -> Int32 {
+        phoneme_set_foreground(
+            runtime?.rawValue,
+            appID ?? 0,
+            Int32(clamping: screenWidth),
+            Int32(clamping: screenHeight)
+        )
+    }
+
+    func pauseMidlet(_ runtime: RuntimeHandle?, appID: Int32) -> Int32 {
+        phoneme_pause_midlet(runtime?.rawValue, appID)
+    }
+
+    func resumeMidlet(_ runtime: RuntimeHandle?, appID: Int32) -> Int32 {
+        phoneme_resume_midlet(runtime?.rawValue, appID)
+    }
+
+    func destroyMidlet(_ runtime: RuntimeHandle?, appID: Int32) -> Int32 {
+        phoneme_destroy_midlet(runtime?.rawValue, appID)
+    }
+
+    func midletState(
+        _ runtime: RuntimeHandle?,
+        appID: Int32
+    ) -> AppState {
+        AppState(rawValue: phoneme_midlet_state(runtime?.rawValue, appID))
+            ?? .none
+    }
+
+    func foregroundAppID(_ runtime: RuntimeHandle?) -> Int32? {
+        let appID = phoneme_foreground_app_id(runtime?.rawValue)
+        return appID > 0 ? appID : nil
+    }
+
+    func midletUsedMemory(
+        _ runtime: RuntimeHandle?,
+        appID: Int32,
+        timeoutMilliseconds: Int32 = 200
+    ) -> UInt64? {
+        let bytes = phoneme_midlet_used_memory(
+            runtime?.rawValue,
+            appID,
+            timeoutMilliseconds
+        )
+        return bytes >= 0 ? UInt64(bytes) : nil
+    }
+
     func startJar(
         _ runtime: RuntimeHandle?,
         jarURL: URL,
@@ -97,6 +312,14 @@ final class PhoneMECAPI: @unchecked Sendable {
 
     func stop(_ runtime: RuntimeHandle?) {
         phoneme_stop(runtime?.rawValue)
+    }
+
+    func suspend(_ runtime: RuntimeHandle?) {
+        phoneme_suspend(runtime?.rawValue)
+    }
+
+    func resume(_ runtime: RuntimeHandle?) {
+        phoneme_resume(runtime?.rawValue)
     }
 
     func isRunning(_ runtime: RuntimeHandle?) -> Bool {
@@ -265,24 +488,24 @@ final class PhoneMECAPI: @unchecked Sendable {
             return nil
         }
 
-        var pixels = Data(count: Int(requiredByteCount))
-        let writtenByteCount = pixels.withUnsafeMutableBytes { rawBuffer in
-            let buffer = rawBuffer.bindMemory(to: UInt8.self)
-            return phoneme_copy_lcdui_image_rgba(
-                runtime?.rawValue,
-                componentID,
-                buffer.baseAddress,
-                Int32(buffer.count),
-                &width,
-                &height,
-                &generation
-            )
-        }
+        let lease = imageBufferPool.acquire(
+            minimumCapacity: Int(requiredByteCount)
+        )
+        let writtenByteCount = phoneme_copy_lcdui_image_rgba(
+            runtime?.rawValue,
+            componentID,
+            lease.pointer.assumingMemoryBound(to: UInt8.self),
+            Int32(clamping: lease.capacity),
+            &width,
+            &height,
+            &generation
+        )
 
         guard
             writtenByteCount == requiredByteCount,
             let image = Self.makeImage(
-                pixels: pixels,
+                lease: lease,
+                byteCount: Int(writtenByteCount),
                 width: Int(width),
                 height: Int(height),
                 shouldInterpolate: true,
@@ -319,26 +542,27 @@ final class PhoneMECAPI: @unchecked Sendable {
             return nil
         }
 
-        // Fill provider-owned storage directly. The previous Array -> Data
-        // conversion allocated and copied a second full RGBA frame every tick.
-        var pixels = Data(count: Int(requiredByteCount))
-        let writtenByteCount = pixels.withUnsafeMutableBytes { rawBuffer in
-            let buffer = rawBuffer.bindMemory(to: UInt8.self)
-            return phoneme_copy_frame_rgba(
-                runtime?.rawValue,
-                buffer.baseAddress,
-                Int32(buffer.count),
-                &width,
-                &height,
-                &generation
-            )
-        }
+        // The provider retains this lease until Core Graphics releases the
+        // image. Returned storage is recycled instead of allocating a fresh
+        // Data object for every changed framebuffer generation.
+        let lease = frameBufferPool.acquire(
+            minimumCapacity: Int(requiredByteCount)
+        )
+        let writtenByteCount = phoneme_copy_frame_rgba(
+            runtime?.rawValue,
+            lease.pointer.assumingMemoryBound(to: UInt8.self),
+            Int32(clamping: lease.capacity),
+            &width,
+            &height,
+            &generation
+        )
 
         guard
             writtenByteCount == requiredByteCount,
-            Int(width) * Int(height) * 4 <= pixels.count,
+            Int(width) * Int(height) * 4 <= Int(writtenByteCount),
             let image = Self.makeImage(
-                pixels: pixels,
+                lease: lease,
+                byteCount: Int(writtenByteCount),
                 width: Int(width),
                 height: Int(height),
                 shouldInterpolate: false,
@@ -352,18 +576,33 @@ final class PhoneMECAPI: @unchecked Sendable {
     }
 
     private static func makeImage(
-        pixels: Data,
+        lease: PhoneMEPixelBufferLease,
+        byteCount: Int,
         width: Int,
         height: Int,
         shouldInterpolate: Bool,
         isOpaque: Bool
     ) -> CGImage? {
-        guard width > 0, height > 0, width * height * 4 <= pixels.count else {
+        guard
+            width > 0,
+            height > 0,
+            byteCount > 0,
+            width * height * 4 <= byteCount,
+            byteCount <= lease.capacity
+        else {
             return nil
         }
-        // CGDataProvider retains the immutable CFData backing store. Avoid a
-        // second full RGBA copy for every frame and every native LCDUI image.
-        guard let provider = CGDataProvider(data: pixels as CFData) else {
+
+        let retainedLease = Unmanaged.passRetained(lease).toOpaque()
+        guard let provider = CGDataProvider(
+            dataInfo: retainedLease,
+            data: lease.pointer,
+            size: byteCount,
+            releaseData: phoneMEPixelBufferRelease
+        ) else {
+            Unmanaged<PhoneMEPixelBufferLease>
+                .fromOpaque(retainedLease)
+                .release()
             return nil
         }
         return CGImage(
@@ -393,6 +632,8 @@ enum PhoneMECoreError: LocalizedError {
     case runtimeResourcesMissing
     case runtimeCreationFailed
     case mainClassMissing
+    case applicationNotPrepared
+    case tooManyApplications
     case launchFailed(Int32)
 
     var errorDescription: String? {
@@ -405,6 +646,10 @@ enum PhoneMECoreError: LocalizedError {
             return "Failed to create runtime."
         case .mainClassMissing:
             return "The JAR manifest does not contain a valid MIDlet-1 class."
+        case .applicationNotPrepared:
+            return "This application was imported after multitasking started. Close the running applications once so it can be prepared."
+        case .tooManyApplications:
+            return "The maximum of 64 simultaneous J2ME applications has been reached."
         case let .launchFailed(code):
             return "Failed to start application (error \(code))."
         }

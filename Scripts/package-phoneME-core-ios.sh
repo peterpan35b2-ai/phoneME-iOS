@@ -15,11 +15,12 @@ MIDP_OUTPUT="$CORE_ROOT/midp/build/ios_arm64_gcc/output"
 CLDC_DIST="$CORE_ROOT/cldc/build/ios_arm64/dist"
 PCSL_LIB="$CORE_ROOT/pcsl/output-ios/darwin_arm64/lib"
 ARCHIVE_OUTPUT="$APP_ROOT/phoneME/Core/libphoneMECore.a"
+PREVERIFIER_ARCHIVE="$CORE_ROOT/preverifier/build/ios_arm64/libphoneMEPreverifier.a"
 RUNTIME_OUTPUT="$APP_ROOT/phoneME/Resources/PhoneMERuntime"
 
 required_files=(
+  "$PREVERIFIER_ARCHIVE"
   "$MIDP_OUTPUT/obj/arm64/libobj.a"
-  "$MIDP_OUTPUT/obj/arm64/runMidlet.o"
   "$MIDP_OUTPUT/classes.zip"
   "$CLDC_DIST/lib/libcldc_vm_r.a"
   "$CLDC_DIST/lib/cldc_rom_image_r.o"
@@ -38,16 +39,15 @@ for path in "${required_files[@]}"; do
   fi
 done
 
-if [[ ! -d "$MIDP_OUTPUT/appdb" ]]; then
-  echo "MIDP app database template is missing under $MIDP_OUTPUT." >&2
-  exit 1
-fi
+# Some cross-compiled iOS builds do not generate the optional appdb template.
+# The runtime creates its suite store on first launch, and the iOS HTTPS bridge
+# validates certificates through the system trust store instead of _main.ks.
 
 mkdir -p "$(dirname "$ARCHIVE_OUTPUT")"
 
 xcrun libtool -static -o "$ARCHIVE_OUTPUT" \
+  "$PREVERIFIER_ARCHIVE" \
   "$MIDP_OUTPUT/obj/arm64/libobj.a" \
-  "$MIDP_OUTPUT/obj/arm64/runMidlet.o" \
   "$CLDC_DIST/lib/libcldc_vm_r.a" \
   "$CLDC_DIST/lib/cldc_rom_image_r.o" \
   "$PCSL_LIB/libpcsl_escfilenames.a" \
@@ -57,10 +57,14 @@ xcrun libtool -static -o "$ARCHIVE_OUTPUT" \
   "$PCSL_LIB/libpcsl_print.a" \
   "$PCSL_LIB/libpcsl_string.a"
 
-rm -rf "$RUNTIME_OUTPUT"
 mkdir -p "$RUNTIME_OUTPUT/appdb"
-# Direct-JAR launch does not use the legacy AMS selector splash/icons. Keep
-# only the public-key store required by MIDP security/HTTPS.
+# Remove generated suite-store data without deleting the tracked trust-store
+# template when the cross-compiled MIDP output does not provide a replacement.
+find "$RUNTIME_OUTPUT/appdb" -mindepth 1 -maxdepth 1 \
+  ! -name '_main.ks' -exec rm -rf {} +
+rm -f "$RUNTIME_OUTPUT/classes.zip"
+# The native iOS library is the AMS UI. Keep only the suite store template
+# and public-key material required by MIDP security/HTTPS.
 if [[ -f "$MIDP_OUTPUT/appdb/_main.ks" ]]; then
   install -m 0644 \
     "$MIDP_OUTPUT/appdb/_main.ks" \

@@ -1760,7 +1760,19 @@ ReturnOop Universe::new_task(int id JVM_TRAPS) {
 
   {
     ObjArray::Raw cl = Universe::new_obj_array(num + pad JVM_CHECK_0);
-    ObjArray::Raw cl_src  = Universe::system_class_list();
+    ObjArray::Raw cl_src;
+    if (!UseROM) {
+      /* A non-ROM MVM keeps loading shared CLDC/MIDP classes in the AMS task.
+       * system_class_list may point at an older array after class-list growth,
+       * so always snapshot the AMS task's current list when creating a child. */
+      cl_src = Universe::class_list()->obj();
+      GUARANTEE(!cl_src.is_null(), "Current task class list is null");
+      *Universe::system_class_list() = cl_src.obj();
+    } else {
+      cl_src = Universe::system_class_list();
+    }
+    GUARANTEE(cl_src().length() >= num,
+              "System class list shorter than class count");
     ObjArray::array_copy(&cl_src, 0, &cl, 0, num JVM_MUST_SUCCEED);
     task().set_class_count(num);
     task().set_class_list(cl);

@@ -113,8 +113,13 @@ seek(imageSrcPtr self, long pos)
 {
     resourceImageSrcPtr p = (resourceImageSrcPtr) self->ptr;
 
-    p->offset = pos;
-    p->remaining = p->len - pos;
+    if (pos < 0 || pos > p->len) {
+        p->offset = p->len;
+        p->remaining = -1;
+        return;
+    }
+    p->offset = (int)pos;
+    p->remaining = p->len - (int)pos;
 }
 
 

@@ -24,6 +24,7 @@
  * information or have any questions. 
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -64,8 +65,8 @@ readChars(void* state, unsigned char* buffer, long n) {
 
 static int
 seekChars(void* state, long offset, int whence) {
-    long absPos;
-    char* pszError;
+    long absPos = 0;
+    char* pszError = NULL;
 
     switch (whence) {
     case SEEK_SET:
@@ -75,6 +76,9 @@ seekChars(void* state, long offset, int whence) {
 
     case SEEK_END:
         absPos = sizeOfFile(state) + offset;
+        if (absPos < 0) {
+            return -1;
+        }
         storagePosition(&pszError, *(int*)state, absPos);
         break;
 
@@ -86,8 +90,13 @@ seekChars(void* state, long offset, int whence) {
         return -1;
     }
 
+    if (pszError != NULL || absPos < 0) {
+        storageFreeError(pszError);
+        return -1;
+    }
+
     storageFreeError(pszError);
-    return absPos;
+    return 0;
 }
 
 static int
@@ -96,11 +105,11 @@ readChar(void* state) {
     unsigned char temp;
 
     size = readChars(state, &temp, 1);
-    if (size < 1) {
-        return size;
+    if (size != 1) {
+        return -1;
     }
 
-    return temp;
+    return (int)temp;
 }
 
 static void*
@@ -221,14 +230,18 @@ midpGetJarEntry(void* handle, const pcsl_string * name,
     }
 
     nameLen = pcsl_string_utf8_length(name);
-    pCompBuffer = midpMalloc(nameLen);
+    if (nameLen < 0) {
+        pcsl_string_release_utf8_data((jbyte*)pName, name);
+        return MIDP_JAR_CORRUPT_ERROR;
+    }
+    pCompBuffer = midpMalloc((unsigned int)nameLen);
     if (pCompBuffer == NULL) {
         pcsl_string_release_utf8_data((jbyte*)pName, name);
         return MIDP_JAR_OUT_OF_MEM_ERROR;
     }
     
     entryInfo = findJarEntryInfo(&pJarInfo->fileObj, &pJarInfo->jarInfo,
-                pName, nameLen, pCompBuffer);
+                pName, (unsigned int)nameLen, pCompBuffer);
     pcsl_string_release_utf8_data((jbyte*)pName, name);
     midpFree(pCompBuffer);
     if (entryInfo.status == JAR_ENTRY_NOT_FOUND) {
@@ -239,7 +252,12 @@ midpGetJarEntry(void* handle, const pcsl_string * name,
         return MIDP_JAR_CORRUPT_ERROR;
     }
 
-    entryData = midpMalloc((size_t)entryInfo.decompLen);
+    if (entryInfo.decompLen > (unsigned long)UINT_MAX ||
+            entryInfo.decompLen > (unsigned long)LONG_MAX) {
+        return MIDP_JAR_OUT_OF_MEM_ERROR;
+    }
+
+    entryData = midpMalloc((unsigned int)entryInfo.decompLen);
     if (entryData == NULL) {
         return MIDP_JAR_OUT_OF_MEM_ERROR;
     }
@@ -252,7 +270,7 @@ midpGetJarEntry(void* handle, const pcsl_string * name,
     }
 
     *ppEntry = (unsigned char*)entryData;
-    return entryInfo.decompLen;
+    return (long)entryInfo.decompLen;
 }
 
 int
@@ -270,14 +288,18 @@ midpJarEntryExists(void* handle, const pcsl_string * name) {
     }
 
     nameLen = pcsl_string_utf8_length(name);
-    pCompBuffer = midpMalloc(nameLen);
+    if (nameLen < 0) {
+        pcsl_string_release_utf8_data((jbyte*)pName, name);
+        return MIDP_JAR_CORRUPT_ERROR;
+    }
+    pCompBuffer = midpMalloc((unsigned int)nameLen);
     if (NULL == pCompBuffer) {
         pcsl_string_release_utf8_data((jbyte*)pName, name);
         return MIDP_JAR_OUT_OF_MEM_ERROR;
     }
     
     entryInfo = findJarEntryInfo(&pJarInfo->fileObj, &pJarInfo->jarInfo,
-                pName, nameLen, pCompBuffer);
+                pName, (unsigned int)nameLen, pCompBuffer);
     pcsl_string_release_utf8_data((jbyte*)pName, name);
     midpFree(pCompBuffer);
     if (JAR_ENTRY_NOT_FOUND == entryInfo.status) {
@@ -304,8 +326,13 @@ midpIterateJarEntries(void *handle, filterFuncT *filter, actionFuncT *action) {
     entryInfo = getFirstJarEntryInfo(&pJarInfo->fileObj, &pJarInfo->jarInfo);
 
     while (entryInfo.status == 0) {
+        if (entryInfo.nameLen > (unsigned long)UINT_MAX ||
+                entryInfo.nameLen > (unsigned long)INT_MAX) {
+            status = MIDP_JAR_CORRUPT_ERROR;
+            break;
+        }
         
-        nameBuf =  (unsigned char*) midpMalloc(entryInfo.nameLen);
+        nameBuf = (unsigned char*)midpMalloc((unsigned int)entryInfo.nameLen);
         if (nameBuf == NULL) {
             status = MIDP_JAR_OUT_OF_MEM_ERROR;
             break;
@@ -318,7 +345,8 @@ midpIterateJarEntries(void *handle, filterFuncT *filter, actionFuncT *action) {
             break;
         }
 
-        res = pcsl_string_convert_from_utf8((jbyte*)nameBuf, entryInfo.nameLen,
+        res = pcsl_string_convert_from_utf8((jbyte*)nameBuf,
+                                            (jsize)entryInfo.nameLen,
                                             &entryName);
         midpFree(nameBuf);
         if (PCSL_STRING_OK != res) {

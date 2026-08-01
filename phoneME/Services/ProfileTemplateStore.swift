@@ -27,6 +27,8 @@ final class ProfileTemplateStore: ObservableObject {
     private let keyboardPaletteMigrationKey = "phoneME.profileTemplates.keyboardPaletteV3"
     private let displayGravityMigrationKey = "phoneME.profileTemplates.displayGravityV5"
     private let parallelRedrawMigrationKey = "phoneME.profileTemplates.parallelRedrawV6"
+    private let nativeInputDefaultsMigrationKey = "phoneME.profileTemplates.nativeInputDefaultsV7"
+    private let frameRate60MigrationKey = "phoneME.profileTemplates.frameRate60V8"
 
     init(fileManager: FileManager = .default) {
         let applicationSupport = fileManager.urls(
@@ -104,6 +106,8 @@ final class ProfileTemplateStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: keyboardPaletteMigrationKey)
             UserDefaults.standard.set(true, forKey: displayGravityMigrationKey)
             UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
+            UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
+            UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
             return
         }
         templates = stored.templates.map { template in
@@ -165,6 +169,33 @@ final class ProfileTemplateStore: ObservableObject {
                 changed = true
             }
             defaults.set(true, forKey: parallelRedrawMigrationKey)
+            if changed {
+                persist()
+            }
+        }
+
+        if !defaults.bool(forKey: nativeInputDefaultsMigrationKey) {
+            var changed = false
+            for index in templates.indices {
+                if templates[index].profile.migrateNativeInputDefaultsIfNeeded() {
+                    changed = true
+                }
+            }
+            defaults.set(true, forKey: nativeInputDefaultsMigrationKey)
+            if changed {
+                persist()
+            }
+        }
+
+        if !defaults.bool(forKey: frameRate60MigrationKey) {
+            var changed = false
+            for index in templates.indices
+                where templates[index].profile.frameRateLimit
+                    == GameProfile.previousMaximumFrameRate {
+                templates[index].profile.frameRateLimit = GameProfile.maximumFrameRate
+                changed = true
+            }
+            defaults.set(true, forKey: frameRate60MigrationKey)
             if changed {
                 persist()
             }

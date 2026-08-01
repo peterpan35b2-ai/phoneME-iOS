@@ -324,9 +324,23 @@ public:
 
   // holder class of this method
   ReturnOop holder() const {
-    GUARANTEE(ushort_field(holder_id_offset()) != 0xFFFF,
+    const jushort id = ushort_field(holder_id_offset());
+    GUARANTEE(id != 0xFFFF,
       "Attempt to access uninitialized holder id");
-    return Universe::class_from_id(ushort_field(holder_id_offset()));
+    OopDesc* klass = Universe::class_from_id(id);
+#if ENABLE_ISOLATES
+    if (klass == NULL) {
+      TaskGCContext owner_context(obj());
+      klass = Universe::class_from_id(id);
+      if (klass == NULL) {
+        ObjArray::Raw system_classes = Universe::system_class_list();
+        if (system_classes.not_null() && id < system_classes().length()) {
+          klass = system_classes().obj_at(id);
+        }
+      }
+    }
+#endif
+    return klass;
   }
 
   ReturnOop holder(Thread *thread) {
@@ -339,7 +353,8 @@ public:
     ObjArray::Raw cl = t().class_list();
     GUARANTEE(!cl.is_null() && cl().length() > holder_id(),
               "Illegal class id");
-    return cl().obj_at(ushort_field(holder_id_offset()));
+    OopDesc* klass = cl().obj_at(ushort_field(holder_id_offset()));
+    return klass != NULL ? klass : holder();
 #else
     (void)thread;
     return holder();

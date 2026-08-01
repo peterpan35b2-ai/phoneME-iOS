@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <stdio.h>
 
 #include <kni.h>
@@ -122,7 +123,7 @@ KNIDECL(com_sun_midp_io_j2me_storage_RandomAccessStream_close) {
  */
 KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_sun_midp_io_j2me_storage_RandomAccessStream_read) {
-    int   bytesRead = 0;
+    long  bytesRead = 0;
     int   length;
     int   offset;
     int   handle;
@@ -147,9 +148,12 @@ KNIDECL(com_sun_midp_io_j2me_storage_RandomAccessStream_read) {
     if (pszError != NULL) {
         KNI_ThrowNew(midpIOException, pszError);
         storageFreeError(pszError);
+    } else if (bytesRead < -1 || bytesRead > INT_MAX) {
+        KNI_ThrowNew(midpIOException, "Invalid stream read length");
+        bytesRead = 0;
     }
 
-    KNI_ReturnInt(bytesRead);
+    KNI_ReturnInt((jint)bytesRead);
 }
 
 /*

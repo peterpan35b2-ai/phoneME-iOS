@@ -24,6 +24,9 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
+
 #include <kni.h>
 
 #include <midlet.h>
@@ -56,8 +59,8 @@
 KNIEXPORT KNI_RETURNTYPE_BOOLEAN
 KNIDECL(com_sun_midp_main_CldcPlatformRequest_dispatchPlatformRequest) {
     jsize urlLen;
-    char* pszUrl;
-    jchar* temp;
+    char* pszUrl = NULL;
+    jchar* temp = NULL;
     int i;
     int connectionFound = KNI_FALSE;
 
@@ -67,21 +70,27 @@ KNIDECL(com_sun_midp_main_CldcPlatformRequest_dispatchPlatformRequest) {
     KNI_GetParameterAsObject(1, urlObj);
     if (!KNI_IsNullHandle(urlObj)) {
         urlLen = KNI_GetStringLength(urlObj);
-        if (urlLen >= 0) {
-            pszUrl = (char*)midpMalloc((urlLen + 1) * sizeof (jchar));
-            if (pszUrl != NULL) {
-                temp = (jchar*)pszUrl;
-                KNI_GetStringRegion(urlObj, 0, urlLen, (jchar*)temp);
+        if (urlLen >= 0 &&
+                (size_t)urlLen + 1U <= (size_t)UINT_MAX &&
+                (size_t)urlLen <= (size_t)UINT_MAX / sizeof (jchar)) {
+            pszUrl = (char*)midpMalloc((unsigned int)((size_t)urlLen + 1U));
+            temp = (jchar*)midpMalloc(
+                (unsigned int)((size_t)urlLen * sizeof (jchar)));
+            if (pszUrl != NULL && (urlLen == 0 || temp != NULL)) {
+                if (urlLen > 0) {
+                    KNI_GetStringRegion(urlObj, 0, urlLen, temp);
+                }
 
                 /* simply convert the unicode by stripping the high byte */
                 for (i = 0; i < urlLen; i++) {
-                    pszUrl[i] = (char)temp[i];
+                    pszUrl[i] = (char)(temp[i] & 0xffU);
                 }
 
                 pszUrl[urlLen] = 0;
                 connectionFound = platformRequest(pszUrl);
-                midpFree(pszUrl);
             }
+            midpFree(temp);
+            midpFree(pszUrl);
         }
     }
 

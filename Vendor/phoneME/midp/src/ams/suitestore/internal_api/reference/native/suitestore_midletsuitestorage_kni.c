@@ -24,6 +24,8 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <sni.h>
@@ -136,7 +138,9 @@ MIDP_ERROR midpport_suite_next_property(jint propHandle,
                                         jchar **key, jint *keyLength,
                                         jchar **value, jint *valueLength) {
   char* pszError = NULL;
-  int bytesRead = 0;
+  long bytesRead = 0;
+  long bytesToRead;
+  size_t byteLength;
   jchar *tempStr = NULL;
   jint tempLen = 0;
 
@@ -152,15 +156,21 @@ MIDP_ERROR midpport_suite_next_property(jint propHandle,
     return MIDP_ERROR_AMS_SUITE_CORRUPTED;
   }
 
-  tempStr = (jchar*)midpMalloc(tempLen * sizeof (jchar));
-  if (tempStr == NULL) {
-      return MIDP_ERROR_OUT_MEM;
+  if (tempLen < 0 ||
+      (size_t)tempLen > (size_t)UINT_MAX / sizeof (jchar) ||
+      (size_t)tempLen * sizeof (jchar) > (size_t)LONG_MAX) {
+    return MIDP_ERROR_AMS_SUITE_CORRUPTED;
+  }
+  byteLength = (size_t)tempLen * sizeof (jchar);
+  bytesToRead = (long)byteLength;
+  tempStr = (jchar*)midpMalloc((unsigned int)byteLength);
+  if (tempStr == NULL && byteLength != 0U) {
+    return MIDP_ERROR_OUT_MEM;
   }
 
   bytesRead = storageRead(&pszError, propHandle,
-                          (char*)tempStr, tempLen * sizeof (jchar));
-  if (pszError != NULL ||
-      (bytesRead != (signed)(tempLen * sizeof (jchar)))) {
+                          (char*)tempStr, bytesToRead);
+  if (pszError != NULL || bytesRead != bytesToRead) {
     midpFree(tempStr);
     storageFreeError(pszError);
     return MIDP_ERROR_AMS_SUITE_CORRUPTED;
@@ -172,20 +182,38 @@ MIDP_ERROR midpport_suite_next_property(jint propHandle,
   /* load the value string */
   storageRead(&pszError, propHandle, (char*)&tempLen, sizeof (jint));
   if (pszError != NULL) {
+    midpFree(*key);
+    *key = NULL;
+    *keyLength = 0;
     storageFreeError(pszError);
     return MIDP_ERROR_AMS_SUITE_CORRUPTED;
   }
 
-  tempStr = (jchar*)midpMalloc(tempLen * sizeof (jchar));
-  if (tempStr == NULL) {
+  if (tempLen < 0 ||
+      (size_t)tempLen > (size_t)UINT_MAX / sizeof (jchar) ||
+      (size_t)tempLen * sizeof (jchar) > (size_t)LONG_MAX) {
+    midpFree(*key);
+    *key = NULL;
+    *keyLength = 0;
+    return MIDP_ERROR_AMS_SUITE_CORRUPTED;
+  }
+  byteLength = (size_t)tempLen * sizeof (jchar);
+  bytesToRead = (long)byteLength;
+  tempStr = (jchar*)midpMalloc((unsigned int)byteLength);
+  if (tempStr == NULL && byteLength != 0U) {
+    midpFree(*key);
+    *key = NULL;
+    *keyLength = 0;
     return MIDP_ERROR_OUT_MEM;
   }
 
   bytesRead = storageRead(&pszError, propHandle,
-                          (char*)tempStr, tempLen * sizeof (jchar));
-  if (pszError != NULL ||
-      (bytesRead != (signed)(tempLen * sizeof (jchar)))) {
+                          (char*)tempStr, bytesToRead);
+  if (pszError != NULL || bytesRead != bytesToRead) {
     midpFree(tempStr);
+    midpFree(*key);
+    *key = NULL;
+    *keyLength = 0;
     storageFreeError(pszError);
     return MIDP_ERROR_AMS_SUITE_CORRUPTED;
   }
@@ -579,13 +607,14 @@ KNIDECL(com_sun_midp_midletsuite_MIDletSuiteStorage_createSuiteID) {
  */
 KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_sun_midp_midletsuite_MIDletSuiteStorage_getStorageUsed) {
-    int used = 0;
+    long used = 0;
     /* assert(sizeof(SuiteIdType) == sizeof(jint)); */
     SuiteIdType suiteId = KNI_GetParameterAsInt(1);
     used = midp_get_suite_storage_size(suiteId);
 
-    if (used < 0) {
+    if (used < 0 || used > INT_MAX) {
         KNI_ThrowNew(midpOutOfMemoryError, NULL);
+        KNI_ReturnInt(0);
     }
 
     KNI_ReturnInt((jint)used);
@@ -1898,11 +1927,14 @@ KNIDECL(com_sun_midp_midletsuite_MIDletSuiteStorage_getSecureFilenameBase) {
  */
 KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_sun_midp_midletsuite_MIDletSuiteStorage_checkSuitesIntegrity) {
-    jboolean fullCheck, delCorruptedSuites, retCode;
+    jboolean fullCheck, delCorruptedSuites;
+    jint retCode;
     MIDPError status;
 
     fullCheck = KNI_GetParameterAsBoolean(1);
-    delCorruptedSuites = KNI_GetParameterAsInt(2);
+    delCorruptedSuites = KNI_GetParameterAsInt(2) != 0
+        ? KNI_TRUE
+        : KNI_FALSE;
 
     status = midp_check_suites_integrity((fullCheck == KNI_TRUE),
                                          (delCorruptedSuites == KNI_TRUE));
@@ -1912,7 +1944,7 @@ KNIDECL(com_sun_midp_midletsuite_MIDletSuiteStorage_checkSuitesIntegrity) {
     } else if (status == SUITE_CORRUPTED_ERROR) {
         retCode = 1;
     } else {
-        retCode = (jint)status;
+        retCode = status;
         if (retCode > 0) {
             /*
              * to guarantee that this function will return a negative

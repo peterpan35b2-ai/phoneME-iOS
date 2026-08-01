@@ -24,6 +24,9 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #include <jar.h>
@@ -78,9 +81,14 @@ int inflateData(FileObj* fileObj, HeapManObj* heapManObj, int compLen,
     InflaterState* state = &stateStruct;
     int result = 0;
 
+    if (compLen < 0 || decompLen < 0 ||
+            compLen > INT_MAX - INFLATER_EXTRA_BYTES) {
+        return INFLATE_INPUT_OVERFLOW;
+    }
+
     state->outBuffer = decompBuffer;
     state->outOffset = 0;
-    state->outLength = decompLen;
+    state->outLength = (unsigned int)decompLen;
     state->outBufferIsAHandle = bufferIsAHandle;
 
     state->fileState = fileObj->state;
@@ -154,7 +162,7 @@ int inflateData(FileObj* fileObj, HeapManObj* heapManObj, int compLen,
 static int inflateStored(InflaterState *state) {
     DECLARE_IN_VARIABLES
     DECLARE_OUT_VARIABLES
-    long len, nlen;
+    uint32_t len, nlen;
 
     LOAD_IN; LOAD_OUT;
 
@@ -185,11 +193,13 @@ static int inflateStored(InflaterState *state) {
         while (len > 0) {
             if (state->inflateBufferCount > 0) {
                 /* we have data buffered, copy it first */
+                count = state->inflateBufferCount <= (int)len
+                    ? state->inflateBufferCount
+                    : (int)len;
                 memcpy(&outBuffer[outOffset],
                        &(state->inflateBuffer[state->inflateBufferIndex]),
-                       (count = (state->inflateBufferCount <= len ?
-                                 state->inflateBufferCount : len)));
-                len -= count;
+                       (size_t)count);
+                len -= (uint32_t)count;
                 (state->inflateBufferCount) -= count;
                 (state->inflateBufferIndex) += count;
                 outOffset += count;
@@ -288,7 +298,7 @@ static int inflateHuffman(InflaterState *state, int fixedHuffman) {
 
         if (litxlen <= 255) {
             if (outOffset < outLength) {
-                outBuffer[outOffset] = litxlen;
+                outBuffer[outOffset] = (unsigned char)litxlen;
                 outOffset++;
             } else {
                 /* success */
@@ -336,8 +346,8 @@ static int inflateHuffman(InflaterState *state, int fixedHuffman) {
                 error = INFLATE_OUTPUT_OVERFLOW;
                 break;
             } else {
-                unsigned long prev = outOffset - distance;
-                unsigned long end = outOffset + length;
+                unsigned int prev = outOffset - distance;
+                unsigned int end = outOffset + length;
                 unsigned char value;
                 while (outOffset != end) {
                     value = outBuffer[prev];
@@ -470,7 +480,7 @@ static int decodeDynamicHuffmanTables(InflaterState *state,
              *          11 + (7 bits of length)
              */
         if (val <= 15) {
-            *codePtr++ = val;
+            *codePtr++ = (unsigned char)val;
         } else if (val <= 18) {
             unsigned repeat  = (val == 18) ? 11 : 3;
             unsigned bits    = (val == 18) ? 7 : (val - 14);
@@ -564,7 +574,7 @@ static int makeCodeTable(InflaterState *state,
     int mainTableLength, longTableLength, numLongTables;
     int tableSize;
     int j;
-    unsigned short *nextLongTable;
+    uint16_t *nextLongTable;
 
     *result = NULL;
 
@@ -626,13 +636,13 @@ static int makeCodeTable(InflaterState *state,
 
     memset(table, 0, tableSize);
 
-    table->h.maxCodeLen   = maxCodeLen;
-    table->h.quickBits    = maxQuickBits;
+    table->h.maxCodeLen = (uint16_t)maxCodeLen;
+    table->h.quickBits = (uint16_t)maxQuickBits;
 
     quickMask = (1 << maxQuickBits) - 1;
 
     for (p = codelen; p < endCodeLen; p++) {
-        unsigned short huff;
+        uint16_t huff;
         bits = *p;
         if (bits == 0) {
             continue;
@@ -642,7 +652,7 @@ static int makeCodeTable(InflaterState *state,
         code = codes[bits];
         codes[bits] += 1 << (MAX_BITS - bits);
         code = REVERSE_15BITS(code);
-        huff = ((p - codelen) << 4) + bits;
+        huff = (uint16_t)(((size_t)(p - codelen) << 4) + bits);
 
         if (bits <= maxQuickBits) {
             unsigned stride = 1 << bits;
@@ -650,26 +660,34 @@ static int makeCodeTable(InflaterState *state,
                 table->entries[j] = huff;
             }
         } else {
-            unsigned short *thisLongTable;
-            unsigned stride = 1 << (bits - maxQuickBits);
+            unsigned char *thisLongTableBytes;
+            unsigned stride = 1U << (bits - maxQuickBits);
             unsigned int prefixCode = code & quickMask;
             unsigned int suffixCode = code >> maxQuickBits;
 
             if (table->entries[prefixCode] == 0) {
                 /* This in the first long code with the indicated prefix.
                  * Create a pointer to the subtable */
-                long delta = (char *)nextLongTable - (char *)table;
-                table->entries[prefixCode] = 
-                (unsigned short)(HUFFINFO_LONG_MASK | delta);
-                thisLongTable = nextLongTable;
+                size_t delta = (size_t)((unsigned char *)nextLongTable -
+                                        (unsigned char *)table);
+                if (delta > (size_t)(HUFFINFO_LONG_MASK - 1)) {
+                    state->freeBytes(state->heapState, tableMemHandle);
+                    return INFLATE_CODE_TABLE_LENGTH_ERROR;
+                }
+                table->entries[prefixCode] =
+                    (uint16_t)(HUFFINFO_LONG_MASK | (uint16_t)delta);
+                thisLongTableBytes = (unsigned char *)nextLongTable;
                 nextLongTable += longTableLength;
             } else {
-                long delta = table->entries[prefixCode] & ~HUFFINFO_LONG_MASK;
-                thisLongTable = (unsigned short *)((char *)table + delta);
+                uint16_t delta = (uint16_t)(table->entries[prefixCode] &
+                                            ~HUFFINFO_LONG_MASK);
+                thisLongTableBytes = (unsigned char *)table + delta;
             }
 
-            for (j = suffixCode; j < longTableLength; j += stride) {
-                thisLongTable[j] = huff;
+            for (j = (int)suffixCode; j < longTableLength;
+                    j += (int)stride) {
+                memcpy(thisLongTableBytes + (size_t)j * sizeof (huff),
+                       &huff, sizeof (huff));
             }
         }
     }

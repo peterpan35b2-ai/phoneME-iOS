@@ -937,10 +937,17 @@ public final class Isolate {
      * If not, throw runtime exception
      */
     private static void securityCheck() {
-        if (_API_access_ok == 0) {
+        if (_API_access_ok == 0 && !hasAPIAccess0()) {
             throw new SecurityException("Access to Isolate API not allowed");
         }
     }
+
+    /**
+     * Reads the creator-selected permission from the current task's primary
+     * Isolate object. This is the authoritative fallback when a non-ROM MVM
+     * lazily loads a task-local Isolate class after bootstrap statics were set.
+     */
+    private static native boolean hasAPIAccess0();
 
     /** 
      * Sets the access to Isolate API for this Isolate. This method

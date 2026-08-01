@@ -59,6 +59,49 @@ ReturnOop IsolateObj::task( void ) const {
   return NULL;
 }
 
+static ReturnOop copy_isolate_string(OopDesc* value JVM_TRAPS) {
+  if (value == NULL) {
+    return NULL;
+  }
+
+  UsingFastOops fast_oops;
+  String::Fast source = value;
+  const int offset = source().offset();
+  const int length = source().count();
+  TypeArray::Fast source_value = source().value();
+  TypeArray::Fast copied_value =
+      Universe::new_char_array(length JVM_OZCHECK_0(copied_value));
+  TypeArray::array_copy(
+      &source_value, offset, &copied_value, 0, length);
+  return Universe::new_string(
+      &copied_value, 0, length JVM_NO_CHECK_AT_BOTTOM);
+}
+
+static ReturnOop copy_isolate_string_array(OopDesc* value JVM_TRAPS) {
+  if (value == NULL) {
+    return NULL;
+  }
+
+  /* The source array belongs to the creator task while allocations below are
+   * made in the child task. Do not use Universe::deep_copy() here: its generic
+   * type test resolves the source blueprint in the current task and non-ROM
+   * MVM class metadata is task-local. Read only the stable String/String[]
+   * layout that the Isolate constructor guarantees. */
+  UsingFastOops fast_oops;
+  ObjArray::Fast source = value;
+  const int length = source().length();
+  InstanceClass::Fast string_class = Universe::string_class();
+  ObjArray::Fast copy =
+      Universe::new_obj_array(&string_class, length JVM_OZCHECK_0(copy));
+
+  for (int index = 0; index < length; ++index) {
+    OopDesc* copied_string =
+        copy_isolate_string(source().obj_at(index) JVM_CHECK_0);
+    copy().obj_at_put(index, copied_string);
+  }
+  return copy.obj();
+}
+
 ReturnOop IsolateObj::duplicate(JVM_SINGLE_ARG_TRAPS) const {
   UsingFastOops fast_oops;
   IsolateObj::Fast dup = 
@@ -76,12 +119,12 @@ ReturnOop IsolateObj::duplicate(JVM_SINGLE_ARG_TRAPS) const {
 #endif
 
   OopDesc* p;
-  // Do not use JVM_ZCHECK because result can be NULL
-  p = Universe::deep_copy(main_class() JVM_CHECK_0);
+  // Do not use JVM_ZCHECK because each source value may legitimately be NULL.
+  p = copy_isolate_string(main_class() JVM_CHECK_0);
   dup().set_main_class(p);
-  p = Universe::deep_copy(main_args() JVM_CHECK_0);
+  p = copy_isolate_string_array(main_args() JVM_CHECK_0);
   dup().set_main_args(p);
-  p = Universe::deep_copy(app_classpath() JVM_CHECK_0);
+  p = copy_isolate_string_array(app_classpath() JVM_CHECK_0);
   dup().set_app_classpath(p);
 
   return dup.obj();
@@ -194,6 +237,50 @@ void IsolateObj::static_int_field_put(int offset, int value) {
   tm().int_field_put(offset, value);
 }
 
+void IsolateObj::set_current_api_access(const jint value) {
+  UsingFastOops fast_oops;
+  ObjArray::Fast classes = Universe::class_list();
+  ObjArray::Fast mirrors = Universe::mirror_list();
+  Symbol::Fast isolate_name = Universe::isolate_class()->name();
+  bool updated = false;
+
+  if (classes.not_null() && mirrors.not_null()) {
+    const int limit = min(classes().length(), mirrors().length());
+    for (int i = 0; i < limit; i++) {
+      JavaClass::Raw candidate = classes().obj_at(i);
+      if (candidate.is_null() || !candidate().is_instance_class()) {
+        continue;
+      }
+      Symbol::Raw candidate_name = candidate().name();
+      if (!candidate_name.equals(&isolate_name) &&
+          !candidate_name().matches(&isolate_name)) {
+        continue;
+      }
+
+      TaskMirror::Raw mirror = mirrors().obj_at(i);
+      if (!TaskMirrorDesc::is_initialized_mirror(
+              (TaskMirrorDesc*)mirror.obj())) {
+        continue;
+      }
+      mirror().int_field_put(static_api_access_offset(), value);
+      updated = true;
+    }
+  }
+
+  /* During the earliest bootstrap phase the class list may not yet expose
+   * the represented Isolate class. Preserve the original persistent-handle
+   * path as a fallback. */
+  if (!updated) {
+    TaskMirror::Raw mirror =
+        Universe::isolate_class()->task_mirror_no_check();
+    GUARANTEE(!mirror.is_null(), "Isolate task mirror is null");
+    GUARANTEE(TaskMirrorDesc::is_initialized_mirror(
+                  (TaskMirrorDesc*)mirror.obj()),
+              "Isolate task mirror is not initialized");
+    mirror().int_field_put(static_api_access_offset(), value);
+  }
+}
+
 
 #ifndef PRODUCT
 
@@ -227,7 +314,9 @@ void IsolateObj::verify_fields() {
   ic().verify_instance_field("_memoryLimit",  "I",
                                           memory_limit_offset()); 
   ic().verify_instance_field("_profileId", "I",
-                                          profile_id_offset()); 
+                                          profile_id_offset());
+  ic().verify_static_field("_API_access_ok", "I",
+                                          static_api_access_offset());
 }
 
 #endif

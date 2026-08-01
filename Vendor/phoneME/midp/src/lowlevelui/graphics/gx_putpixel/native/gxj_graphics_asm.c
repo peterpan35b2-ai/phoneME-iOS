@@ -362,70 +362,23 @@ void unclipped_blit(unsigned short *dstRaster, int dstSpan,
     done:
     }
 #else
-  dstSpan >>= 1; srcSpan >>= 1;
-  if (((uintptr_t)dstRaster | (uintptr_t)srcRaster |
-       (uintptr_t)(dstSpan << 1) | (uintptr_t)(srcSpan << 1)) & 0x2) {
-    for ( ; height > 0; height--) {
-      CHECK_PTR_CLIP(dst, dstRaster); CHECK_PTR_CLIP(dst, dstRaster+(width>>1)-1);
-      if (((uintptr_t)dstRaster | (uintptr_t)srcRaster) & 0x2) {
-        memcpy(dstRaster, srcRaster, width);
-      } else {
-#ifdef USE_RT_MEMCPY_W
-        __rt_memcpy_w(dstRaster, srcRaster, width);
-#else
-          memcpy(dstRaster, srcRaster, width);
-#endif
-      }
-      dstRaster += dstSpan;
-      srcRaster += srcSpan;
-    }
-  } else {
-    if (width == 32) {
-      int *dstPtr = (int*) dstRaster;
-      int *srcPtr = (int*) srcRaster;
-      dstSpan >>= 1; srcSpan >>= 1;
-      if (height == 16) {
-        CHECK_PTR_CLIP(dst, dstPtr); CHECK_PTR_CLIP(dst, dstPtr+(width>>2)-1);
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        CHECK_PTR_CLIP(dst, dstPtr); CHECK_PTR_CLIP(dst, dstPtr+(width>>2)-1);
-        memcpy(dstPtr, srcPtr, 32); // dstPtr += dstSpan; srcPtr += srcSpan;
-      } else {
-        for ( ; height > 0; height -= 1) {
-          CHECK_PTR_CLIP(dst, dstPtr); CHECK_PTR_CLIP(dst, dstPtr+(width>>2)-1);
-          memcpy(dstPtr, srcPtr, 32); dstPtr += dstSpan; srcPtr += srcSpan;
-        }
-      }
-    } else {
-      /* single memcpy optimization */
-      if (((width>>1) == srcSpan) && (srcSpan == dstSpan)) {
-        width = (dstSpan<<1) * height;
-        height = 1;
-      }
-      for ( ; height > 0; height -= 1) {
-        CHECK_PTR_CLIP(dst, dstRaster); CHECK_PTR_CLIP(dst, dstRaster+(width>>1)-1);
-#ifdef USE_RT_MEMCPY_W
-        __rt_memcpy_w(dstRaster, srcRaster, width);
-#else
-        memcpy(dstRaster, srcRaster, width);
-#endif
-        dstRaster += dstSpan;
-        srcRaster += srcSpan;
-      }
-    }
+  dstSpan >>= 1;
+  srcSpan >>= 1;
+
+  /* Collapse tightly packed rows into one copy. Modern libc handles both
+   * aligned and unaligned addresses safely and more efficiently than the
+   * old 32-bit pointer-punning fast path. */
+  if (((width >> 1) == srcSpan) && (srcSpan == dstSpan)) {
+    width = (dstSpan << 1) * height;
+    height = 1;
+  }
+
+  for ( ; height > 0; height--) {
+    CHECK_PTR_CLIP(dst, dstRaster);
+    CHECK_PTR_CLIP(dst, dstRaster + (width >> 1) - 1);
+    memcpy(dstRaster, srcRaster, (size_t)width);
+    dstRaster += dstSpan;
+    srcRaster += srcSpan;
   }
 #endif
 }

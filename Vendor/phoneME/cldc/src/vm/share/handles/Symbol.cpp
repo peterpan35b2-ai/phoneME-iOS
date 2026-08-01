@@ -228,10 +228,14 @@ bool Symbol::is_valid_class_name(void) {
 }
 
 bool Symbol::is_valid_method_name(void) {
-  // is_valid_field_name() is the most common case, so do it first
+  // is_valid_field_name() is the most common case, so do it first. Symbols
+  // loaded independently by non-ROM isolates are content-equivalent but not
+  // pointer-identical to the bootstrap symbol table entries.
+  Symbol::Raw object_initializer = Symbols::object_initializer_name()->obj();
+  Symbol::Raw class_initializer = Symbols::class_initializer_name()->obj();
   return is_valid_field_name() ||
-         equals(Symbols::object_initializer_name()) ||
-         equals(Symbols::class_initializer_name());
+         equals(&object_initializer) || matches(&object_initializer) ||
+         equals(&class_initializer) || matches(&class_initializer);
 }
 
 #ifndef PRODUCT

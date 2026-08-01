@@ -37,6 +37,8 @@
  * storagePosix_md.h.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -826,10 +828,10 @@ static char*
 storage_get_last_file_error(char* pszFunction,
                             const pcsl_string* filename_str) {
     char* temp;
-    int charsLeft;
-    int i;
-    int j;
-    int lim;
+    size_t charsLeft;
+    size_t i;
+    size_t j;
+    size_t lim;
 
 #ifndef UNDER_CE
     temp = strerror(errno);
@@ -859,6 +861,11 @@ storage_get_last_file_error(char* pszFunction,
 
     LocalFree(lpMsgBuf);
 
+    if (convertedLength < 0) {
+        convertedLength = 0;
+    } else if (convertedLength > MAX_ERROR_LEN) {
+        convertedLength = MAX_ERROR_LEN;
+    }
     errorBuffer[convertedLength] = 0x0;
     return errorBuffer;
 #endif
@@ -867,28 +874,37 @@ storage_get_last_file_error(char* pszFunction,
         return "Unspecified Error";
     }
 
-    strcpy(errorBuffer, pszFunction);
-    strcat(errorBuffer, ": ");
-    charsLeft = MAX_ERROR_LEN - strlen(errorBuffer);
+    errorBuffer[0] = '\0';
+    strncat(errorBuffer, pszFunction, MAX_ERROR_LEN);
+    charsLeft = (size_t)MAX_ERROR_LEN - strlen(errorBuffer);
+    strncat(errorBuffer, ": ", charsLeft);
+    charsLeft = (size_t)MAX_ERROR_LEN - strlen(errorBuffer);
 
     strncat(errorBuffer, temp, charsLeft);
-    charsLeft = MAX_ERROR_LEN - strlen(errorBuffer);
+    charsLeft = (size_t)MAX_ERROR_LEN - strlen(errorBuffer);
 
     strncat(errorBuffer, ", ", charsLeft);
-    charsLeft = MAX_ERROR_LEN - strlen(errorBuffer);
+    charsLeft = (size_t)MAX_ERROR_LEN - strlen(errorBuffer);
 
     if (NULL_LEN == pcsl_string_length(filename_str)) {
         strncat(errorBuffer, "NULL", charsLeft);
     } else {
         const jchar* filename_data = pcsl_string_get_utf16_data(filename_str);
-        int filename_len = pcsl_string_length(filename_str);
-        lim = charsLeft < filename_len ? charsLeft : filename_len;
-        for (i = strlen(errorBuffer), j = 0; j < lim; i++, j++) {
-            errorBuffer[i] = (char)filename_data[j];
-        }
+        jsize filename_len = pcsl_string_length(filename_str);
+        if (filename_data == NULL || filename_len < 0) {
+            strncat(errorBuffer, "NULL", charsLeft);
+        } else {
+            lim = (size_t)filename_len;
+            if (lim > charsLeft) {
+                lim = charsLeft;
+            }
+            for (i = strlen(errorBuffer), j = 0; j < lim; i++, j++) {
+                errorBuffer[i] = (char)filename_data[j];
+            }
 
-        errorBuffer[i] = 0;
-        pcsl_string_release_utf16_data(filename_data,filename_str);
+            errorBuffer[i] = 0;
+            pcsl_string_release_utf16_data(filename_data, filename_str);
+        }
     }
 
     return errorBuffer;
@@ -949,7 +965,9 @@ storageCloseFileIterator(void* handle) {
  */
 void
 storage_read_utf16_string(char** ppszError, int handle, pcsl_string* str) {
-    jint bytesRead = 0;
+    long bytesRead = 0;
+    long bytesToRead;
+    size_t byteLength;
     jchar *tempStr = NULL;
     jint tempLen = 0;
     pcsl_string_status prc;
@@ -960,7 +978,7 @@ storage_read_utf16_string(char** ppszError, int handle, pcsl_string* str) {
     }
 
     /* special cases: null and empty strings */
-    if (tempLen < 0) {
+    if (tempLen <= 0) {
       if (0 == tempLen) {
           *str = PCSL_STRING_NULL;
       } else if (-1 == tempLen) {
@@ -972,17 +990,24 @@ storage_read_utf16_string(char** ppszError, int handle, pcsl_string* str) {
       return;
     }
 
-    tempStr = (jchar*)midpMalloc(tempLen * sizeof (jchar));
+    byteLength = (size_t)tempLen * sizeof (jchar);
+    if (byteLength > (size_t)UINT_MAX || byteLength > (size_t)LONG_MAX) {
+        *ppszError = (char *)OUT_OF_MEM_ERROR;
+        return;
+    }
+    bytesToRead = (long)byteLength;
+
+    tempStr = (jchar*)midpMalloc((unsigned int)byteLength);
     if (tempStr == NULL) {
         *ppszError = (char *)OUT_OF_MEM_ERROR;
         return;
     }
 
     bytesRead = storageRead(ppszError, handle,
-          (char*)tempStr, tempLen * sizeof (jchar));
+          (char*)tempStr, bytesToRead);
     if (*ppszError != NULL) {
         /* do nothing: error code already there */
-    } else if (bytesRead != (signed)(tempLen * sizeof (jchar))) {
+    } else if (bytesRead != bytesToRead) {
         *ppszError = (char *)STRING_CORRUPT_ERROR;
     } else if (PCSL_STRING_OK != (prc
                 = pcsl_string_convert_from_utf16(tempStr, tempLen, str))) {

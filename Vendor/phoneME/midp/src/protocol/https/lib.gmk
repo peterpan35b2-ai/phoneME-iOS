@@ -34,6 +34,34 @@
 #
 ######################################################################
 
+ifeq ($(USE_IOS_NATIVE), true)
+
+# iOS delegates modern TLS, certificate validation, redirects and cipher
+# negotiation to NSURLSession instead of pulling in phoneME's obsolete and
+# unavailable restricted-crypto implementation.
+SUBSYSTEMS += https
+SUBSYSTEM_PROTOCOL_MODULES += https
+
+SUBSYSTEM_HTTPS_SOURCEPATH = \
+    $(SUBSYSTEM_DIR)/protocol/https/classes$(PATHSEP)\
+    $(SUBSYSTEM_DIR)/protocol/https/ios_native/classes
+SUBSYSTEM_HTTPS_PACKAGES = \
+    com.sun.midp.io.j2me.https
+
+MIDP_JAVADOC_SOURCEPATH += $(SUBSYSTEM_HTTPS_SOURCEPATH)
+MIDP_JAVADOC_PACKAGES += $(SUBSYSTEM_HTTPS_PACKAGES)
+GROUP_PROTOCOL_JAVADOC_PACKAGES += $(SUBSYSTEM_HTTPS_PACKAGES)
+
+SUBSYSTEM_HTTPS_JAVA_FILES += \
+    $(SUBSYSTEM_DIR)/protocol/https/ios_native/classes/com/sun/midp/io/j2me/https/Protocol.java
+
+vpath % $(SUBSYSTEM_DIR)/protocol/https/ios_native/native
+SUBSYSTEM_HTTPS_EXTRA_INCLUDES += \
+    -I$(SUBSYSTEM_DIR)/core/kni_util/include
+SUBSYSTEM_HTTPS_NATIVE_FILES += \
+    ios_https_kni.c
+
+else
 ifeq ($(USE_SSL), true)
 
 # Adds to global SUBSYSTEMS list
@@ -63,6 +91,7 @@ SUBSYSTEM_HTTPS_JAVA_FILES += \
     $(SUBSYSTEM_DIR)/protocol/https/reference/classes/com/sun/kvem/io/j2me/https/Protocol.java
 endif
 
+endif
 endif
 
 # Even if HTTPS is not supported, we have to include

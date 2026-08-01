@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 import Foundation
 
 @MainActor
@@ -15,19 +16,85 @@ final class EmulatorFrameStore: ObservableObject {
 }
 
 @MainActor
+final class EmulatorFPSStore: ObservableObject {
+    @Published private(set) var value: Double = 0
+
+    fileprivate func update(_ value: Double) {
+        guard self.value != value else { return }
+        self.value = value
+    }
+
+    fileprivate func reset() {
+        update(0)
+    }
+}
+
+@MainActor
+final class LCDUIImageSlot: ObservableObject {
+    @Published private(set) var image: CGImage?
+
+    fileprivate init(image: CGImage? = nil) {
+        self.image = image
+    }
+
+    fileprivate func update(_ image: CGImage?) {
+        if let current = self.image, let image, current === image {
+            return
+        }
+        if self.image == nil, image == nil {
+            return
+        }
+        self.image = image
+    }
+}
+
+@MainActor
 final class LCDUIImageStore: ObservableObject {
-    @Published private(set) var images: [Int32: CGImage] = [:]
+    private(set) var images: [Int32: CGImage] = [:]
+    private var slots: [Int32: LCDUIImageSlot] = [:]
 
     subscript(componentID: Int32) -> CGImage? {
         images[componentID]
     }
 
-    fileprivate func replace(with images: [Int32: CGImage]) {
-        self.images = images
+    func slot(for componentID: Int32) -> LCDUIImageSlot {
+        if let slot = slots[componentID] {
+            return slot
+        }
+        let slot = LCDUIImageSlot(image: images[componentID])
+        slots[componentID] = slot
+        return slot
+    }
+
+    fileprivate func merge(_ updates: [Int32: CGImage]) {
+        for (componentID, image) in updates {
+            if let current = images[componentID], current === image {
+                continue
+            }
+            images[componentID] = image
+            slots[componentID]?.update(image)
+        }
+    }
+
+    fileprivate func replace(with nextImages: [Int32: CGImage]) {
+        for componentID in images.keys where nextImages[componentID] == nil {
+            slots[componentID]?.update(nil)
+        }
+        for (componentID, image) in nextImages {
+            if let current = images[componentID], current === image {
+                continue
+            }
+            slots[componentID]?.update(image)
+        }
+        images = nextImages
     }
 
     fileprivate func reset() {
         images.removeAll(keepingCapacity: true)
+        for slot in slots.values {
+            slot.update(nil)
+        }
+        slots.removeAll(keepingCapacity: true)
     }
 }
 
@@ -36,15 +103,111 @@ enum EmulatorPresentationMode: Equatable, Sendable {
     case nativeLCDUI
 }
 
+struct RunningJ2MEApplication: Identifiable, Equatable {
+    enum State: Equatable {
+        case starting
+        case foreground
+        case background
+        case paused
+        case failed
+    }
+
+    let game: Game
+    var state: State
+
+    var id: UUID { game.id }
+}
+
+struct J2MERuntimeResourceUsage: Equatable, Sendable {
+    let cpuPercent: Double
+    let residentMemoryBytes: UInt64
+}
+
+private final class J2MEProcessResourceSampler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var previousCPUTime: Double?
+    private var previousUptime: TimeInterval?
+
+    func reset() {
+        lock.lock()
+        previousCPUTime = nil
+        previousUptime = nil
+        lock.unlock()
+    }
+
+    func sample() -> J2MERuntimeResourceUsage? {
+        var processUsage = rusage()
+        guard getrusage(RUSAGE_SELF, &processUsage) == 0 else {
+            return nil
+        }
+
+        let userTime = Double(processUsage.ru_utime.tv_sec)
+            + Double(processUsage.ru_utime.tv_usec) / 1_000_000
+        let systemTime = Double(processUsage.ru_stime.tv_sec)
+            + Double(processUsage.ru_stime.tv_usec) / 1_000_000
+        let currentCPUTime = userTime + systemTime
+        let currentUptime = ProcessInfo.processInfo.systemUptime
+
+        lock.lock()
+        let oldCPUTime = previousCPUTime
+        let oldUptime = previousUptime
+        previousCPUTime = currentCPUTime
+        previousUptime = currentUptime
+        lock.unlock()
+
+        let cpuPercent: Double
+        if let oldCPUTime, let oldUptime {
+            let elapsed = currentUptime - oldUptime
+            let consumed = currentCPUTime - oldCPUTime
+            let maximum = Double(ProcessInfo.processInfo.activeProcessorCount) * 100
+            cpuPercent = elapsed > 0
+                ? min(max(consumed / elapsed * 100, 0), maximum)
+                : 0
+        } else {
+            cpuPercent = 0
+        }
+
+        return J2MERuntimeResourceUsage(
+            cpuPercent: cpuPercent,
+            residentMemoryBytes: Self.residentMemoryBytes()
+        )
+    }
+
+    private static func residentMemoryBytes() -> UInt64 {
+        var info = mach_task_basic_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout.size(ofValue: info) / MemoryLayout<natural_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(
+                to: integer_t.self,
+                capacity: Int(count)
+            ) { reboundPointer in
+                task_info(
+                    mach_task_self_,
+                    task_flavor_t(MACH_TASK_BASIC_INFO),
+                    reboundPointer,
+                    &count
+                )
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return UInt64(info.resident_size)
+    }
+}
+
 @MainActor
 final class EmulatorSession: ObservableObject {
     @Published private(set) var state: EmulatorState = .idle
     @Published private(set) var presentationMode: EmulatorPresentationMode = .framebuffer
     @Published private(set) var lcdUI: LCDUIState = .empty
     @Published private(set) var currentGame: Game?
-    @Published private(set) var framesPerSecond: Double = 0
+    @Published private(set) var runningApplications: [UUID: RunningJ2MEApplication] = [:]
+    @Published private(set) var backgroundRuntimeUsage: J2MERuntimeResourceUsage?
+    @Published private(set) var backgroundApplicationMemoryUsage: [UUID: UInt64] = [:]
 
     let frameStore = EmulatorFrameStore()
+    let fpsStore = EmulatorFPSStore()
     let lcdUIImageStore = LCDUIImageStore()
     var frame: CGImage? { frameStore.frame }
     var lcdUIImages: [Int32: CGImage] { lcdUIImageStore.images }
@@ -54,6 +217,15 @@ final class EmulatorSession: ObservableObject {
     }
 
     private let engine: EmbeddedPhoneMEEngine
+    private let resourceMonitorQueue = DispatchQueue(
+        label: "dev.phoneme.emulator.resource-monitor",
+        qos: .utility
+    )
+    private let resourceSampler = J2MEProcessResourceSampler()
+    private var resourceMonitorTimer: DispatchSourceTimer?
+    private var resourceMeasurementInFlight = false
+    private var resourceMonitorTick: UInt = 0
+    private var isApplicationInBackground = false
 
     init(engine: EmbeddedPhoneMEEngine? = nil) {
         let resolvedEngine = engine ?? EmbeddedPhoneMEEngine()
@@ -155,11 +327,7 @@ final class EmulatorSession: ObservableObject {
         }
         resolvedEngine.onLCDUIImages = { [weak self] images in
             guard let self, !images.isEmpty else { return }
-            var nextImages = self.lcdUIImageStore.images
-            for (componentID, image) in images {
-                nextImages[componentID] = image
-            }
-            self.lcdUIImageStore.replace(with: nextImages)
+            self.lcdUIImageStore.merge(images)
         }
         resolvedEngine.onStateChange = { [weak self] state in
             guard let self else { return }
@@ -168,21 +336,95 @@ final class EmulatorSession: ObservableObject {
             case .stopped:
                 self.resetSessionResources(clearCurrentGame: true)
             case .failed:
+                if let currentGame,
+                   var application = self.runningApplications[currentGame.id] {
+                    application.state = .failed
+                    self.runningApplications[currentGame.id] = application
+                }
                 self.resetSessionResources(clearCurrentGame: false)
             default:
                 break
             }
+            self.refreshResourceMonitoringState()
         }
         resolvedEngine.onFPSChange = { [weak self] value in
-            self?.framesPerSecond = value
+            self?.fpsStore.update(value)
+        }
+        resolvedEngine.onApplicationStateChange = { [weak self] gameID, state in
+            guard let self else { return }
+            switch state {
+            case .destroyed:
+                self.runningApplications.removeValue(forKey: gameID)
+                if self.currentGame?.id == gameID {
+                    self.resetSessionResources(clearCurrentGame: true)
+                }
+
+            case .error:
+                if var application = self.runningApplications[gameID] {
+                    application.state = .failed
+                    self.runningApplications[gameID] = application
+                }
+
+            case .paused:
+                if var application = self.runningApplications[gameID] {
+                    application.state = .paused
+                    self.runningApplications[gameID] = application
+                }
+
+            case .active, .none:
+                break
+            }
+            self.refreshResourceMonitoringState()
+        }
+        resolvedEngine.onForegroundApplicationChange = { [weak self] gameID in
+            guard let self else { return }
+            for id in Array(self.runningApplications.keys) {
+                guard var application = self.runningApplications[id] else {
+                    continue
+                }
+                if id == gameID {
+                    application.state = .foreground
+                } else {
+                    switch application.state {
+                    case .starting, .foreground, .background:
+                        application.state = .background
+                    case .paused, .failed:
+                        break
+                    }
+                }
+                self.runningApplications[id] = application
+            }
+            self.refreshResourceMonitoringState()
         }
     }
 
-    func launch(game: Game, jarURL: URL, profile: GameProfile) {
+    func prepareApplications(
+        _ games: [Game],
+        fileURL: (Game) -> URL
+    ) {
+        let applications = Dictionary(
+            uniqueKeysWithValues: games.map { game in
+                (game.id, fileURL(game))
+            }
+        )
+        engine.prepareApplications(applications)
+    }
+
+    func launch(
+        game: Game,
+        jarURL: URL,
+        artworkURL: URL?,
+        profile: GameProfile
+    ) {
         let profile = profile.normalized()
         currentGame = game
+        runningApplications[game.id] = RunningJ2MEApplication(
+            game: game,
+            state: .starting
+        )
+        refreshResourceMonitoringState()
         frameStore.reset()
-        framesPerSecond = 0
+        fpsStore.reset()
         presentationMode = .framebuffer
         lcdUI = .empty
         lcdUIImageStore.reset()
@@ -201,10 +443,13 @@ final class EmulatorSession: ObservableObject {
             return
         }
 
-        engine.start(
+        engine.launchApplication(
             gameID: game.id,
             jarURL: jarURL,
             mainClass: mainClass,
+            mediaTitle: game.title,
+            mediaArtist: game.vendor,
+            mediaArtworkPath: artworkURL?.path,
             screenWidth: profile.screenWidth,
             screenHeight: profile.screenHeight,
             frameRateLimit: profile.frameRateLimit,
@@ -220,9 +465,79 @@ final class EmulatorSession: ObservableObject {
         )
     }
 
+    func hideCurrent() {
+        guard let currentGame,
+              let applicationState = runningApplications[currentGame.id]?.state,
+              applicationState != .background else {
+            return
+        }
+
+        if applicationState == .failed {
+            self.currentGame = nil
+            state = .idle
+            fpsStore.reset()
+            return
+        }
+
+        // Detach only the visible Displayable. The MIDlet isolate, network
+        // sockets and native audio players stay alive so another J2ME app can
+        // become foreground without destroying this one.
+        engine.hideCurrentApplication()
+        if var application = runningApplications[currentGame.id] {
+            application.state = .background
+            runningApplications[currentGame.id] = application
+        }
+        refreshResourceMonitoringState()
+        self.currentGame = nil
+        state = .idle
+        fpsStore.reset()
+    }
+
+    func terminateCurrent() {
+        guard let currentGame else { return }
+        terminate(gameID: currentGame.id)
+    }
+
+    func terminate(gameID: UUID) {
+        fpsStore.reset()
+        engine.terminateApplication(gameID: gameID)
+        runningApplications.removeValue(forKey: gameID)
+        refreshResourceMonitoringState()
+        if currentGame?.id == gameID {
+            resetSessionResources(clearCurrentGame: true)
+            state = .stopped
+        }
+    }
+
     func stop() {
-        framesPerSecond = 0
-        engine.stop()
+        terminateCurrent()
+    }
+
+    func isRunning(_ gameID: UUID) -> Bool {
+        runningApplications[gameID] != nil
+    }
+
+    func isRunningInBackground(_ gameID: UUID) -> Bool {
+        runningApplications[gameID]?.state == .background
+            || runningApplications[gameID]?.state == .paused
+    }
+
+    func setApplicationInBackground(_ isInBackground: Bool) {
+        guard isApplicationInBackground != isInBackground else {
+            refreshResourceMonitoringState()
+            return
+        }
+
+        isApplicationInBackground = isInBackground
+        refreshResourceMonitoringState()
+    }
+
+    func suspend() {
+        engine.enterBackground()
+    }
+
+    func resume() {
+        engine.enterForeground()
     }
 
     private func resetSessionResources(clearCurrentGame: Bool) {
@@ -230,9 +545,106 @@ final class EmulatorSession: ObservableObject {
         lcdUIImageStore.reset()
         lcdUI = .empty
         presentationMode = .framebuffer
-        framesPerSecond = 0
+        fpsStore.reset()
         if clearCurrentGame {
             currentGame = nil
+        }
+    }
+
+    private var hiddenApplicationIDs: Set<UUID> {
+        Set(
+            runningApplications.compactMap { gameID, application in
+                application.state == .background || application.state == .paused
+                    ? gameID : nil
+            }
+        )
+    }
+
+    private var hasHiddenApplications: Bool {
+        !hiddenApplicationIDs.isEmpty
+    }
+
+    private func refreshResourceMonitoringState() {
+        if hasHiddenApplications && !isApplicationInBackground {
+            startResourceMonitoring()
+        } else {
+            stopResourceMonitoring()
+        }
+    }
+
+    private func startResourceMonitoring() {
+        guard resourceMonitorTimer == nil else { return }
+
+        resourceSampler.reset()
+        // Sample process CPU frequently enough for the library indicator, but
+        // query isolate heap usage only every fourth tick. A runtime-info
+        // request enters the AMS isolate and becomes noticeable with several
+        // busy background games.
+        resourceMonitorTick = 3
+        let sampler = resourceSampler
+        let timer = DispatchSource.makeTimerSource(queue: resourceMonitorQueue)
+        timer.schedule(
+            deadline: .now(),
+            repeating: .milliseconds(1_500),
+            leeway: .milliseconds(250)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let sample = sampler.sample() else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard
+                    let self,
+                    self.hasHiddenApplications,
+                    !self.isApplicationInBackground
+                else {
+                    return
+                }
+                if self.backgroundRuntimeUsage != sample {
+                    self.backgroundRuntimeUsage = sample
+                }
+                self.resourceMonitorTick &+= 1
+                if self.resourceMonitorTick.isMultiple(of: 4) {
+                    self.measureHiddenApplicationMemory()
+                }
+            }
+        }
+        resourceMonitorTimer = timer
+        timer.resume()
+    }
+
+    private func measureHiddenApplicationMemory() {
+        guard !resourceMeasurementInFlight else { return }
+        let gameIDs = hiddenApplicationIDs
+        guard !gameIDs.isEmpty else { return }
+
+        resourceMeasurementInFlight = true
+        engine.measureApplicationMemoryUsage(gameIDs: gameIDs) { [weak self] usage in
+            guard let self else { return }
+            self.resourceMeasurementInFlight = false
+            guard !self.isApplicationInBackground else { return }
+            let currentHiddenIDs = self.hiddenApplicationIDs
+            let filteredUsage = usage.filter {
+                currentHiddenIDs.contains($0.key)
+            }
+            if self.backgroundApplicationMemoryUsage != filteredUsage {
+                self.backgroundApplicationMemoryUsage = filteredUsage
+            }
+        }
+    }
+
+    deinit {
+        resourceMonitorTimer?.cancel()
+    }
+
+    private func stopResourceMonitoring() {
+        resourceMonitorTimer?.cancel()
+        resourceMonitorTimer = nil
+        resourceMonitorTick = 0
+        resourceSampler.reset()
+        if backgroundRuntimeUsage != nil {
+            backgroundRuntimeUsage = nil
+        }
+        if !backgroundApplicationMemoryUsage.isEmpty {
+            backgroundApplicationMemoryUsage = [:]
         }
     }
 

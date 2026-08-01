@@ -53,6 +53,8 @@ cpe_t **sysGetClassPath(void);
 void pushDirectoryOntoClassPath(char* directory);
 void pushJarFileOntoClassPath(zip_t *zip);
 void popClassPath(void);
+void phoneme_preverify_reset_classpath(void);
+void phoneme_preverify_abandon_classpath(void);
 
 bool_t 
 findJARDirectories(zip_t *entry, struct stat *statbuf);

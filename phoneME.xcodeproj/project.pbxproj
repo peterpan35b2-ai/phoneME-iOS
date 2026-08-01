@@ -33,7 +33,11 @@
 		A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001F /* PhoneMEMediaBridge.m */; };
 		A00000000000000000000021 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000020 /* AVFoundation.framework */; };
 		A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */; };
-		A00000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001E /* Assets.xcassets */; };
+		A00000000000000000000023 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000022 /* MediaPlayer.framework */; };
+		A00000000000000000000024 /* PhoneMEHTTPSBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000023 /* PhoneMEHTTPSBridge.m */; };
+		A00000000000000000000025 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000024 /* Security.framework */; };
+		A00000000000000000000026 /* PhoneMEPlatformBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000025 /* PhoneMEPlatformBridge.m */; };
+		A00000000000000000000027 /* BackgroundExecutionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000026 /* BackgroundExecutionController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -69,7 +73,11 @@
 		B0000000000000000000001F /* PhoneMEMediaBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEMediaBridge.m; sourceTree = "<group>"; };
 		B00000000000000000000020 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */ = {isa = PBXFileReference; lastKnownFileType = file; path = AvatarLAPROStackMaps.pmpatch; sourceTree = "<group>"; };
-		B0000000000000000000001E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B00000000000000000000022 /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
+		B00000000000000000000023 /* PhoneMEHTTPSBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEHTTPSBridge.m; sourceTree = "<group>"; };
+		B00000000000000000000024 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		B00000000000000000000025 /* PhoneMEPlatformBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEPlatformBridge.m; sourceTree = "<group>"; };
+		B00000000000000000000026 /* BackgroundExecutionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundExecutionController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +86,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000021 /* AVFoundation.framework in Frameworks */,
+				A00000000000000000000023 /* MediaPlayer.framework in Frameworks */,
+				A00000000000000000000025 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -131,6 +141,7 @@
 				B00000000000000000000011 /* JarMetadataReader.swift */,
 				B0000000000000000000001D /* JarCompatibilityPatcher.swift */,
 				B00000000000000000000015 /* ProfileTemplateStore.swift */,
+				B00000000000000000000026 /* BackgroundExecutionController.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -174,7 +185,11 @@
 				B00000000000000000000018 /* PhoneMECore.h */,
 				B00000000000000000000019 /* libphoneMECore.a */,
 				B0000000000000000000001F /* PhoneMEMediaBridge.m */,
+				B00000000000000000000023 /* PhoneMEHTTPSBridge.m */,
+				B00000000000000000000025 /* PhoneMEPlatformBridge.m */,
 				B00000000000000000000020 /* AVFoundation.framework */,
+				B00000000000000000000022 /* MediaPlayer.framework */,
+				B00000000000000000000024 /* Security.framework */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -182,7 +197,6 @@
 		D0000000000000000000000B /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				B0000000000000000000001E /* Assets.xcassets */,
 				B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */,
 				B0000000000000000000001A /* PhoneMERuntime */,
 			);
@@ -247,7 +261,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A00000000000000000000019 /* Assets.xcassets in Resources */,
 				A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */,
 				A00000000000000000000015 /* PhoneMERuntime in Resources */,
 			);
@@ -303,6 +316,9 @@
 				A00000000000000000000017 /* NativeLCDUIView.swift in Sources */,
 				A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */,
 				A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */,
+				A00000000000000000000024 /* PhoneMEHTTPSBridge.m in Sources */,
+				A00000000000000000000026 /* PhoneMEPlatformBridge.m in Sources */,
+				A00000000000000000000027 /* BackgroundExecutionController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -347,16 +363,16 @@
 				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
 				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
 				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
 				MARKETING_VERSION = 0.2.1;
-				OTHER_LDFLAGS = "-lz";
+				OTHER_LDFLAGS = "-lz -liconv";
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"-lz",
 					"-lc++",
+					"-liconv",
 					"-framework",
 					CoreText,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
@@ -364,6 +380,7 @@
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
 					"-lz",
 					"-lc++",
+					"-liconv",
 					"-framework",
 					CoreText,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
@@ -398,16 +415,16 @@
 				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
 				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
 				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
 				MARKETING_VERSION = 0.2.1;
-				OTHER_LDFLAGS = "-lz";
+				OTHER_LDFLAGS = "-lz -liconv";
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"-lz",
 					"-lc++",
+					"-liconv",
 					"-framework",
 					CoreText,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
@@ -415,6 +432,7 @@
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
 					"-lz",
 					"-lc++",
+					"-liconv",
 					"-framework",
 					CoreText,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",

@@ -353,7 +353,8 @@ public class NativeAppManagerPeer
                             nativeEvent.stringParam3, nativeEvent.stringParam4,
                             nativeEvent.stringParam5, nativeEvent.intParam3,
                             nativeEvent.intParam4, nativeEvent.intParam5,
-                            nativeEvent.stringParam6, false);
+                            nativeEvent.stringParam6,
+                            Constants.MIDP_NO_DEBUG);
                     }
                 } else {
                     errorMsg = "Only one instance of a MIDlet can be launched";

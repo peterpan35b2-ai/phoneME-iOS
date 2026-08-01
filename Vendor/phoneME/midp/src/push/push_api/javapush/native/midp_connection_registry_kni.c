@@ -31,6 +31,8 @@
  * class.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <kni.h>
@@ -294,6 +296,7 @@ KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_list0) {
     int available;
     int connsize;
     int nameLength;
+    size_t connectionLength;
     char *conn;
     int ret = -1;
 
@@ -309,15 +312,22 @@ KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_list0) {
 
     nameLength = KNI_GetArrayLength(name);
 
-    if (nameLength > 0 && (midletName = (char*)midpMalloc(nameLength)) != NULL) {
+    if (nameLength > 0 &&
+            (midletName = (char*)midpMalloc((unsigned int)nameLength)) != NULL) {
         KNI_GetRawArrayRegion(name, 0, nameLength, (jbyte*)midletName);
 
         conn = pushfindsuite(midletName, available);
 
         if (conn != NULL) {
-            KNI_SetRawArrayRegion(connections, 0, strlen(conn), (jbyte*)conn);
+            connectionLength = strlen(conn);
+            if (connectionLength <= (size_t)connsize &&
+                    connectionLength <= (size_t)INT_MAX) {
+                KNI_SetRawArrayRegion(connections, 0,
+                                      (jsize)connectionLength,
+                                      (jbyte*)conn);
+                ret = 0;
+            }
             midpFree(conn);
-            ret = 0;
         }
 
         midpFree(midletName);
@@ -375,6 +385,7 @@ KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_getMIDlet0) {
     int   midletNameLength;
     char* regentry;
+    size_t regentrySize;
     int   regentryLength;
     int   ret = -1;
     int   handle;
@@ -389,8 +400,13 @@ KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_getMIDlet0) {
 
     regentry = pushfindfd(handle);
     if (NULL != regentry) {
-        regentryLength = strlen(regentry) + 1;      /* Include trailing '\0' */
-        if (regentryLength < midletNameLength) {
+        regentrySize = strlen(regentry) + 1U;      /* Include trailing '\0' */
+        if (regentrySize <= (size_t)INT_MAX) {
+            regentryLength = (int)regentrySize;
+        } else {
+            regentryLength = -1;
+        }
+        if (regentryLength > 0 && regentryLength <= midletNameLength) {
             memcpy((char*)JavaByteArray(midletName),
                    regentry, regentryLength);
             ret = 0;
@@ -422,7 +438,8 @@ KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_getEntry0) {
     int midletsize;
     char *regentry;
-    int regsize ;
+    size_t regentrySize;
+    int regsize;
     int ret = -1;
     int connLen;
     char *szConn = NULL;
@@ -443,8 +460,13 @@ KNIDECL(com_sun_midp_io_j2me_push_ConnectionRegistry_getEntry0) {
 
         regentry = pushfindconn(szConn);
         if (NULL != regentry) {
-            regsize = strlen(regentry) + 1;
-            if (regsize < midletsize) {
+            regentrySize = strlen(regentry) + 1U;
+            if (regentrySize <= (size_t)INT_MAX) {
+                regsize = (int)regentrySize;
+            } else {
+                regsize = -1;
+            }
+            if (regsize > 0 && regsize <= midletsize) {
                 KNI_SetRawArrayRegion(regObject, 0, regsize,
                                       (jbyte*)regentry);
                 ret = 0;

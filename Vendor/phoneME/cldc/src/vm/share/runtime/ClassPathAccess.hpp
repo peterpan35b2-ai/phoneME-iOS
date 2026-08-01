@@ -43,5 +43,11 @@ private:
   static ReturnOop open_local_file(PathChar* path_name, Symbol * entry_name,
                                   const bool is_class_file JVM_TRAPS);
 #endif
-  enum { NAME_BUFFER_SIZE = 270 };
+  /*
+   * Merged/obfuscated MIDlet launchers commonly use generated package and
+   * class names well beyond the original 270-byte phoneME assumption. Keep
+   * this bounded to protect the VM stack, but large enough for real-world
+   * multi-game JARs and their resources.
+   */
+  enum { NAME_BUFFER_SIZE = 4096 };
 };

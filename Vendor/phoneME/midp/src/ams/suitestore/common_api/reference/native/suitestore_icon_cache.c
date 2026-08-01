@@ -34,6 +34,9 @@
  * when the certain operation on a midlet suite is performed.
  */
 
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <pcsl_memory.h>
 #include <midpInit.h>
@@ -114,15 +117,19 @@ get_icon_cache_for_suite(SuiteIdType suiteId) {
  */
 MIDPError midp_load_suites_icons() {
     int i;
+    int iconIndex = 0;
     long bufferLen, pos, alignedOffset;
     char* buffer = NULL;
     char* pszError = NULL;
     unsigned char* pIconBytes;
+    jchar* iconNameChars = NULL;
+    size_t entryLength;
+    size_t iconNameBytes;
     pcsl_string_status rc;
     pcsl_string iconsCacheFile;
     IconCache *pIconsData, *pData;
-    IconCacheHeader* pCacheFileHeader;
-    IconCacheEntry* pNextCacheEntry;
+    IconCacheHeader cacheFileHeader;
+    IconCacheEntry nextCacheEntry;
     int numOfIcons = 0, numOfEntries = 0;
     MIDPError status;
 
@@ -153,7 +160,7 @@ MIDPError midp_load_suites_icons() {
         return ALL_OK;
     }
 
-    if (status == ALL_OK && bufferLen < (long)(sizeof(unsigned long)<<1)) {
+    if (status == ALL_OK && bufferLen < (long)sizeof (IconCacheHeader)) {
         status = IO_ERROR; /* _icons.dat is corrupted */
     }
     if (status != ALL_OK) {
@@ -165,96 +172,144 @@ MIDPError midp_load_suites_icons() {
     pos = 0;
 
     /* checking the file header */
-    pCacheFileHeader = (IconCacheHeader*)buffer;
-    if (pCacheFileHeader->magic   != ICON_CACHE_MAGIC ||
-        pCacheFileHeader->version != ICON_CACHE_VERSION ||
-        pCacheFileHeader->numberOfFreeEntries >
-            pCacheFileHeader->numberOfEntries) {
+    memcpy(&cacheFileHeader, buffer, sizeof (cacheFileHeader));
+    if (cacheFileHeader.magic   != ICON_CACHE_MAGIC ||
+        cacheFileHeader.version != ICON_CACHE_VERSION ||
+        cacheFileHeader.numberOfEntries < 0 ||
+        cacheFileHeader.numberOfFreeEntries < 0 ||
+        cacheFileHeader.numberOfFreeEntries >
+            cacheFileHeader.numberOfEntries) {
         pcsl_mem_free(buffer);
         return IO_ERROR;
     }
 
-    numOfIcons   = pCacheFileHeader->numberOfEntries -
-                       pCacheFileHeader->numberOfFreeEntries;
+    numOfIcons = cacheFileHeader.numberOfEntries -
+                 cacheFileHeader.numberOfFreeEntries;
     numOfEntries = numOfIcons + RESERVED_CACHE_ENTRIES_NUM;
 
     ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(IconCacheHeader));
 
-    pIconsData = (IconCache*) pcsl_mem_malloc(sizeof(IconCache) * numOfEntries);
+    if ((size_t)numOfEntries > SIZE_MAX / sizeof (IconCache)) {
+        pcsl_mem_free(buffer);
+        return OUT_OF_MEMORY;
+    }
+    pIconsData = (IconCache*)pcsl_mem_malloc(
+        (size_t)numOfEntries * sizeof (IconCache));
     if (pIconsData == NULL) {
         pcsl_mem_free(buffer);
         return OUT_OF_MEMORY;
     }
 
     /* iterating through the cache entries */
-    for (i = 0; i < pCacheFileHeader->numberOfEntries; i++) {
-        if ((long)sizeof(IconCacheEntry) > bufferLen) {
+    memset(pIconsData, 0, (size_t)numOfEntries * sizeof (IconCache));
+
+    for (i = 0; i < cacheFileHeader.numberOfEntries; i++) {
+        if ((long)sizeof (IconCacheEntry) > bufferLen) {
             status = IO_ERROR;
             break;
         }
 
-        pNextCacheEntry = (IconCacheEntry*)&buffer[pos];
+        memcpy(&nextCacheEntry, &buffer[pos], sizeof (nextCacheEntry));
+        if (nextCacheEntry.nameLength < 0 ||
+                (nextCacheEntry.nameLength & 1) != 0 ||
+                nextCacheEntry.imageDataLength < 0) {
+            status = IO_ERROR;
+            break;
+        }
 
-        if (pNextCacheEntry->isFree) {
-            alignedOffset = sizeof(IconCacheEntry) +
-                pNextCacheEntry->nameLength + pNextCacheEntry->imageDataLength;
-            alignedOffset = SUITESTORE_ALIGN_4(alignedOffset);
+        entryLength = sizeof (IconCacheEntry) +
+            (size_t)nextCacheEntry.nameLength +
+            (size_t)nextCacheEntry.imageDataLength;
+        if (entryLength > (size_t)LONG_MAX ||
+                entryLength > (size_t)bufferLen) {
+            status = IO_ERROR;
+            break;
+        }
+        alignedOffset = SUITESTORE_ALIGN_4((long)entryLength);
+        if (alignedOffset < 0 || alignedOffset > bufferLen) {
+            status = IO_ERROR;
+            break;
+        }
+
+        if (nextCacheEntry.isFree) {
             ADJUST_POS_IN_BUF(pos, bufferLen, alignedOffset);
             continue;
         }
-
-        pData = &pIconsData[i];
-        pData->suiteId = pNextCacheEntry->suiteId;
-        pData->numberOfCachedImages = 1;
-
-        pData->pInfo[0].isFree = 0;
-        pData->pInfo[0].entryOffsetInFile = pos;
-        pData->pInfo[0].pImageData = (unsigned char*)pcsl_mem_malloc(
-            pNextCacheEntry->imageDataLength);
-        if (pData->pInfo[0].pImageData == NULL) {
-            status = OUT_OF_MEMORY;
-            break;
-        }
-
-        pIconBytes = (unsigned char*)pNextCacheEntry + sizeof(IconCacheEntry) +
-            pNextCacheEntry->nameLength;
-        if (sizeof(IconCacheEntry) + pNextCacheEntry->nameLength +
-                pNextCacheEntry->imageDataLength > (unsigned long)bufferLen) {
+        if (iconIndex >= numOfIcons) {
             status = IO_ERROR;
             break;
         }
 
-        pData->pInfo[0].imageDataLength = pNextCacheEntry->imageDataLength;
+        pData = &pIconsData[iconIndex];
+        pData->suiteId = nextCacheEntry.suiteId;
+        pData->numberOfCachedImages = 1;
 
-        memcpy(pData->pInfo[0].pImageData, pIconBytes,
-               pNextCacheEntry->imageDataLength);
-
-        rc = pcsl_string_convert_from_utf16(
-            (jchar*)((char*)pNextCacheEntry + sizeof(IconCacheEntry)),
-            pNextCacheEntry->nameLength >> 1,
-            &pData->pInfo[0].imageName);
-        if (rc != PCSL_STRING_OK) {
-            status = OUT_OF_MEMORY;
-            break;
+        pData->pInfo[0].isFree = 0;
+        pData->pInfo[0].entryOffsetInFile = (uint64_t)pos;
+        pData->pInfo[0].imageDataLength = nextCacheEntry.imageDataLength;
+        if (nextCacheEntry.imageDataLength > 0) {
+            pData->pInfo[0].pImageData =
+                (unsigned char*)pcsl_mem_malloc(
+                    (size_t)nextCacheEntry.imageDataLength);
+            if (pData->pInfo[0].pImageData == NULL) {
+                status = OUT_OF_MEMORY;
+                break;
+            }
         }
 
-        alignedOffset = sizeof(IconCacheEntry) +
-            pNextCacheEntry->nameLength + pNextCacheEntry->imageDataLength;
-        alignedOffset = SUITESTORE_ALIGN_4(alignedOffset);
+        iconNameBytes = (size_t)nextCacheEntry.nameLength;
+        pIconBytes = (unsigned char*)&buffer[pos] + sizeof (IconCacheEntry) +
+            iconNameBytes;
+        if (nextCacheEntry.imageDataLength > 0) {
+            memcpy(pData->pInfo[0].pImageData, pIconBytes,
+                   (size_t)nextCacheEntry.imageDataLength);
+        }
+
+        if (iconNameBytes == 0U) {
+            pData->pInfo[0].imageName = PCSL_STRING_EMPTY;
+        } else {
+            iconNameChars = (jchar*)pcsl_mem_malloc(iconNameBytes);
+            if (iconNameChars == NULL) {
+                status = OUT_OF_MEMORY;
+                break;
+            }
+            memcpy(iconNameChars,
+                   &buffer[pos] + sizeof (IconCacheEntry),
+                   iconNameBytes);
+            rc = pcsl_string_convert_from_utf16(
+                iconNameChars,
+                (jsize)(iconNameBytes / sizeof (jchar)),
+                &pData->pInfo[0].imageName);
+            pcsl_mem_free(iconNameChars);
+            iconNameChars = NULL;
+            if (rc != PCSL_STRING_OK) {
+                status = OUT_OF_MEMORY;
+                break;
+            }
+        }
+
+        iconIndex++;
         ADJUST_POS_IN_BUF(pos, bufferLen, alignedOffset);
     } /* end for (numOfEntries) */
+
+    if (status == ALL_OK && iconIndex != numOfIcons) {
+        status = IO_ERROR;
+    }
 
     if (status == ALL_OK) {
         g_numberOfIcons = numOfIcons;
         g_numberOfEntries = numOfEntries;
-        g_pIconCache    = pIconsData;
-        g_iconsLoaded   = 1;
+        g_pIconCache = pIconsData;
+        g_iconsLoaded = 1;
 
-        if (pCacheFileHeader->numberOfFreeEntries > MAX_FREE_ENTRIES) {
+        if (cacheFileHeader.numberOfFreeEntries > MAX_FREE_ENTRIES) {
             (void)midp_compact_icons();
         }
     } else {
-        /* IMPL_NOTE: free the memory allocated for the image itself */
+        for (i = 0; i <= iconIndex && i < numOfEntries; i++) {
+            pcsl_mem_free(pIconsData[i].pInfo[0].pImageData);
+            pcsl_string_free(&pIconsData[i].pInfo[0].imageName);
+        }
         pcsl_mem_free(pIconsData);
     }
 
@@ -276,22 +331,27 @@ MIDPError midp_load_suites_icons() {
 static MIDPError store_suites_icons(const IconCache* pIconCache) {
     MIDPError status = ALL_OK;
     int i;
-    long bufferLen, pos, alignedOffset;
+    int activeEntries = 0;
+    int convertedLen;
+    long bufferLen;
+    long pos;
+    size_t totalSize;
+    size_t entrySize;
+    size_t nameBytes;
+    jsize nameLength;
     char* buffer = NULL;
     char *pszError = NULL;
+    jchar* nameBuffer = NULL;
     pcsl_string_status rc;
     pcsl_string iconsCacheFile;
-    IconCache *pData;
-    IconCacheHeader* pCacheFileHeader;
-    IconCacheEntry* pNextCacheEntry;
+    const IconCache *pData;
+    IconCacheHeader cacheFileHeader;
+    IconCacheEntry cacheEntry;
 
     if (pIconCache == NULL) {
         return BAD_PARAMS;
     }
 
-    /* IMPL_NOTE: currently the whole file is rewritten */
-
-    /* get a full path to the _icons.dat */
     rc = pcsl_string_cat(storage_get_root(INTERNAL_STORAGE_ID),
                          &ICON_CACHE_FILENAME, &iconsCacheFile);
     if (rc != PCSL_STRING_OK) {
@@ -299,100 +359,124 @@ static MIDPError store_suites_icons(const IconCache* pIconCache) {
     }
 
     if (!g_numberOfIcons) {
-        /* there are no icons to cache, truncate the file */
         status = write_file(&pszError, &iconsCacheFile, buffer, 0);
         storageFreeError(pszError);
         pcsl_string_free(&iconsCacheFile);
         return status;
     }
 
-    /* allocate a buffer to store icons data */
-    bufferLen = g_numberOfIcons * sizeof(IconCacheEntry) +
-        sizeof(IconCacheHeader);
-
+    totalSize = sizeof (IconCacheHeader);
     for (i = 0; i < g_numberOfIcons; i++) {
-        long strLen, dataLen = 0;
-        pData = &g_pIconCache[i];
+        pData = &pIconCache[i];
         if (pData->pInfo[0].isFree) {
             continue;
         }
-
-        dataLen += pData->pInfo[0].imageDataLength;
-
-        strLen = pcsl_string_utf16_length(&pData->pInfo[0].imageName);
-        strLen <<= 1;
-        if (strLen > 0) {
-            dataLen += strLen;
-        }
-
-        bufferLen += SUITESTORE_ALIGN_4(dataLen);
-    }
-
-    buffer = pcsl_mem_malloc(bufferLen);
-    if (buffer == NULL) {
-        pcsl_string_free(&iconsCacheFile);
-        return OUT_OF_MEMORY;
-    }
-
-    /* assemble the information about all icons into the allocated buffer */
-    pos = 0;
-
-    pCacheFileHeader = (IconCacheHeader*)buffer;
-    pCacheFileHeader->magic   = ICON_CACHE_MAGIC;
-    pCacheFileHeader->version = ICON_CACHE_VERSION;
-    pCacheFileHeader->numberOfEntries = g_numberOfIcons;
-    pCacheFileHeader->numberOfFreeEntries = 0;
-
-    ADJUST_POS_IN_BUF(pos, bufferLen, sizeof(IconCacheHeader));
-
-    for (i = 0; i < g_numberOfIcons; i++) {
-        pData = &g_pIconCache[i];
-
-        if (pData->pInfo[0].isFree) {
-            if (pCacheFileHeader->numberOfEntries > 0) {
-                pCacheFileHeader->numberOfEntries--;
-            }
-            continue;
-        }
-
-        pNextCacheEntry = (IconCacheEntry*)&buffer[pos];
-        pNextCacheEntry->isFree = 0;
-        pNextCacheEntry->suiteId = pData->suiteId;
-        pNextCacheEntry->imageDataLength = pData->pInfo[0].imageDataLength;
-
-        rc = pcsl_string_convert_to_utf16(&pData->pInfo[0].imageName,
-            (jchar*)((char*)pNextCacheEntry + sizeof(IconCacheEntry)),
-                bufferLen / sizeof(jchar),
-                    &(pNextCacheEntry->nameLength));
-        if (rc != PCSL_STRING_OK) {
-            status = OUT_OF_MEMORY;
-            break;
-        }
-
-        /* convert UTF16 length to size in bytes */
-        pNextCacheEntry->nameLength <<= 1;
-        if (pNextCacheEntry->nameLength <= 0) {
+        if (pData->pInfo[0].imageDataLength < 0) {
             status = IO_ERROR;
             break;
         }
 
-        memcpy((char*)pNextCacheEntry + sizeof(IconCacheEntry) +
-            pNextCacheEntry->nameLength, pData->pInfo[0].pImageData,
-                pNextCacheEntry->imageDataLength);
+        nameLength = pcsl_string_utf16_length(&pData->pInfo[0].imageName);
+        if (nameLength < 0 ||
+                (size_t)nameLength > (size_t)INT_MAX / sizeof (jchar)) {
+            status = IO_ERROR;
+            break;
+        }
+        nameBytes = (size_t)nameLength * sizeof (jchar);
+        entrySize = sizeof (IconCacheEntry) + nameBytes +
+                    (size_t)pData->pInfo[0].imageDataLength;
+        if (entrySize > SIZE_MAX - 3U) {
+            status = OUT_OF_MEMORY;
+            break;
+        }
+        entrySize = (entrySize + 3U) & ~(size_t)3U;
+        if (totalSize > SIZE_MAX - entrySize) {
+            status = OUT_OF_MEMORY;
+            break;
+        }
+        totalSize += entrySize;
+        activeEntries++;
+    }
 
-        alignedOffset = sizeof(IconCacheEntry) +
-            pNextCacheEntry->nameLength + pNextCacheEntry->imageDataLength;
-        alignedOffset = SUITESTORE_ALIGN_4(alignedOffset);
-        ADJUST_POS_IN_BUF(pos, bufferLen, alignedOffset);
+    if (status != ALL_OK || totalSize > (size_t)LONG_MAX) {
+        pcsl_string_free(&iconsCacheFile);
+        return status == ALL_OK ? OUT_OF_MEMORY : status;
+    }
+
+    bufferLen = (long)totalSize;
+    buffer = (char*)pcsl_mem_malloc(totalSize);
+    if (buffer == NULL) {
+        pcsl_string_free(&iconsCacheFile);
+        return OUT_OF_MEMORY;
+    }
+    memset(buffer, 0, totalSize);
+
+    cacheFileHeader.magic = ICON_CACHE_MAGIC;
+    cacheFileHeader.version = ICON_CACHE_VERSION;
+    cacheFileHeader.numberOfEntries = activeEntries;
+    cacheFileHeader.numberOfFreeEntries = 0;
+    memcpy(buffer, &cacheFileHeader, sizeof (cacheFileHeader));
+    pos = (long)sizeof (cacheFileHeader);
+
+    for (i = 0; i < g_numberOfIcons; i++) {
+        pData = &pIconCache[i];
+        if (pData->pInfo[0].isFree) {
+            continue;
+        }
+
+        nameLength = pcsl_string_utf16_length(&pData->pInfo[0].imageName);
+        nameBytes = (size_t)nameLength * sizeof (jchar);
+        if (nameBytes > 0U) {
+            nameBuffer = (jchar*)pcsl_mem_malloc(nameBytes);
+            if (nameBuffer == NULL) {
+                status = OUT_OF_MEMORY;
+                break;
+            }
+            rc = pcsl_string_convert_to_utf16(&pData->pInfo[0].imageName,
+                                               nameBuffer, nameLength,
+                                               &convertedLen);
+            if (rc != PCSL_STRING_OK || convertedLen != nameLength) {
+                pcsl_mem_free(nameBuffer);
+                nameBuffer = NULL;
+                status = IO_ERROR;
+                break;
+            }
+        }
+
+        cacheEntry.isFree = 0;
+        cacheEntry.suiteId = pData->suiteId;
+        cacheEntry.imageDataLength = pData->pInfo[0].imageDataLength;
+        cacheEntry.nameLength = (jint)nameBytes;
+        entrySize = sizeof (cacheEntry) + nameBytes +
+                    (size_t)cacheEntry.imageDataLength;
+        entrySize = (entrySize + 3U) & ~(size_t)3U;
+        if ((size_t)pos > totalSize || entrySize > totalSize - (size_t)pos) {
+            pcsl_mem_free(nameBuffer);
+            nameBuffer = NULL;
+            status = IO_ERROR;
+            break;
+        }
+
+        memcpy(&buffer[pos], &cacheEntry, sizeof (cacheEntry));
+        if (nameBytes > 0U) {
+            memcpy(&buffer[pos] + sizeof (cacheEntry), nameBuffer, nameBytes);
+            pcsl_mem_free(nameBuffer);
+            nameBuffer = NULL;
+        }
+        if (cacheEntry.imageDataLength > 0) {
+            memcpy(&buffer[pos] + sizeof (cacheEntry) + nameBytes,
+                   pData->pInfo[0].pImageData,
+                   (size_t)cacheEntry.imageDataLength);
+        }
+        pos += (long)entrySize;
     }
 
     if (status == ALL_OK) {
-        /* write the buffer into the file */
         status = write_file(&pszError, &iconsCacheFile, buffer, pos);
         storageFreeError(pszError);
     }
 
-    /* cleanup */
+    pcsl_mem_free(nameBuffer);
     pcsl_mem_free(buffer);
     pcsl_string_free(&iconsCacheFile);
 

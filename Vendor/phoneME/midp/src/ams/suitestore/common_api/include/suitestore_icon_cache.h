@@ -33,6 +33,8 @@
 #ifndef _SUITESTORE_ICON_CACHE_H_
 #define _SUITESTORE_ICON_CACHE_H_
 
+#include <stdint.h>
+
 #include <suitestore_common.h>
 
 #define MAX_CACHE_ENTRIES_PER_SUITE 1
@@ -43,9 +45,9 @@
 /** A header of the file containing the cached icons. */
 typedef struct _iconCacheHeader {
     /** Magic number. */
-    unsigned long magic;
+    uint32_t magic;
     /** Version of the file. */
-    unsigned long version;
+    uint32_t version;
     /** Number of cached images (including the removed) in the file. */
     int numberOfEntries;
     /** Number of free entries in the file. */
@@ -86,7 +88,7 @@ typedef struct _cachedImageInfo {
     /** The name of the cached icon. */
     pcsl_string imageName;
     /** -1 if unknown */
-    unsigned long entryOffsetInFile;
+    uint64_t entryOffsetInFile;
     /** Length of the icon's binary data. */
     int imageDataLength;
     /** Pointer to the image bytes */

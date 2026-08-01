@@ -14,6 +14,7 @@ int32_t phoneme_ios_port_configured_height(void);
 void phoneme_ios_port_reset(void);
 void phoneme_ios_port_request_stop(void);
 int phoneme_ios_port_should_stop(void);
+void phoneme_ios_port_drain_wakeup(void);
 
 void phoneme_ios_port_send_key(int32_t key_code, int32_t pressed);
 int phoneme_ios_port_has_pending_key(void);

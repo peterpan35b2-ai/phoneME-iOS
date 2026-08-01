@@ -44,21 +44,6 @@ struct GameProfile: Codable, Equatable {
         }
     }
 
-    enum GraphicsMode: String, Codable, CaseIterable, Identifiable {
-        case software
-        case openGLES
-        case window
-
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .software: return "Software"
-            case .openGLES: return "HW acceleration (OpenGL ES)"
-            case .window: return "HW acceleration (window)"
-            }
-        }
-    }
-
     enum KeyLayout: String, Codable, CaseIterable, Identifiable {
         case nokiaSE
         case siemens
@@ -165,21 +150,21 @@ struct GameProfile: Codable, Equatable {
     var preserveAspectRatio = true
     var scalePercent = 100
     var orientation: Orientation = .defaultValue
+    var lockedOrientation: Orientation?
     var screenGravity: ScreenGravity = .top
     var scaleType: ScaleType = .fit
     var filtering = false
     var immediateProcessing = false
-    var graphicsMode: GraphicsMode = .openGLES
     var parallelScreenRedrawing = true
     var forceFullscreen = false
     var showFPS = false
-    var frameRateLimit = 0
+    var frameRateLimit = Self.maximumFrameRate
 
     var fontSmall = 18
     var fontMedium = 22
     var fontLarge = 26
     var fontValuesAreScaledPixels = false
-    var fontAntialiasing = true
+    var fontAntialiasing = false
 
     var touchInput = true
     var keyLayout: KeyLayout = .nokiaSE
@@ -188,7 +173,7 @@ struct GameProfile: Codable, Equatable {
     var showVirtualKeyboard = true
     var buttonShape: ButtonShape = .roundedRectangle
     var hapticFeedback = false
-    var keyboardOpacity = 0.78
+    var keyboardOpacity = 0.20
     var keyboardBackgroundHex = "F2F2F7"
     var keyboardForegroundHex = "1C1C1E"
     var keyboardSelectedBackgroundHex = "007AFF"
@@ -200,13 +185,18 @@ struct GameProfile: Codable, Equatable {
     var keyboardCustomBaseType: VirtualKeyboardType?
     var keyboardLayoutCustomization: KeyboardLayoutCustomization?
 
+    static let previousMaximumFrameRate = 30
+    static let maximumFrameRate = 60
     static let `default` = GameProfile()
 
     mutating func normalize() {
         screenWidth = min(max(screenWidth, 1), 2048)
         screenHeight = min(max(screenHeight, 1), 2048)
         scalePercent = min(max(scalePercent, 10), 300)
-        frameRateLimit = min(max(frameRateLimit, 0), 240)
+        frameRateLimit = min(
+            max(frameRateLimit, 0),
+            Self.maximumFrameRate
+        )
         fontSmall = min(max(fontSmall, 1), 128)
         fontMedium = min(max(fontMedium, 1), 128)
         fontLarge = min(max(fontLarge, 1), 128)
@@ -366,13 +356,37 @@ struct GameProfile: Codable, Equatable {
             && abs(keyboardOpacity - (64.0 / 255.0)) < 0.001
 
         guard usesLegacyPalette else { return false }
-        keyboardOpacity = 0.78
+        keyboardOpacity = 0.20
         keyboardBackgroundHex = "F2F2F7"
         keyboardForegroundHex = "1C1C1E"
         keyboardSelectedBackgroundHex = "007AFF"
         keyboardSelectedForegroundHex = "FFFFFF"
         keyboardOutlineHex = "8E8E93"
         return true
+    }
+
+    @discardableResult
+    mutating func migrateNativeInputDefaultsIfNeeded() -> Bool {
+        var changed = false
+
+        if abs(keyboardOpacity - 0.78) < 0.001 {
+            keyboardOpacity = 0.20
+            changed = true
+        }
+        if fontAntialiasing {
+            fontAntialiasing = false
+            changed = true
+        }
+        if !usesNativeKeyboardPalette {
+            keyboardBackgroundHex = "F2F2F7"
+            keyboardForegroundHex = "1C1C1E"
+            keyboardSelectedBackgroundHex = "007AFF"
+            keyboardSelectedForegroundHex = "FFFFFF"
+            keyboardOutlineHex = "8E8E93"
+            changed = true
+        }
+
+        return changed
     }
 
     static let screenPresets: [(width: Int, height: Int)] = [

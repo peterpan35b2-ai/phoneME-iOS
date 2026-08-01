@@ -27,6 +27,10 @@
 #ifndef _INFLATE_INT_H_
 #define _INFLATE_INT_H_
 
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
 /**
  * @file
  *
@@ -52,8 +56,8 @@ typedef void* (*AddrFromHandleFunctionType)(void* state, void* handle);
  * possible codes.
  */
 typedef struct HuffmanCodeTableHeader {
-    unsigned short quickBits;   /* quick bit size */
-    unsigned short maxCodeLen;  /* Max number of bits in any code */
+    uint16_t quickBits;   /* quick bit size */
+    uint16_t maxCodeLen;  /* Max number of bits in any code */
 } HuffmanCodeTableHeader;
 
 /* If this bit is set in a huffman entry, it means that this is not
@@ -101,7 +105,7 @@ typedef struct _HuffmanCodeTable {
      *        Next 15 bits give the offset (in bytes) from the header to 
      *        the first long entry dealing with this long code.
      */
-    unsigned short entries[512];
+    uint16_t entries[512];
 } HuffmanCodeTable;
 
 /* A small sized huffman code table with a 9-bit quick bit.  We have
@@ -109,7 +113,7 @@ typedef struct _HuffmanCodeTable {
  */
 typedef struct shortHuffmanCodeTable {
     struct HuffmanCodeTableHeader h;
-    unsigned short entries[32];
+    uint16_t entries[32];
 } shortHuffmanCodeTable;
 
 typedef struct _InflaterState {
@@ -123,13 +127,13 @@ typedef struct _InflaterState {
     AddrFromHandleFunction addrFromHandle;
 
     int inRemaining;            /* Number of bytes left that we can read */
-    unsigned int inDataSize;    /* Number of good bits in inData */
-    unsigned long inData;       /* Low inDataSize bits are from stream. */
+    uint32_t inDataSize;        /* Number of good bits in inData */
+    uint32_t inData;            /* Low inDataSize bits are from stream. */
                                 /* High unused bits must be zero */
     /* The output buffer */
     unsigned char* outBuffer;
-    unsigned long outOffset;
-    unsigned long outLength;
+    unsigned int outOffset;
+    unsigned int outLength;
     int outBufferIsAHandle; /* non-zero if decompBuffer is mem handle that
                        must be given to heapObj.addrFromHandle before using */
 
@@ -142,24 +146,44 @@ typedef struct _InflaterState {
  * Macros used internally
  *=======================================================================*/
 
-#define NEXTBYTE ((state->inflateBufferCount)-- > 0 ? (unsigned long)(state->inflateBuffer[state->inflateBufferIndex++]) : \
-    ((state->inflateBufferCount = getBytes(fileState, state->inflateBuffer, INFLATEBUFFERSIZE)) > 0 ? \
-    (state->inflateBufferIndex = 1, state->inflateBufferCount--, (unsigned long)(state->inflateBuffer[0])) : 0xff))
+static uint32_t inflater_next_byte(InflaterState* state) {
+    long bytesRead;
+
+    if (state->inflateBufferCount > 0) {
+        state->inflateBufferCount--;
+        return (uint32_t)state->inflateBuffer[state->inflateBufferIndex++];
+    }
+
+    bytesRead = state->getBytes(state->fileState, state->inflateBuffer,
+                                INFLATEBUFFERSIZE);
+    if (bytesRead <= 0 || bytesRead > INFLATEBUFFERSIZE) {
+        state->inflateBufferIndex = 0;
+        state->inflateBufferCount = 0;
+        return UINT32_C(0xff);
+    }
+
+    state->inflateBufferIndex = 1;
+    state->inflateBufferCount = (int)bytesRead - 1;
+    return (uint32_t)state->inflateBuffer[0];
+}
+
+#define NEXTBYTE inflater_next_byte(state)
 
 /* Call this macro to make sure that we have at least "j" bits of
  * input available
  */
 #define NEEDBITS(j) {                                         \
       while (inDataSize < (j)) {                              \
-           inData |= ((unsigned long)NEXTBYTE) << inDataSize; \
-           inRemaining--; inDataSize += 8;                    \
+           inData |= ((uint32_t)NEXTBYTE) << inDataSize;      \
+           inRemaining--; inDataSize += 8U;                   \
       }                                                       \
       ASSERT(inDataSize <= 32);                               \
 }
 
 /* Return (without consuming) the next "j" bits of the input */
 #define NEXTBITS(j) \
-       (ASSERT((j) <= inDataSize), inData & ((1 << (j)) - 1))
+       (ASSERT((j) <= inDataSize), \
+        inData & ((((uint32_t)1U) << (j)) - (uint32_t)1U))
 
 /* Consume (quietly) "j" bits of input, and make them no longer available
  * to the user
@@ -177,31 +201,31 @@ typedef struct _InflaterState {
  * For speed, we assume that quickBits = table->h.quickBits and that
  * it has been cached into a variable.
  */
-#define GET_HUFFMAN_ENTRY(table, quickBits, result) {  \
-    unsigned int huff = table->entries[NEXTBITS(quickBits)];       \
-    if (huff & HUFFINFO_LONG_MASK) {                               \
-        long delta = (huff & ~HUFFINFO_LONG_MASK);                 \
-        unsigned short *table2 = (unsigned short *)((char *)table + delta); \
-        huff = table2[NEXTBITS(table->h.maxCodeLen) >> quickBits]; \
-    }                                                              \
-    if (huff == 0) {                                               \
-        error = INFLATE_HUFFMAN_ENTRY_ERROR;                       \
-        break;                                                     \
-    }                                                              \
-    DUMPBITS(huff & 0xF);                                          \
-    result = huff >> 4;                                            \
+#define GET_HUFFMAN_ENTRY(table, quickBits, result) {                  \
+    uint32_t huff = (table)->entries[NEXTBITS(quickBits)];             \
+    if (huff & HUFFINFO_LONG_MASK) {                                   \
+        uint32_t delta = huff & ~((uint32_t)HUFFINFO_LONG_MASK);       \
+        size_t tableIndex =                                            \
+            (size_t)(NEXTBITS((table)->h.maxCodeLen) >> (quickBits));  \
+        uint16_t longEntry;                                            \
+        memcpy(&longEntry,                                             \
+               (const unsigned char *)(table) + delta +                \
+                   tableIndex * sizeof (longEntry),                    \
+               sizeof (longEntry));                                    \
+        huff = longEntry;                                              \
+    }                                                                  \
+    if (huff == 0U) {                                                  \
+        error = INFLATE_HUFFMAN_ENTRY_ERROR;                           \
+        break;                                                         \
+    }                                                                  \
+    DUMPBITS(huff & 0xFU);                                             \
+    result = huff >> 4;                                                \
 }
 
-#define NEXTBYTE ((state->inflateBufferCount)-- > 0 ? (unsigned long)(state->inflateBuffer[state->inflateBufferIndex++]) : \
-    ((state->inflateBufferCount = getBytes(fileState, state->inflateBuffer, INFLATEBUFFERSIZE)) > 0 ? \
-    (state->inflateBufferIndex = 1, state->inflateBufferCount--, (unsigned long)(state->inflateBuffer[0])) : 0xff))
-
-#define DECLARE_IN_VARIABLES                         \
-    register void* fileState = state->fileState;     \
-    GetBytesFunctionType getBytes = state->getBytes; \
-    register unsigned long inData;                   \
-    register unsigned int inDataSize;                \
-    register long inRemaining;
+#define DECLARE_IN_VARIABLES      \
+    register uint32_t inData;     \
+    register uint32_t inDataSize; \
+    register int inRemaining;
 
 /* Copy values from the inflaterState structure to local variables */
 #define LOAD_IN                       \
@@ -217,8 +241,8 @@ typedef struct _InflaterState {
 
 #define DECLARE_OUT_VARIABLES                              \
     register unsigned char *outBuffer = state->outBuffer; \
-    register unsigned long outLength = state->outLength;   \
-    register unsigned long outOffset;
+    register unsigned int outLength = state->outLength;    \
+    register unsigned int outOffset;
 
 #define LOAD_OUT outOffset = state->outOffset;
 

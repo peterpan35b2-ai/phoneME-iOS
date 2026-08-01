@@ -48,6 +48,9 @@ endif
 # vpath for ( example ) module
 #
 vpath % $(NAMS_EXAMPLES_DIR)/native
+# phoneME-iOS launches a selected suite through the reusable JAMS
+# runMidlet() entry point while using the NAMS runtime/UI.
+vpath % $(SUBSYSTEM_AMS_DIR)/example/jams/native
 
 # This is needed to include API provided by findMidlet.c
 vpath % $(SUBSYSTEM_AMS_DIR)/example/ams_common/native
@@ -65,10 +68,18 @@ endif
 SUBSYSTEM_AMS_EXTRA_INCLUDES += \
 	-I$(SUBSYSTEM_AMS_DIR)/example/ams_common/include \
 	-I$(SUBSYSTEM_AMS_DIR)/example/ams_common_port/include \
+	-I$(SUBSYSTEM_AMS_DIR)/example/jams/include \
 	-I$(NAMS_EXAMPLES_DIR)/native/inc
 
 # Native files for the ( example ) module
 #
+SUBSYSTEM_AMS_NATIVE_FILES += \
+	runMidlet.c \
+	fileInstallerShared.c \
+	jadParser.c \
+	manifestParser.c \
+	nams_command_stub.c
+
 AMS_RUNNAMS_NATIVE_FILES += \
 	runNams.c
 

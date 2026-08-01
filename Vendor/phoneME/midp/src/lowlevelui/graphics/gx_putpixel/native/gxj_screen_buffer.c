@@ -24,12 +24,31 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <kni.h>
 #include <midpMalloc.h>
 #include <midp_logging.h>
 
 #include "gxj_screen_buffer.h"
+
+static int gxj_calculate_buffer_size(int width, int height,
+                                     size_t elementSize, size_t* size) {
+    size_t pixelCount;
+
+    if (size == NULL || width <= 0 || height <= 0 ||
+            (size_t)width > SIZE_MAX / (size_t)height) {
+        return 0;
+    }
+    pixelCount = (size_t)width * (size_t)height;
+    if (elementSize != 0U && pixelCount > SIZE_MAX / elementSize) {
+        return 0;
+    }
+    *size = pixelCount * elementSize;
+    return *size <= (size_t)UINT_MAX;
+}
 
 /**
  * Initialize screen buffer for a screen with specified demension,
@@ -42,13 +61,19 @@
  */
 MIDPError gxj_init_screen_buffer(int width, int height) {
     MIDPError stat = ALL_OK;
-    int size = sizeof(gxj_pixel_type) * width * height;
+    size_t size;
+
+    if (!gxj_calculate_buffer_size(width, height,
+                                   sizeof (gxj_pixel_type), &size)) {
+        return OUT_OF_MEMORY;
+    }
+
     gxj_system_screen_buffer.width = width;
     gxj_system_screen_buffer.height = height;
     gxj_system_screen_buffer.alphaData = NULL;
 
     gxj_system_screen_buffer.pixelData =
-        (gxj_pixel_type *)midpMalloc(size);
+        (gxj_pixel_type *)midpMalloc((unsigned int)size);
     if (gxj_system_screen_buffer.pixelData != NULL) {
         memset(gxj_system_screen_buffer.pixelData, 0, size);
     } else {
@@ -93,11 +118,12 @@ MIDPError gxj_resize_screen_buffer(int width, int height) {
 /** Reset pixel data of screen buffer to zero */
 void gxj_reset_screen_buffer() {
     if (gxj_system_screen_buffer.pixelData != NULL) {
-        int size = sizeof(gxj_pixel_type) *
-            gxj_system_screen_buffer.width *
-                gxj_system_screen_buffer.height;
-
-        memset(gxj_system_screen_buffer.pixelData, 0, size);
+        size_t size;
+        if (gxj_calculate_buffer_size(gxj_system_screen_buffer.width,
+                                      gxj_system_screen_buffer.height,
+                                      sizeof (gxj_pixel_type), &size)) {
+            memset(gxj_system_screen_buffer.pixelData, 0, size);
+        }
     }
 }
 
@@ -118,13 +144,28 @@ static void reformat_plain_data(
 
     int i;
     char *src, *dst;
-    int width_bytes = width * elem_bytes;
-    int height_bytes = height * elem_bytes;
+    size_t width_bytes;
+    size_t height_bytes;
+
+    if (data == NULL || width <= 0 || height <= 0 ||
+            (size_t)width > SIZE_MAX / elem_bytes ||
+            (size_t)height > SIZE_MAX / elem_bytes) {
+        return;
+    }
+    width_bytes = (size_t)width * elem_bytes;
+    height_bytes = (size_t)height * elem_bytes;
     src = dst = data;
 
     if (width < height) {
-        char *buf = (char *)midpMalloc(width_bytes);
-        src += (width-1) * width_bytes;
+        char *buf;
+        if (width_bytes > (size_t)UINT_MAX) {
+            return;
+        }
+        buf = (char *)midpMalloc((unsigned int)width_bytes);
+        if (buf == NULL) {
+            return;
+        }
+        src += (size_t)(width - 1) * width_bytes;
         dst += (width-1) * height_bytes;
         for (i = width; i > 0 ; i--) {
             // prevent intersected memory copying

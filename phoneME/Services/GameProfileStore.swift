@@ -11,6 +11,8 @@ final class GameProfileStore: ObservableObject {
     private let displayScaleMigrationKey = "phoneME.gameProfiles.displayScaleV4"
     private let displayGravityMigrationKey = "phoneME.gameProfiles.displayGravityV5"
     private let parallelRedrawMigrationKey = "phoneME.gameProfiles.parallelRedrawV6"
+    private let nativeInputDefaultsMigrationKey = "phoneME.gameProfiles.nativeInputDefaultsV7"
+    private let frameRate60MigrationKey = "phoneME.gameProfiles.frameRate60V8"
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -57,6 +59,8 @@ final class GameProfileStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: displayScaleMigrationKey)
             UserDefaults.standard.set(true, forKey: displayGravityMigrationKey)
             UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
+            UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
+            UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
             return
         }
 
@@ -157,6 +161,35 @@ final class GameProfileStore: ObservableObject {
                 changed = true
             }
             defaults.set(true, forKey: parallelRedrawMigrationKey)
+            if changed {
+                persist()
+            }
+        }
+
+        if !defaults.bool(forKey: nativeInputDefaultsMigrationKey) {
+            var changed = false
+            for id in profiles.keys {
+                if profiles[id]?.migrateNativeInputDefaultsIfNeeded() == true {
+                    changed = true
+                }
+            }
+            defaults.set(true, forKey: nativeInputDefaultsMigrationKey)
+            if changed {
+                persist()
+            }
+        }
+
+        // The previous app-wide ceiling was also the default value stored in
+        // every profile. Promote those legacy defaults so existing games gain
+        // 60 FPS immediately; users can still explicitly select 30 afterward.
+        if !defaults.bool(forKey: frameRate60MigrationKey) {
+            var changed = false
+            for id in profiles.keys
+                where profiles[id]?.frameRateLimit == GameProfile.previousMaximumFrameRate {
+                profiles[id]?.frameRateLimit = GameProfile.maximumFrameRate
+                changed = true
+            }
+            defaults.set(true, forKey: frameRate60MigrationKey)
             if changed {
                 persist()
             }

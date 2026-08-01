@@ -9,7 +9,7 @@ final class GameLibrary: ObservableObject {
     private let gamesURL: URL
     private let iconsURL: URL
     private let metadataURL: URL
-    private let compatibilityRevision = "avatar-lapro-stackmaps-v1"
+    private let compatibilityRevision = "merged-launcher-stackmaps-v3"
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -57,7 +57,12 @@ final class GameLibrary: ObservableObject {
         guard fileManager.fileExists(atPath: sourceURL.path) else {
             throw LibraryError.missingGameFile
         }
-        guard !isCompatibilityPrepared(for: sourceURL) else {
+        let needsTargetedRefresh =
+            JarCompatibilityPatcher.requiresTargetedCompatibilityRefresh(
+                at: sourceURL
+            )
+        guard !isCompatibilityPrepared(for: sourceURL)
+                || needsTargetedRefresh else {
             return sourceURL
         }
 

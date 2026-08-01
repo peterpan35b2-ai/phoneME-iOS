@@ -2,6 +2,16 @@ import CryptoKit
 import Foundation
 
 enum JarCompatibilityPatcher {
+    private static let mergedLauncherPathThreshold = 256
+    private static let classesRequiringPreverification: [String: Set<String>] = [
+        // VQSV1.jar: h.class contains stale CLDC StackMap entries after the
+        // game was modified. Re-running this class through the embedded
+        // preverifier regenerates its frames without touching unrelated code.
+        "h.class": [
+            "d4fbf900bea192a056ec2dfc300cd8046f6c7f92fa288aa96fde2fc4511b8c24"
+        ]
+    ]
+
     private struct StackMapPatch {
         let methodName: String
         let descriptor: String
@@ -47,6 +57,21 @@ enum JarCompatibilityPatcher {
         )
     ]
 
+    static func requiresTargetedCompatibilityRefresh(
+        at sourceURL: URL
+    ) -> Bool {
+        do {
+            let archive = try CompatibilityZipArchive(
+                data: Data(contentsOf: sourceURL)
+            )
+            return try !targetedPreverificationClassPaths(
+                in: archive
+            ).isEmpty
+        } catch {
+            return false
+        }
+    }
+
     /// Writes a normalized JAR when a known malformed class is present.
     /// Returns false without creating the destination when no patch applies.
     static func writeNormalizedJar(from sourceURL: URL, to destinationURL: URL) throws -> Bool {
@@ -73,6 +98,16 @@ enum JarCompatibilityPatcher {
             replacements.merge(generated) { _, generatedValue in generatedValue }
         }
 
+        if let classPaths = try compatibilityPreverificationClassPaths(
+            in: archive
+        ) {
+            let generated = try preverifyCompatibilityClasses(
+                sourceURL: sourceURL,
+                classPaths: classPaths
+            )
+            replacements.merge(generated) { explicitPatch, _ in explicitPatch }
+        }
+
         for path in archive.classPaths {
             let original: Data
             if let replacement = replacements[path] {
@@ -91,6 +126,124 @@ enum JarCompatibilityPatcher {
         let normalized = try archive.replacing(replacements)
         try normalized.write(to: destinationURL, options: .atomic)
         return true
+    }
+
+    private static func compatibilityPreverificationClassPaths(
+        in archive: CompatibilityZipArchive
+    ) throws -> [String]? {
+        if archive.classPaths.contains(where: {
+            $0.utf8.count >= mergedLauncherPathThreshold
+        }) {
+            // Merged/obfuscated launchers can reference one another while the
+            // verifier rebuilds frames, so preserve the existing whole-suite
+            // behavior for that compatibility path.
+            return archive.classPaths
+        }
+
+        let matchingPaths = try targetedPreverificationClassPaths(
+            in: archive
+        )
+        return matchingPaths.isEmpty ? nil : matchingPaths
+    }
+
+    private static func targetedPreverificationClassPaths(
+        in archive: CompatibilityZipArchive
+    ) throws -> [String] {
+        var matchingPaths: [String] = []
+        for (path, knownHashes) in classesRequiringPreverification {
+            guard let classData = try archive.data(forExactPath: path) else {
+                continue
+            }
+            if knownHashes.contains(sha256(classData)) {
+                matchingPaths.append(path)
+            }
+        }
+        return matchingPaths
+    }
+
+    private static func preverifyCompatibilityClasses(
+        sourceURL: URL,
+        classPaths: [String]
+    ) throws -> [String: Data] {
+        let fileManager = FileManager.default
+        let runtime = try PhoneMERuntimeResources.prepare()
+        let workingURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "phoneme-preverify-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let outputURL = workingURL.appendingPathComponent("classes", isDirectory: true)
+        let classListURL = workingURL.appendingPathComponent("classes.txt")
+
+        try fileManager.createDirectory(
+            at: outputURL,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? fileManager.removeItem(at: workingURL)
+        }
+
+        let classList = classPaths.joined(separator: "\n") + "\n"
+        try classList.write(to: classListURL, atomically: true, encoding: .utf8)
+
+        var result = PhoneMEPreverifyResult()
+        let status = runtime.classesURL.path.withCString { runtimePath in
+            sourceURL.path.withCString { jarPath in
+                classListURL.path.withCString { classListPath in
+                    outputURL.path.withCString { outputPath in
+                        phoneme_preverify_jar_classes(
+                            runtimePath,
+                            jarPath,
+                            classListPath,
+                            outputPath,
+                            &result
+                        )
+                    }
+                }
+            }
+        }
+        guard status == 0 else {
+            throw PatchError.preverificationFailed(status)
+        }
+        guard Int(result.attempted) == classPaths.count,
+              Int(result.succeeded) == classPaths.count,
+              result.failed == 0,
+              result.skipped == 0 else {
+            throw PatchError.preverificationIncomplete(
+                attempted: result.attempted,
+                succeeded: result.succeeded,
+                failed: result.failed,
+                skipped: result.skipped
+            )
+        }
+
+        var replacements: [String: Data] = [:]
+        replacements.reserveCapacity(Int(result.succeeded))
+        for (index, classPath) in classPaths.enumerated() {
+            let alias = String(format: "%08lx.class", UInt(index))
+            let fileURL = outputURL.appendingPathComponent(alias, isDirectory: false)
+            guard fileManager.fileExists(atPath: fileURL.path) else { continue }
+            replacements[classPath] = try Data(
+                contentsOf: fileURL,
+                options: .mappedIfSafe
+            )
+        }
+
+        guard replacements.count == classPaths.count else {
+            throw PatchError.preverificationOutputMissing(
+                expected: classPaths.count,
+                actual: replacements.count
+            )
+        }
+
+        print(
+            "[JarCompatibilityPatcher] compatibility preverifier: "
+                + "attempted=\(result.attempted) "
+                + "succeeded=\(result.succeeded) "
+                + "failed=\(result.failed) "
+                + "skipped=\(result.skipped) "
+                + "replacements=\(replacements.count)"
+        )
+        return replacements
     }
 
     private static func map(_ name: String, _ descriptor: String, _ base64: String) -> StackMapPatch {
@@ -1445,6 +1598,14 @@ private enum StoredZipWriter {
 
 private enum PatchError: Error {
     case invalidArchive
+    case preverificationFailed(Int32)
+    case preverificationIncomplete(
+        attempted: Int32,
+        succeeded: Int32,
+        failed: Int32,
+        skipped: Int32
+    )
+    case preverificationOutputMissing(expected: Int, actual: Int)
     case invalidClassFile
     case invalidPatch
     case unsupportedCompression

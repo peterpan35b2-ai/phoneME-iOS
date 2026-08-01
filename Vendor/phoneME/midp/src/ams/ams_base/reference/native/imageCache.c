@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <string.h>
 
 #include <kni.h>
@@ -141,16 +142,18 @@ static jboolean image_filter(const pcsl_string * entry) {
  */
 static jboolean image_cache_action(const pcsl_string * entry) {
     unsigned char *pngBufPtr = NULL;
+    long pngBufLength;
     int pngBufLen = 0;
     unsigned char *nativeBufPtr = NULL;
     unsigned int nativeBufLen = 0;
     jboolean status = KNI_FALSE;
 
     do {
-        pngBufLen = midpGetJarEntry(handle, entry, &pngBufPtr);
-        if (pngBufLen < 0) {
+        pngBufLength = midpGetJarEntry(handle, entry, &pngBufPtr);
+        if (pngBufLength < 0 || pngBufLength > INT_MAX) {
             break;
         }
+        pngBufLen = (int)pngBufLength;
 
         if (img_decode_data2cache(pngBufPtr, pngBufLen,
                 &nativeBufPtr, &nativeBufLen) != MIDP_ERROR_NONE) {
@@ -164,8 +167,13 @@ static jboolean image_cache_action(const pcsl_string * entry) {
 
         /* write native buffer to persistent store */
         /* status = KNI_TRUE on success */
+        if (nativeBufLen > (unsigned int)INT_MAX) {
+            break;
+        }
         status = storeFileToCache(globalSuiteId, globalStorageId, entry,
-                                   nativeBufPtr, nativeBufLen);
+                                  nativeBufPtr, (int)nativeBufLen)
+            ? KNI_TRUE
+            : KNI_FALSE;
 
     } while (0);
 

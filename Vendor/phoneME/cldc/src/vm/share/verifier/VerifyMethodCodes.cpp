@@ -201,8 +201,12 @@ void VerifyMethodCodes::check_not_final_override(Method *method JVM_TRAPS) {
   InstanceClass::Fast klass = method->holder();
   InstanceClass::Fast super_class = klass().super();
 
-  if (method->access_flags().is_static()
-    || klass().equals(Universe::object_class())){
+  Symbol::Raw klass_name = klass().name();
+  Symbol::Raw object_name = Symbols::java_lang_Object()->obj();
+  if (method->access_flags().is_static() ||
+      klass().equals(Universe::object_class()) ||
+      klass_name().matches(&object_name) ||
+      super_class.is_null()) {
     return;
   }
   // Lookup the method being verified in the superclass
@@ -873,8 +877,9 @@ void VerifyMethodCodes::handle_invoker(int index, int /*num_of_args*/,
   // and that it is only called via an INVOKESPECIAL
 
   if (method_name().byte_at(0) == '<') {
-    if (opcode != Bytecodes::_invokespecial
-        || !(method_name.equals(Symbols::object_initializer_name()))) {
+    if (opcode != Bytecodes::_invokespecial ||
+        !(method_name.equals(Symbols::object_initializer_name()) ||
+          method_name().matches(Symbols::object_initializer_name()))) {
       VFY_ERROR(ve_expect_invokespecial);
     }
   }
@@ -882,7 +887,8 @@ void VerifyMethodCodes::handle_invoker(int index, int /*num_of_args*/,
   // Receiver type processing
   if (opcode != Bytecodes::_invokestatic) {
     // Special processing for calls to <init>
-    if (method_name.equals((Oop *)Symbols::object_initializer_name())) {
+    if (method_name.equals((Oop *)Symbols::object_initializer_name()) ||
+        method_name().matches(Symbols::object_initializer_name())) {
       UsingFastOops inside;
       Symbol::Fast newobject_name;
       // Pop the receiver type
@@ -913,7 +919,8 @@ void VerifyMethodCodes::handle_invoker(int index, int /*num_of_args*/,
         newobject_name = cp()->name_of_klass_at(new_index JVM_CHECK);
 
         // The method must be an <init> method of the indicated class
-        if (!newobject_name.equals(&method_klass_name)) {
+        if (!newobject_name.equals(&method_klass_name) &&
+            !newobject_name().matches(&method_klass_name)) {
           VFY_ERROR(ve_bad_init_call);
         }
       } else if (receiver_kind == ITEM_InitObject) {
@@ -923,10 +930,12 @@ void VerifyMethodCodes::handle_invoker(int index, int /*num_of_args*/,
 
         // The receiver class tag type must be the same as the one for the class
         // of the method being verified or its superclass
-        if (!method_klass_name.equals(&newobject_name)) {
+        if (!method_klass_name.equals(&newobject_name) &&
+            !method_klass_name().matches(&newobject_name)) {
           JavaClass::Raw super = verifying_class().super();
           Symbol::Raw super_klass_name = super().name();
-          if (!method_klass_name.equals(&super_klass_name)) {
+          if (!method_klass_name.equals(&super_klass_name) &&
+              !method_klass_name().matches(&super_klass_name)) {
             VFY_ERROR(ve_bad_init_call);
           }
         }
@@ -1361,7 +1370,10 @@ void VerifyMethodCodes::initialize_locals(Method* method JVM_TRAPS) {
     UsingFastOops in_if;
     JavaClass::Fast jc = method->holder();
     Symbol::Fast jc_name = jc().name();
-    if (!jc.equals(Universe::object_class()) && method->is_object_initializer()) {
+    Symbol::Raw object_name = Symbols::java_lang_Object()->obj();
+    const bool is_object_class = jc.equals(Universe::object_class()) ||
+        jc_name().matches(&object_name);
+    if (!is_object_class && method->is_object_initializer()) {
       frame()->set_need_initialization(true);
       frame()->set_local(0, ITEM_InitObject JVM_CHECK);
     } else {

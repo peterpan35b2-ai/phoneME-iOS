@@ -92,6 +92,10 @@ void Verifier::verify_class_internal(InstanceClass* ic JVM_TRAPS) {
   ic->set_verified();
 } 
 
+void Verifier::compress_stackmaps(InstanceClass* ic JVM_TRAPS) {
+  StackmapGenerator::compress_verifier_stackmaps(ic JVM_NO_CHECK_AT_BOTTOM);
+}
+
 void Verifier::verify_class(InstanceClass* ic JVM_TRAPS) {
   GUARANTEE(!is_active(), "not re-entrant");
 

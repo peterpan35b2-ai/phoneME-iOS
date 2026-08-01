@@ -35,6 +35,7 @@
 #define IOS_NODE_TEXT_CAPACITY 2048
 #define IOS_LABEL_CAPACITY 512
 #define IOS_EVENT_SCREEN_KIND_METADATA -1006
+#define IOS_EVENT_SCREEN_MODE_METADATA -1007
 #define IOS_CHOICE_IMAGE_INDEX_BITS 10
 #define IOS_CHOICE_IMAGE_INDEX_MASK ((1 << IOS_CHOICE_IMAGE_INDEX_BITS) - 1)
 
@@ -109,6 +110,7 @@ static uint64_t eventGeneration;
 static pthread_mutex_t nodeMutex = PTHREAD_MUTEX_INITIALIZER;
 static IOSNode* firstNode;
 static int formScrollPosition;
+static int fullScreenMode;
 static int32_t focusedItemId;
 
 #define IOS_FONT_REGISTRY_CAPACITY 96
@@ -435,6 +437,25 @@ static void emit_event(
     );
 }
 
+static void emit_screen_mode(const IOSNode* node) {
+    if (node == NULL) {
+        return;
+    }
+    emit_event(
+        PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
+        node->id,
+        node->parentId,
+        node->type,
+        -1,
+        fullScreenMode,
+        0,
+        0,
+        IOS_EVENT_SCREEN_MODE_METADATA,
+        node->label,
+        node->detail
+    );
+}
+
 static IOSNode* node_for_id(int32_t id) {
     IOSNode* node = firstNode;
     while (node != NULL) {
@@ -671,6 +692,7 @@ static MidpError screen_show(MidpFrame* frame) {
         node->label,
         node->detail
     );
+    emit_screen_mode(node);
     return KNI_OK;
 }
 
@@ -914,6 +936,8 @@ static MidpError initialize_item(
 void phoneme_ios_lcdui_reset(void) {
     focusedItemId = 0;
     formScrollPosition = 0;
+    fullScreenMode = 0;
+    fbapp_set_fullscreen_mode(0, 0);
     clear_nodes();
     pthread_mutex_lock(&eventMutex);
     eventReadIndex = 0;
@@ -1043,8 +1067,10 @@ static void capture_image(
         pixelCount = width * height;
         pixelArrayLength = KNI_GetArrayLength(pixelData);
         if (pixelArrayLength >= pixelCount * 2) {
-            pixelBytes = (jbyte*)midpMalloc((size_t)pixelCount * 2U);
-            rgba = (uint8_t*)midpMalloc((size_t)pixelCount * 4U);
+            pixelBytes = (jbyte*)midpMalloc(
+                (unsigned int)pixelCount * 2U);
+            rgba = (uint8_t*)midpMalloc(
+                (unsigned int)pixelCount * 4U);
             if (pixelBytes != NULL && rgba != NULL) {
                 KNI_GetRawArrayRegion(
                     pixelData,
@@ -1056,7 +1082,8 @@ static void capture_image(
                 if (KNI_IsNullHandle(alphaData) != KNI_TRUE) {
                     alphaArrayLength = KNI_GetArrayLength(alphaData);
                     if (alphaArrayLength >= pixelCount) {
-                        alphaBytes = (jbyte*)midpMalloc((size_t)pixelCount);
+                        alphaBytes = (jbyte*)midpMalloc(
+                            (unsigned int)pixelCount);
                         if (alphaBytes != NULL) {
                             KNI_GetRawArrayRegion(
                                 alphaData,
@@ -1368,7 +1395,16 @@ void lfpport_refresh(int hardwareId, int x, int y, int w, int h) {
 }
 
 void lfpport_set_fullscreen_mode(int hardwareId, jboolean mode) {
-    fbapp_set_fullscreen_mode(hardwareId, mode);
+    IOSNode* currentNode = NULL;
+
+    fullScreenMode = mode == KNI_TRUE ? 1 : 0;
+    fbapp_set_fullscreen_mode(hardwareId, fullScreenMode);
+
+    if (MidpCurrentScreen != NULL &&
+            MidpCurrentScreen->component.type == MIDP_CANVAS_TYPE) {
+        currentNode = (IOSNode*)MidpCurrentScreen->widgetPtr;
+    }
+    emit_screen_mode(currentNode);
 }
 
 jboolean lfpport_reverse_orientation(int hardwareId) {
@@ -2094,7 +2130,11 @@ static MidpError resize_choices(IOSNode* node, int newCount) {
         return KNI_OK;
     }
 
-    resized = (IOSChoice*)midpMalloc(sizeof(*resized) * (size_t)newCount);
+    if ((size_t)newCount > (size_t)UINT_MAX / sizeof (*resized)) {
+        return KNI_ENOMEM;
+    }
+    resized = (IOSChoice*)midpMalloc(
+        (unsigned int)((size_t)newCount * sizeof (*resized)));
     if (resized == NULL) {
         return KNI_ENOMEM;
     }

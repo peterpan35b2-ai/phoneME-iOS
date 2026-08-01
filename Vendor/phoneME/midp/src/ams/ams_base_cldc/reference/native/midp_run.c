@@ -24,9 +24,12 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 #if defined(__APPLE__)
 #include <pthread.h>
+#include <os/log.h>
 #endif
 
 #include <jvmconfig.h>
@@ -54,6 +57,9 @@
 #include <midp_run_vm.h>
 #include <midp_check_events.h>
 #include <midpMidletSuiteUtils.h>
+#if defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES
+#include <midpNativeAppManager.h>
+#endif
 #include <midp_constants_data.h>
 #if (ENABLE_JSR_205 || ENABLE_JSR_120)
 #include <jsr120_types.h>
@@ -319,6 +325,7 @@ void
 JVMSPI_Exit(int code) {
     midpFinalize();
 #if defined(__APPLE__)
+    os_log_info(OS_LOG_DEFAULT, "PHONEME_JVMSPI_EXIT code=%d", code);
     /*
      * phoneME runs inside the iOS application process. The reference launcher
      * owns its process and may call exit(), but an embedded VM must only end
@@ -347,10 +354,219 @@ JVMSPI_Exit(int code) {
  *                     sources.
  *                -1 = Do not timeout. Block until an event happens.
  */
+#if defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES
+
+typedef enum {
+    PHONEME_NAMS_COMMAND_START = 1,
+    PHONEME_NAMS_COMMAND_FOREGROUND = 2,
+    PHONEME_NAMS_COMMAND_PAUSE = 3,
+    PHONEME_NAMS_COMMAND_RESUME = 4,
+    PHONEME_NAMS_COMMAND_DESTROY = 5,
+    PHONEME_NAMS_COMMAND_STOP = 6
+} PhoneMENamsCommandType;
+
+typedef struct _PhoneMENamsCommand {
+    PhoneMENamsCommandType type;
+    SuiteIdType suiteId;
+    jint appId;
+    jint timeoutMs;
+    jchar* className;
+    jint classNameLength;
+    struct _PhoneMENamsCommand* next;
+} PhoneMENamsCommand;
+
+static pthread_mutex_t phoneMENamsCommandMutex = PTHREAD_MUTEX_INITIALIZER;
+static PhoneMENamsCommand* phoneMENamsCommandHead;
+static PhoneMENamsCommand* phoneMENamsCommandTail;
+
+static void phoneme_ios_nams_free_command(PhoneMENamsCommand* command) {
+    if (command != NULL) {
+        free(command->className);
+        free(command);
+    }
+}
+
+static int phoneme_ios_nams_enqueue_command(PhoneMENamsCommand* command) {
+    if (command == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&phoneMENamsCommandMutex);
+    command->next = NULL;
+    if (phoneMENamsCommandTail == NULL) {
+        phoneMENamsCommandHead = command;
+    } else {
+        phoneMENamsCommandTail->next = command;
+    }
+    phoneMENamsCommandTail = command;
+    pthread_mutex_unlock(&phoneMENamsCommandMutex);
+    return 0;
+}
+
+int phoneme_ios_nams_enqueue_start(
+        SuiteIdType suiteId,
+        const jchar* className,
+        jint classNameLength,
+        jint appId) {
+    PhoneMENamsCommand* command;
+    size_t classNameBytes;
+
+    if (suiteId <= 0 || appId <= 0 || className == NULL ||
+            classNameLength <= 0 ||
+            (size_t)classNameLength > SIZE_MAX / sizeof(jchar)) {
+        return -1;
+    }
+
+    command = (PhoneMENamsCommand*)calloc(1, sizeof(PhoneMENamsCommand));
+    if (command == NULL) {
+        return -1;
+    }
+
+    classNameBytes = (size_t)classNameLength * sizeof(jchar);
+    command->className = (jchar*)malloc(classNameBytes);
+    if (command->className == NULL) {
+        free(command);
+        return -1;
+    }
+    memcpy(command->className, className, classNameBytes);
+    command->type = PHONEME_NAMS_COMMAND_START;
+    command->suiteId = suiteId;
+    command->appId = appId;
+    command->classNameLength = classNameLength;
+    return phoneme_ios_nams_enqueue_command(command);
+}
+
+static int phoneme_ios_nams_enqueue_simple(
+        PhoneMENamsCommandType type,
+        jint appId,
+        jint timeoutMs) {
+    PhoneMENamsCommand* command =
+        (PhoneMENamsCommand*)calloc(1, sizeof(PhoneMENamsCommand));
+    if (command == NULL) {
+        return -1;
+    }
+    command->type = type;
+    command->appId = appId;
+    command->timeoutMs = timeoutMs;
+    return phoneme_ios_nams_enqueue_command(command);
+}
+
+int phoneme_ios_nams_enqueue_set_foreground(jint appId) {
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_FOREGROUND, appId, 0);
+}
+
+int phoneme_ios_nams_enqueue_pause(jint appId) {
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_PAUSE, appId, 0);
+}
+
+int phoneme_ios_nams_enqueue_resume(jint appId) {
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_RESUME, appId, 0);
+}
+
+int phoneme_ios_nams_enqueue_destroy(jint appId, jint timeoutMs) {
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_DESTROY, appId, timeoutMs);
+}
+
+int phoneme_ios_nams_enqueue_stop(void) {
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_STOP, 0, 0);
+}
+
+void phoneme_ios_nams_reset_queue(void) {
+    PhoneMENamsCommand* command;
+
+    pthread_mutex_lock(&phoneMENamsCommandMutex);
+    command = phoneMENamsCommandHead;
+    phoneMENamsCommandHead = NULL;
+    phoneMENamsCommandTail = NULL;
+    pthread_mutex_unlock(&phoneMENamsCommandMutex);
+
+    while (command != NULL) {
+        PhoneMENamsCommand* next = command->next;
+        phoneme_ios_nams_free_command(command);
+        command = next;
+    }
+}
+
+static PhoneMENamsCommand* phoneme_ios_nams_dequeue_command(void) {
+    PhoneMENamsCommand* command;
+
+    pthread_mutex_lock(&phoneMENamsCommandMutex);
+    command = phoneMENamsCommandHead;
+    if (command != NULL) {
+        phoneMENamsCommandHead = command->next;
+        if (phoneMENamsCommandHead == NULL) {
+            phoneMENamsCommandTail = NULL;
+        }
+        command->next = NULL;
+    }
+    pthread_mutex_unlock(&phoneMENamsCommandMutex);
+    return command;
+}
+
+static void phoneme_ios_nams_drain_commands(void) {
+    PhoneMENamsCommand* command;
+
+    while ((command = phoneme_ios_nams_dequeue_command()) != NULL) {
+        MIDPError result = GENERAL_ERROR;
+        switch (command->type) {
+            case PHONEME_NAMS_COMMAND_START:
+                result = midp_midlet_create_start(
+                    command->suiteId,
+                    command->className,
+                    command->classNameLength,
+                    command->appId,
+                    NULL
+                );
+                break;
+            case PHONEME_NAMS_COMMAND_FOREGROUND:
+                result = midp_midlet_set_foreground(command->appId);
+                break;
+            case PHONEME_NAMS_COMMAND_PAUSE:
+                result = midp_midlet_pause(command->appId);
+                break;
+            case PHONEME_NAMS_COMMAND_RESUME:
+                result = midp_midlet_resume(command->appId);
+                break;
+            case PHONEME_NAMS_COMMAND_DESTROY:
+                result = midp_midlet_destroy(
+                    command->appId, command->timeoutMs);
+                break;
+            case PHONEME_NAMS_COMMAND_STOP:
+                result = midp_system_stop();
+                break;
+            default:
+                result = BAD_PARAMS;
+                break;
+        }
+        (void)result;
+        phoneme_ios_nams_free_command(command);
+    }
+}
+
+#endif /* defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES */
+
 void JVMSPI_CheckEvents(JVMSPI_BlockedThreadInfo *blocked_threads,
                         int blocked_threads_count,
                         jlong timeout) {
+#if defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES
+  /* Native UI/API calls originate on iOS host threads. Execute their NAMS
+   * operations here, on the VM thread, because StoreMIDPEventInVmThread() is
+   * explicitly not safe from external pthreads. Bound idle waits so newly
+   * queued commands are observed without a process-wide wake primitive. */
+  phoneme_ios_nams_drain_commands();
+  if (timeout < 0 || timeout > 32) {
+    timeout = 32;
+  }
+#endif
   midp_check_events(blocked_threads, blocked_threads_count, timeout);
+#if defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES
+  phoneme_ios_nams_drain_commands();
+#endif
 }
 
 #if !ENABLE_CDC
@@ -639,12 +855,17 @@ putClassPathExtToSysProperty(char* classPathExt) {
     if (NULL != classPathExt) {
         char* argv[1];
         const char prefix[] = "-Dclasspathext=";
-        argv[0] = midpMalloc(sizeof(prefix) + strlen(classPathExt));
+        size_t extensionLength = strlen(classPathExt);
+        size_t allocationSize = sizeof(prefix) + extensionLength;
+        if (allocationSize > (size_t)UINT_MAX) {
+            return;
+        }
+        argv[0] = midpMalloc((unsigned int)allocationSize);
         if (NULL != argv[0]) {
             memcpy(argv[0], prefix, sizeof(prefix));
             /* copy extention + trailing zero */
             memcpy(argv[0] + sizeof(prefix) - 1, classPathExt,
-                   strlen(classPathExt) + 1);
+                   extensionLength + 1U);
             (void)JVM_ParseOneArg(1, argv);
             midpFree(argv[0]);
         }
@@ -1015,8 +1236,14 @@ static MIDP_ERROR getClassPathPlus(SuiteIdType suiteId,
     JvmPathChar* newPath;
     char* additionalPath =        /* replace NULL with empty string */
             classPathExt!=NULL ? classPathExt : "";
-    int additionalPathLength = strlen(additionalPath);
+    size_t additionalPathSize = strlen(additionalPath);
+    int additionalPathLength;
     int i,j;
+
+    if (additionalPathSize > (size_t)INT_MAX) {
+        return MIDP_ERROR_OUT_MEM;
+    }
+    additionalPathLength = (int)additionalPathSize;
 
     if (suiteId == UNUSED_SUITE_ID) {
         return MIDP_ERROR_AMS_SUITE_NOT_FOUND;
@@ -1041,9 +1268,16 @@ static MIDP_ERROR getClassPathPlus(SuiteIdType suiteId,
     }
 
     jarPathLen = pcsl_string_utf16_length(&jarPath);
-    newPath = (JvmPathChar*)midpMalloc(sizeof(JvmPathChar)
-                    /* generatedPath separator pathExt terminator */
-                    * (jarPathLen + 1 + additionalPathLength + 1));
+    if (jarPathLen < 0 ||
+            (size_t)jarPathLen + (size_t)additionalPathLength + 2U >
+                (size_t)UINT_MAX / sizeof (JvmPathChar)) {
+        pcsl_string_free(&jarPath);
+        return MIDP_ERROR_OUT_MEM;
+    }
+    newPath = (JvmPathChar*)midpMalloc((unsigned int)(
+        sizeof(JvmPathChar)
+        /* generatedPath separator pathExt terminator */
+        * ((size_t)jarPathLen + 1U + (size_t)additionalPathLength + 1U)));
     if (NULL == newPath) {
         pcsl_string_free(&jarPath);
         return OUT_OF_MEM_LEN;

@@ -76,7 +76,9 @@ KNIDECL(javax_microedition_lcdui_SuiteImageCacheImpl_loadAndCreateImmutableImage
     if (len != -1 && rawBuffer != NULL) {
         /* image is found in cache */
         status = img_load_imagedata_from_raw_buffer(KNIPASSARGS
-            imageData, rawBuffer, len);
+            imageData, rawBuffer, len)
+            ? KNI_TRUE
+            : KNI_FALSE;
     }
 
     midpFree(rawBuffer);

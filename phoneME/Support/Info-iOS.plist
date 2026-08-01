@@ -64,6 +64,13 @@
         </dict>
     </array>
 
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Allow J2ME Loader to save game screenshots to your photo library.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>J2ME Loader uses low-accuracy location updates only to keep active games and their network connections running when the app is in the background.</string>
+    <key>NSLocationDefaultAccuracyReduced</key>
+    <true/>
+
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
@@ -71,6 +78,12 @@
         <key>NSAllowsArbitraryLoadsForMedia</key>
         <true/>
     </dict>
+
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>location</string>
+    </array>
 
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.games</string>
@@ -81,7 +94,7 @@
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
-        <true/>
+        <false/>
         <key>UISceneConfigurations</key>
         <dict/>
     </dict>

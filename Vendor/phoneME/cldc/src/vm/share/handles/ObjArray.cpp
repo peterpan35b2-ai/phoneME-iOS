@@ -136,7 +136,9 @@ void ObjArray::array_copy(ObjArray* src, jint src_pos,
     ObjArrayClass::Raw src_class = src->blueprint();
     JavaClass::Raw bound = dst_class().element_class();
     JavaClass::Raw stype = src_class().element_class();
-    if (stype.equals(&bound) || stype().is_subtype_of(&bound)) {
+    if (stype.equals(&bound) ||
+        (stype.not_null() && bound.not_null() &&
+         stype().is_subtype_of(&bound))) {
       // elements are guaranteed to be subtypes, so no check necessary
       jvm_memmove(dst_start, src_start, length * oopSize);
       oop_write_barrier_range(dst_start, length);

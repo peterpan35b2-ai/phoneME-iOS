@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <string.h>
 
 #include <jar.h>
@@ -80,7 +81,7 @@ static unsigned long readTransPal(imageSrcPtr, long, pngData *,
                                   unsigned char *, unsigned long);
 static bool handleImageData(unsigned char *, int, imageDstPtr, pngData *);
 static unsigned long getInt(imageSrcPtr);
-static unsigned long skip(imageSrcPtr, int, unsigned long);
+static unsigned long skip(imageSrcPtr, long, unsigned long);
 static bool getChunk(imageSrcPtr, unsigned long *, long *);
 static bool signatureOK(imageSrcPtr);
 static bool headerOK(pngData *);
@@ -389,7 +390,10 @@ PNGdecodeImage_real(imageSrcPtr src, imageDstPtr dst,
                 if (chunkType != IDAT_CHUNK) break;
 
                 CRC = init_CRC(chunkType);
-                compLen += chunkLength;
+                if (chunkLength < 0 || chunkLength > INT_MAX - compLen) {
+                    goto formaterror;
+                }
+                compLen += (int)chunkLength;
                 CRC = skip(src, chunkLength, CRC);
                 lastGoodPos = src->getpos(src);
 
@@ -593,7 +597,9 @@ readHeader(imageSrcPtr src, long length, pngData *data, unsigned long CRC)
     length -= sizeof(buf);
 
     while (length > 0) {
-        int n = (length < (long)sizeof(buf)) ? length : (long)sizeof(buf);
+        int n = length < (long)sizeof(buf)
+            ? (int)length
+            : (int)sizeof(buf);
         src->getBytes(src, buf, n);
         CRC = update_crc(CRC, buf, n);
     }
@@ -633,7 +639,7 @@ readTransPal(imageSrcPtr src, long length, pngData *data,
     if (data->colorType & CT_PALETTE) { /* palette */
         for (i = 0; i < data->transLength; i++) {
             unsigned char buf[1];
-            buf[0] = src->getByte(src);
+            buf[0] = (unsigned char)src->getByte(src);
             CRC = update_crc(CRC, buf, 1);
             data->trans[i] = buf[0];
         }
@@ -1615,11 +1621,13 @@ getChunk(imageSrcPtr src, unsigned long *chunkType, long *chunkLength)
 }
 
 static unsigned long
-skip(imageSrcPtr src, int nBytes, unsigned long CRC)
+skip(imageSrcPtr src, long nBytes, unsigned long CRC)
 {
     static unsigned char buf[64];
     while (nBytes > 0) {
-        int n = (nBytes > (long)sizeof(buf)) ? (long)sizeof(buf) : nBytes;
+        int n = nBytes > (long)sizeof(buf)
+            ? (int)sizeof(buf)
+            : (int)nBytes;
         src->getBytes(src, buf, n);
         CRC = update_crc(CRC, buf, n);
         nBytes -= n;

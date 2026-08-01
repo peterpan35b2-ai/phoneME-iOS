@@ -10,8 +10,11 @@ MEMORY_PORT_MODULE=malloc
 PRINT_MODULE=stdout
 STRING_MODULE=utf16
 
-PCSL_CHUNKMEM_IMPL=pcsl_chunkheap
-PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/heap
+# Reserve the maximum CLDC heap as virtual address space, but commit only the
+# pages currently required. The legacy chunkheap implementation mallocs the
+# full maximum immediately and makes a 64 MB limit look like 64 MB in use.
+PCSL_CHUNKMEM_IMPL=pcsl_chunkmmap_posix
+PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/malloc
 
 include $(PCSL_DIR)/makefiles/share/gcc.gmk
 include $(PCSL_DIR)/makefiles/share/darwin.gmk

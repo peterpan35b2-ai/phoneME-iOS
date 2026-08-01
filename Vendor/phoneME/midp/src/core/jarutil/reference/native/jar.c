@@ -24,6 +24,8 @@
  * information or have any questions. 
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -284,9 +286,10 @@ getJarInfo(FileObj* fileObj) {
                  * implied length of the jar file matches the actual
                  * length.
                  */
-                int endpos = currentOffset + (bp - buffer);
+                long endpos = currentOffset + (long)(bp - buffer);
                 if (endpos + ENDHDRSIZ + ENDCOM(bp) == length) {
-                    unsigned long cenOffset = endpos - ENDSIZ(bp);
+                    unsigned long cenOffset =
+                        (unsigned long)(endpos - ENDSIZ(bp));
                     unsigned long locOffset = cenOffset - ENDOFF(bp);
 
                     if (fileObj->seek(fileObj->state, locOffset,
@@ -319,7 +322,7 @@ getJarInfo(FileObj* fileObj) {
              * We've moved outside our window into the file.  We must
              * move the window backwards
              */
-            int count = currentOffset - minOffset; /* Bytes left in file */
+            long count = currentOffset - minOffset; /* Bytes left in file */
             if (count <= 0) {
                 /* Nothing left to read.  Time to give up */
                 jarInfo.status = -3;
@@ -331,17 +334,23 @@ getJarInfo(FileObj* fileObj) {
                  * actually read are
                  *      sizeof (buffer) - ((bp - buffer) + ENDHDRSIZE).
                  */
-                int available = (sizeof (buffer) - ENDHDRSIZ) +
+                ptrdiff_t available =
+                    (ptrdiff_t)(sizeof (buffer) - ENDHDRSIZ) +
                     (buffer - bp);
-                if (count > available) {
-                    count = available;
+                if (available <= 0) {
+                    jarInfo.status = -3;
+                    return jarInfo;
+                }
+                if (count > (long)available) {
+                    count = (long)available;
                 }
             }
 
             /* Back up, while keeping our virtual currentOffset the same */
             currentOffset -= count;
-            bp += count;
-            memmove(buffer + count, buffer, sizeof (buffer) - count);
+            bp += (ptrdiff_t)count;
+            memmove(buffer + (size_t)count, buffer,
+                    sizeof (buffer) - (size_t)count);
             if ((fileObj->seek(fileObj->state, currentOffset, SEEK_SET) < 0) ||
                 (fileObj->read(fileObj->state, buffer, count) !=
                    (long)count)) {
@@ -518,8 +527,13 @@ inflateJarEntry(FileObj* fileObj, HeapManObj* heapManObj, JarEntryInfo* entry,
         break;
 
     case DEFLATED:
-        status = inflateData(fileObj, heapManObj, entry->compLen,
-                             decompBuffer, entry->decompLen, bufferIsAHandle);
+        if (entry->compLen > (unsigned long)INT_MAX ||
+                entry->decompLen > (unsigned long)INT_MAX) {
+            return JAR_ENTRY_SIZE_MISMATCH;
+        }
+        status = inflateData(fileObj, heapManObj, (int)entry->compLen,
+                             decompBuffer, (int)entry->decompLen,
+                             bufferIsAHandle);
         if (status != 0) {
             return status;
         }

@@ -148,7 +148,9 @@ ReturnOop JavaClass::array_class() {
 void JavaClass::set_array_class(ObjArrayClass* value JVM_TRAPS) {
   // If arrayclass AND element class are both in ROM or both out of
   // ROM then we can use arrayclass field in JavaClass to store arrayclass
-  if ((GenerateROMImage && !ENABLE_MONET)
+  if (Universe::java_lang_Class_class()->is_null()
+      ||
+      (GenerateROMImage && !ENABLE_MONET)
       ||
       (UseROM &&
        ((class_id() < ROM::number_of_system_classes() &&
@@ -184,6 +186,9 @@ ReturnOop JavaClass::get_array_class(jint distance JVM_TRAPS) {
   UsingFastOops fast_oops;
   ObjArrayClass::Fast ac = array_class();
   ObjArrayClass::Fast tmp;
+#if ENABLE_ISOLATES
+  TaskMirror::Fast array_mirror;
+#endif
   if (ac.is_null()) {
 #if ENABLE_ISOLATES
     // THe logic is as follows, if generating the System ROM then don't create
@@ -197,21 +202,32 @@ ReturnOop JavaClass::get_array_class(jint distance JVM_TRAPS) {
     // not in ROM then we don't need TaskMirror
     if (!(GenerateROMImage && !ENABLE_MONET) &&
         (!UseROM || (class_id() < ROM::number_of_system_classes())))  {
-      TaskMirror::Raw tm = task_mirror_no_check();
-      if (is_being_initialized_mirror(&tm)) {
+      array_mirror = task_mirror_no_check();
+      if (is_being_initialized_mirror(&array_mirror)) {
         if (is_instance_class()) {
-          tm = setup_task_mirror(static_field_size(), vtable_length(),
-                                 true JVM_CHECK_0);
+          array_mirror = setup_task_mirror(
+              static_field_size(), vtable_length(), true JVM_CHECK_0);
           InstanceClass::Raw ic = obj();
-          ic().initialize_static_fields(&tm);
+          ic().initialize_static_fields(&array_mirror);
         } else {
-          tm = setup_task_mirror(0, 0, false JVM_CHECK_0);
+          array_mirror = setup_task_mirror(0, 0, false JVM_CHECK_0);
         }
       }
     }
 #endif
     ac = Universe::new_obj_array_class(this JVM_CHECK_0);
+#if ENABLE_ISOLATES
+    if (array_mirror.not_null()) {
+      /* Keep the freshly resolved mirror across the allocation above. For a
+       * class whose <clinit> barrier is still installed, looking it up again
+       * through the task clinit list can fail during non-ROMized bootstrap. */
+      array_mirror().set_array_class(&ac);
+    } else {
+      set_array_class(&ac JVM_CHECK_0);
+    }
+#else
     set_array_class(&ac JVM_CHECK_0);
+#endif
     if (_debugger_active) {
       // With fixes to ClassBySig in VMImpl.cpp we don't need to do this
       //      VMEvent::class_prepare_event(&ac);

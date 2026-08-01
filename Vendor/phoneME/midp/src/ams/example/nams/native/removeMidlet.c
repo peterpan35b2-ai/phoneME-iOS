@@ -102,8 +102,8 @@ int removeMidlet(int argc, char* argv[]) {
 
     do {
         int onlyDigits;
-        int len;
-        int i;
+        size_t len;
+        size_t i;
         SuiteIdType* pSuites = NULL;
         int numberOfSuites = 0;
         MIDPError err;
@@ -112,7 +112,7 @@ int removeMidlet(int argc, char* argv[]) {
         onlyDigits = 1;
         len = strlen(argv[1]);
         for (i = 0; i < len; i++) {
-            if (!isdigit((argv[1])[i])) {
+            if (!isdigit((unsigned char)(argv[1])[i])) {
                 onlyDigits = 0;
                 break;
             }

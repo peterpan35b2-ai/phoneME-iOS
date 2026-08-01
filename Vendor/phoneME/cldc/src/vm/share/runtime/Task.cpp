@@ -104,15 +104,23 @@ void Task::initialize() {
 }
 
 void Task::setup_task_mirror(JavaClass *klass JVM_TRAPS) {
+  TaskMirror::Raw mirror;
+
   if (klass->is_instance_class()) {
     int static_field_size = ((InstanceClass*)klass)->static_field_size();
     int vtable_length = klass->vtable_length();
 
-    klass->setup_task_mirror(static_field_size, vtable_length, 
-                             false JVM_CHECK);
-    ((InstanceClass*)klass)->initialize_static_fields();
+    mirror = klass->setup_task_mirror(static_field_size, vtable_length,
+                                      false JVM_CHECK);
+    GUARANTEE(!mirror.is_null(), "Task mirror allocation failed");
+    /* Use the freshly allocated handle directly. During non-ROMized MVM
+     * bootstrap the raw mirror-list base can be temporarily stale while
+     * class/mirror tables are resized, and re-reading through task_mirror()
+     * can therefore return NULL even though set_task_mirror() succeeded. */
+    ((InstanceClass*)klass)->initialize_static_fields(&mirror);
   } else {
-    klass->setup_task_mirror(0, 0, false JVM_NO_CHECK_AT_BOTTOM);
+    mirror = klass->setup_task_mirror(0, 0, false JVM_NO_CHECK_AT_BOTTOM);
+    GUARANTEE(!mirror.is_null(), "Task mirror allocation failed");
   }
 }
 
@@ -170,7 +178,7 @@ bool Task::init_first_task(JVM_SINGLE_ARG_TRAPS) {
   task().set_priority(PRIORITY_NORMAL);
   task().add_to_seen_isolates(&isolate_obj);
   task().set_status(TASK_STARTED);
-  isolate_obj().set_api_access(1);
+  IsolateObj::set_current_api_access(1);
 #if ENABLE_MULTIPLE_PROFILES_SUPPORT
   // First task should have profile_id, which is set by JVM_SetProfile.
   task().set_profile_id(Universe::profile_id());
@@ -285,15 +293,21 @@ void Task::start_task(Thread *thread JVM_TRAPS) {
   // to stop waiting.
   IsolateObj::Fast isolate_obj = task().primary_isolate_obj();
   isolate_obj().notify_all_waiters(JVM_SINGLE_ARG_CHECK);
-  // Transfer the value from the instance field to the static field
-  isolate_obj().set_api_access(isolate_obj().api_access_init());
-
 #if USE_BINARY_IMAGE_LOADER
   task().link_dynamic(JVM_SINGLE_ARG_CHECK);
 #endif
 
   task().init_classes_inited_at_build(JVM_SINGLE_ARG_CHECK);
+
+  // Static mirrors can be replaced while the child task bootstraps its system
+  // classes. Apply the creator-selected permission only after that phase, so
+  // the value is written to the final Isolate mirror used by Java bytecodes.
+  IsolateObj::set_current_api_access(isolate_obj().api_access_init());
   task().load_main_class(thread JVM_CHECK);
+  /* load_main_class() can lazily load a task-local copy of the CLDC Isolate
+   * class in the non-ROM iOS build. Apply the permission again to the final
+   * mirror before the pending Java main entry is executed. */
+  IsolateObj::set_current_api_access(isolate_obj().api_access_init());
 #if ENABLE_JAVA_DEBUGGER
   if (JavaDebugger::is_debug_isolate_option_on() &&
       isolate_obj().connect_debugger() != 0) {
@@ -607,6 +621,20 @@ bool Task::load_main_class(Thread *new_thread JVM_TRAPS) {
 
   // Make sure the class is initialized
   klass().initialize(JVM_SINGLE_ARG_CHECK_0);
+
+  /* Resolve method name/signature UTF8 entries before the allocation-free
+   * lookup used for each new isolate. */
+  ObjArray::Fast local_methods = klass().methods();
+  for (int index = 0; index < local_methods().length(); ++index) {
+    Method::Raw method = local_methods().obj_at(index);
+    if (method.not_null()) {
+      ConstantPool::Raw method_constants = method().constants();
+      method_constants().checked_symbol_at(
+          method().name_index() JVM_CHECK_0);
+      method_constants().checked_type_symbol_at(
+          method().signature_index() JVM_CHECK_0);
+    }
+  }
 
   // Find the method to invoke
   Method::Fast main_method = klass().lookup_main_method();

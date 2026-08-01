@@ -942,8 +942,8 @@ KNIDECL(javax_microedition_lcdui_Graphics_doCopyArea) {
     int width  = KNI_GetParameterAsInt(3);
     int y_src  = KNI_GetParameterAsInt(2);
     int x_src  = KNI_GetParameterAsInt(1);
-    jshort gfx_width = 0;
-    jshort gfx_height = 0;
+    int gfx_width = 0;
+    int gfx_height = 0;
 
     KNI_StartHandles(1); 
     KNI_DeclareHandle(thisObject);
@@ -952,7 +952,7 @@ KNIDECL(javax_microedition_lcdui_Graphics_doCopyArea) {
 
     if (GRAPHICS_OP_IS_ALLOWED(thisObject)) {
 
-        gfx_width  = (int)GXAPI_GET_GRAPHICS_PTR(thisObject)->maxWidth;
+        gfx_width = (int)GXAPI_GET_GRAPHICS_PTR(thisObject)->maxWidth;
         gfx_height = (int)GXAPI_GET_GRAPHICS_PTR(thisObject)->maxHeight;
 
         TRANSLATE(thisObject, x_src, y_src); 

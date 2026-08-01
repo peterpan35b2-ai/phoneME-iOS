@@ -39,10 +39,15 @@
  * Guide for details.
  */
 
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <os/log.h>
+#include <sys/ucontext.h>
+#endif
+#include <time.h>
+
 #include "incls/_precompiled.incl"
 #include "incls/_OS_linux.cpp.incl"
-
-#include <time.h>
 
 // this flag allows running with Valgrind, advanced memory checker for
 // x86 Linux see http://developer.kde.org/~sewardj/ for more details
@@ -199,6 +204,16 @@ static inline void rt_tick_event();
 static sem_t ticker_semaphore;
 static bool ticker_created = false;
 static pthread_t main_thread_handle;
+#if defined(__APPLE__)
+/*
+ * Darwin does not support unnamed POSIX semaphores, so the legacy port used
+ * to skip sem_wait() entirely and kept waking the suspended ticker thread at
+ * every TickInterval. Use a condition variable to let iOS sleep until resume
+ * or shutdown instead.
+ */
+static pthread_mutex_t ticker_wait_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ticker_wait_condition = PTHREAD_COND_INITIALIZER;
+#endif
 
 static pthread_t thread_create(int thread_routine(void *parameter),
                                void *parameter) {
@@ -224,20 +239,52 @@ static pthread_t thread_create(int thread_routine(void *parameter),
 }
 
 static int ticker_thread_routine(void *parameter) {
+#if defined(__APPLE__)
+  ::pthread_mutex_lock(&ticker_wait_mutex);
+  ticker_stopped = false;
+  ::pthread_mutex_unlock(&ticker_wait_mutex);
+
+  while (true) {
+    bool should_stop;
+    bool should_tick;
+
+    ::pthread_mutex_lock(&ticker_wait_mutex);
+    while (!ticker_running && !ticker_stopping) {
+      ::pthread_cond_wait(&ticker_wait_condition, &ticker_wait_mutex);
+    }
+    should_stop = ticker_stopping;
+    ::pthread_mutex_unlock(&ticker_wait_mutex);
+    if (should_stop) {
+      break;
+    }
+
+    ::usleep(TickInterval * 1000);
+
+    ::pthread_mutex_lock(&ticker_wait_mutex);
+    should_tick = ticker_running && !ticker_stopping;
+    ::pthread_mutex_unlock(&ticker_wait_mutex);
+    if (should_tick) {
+      rt_tick_event();
+    }
+  }
+
+  ::pthread_mutex_lock(&ticker_wait_mutex);
+  ticker_stopped = true;
+  ::pthread_cond_broadcast(&ticker_wait_condition);
+  ::pthread_mutex_unlock(&ticker_wait_mutex);
+#else
   ticker_stopped = false;
   while (!ticker_stopping) {
     ::usleep(TickInterval * 1000);
 
     if (ticker_running) {
       rt_tick_event();
-    }
-#if !defined(__APPLE__)
-    else {
+    } else {
       ::sem_wait(&ticker_semaphore);
     }
-#endif
   }
   ticker_stopped = true;
+#endif
   return 0;
 }
 
@@ -246,29 +293,57 @@ bool Os::start_ticks() {
     return true;
   }
 
+#if defined(__APPLE__)
+  bool should_create;
+
+  ::pthread_mutex_lock(&ticker_wait_mutex);
+  ticker_running = true;
+  ticker_stopping = false;
+  should_create = !ticker_created;
+  if (should_create) {
+    ticker_created = true;
+  } else {
+    ::pthread_cond_signal(&ticker_wait_condition);
+  }
+  ::pthread_mutex_unlock(&ticker_wait_mutex);
+
+  if (should_create && thread_create(ticker_thread_routine, 0) == 0) {
+    ::pthread_mutex_lock(&ticker_wait_mutex);
+    ticker_created = false;
+    ticker_running = false;
+    ::pthread_mutex_unlock(&ticker_wait_mutex);
+    return false;
+  }
+#else
   ticker_running = true;
   ticker_stopping = false;
   if (ticker_created) {
-#if !defined(__APPLE__)
     ::sem_post(&ticker_semaphore);
-#endif
   } else {
     ticker_created = true;
-#if !defined(__APPLE__)
     if (::sem_init(&ticker_semaphore, 0, 0) != 0) {
+      ticker_created = false;
       return false;
     }
-#endif
     if (thread_create(ticker_thread_routine, 0) == 0) {
+      ::sem_destroy(&ticker_semaphore);
       ticker_created = false;
       return false;
     }
   }
+#endif
   return true;
 }
 
 void Os::suspend_ticks() {
+#if defined(__APPLE__)
+  ::pthread_mutex_lock(&ticker_wait_mutex);
   ticker_running = false;
+  ::pthread_cond_signal(&ticker_wait_condition);
+  ::pthread_mutex_unlock(&ticker_wait_mutex);
+#else
+  ticker_running = false;
+#endif
   Os::sleep(1); // why is this necessary?
 }
 
@@ -277,6 +352,21 @@ void Os::resume_ticks() {
 }
 
 void Os::stop_ticks() {
+#if defined(__APPLE__)
+  ::pthread_mutex_lock(&ticker_wait_mutex);
+  if (ticker_created) {
+    ticker_stopping = true;
+    ::pthread_cond_broadcast(&ticker_wait_condition);
+    while (!ticker_stopped) {
+      ::pthread_cond_wait(&ticker_wait_condition, &ticker_wait_mutex);
+    }
+    ticker_created = false;
+    ticker_running = false;
+    ticker_stopping = false;
+    ticker_stopped = false;
+  }
+  ::pthread_mutex_unlock(&ticker_wait_mutex);
+#else
   if (ticker_created) {
     ticker_stopping = true;
     if (ticker_running) {
@@ -284,21 +374,18 @@ void Os::stop_ticks() {
         ::usleep(TickInterval * 1000);
       }
     } else {
-#if !defined(__APPLE__)
       // ticker is currently suspended on a semaphore
       ::sem_post(&ticker_semaphore);
-#endif
       for (int i=0; i<10 && !ticker_stopped; i++) {
         ::usleep(TickInterval * 1000);
       }
-#if !defined(__APPLE__)
       ::sem_destroy(&ticker_semaphore);
-#endif
     }
     ticker_created = false;
     ticker_running = false;
     ticker_stopped = false;
   }
+#endif
 }
 
 #else // ENABLE_TIMER_THREAD
@@ -529,6 +616,47 @@ static void handle_segv_siginfo(int signo, siginfo_t *info, void *context) {
     return;
   }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+  {
+    ucontext_t* apple_context = (ucontext_t*)context;
+    unsigned long long pc = apple_context != NULL &&
+        apple_context->uc_mcontext != NULL
+        ? (unsigned long long)apple_context->uc_mcontext->__ss.__pc : 0ULL;
+    unsigned long long lr = apple_context != NULL &&
+        apple_context->uc_mcontext != NULL
+        ? (unsigned long long)apple_context->uc_mcontext->__ss.__lr : 0ULL;
+    Dl_info symbol_info;
+    Dl_info caller_info;
+    memset(&symbol_info, 0, sizeof(symbol_info));
+    memset(&caller_info, 0, sizeof(caller_info));
+    (void)dladdr((void*)(uintptr_t)pc, &symbol_info);
+    (void)dladdr((void*)(uintptr_t)lr, &caller_info);
+    os_log_error(
+        OS_LOG_DEFAULT,
+        "PHONEME_OS_FATAL_SIGNAL signal=%d code=%d address=%{public}p pc=0x%{public}llx image=%{public}s base=%{public}p symbol=%{public}s symbolAddress=%{public}p lr=0x%{public}llx caller=%{public}s callerAddress=%{public}p",
+        signo,
+        info != NULL ? info->si_code : 0,
+        info != NULL ? info->si_addr : NULL,
+        pc,
+        symbol_info.dli_fname != NULL ? symbol_info.dli_fname : "?",
+        symbol_info.dli_fbase,
+        symbol_info.dli_sname != NULL ? symbol_info.dli_sname : "?",
+        symbol_info.dli_saddr,
+        lr,
+        caller_info.dli_sname != NULL ? caller_info.dli_sname : "?",
+        caller_info.dli_saddr
+    );
+  }
+#elif defined(__APPLE__)
+  os_log_error(
+      OS_LOG_DEFAULT,
+      "PHONEME_OS_FATAL_SIGNAL signal=%d code=%d address=%{public}p",
+      signo,
+      info != NULL ? info->si_code : 0,
+      info != NULL ? info->si_addr : NULL
+  );
+#endif
+
   print_siginfo(info);
   print_ucontext(context);
 #ifndef PRODUCT
@@ -678,6 +806,15 @@ static void handle_segv_siginfo_npe(int sig, siginfo_t* info, void* ucpPtr) {
   CompiledMethodDesc *cmd = ObjectHeap::method_contains_instruction_of((void *)pc);
   
   if( cmd == NULL){
+#if defined(__APPLE__)
+    os_log_error(
+        OS_LOG_DEFAULT,
+        "PHONEME_OS_NPCE_UNKNOWN_PC signal=%d address=%{public}p pc=0x%{public}lx",
+        sig,
+        info != NULL ? info->si_addr : NULL,
+        pc
+    );
+#endif
     TTY_TRACE(("Memory access error\nPlease report the bug\n"));
     ::exit(1);
   }
@@ -816,6 +953,9 @@ static void handle_segv_siginfo_npe(int sig, siginfo_t* info, void* ucpPtr) {
   }
   return;
 
+#if defined(__APPLE__)
+  os_log_error(OS_LOG_DEFAULT, "PHONEME_OS_NPCE_UNREACHABLE_EXIT");
+#endif
   TTY_TRACE(("Memory access error\nPlease report the bug\n"));
   ::exit(1);
 }

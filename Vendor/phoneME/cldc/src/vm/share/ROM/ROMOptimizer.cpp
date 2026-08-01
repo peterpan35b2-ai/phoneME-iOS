@@ -196,7 +196,10 @@ void ROMOptimizer::optimize(Stream *log_stream JVM_TRAPS) {
     case STATE_REMOVE_UNUSED_STATIC_FIELDS:
 #if USE_SOURCE_IMAGE_GENERATOR
       // Remove unused static fields (such as non-public static final ints)
-      if (RemoveROMUnusedStaticFields) {
+      /* The legacy static-field compactor assumes 32-bit TaskMirror slots.
+       * Keep the fields on arm64; removing them is only a ROM-size
+       * optimization and produces non-word-aligned filler objects in MVM. */
+      if (RemoveROMUnusedStaticFields && BytesPerWord == BytesPerInt) {
         remove_unused_static_fields(JVM_SINGLE_ARG_CHECK);
       }
 #endif

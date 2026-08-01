@@ -504,6 +504,15 @@ bool Arguments::must_compile_method(Symbol* class_name, Symbol* method_name
 
 extern "C" void
 JVM_Initialize(void) {
+  /* JVM instances are started repeatedly by the embedded installer and the
+   * MIDP runtime in the same iOS process. ROM-generation/verify-only flags are
+   * transient launch modes, not process-wide state. Leaving GenerateROMImage
+   * set from an earlier helper run makes normal MVM bootstrap skip task-mirror
+   * creation and eventually dereference a null mirror. ROM tools parse their
+   * option or set the flag again after this initialization step. */
+  GenerateROMImage = false;
+  VerifyOnly = false;
+
   if (tty == NULL) {
     Stream::initialize();
   }

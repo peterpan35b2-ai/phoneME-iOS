@@ -75,6 +75,92 @@ static MIDPError store_jar(char** ppszError, ComponentType type,
 
 static MIDPError add_to_suite_list_and_save(MidletSuiteData* pMsd);
 
+/**
+ * Copies installer-owned suite metadata into an independently owned cache
+ * entry. A raw struct memcpy is not sufficient because pcsl_string values and
+ * the optional JAR hash contain pointers which the installer releases after
+ * midp_store_suite() returns.
+ *
+ * pathToJar is intentionally left NULL: store_jar() fills it with the final
+ * suite-store path immediately after this copy.
+ */
+static MIDPError
+copy_suite_data_for_storage(const MidletSuiteData* source,
+                            MidletSuiteData** destination) {
+    MidletSuiteData* copy;
+    pcsl_string* sourceStrings[7];
+    pcsl_string* destinationStrings[7];
+    int i;
+
+    if (source == NULL || destination == NULL) {
+        return BAD_PARAMS;
+    }
+    *destination = NULL;
+
+    copy = (MidletSuiteData*)pcsl_mem_malloc(sizeof(MidletSuiteData));
+    if (copy == NULL) {
+        return OUT_OF_MEMORY;
+    }
+
+    memcpy(copy, source, sizeof(MidletSuiteData));
+    copy->nextEntry = NULL;
+    copy->varSuiteData.pJarHash = NULL;
+    copy->varSuiteData.midletClassName = PCSL_STRING_NULL;
+    copy->varSuiteData.displayName = PCSL_STRING_NULL;
+    copy->varSuiteData.iconName = PCSL_STRING_NULL;
+    copy->varSuiteData.suiteVendor = PCSL_STRING_NULL;
+    copy->varSuiteData.suiteName = PCSL_STRING_NULL;
+    copy->varSuiteData.suiteVersion = PCSL_STRING_NULL;
+    copy->varSuiteData.pathToJar = PCSL_STRING_NULL;
+    copy->varSuiteData.pathToSettings = PCSL_STRING_NULL;
+
+    sourceStrings[0] = (pcsl_string*)&source->varSuiteData.midletClassName;
+    sourceStrings[1] = (pcsl_string*)&source->varSuiteData.displayName;
+    sourceStrings[2] = (pcsl_string*)&source->varSuiteData.iconName;
+    sourceStrings[3] = (pcsl_string*)&source->varSuiteData.suiteVendor;
+    sourceStrings[4] = (pcsl_string*)&source->varSuiteData.suiteName;
+    sourceStrings[5] = (pcsl_string*)&source->varSuiteData.suiteVersion;
+    sourceStrings[6] = (pcsl_string*)&source->varSuiteData.pathToSettings;
+
+    destinationStrings[0] = &copy->varSuiteData.midletClassName;
+    destinationStrings[1] = &copy->varSuiteData.displayName;
+    destinationStrings[2] = &copy->varSuiteData.iconName;
+    destinationStrings[3] = &copy->varSuiteData.suiteVendor;
+    destinationStrings[4] = &copy->varSuiteData.suiteName;
+    destinationStrings[5] = &copy->varSuiteData.suiteVersion;
+    destinationStrings[6] = &copy->varSuiteData.pathToSettings;
+
+    for (i = 0; i < 7; ++i) {
+        if (pcsl_string_dup(sourceStrings[i], destinationStrings[i]) !=
+                PCSL_STRING_OK) {
+            free_suite_data_entry(copy);
+            return OUT_OF_MEMORY;
+        }
+    }
+
+    if (source->jarHashLen > 0) {
+        if (source->varSuiteData.pJarHash == NULL) {
+            free_suite_data_entry(copy);
+            return BAD_PARAMS;
+        }
+        copy->varSuiteData.pJarHash = (unsigned char*)pcsl_mem_malloc(
+            (size_t)source->jarHashLen
+        );
+        if (copy->varSuiteData.pJarHash == NULL) {
+            free_suite_data_entry(copy);
+            return OUT_OF_MEMORY;
+        }
+        memcpy(
+            copy->varSuiteData.pJarHash,
+            source->varSuiteData.pJarHash,
+            (size_t)source->jarHashLen
+        );
+    }
+
+    *destination = copy;
+    return ALL_OK;
+}
+
 static MIDPError write_install_info(char** ppszError, ComponentType type,
                                     SuiteIdType suiteId,
                                     ComponentIdType componentId,
@@ -82,6 +168,12 @@ static MIDPError write_install_info(char** ppszError, ComponentType type,
                                     jint* pOutDataSize);
 
 static MIDPError create_unique_id(ComponentType idType, void* pId);
+
+static int lastStoreSuiteStage = 0;
+
+int phoneme_suite_store_last_stage(void) {
+    return lastStoreSuiteStage;
+}
 
 /* ------------------------------------------------------------ */
 /*                           Public API                         */
@@ -355,6 +447,7 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
                  const MidletSuiteData* pSuiteData) {
     MIDPError status;
     char* pszError;
+    lastStoreSuiteStage = 1;
     lockStorageList *node;
     SuiteIdType suiteId;
     jint tmpSize;
@@ -400,34 +493,37 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
         SUITESTORE_OPERATION_START, ALL_OK, pSuiteData);
 
     do {
-        /* create a structure describing the new midlet suite */
-        MidletSuiteData* pMsd = pcsl_mem_malloc(sizeof(MidletSuiteData));
-        if (pMsd == NULL) {
-            status = OUT_OF_MEMORY;
+        /* create an independently owned cache entry for the new suite */
+        MidletSuiteData* pMsd;
+        lastStoreSuiteStage = 20;
+        status = copy_suite_data_for_storage(pSuiteData, &pMsd);
+        if (status != ALL_OK) {
+            lastStoreSuiteStage = 21;
             break;
         }
-
-        memcpy((char*)pMsd, (char*)pSuiteData, sizeof(MidletSuiteData));
 
         pMsd->suiteSize = 0;
-        pMsd->nextEntry = NULL;
 
+        lastStoreSuiteStage = 30;
         status = begin_transaction(TRANSACTION_INSTALL_SUITE, UNUSED_SUITE_ID,
             &pSuiteData->varSuiteData.pathToJar);
+        lastStoreSuiteStage = 3000 + status;
         if (status != ALL_OK) {
-            pcsl_mem_free(pMsd);        
+            free_suite_data_entry(pMsd);
             break;
         }
 
+        lastStoreSuiteStage = 40;
         status = store_jar(&pszError, pMsd->type, suiteId,
             pMsd->componentId, pMsd->storageId,
             /* holds the temporary name of the file with the suite */
             &pSuiteData->varSuiteData.pathToJar,
             /* the new (permanent) name of the suite will be returned here */
             &pMsd->varSuiteData.pathToJar);
+        lastStoreSuiteStage = 4000 + status;
 
         if (status != ALL_OK) {
-            pcsl_mem_free(pMsd);        
+            free_suite_data_entry(pMsd);
             if (pszError != NULL) {
                 storageFreeError(pszError);
             }
@@ -478,9 +574,11 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
 #endif /* ENABLE_CONTROL_ARGS_FROM_JAD */
 
         /* add the new structure to the suite list */
+        lastStoreSuiteStage = 60;
         status = add_to_suite_list_and_save(pMsd);
+        lastStoreSuiteStage = 6000 + status;
         if ((status != ALL_OK) && (status != SUITE_CORRUPTED_ERROR)) {
-            pcsl_mem_free(pMsd);
+            free_suite_data_entry(pMsd);
             /* notify the listeners that the installation has failed */
             suite_listeners_notify(SUITESTORE_LISTENER_TYPE_INSTALL,
                 SUITESTORE_OPERATION_END, status, pSuiteData);
@@ -501,8 +599,10 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
             tmpSize = 0;
         }
 #else
+        lastStoreSuiteStage = 70;
         status = write_install_info(&pszError, COMPONENT_REGULAR_SUITE,
             suiteId, UNUSED_COMPONENT_ID, pInstallInfo, &tmpSize);
+        lastStoreSuiteStage = 7000 + status;
 #endif
         if (status != ALL_OK) {
             if (pszError != NULL) {
@@ -520,8 +620,10 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
          */
         if (pMsd->type == COMPONENT_REGULAR_SUITE) {
 #endif
+            lastStoreSuiteStage = 80;
             status = store_install_properties(suiteId, &pInstallInfo->jadProps,
                     &pInstallInfo->jarProps, &tmpSize);
+            lastStoreSuiteStage = 8000 + status;
             if (status != ALL_OK) {
                 break;
             }
@@ -535,11 +637,13 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
         if (pMsd->type == COMPONENT_REGULAR_SUITE) {
 #endif
             /* Suites start off as enabled. */
+            lastStoreSuiteStage = 90;
             status = write_settings(&pszError, suiteId, KNI_TRUE,
                 pSuiteSettings->pushInterruptSetting,
                     pSuiteSettings->pushOptions,
                         pSuiteSettings->pPermissions,
                             pSuiteSettings->permissionsLen, &tmpSize);
+            lastStoreSuiteStage = 9000 + status;
             if (status != ALL_OK) {
                 if (pszError != NULL) {
                     storageFreeError(pszError);
@@ -571,6 +675,7 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
 #endif
     } while (0);
 
+    lastStoreSuiteStage = 100;
     (void)finish_transaction();
 
     if (status != ALL_OK) {
@@ -581,6 +686,9 @@ midp_store_suite(const MidpInstallInfo* pInstallInfo,
     suite_listeners_notify(SUITESTORE_LISTENER_TYPE_INSTALL,
                            SUITESTORE_OPERATION_END, status, pSuiteData);
 
+    if (status == ALL_OK) {
+        lastStoreSuiteStage = 99999;
+    }
     return status;
 }
 

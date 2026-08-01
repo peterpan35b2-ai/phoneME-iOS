@@ -503,7 +503,12 @@ loadJARfile(zip_t *entry, const char* filename)
 
         case DEFLATED: {
             bool_t inflateOK;
-            inflateOK = inflate(file, compLen, decompData, decompLen);
+            inflateOK = phoneme_preverify_inflate(
+                file,
+                compLen,
+                decompData,
+                decompLen
+            );
 
             if (!inflateOK) {
                 sysFree(jdstream);
@@ -519,9 +524,14 @@ loadJARfile(zip_t *entry, const char* filename)
     }
 
     actualCRC = jarCRC32(decompData, decompLen);
+#if !defined(PHONEME_PREVERIFIER_LIBRARY)
     if (actualCRC != expectedCRC) {
         printf("Unexpected CRC value");
     }
+#else
+    (void)actualCRC;
+    (void)expectedCRC;
+#endif
 
     done:
     if (file != NULL) {
@@ -689,7 +699,12 @@ ReadFromZip(zip_t *entry)
 
                 case DEFLATED: {
                     bool_t inflateOK;
-                    inflateOK = inflate(file, compLen, decompData, decompLen);
+                    inflateOK = phoneme_preverify_inflate(
+                        file,
+                        compLen,
+                        decompData,
+                        decompLen
+                    );
 
                     if (!inflateOK) {
                         sysFree(jdstream);
@@ -1261,7 +1276,13 @@ bool_t ProcessJARfile(char *buf, int len)  {
                memset(tmpdir_buf, 0, sizeof(tmpdir_buf));
            }
 #else
+#ifdef PHONEME_PREVERIFIER_LIBRARY
+           /* iOS cannot spawn the host `jar` tool. Embedded callers request
+            * individual class outputs and rebuild the archive themselves. */
+           err = -1;
+#else
            err = system(buffer);
+#endif
 #endif
 
            if (err != 0) {

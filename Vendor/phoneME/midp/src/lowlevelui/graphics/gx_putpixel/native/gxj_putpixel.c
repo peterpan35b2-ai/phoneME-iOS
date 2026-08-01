@@ -25,6 +25,7 @@
  */
 
 #include <stdint.h>
+#include <string.h>
 #include <kni.h>
 #include <midpMalloc.h>
 #include <midp_logging.h>
@@ -239,7 +240,7 @@ primDrawHorzLine(gxj_screen_buffer *sbuf, gxj_pixel_type color,
   int count;
   gxj_pixel_type* pPtr;
   unsigned int c = ((unsigned int)color) << 16 | ((unsigned int)color);
-  jlong lcol = ((jlong) c) << 32 | ((jlong) c);
+  uint64_t lcol = ((uint64_t)c << 32) | (uint64_t)c;
   registers_4 regs;
   regs.r0 = regs.r1 = regs.r2 = regs.r3 = c;
 
@@ -265,22 +266,22 @@ primDrawHorzLine(gxj_screen_buffer *sbuf, gxj_pixel_type color,
 
   while (count >= 16) {
     CHECK_LLPTR_CLIP(sbuf,pPtr);
-    *((registers_4 *)pPtr) = regs;
+    memcpy(pPtr, &regs, sizeof (regs));
     pPtr += 8;
     CHECK_LLPTR_CLIP(sbuf,pPtr);
-    *((registers_4 *)pPtr) = regs;
+    memcpy(pPtr, &regs, sizeof (regs));
     pPtr += 8;
     count -= 16;
   }
   if (count >= 8) {
     CHECK_LLPTR_CLIP(sbuf,pPtr);
-    *((registers_4 *)pPtr) = regs;
+    memcpy(pPtr, &regs, sizeof (regs));
     pPtr += 8;
     count -= 8;
   }
   if (count >= 4) {
     CHECK_LLPTR_CLIP(sbuf,pPtr);
-    *((jlong *)pPtr) = lcol;
+    memcpy(pPtr, &lcol, sizeof (lcol));
     pPtr += 4;
     count -= 4;
   }
@@ -904,7 +905,7 @@ primDrawFilledRect(gxj_screen_buffer *sbuf, gxj_pixel_type color,
     registers_4	regs;
 
 	unsigned int c = ((unsigned int)color) << 16 | ((unsigned int)color);
-    jlong lcol = ((jlong) c) << 32 | ((jlong) c);
+    uint64_t lcol = ((uint64_t)c << 32) | (uint64_t)c;
 	regs.r0 = regs.r1 = regs.r2 = regs.r3 = c;
 
 #if PRIM_CLIPPING
@@ -933,22 +934,22 @@ primDrawFilledRect(gxj_screen_buffer *sbuf, gxj_pixel_type color,
       }
       while (count >= 16) {
         CHECK_LLPTR_CLIP(sbuf,pPtr);
-        *((registers_4 *)pPtr) = regs;
+        memcpy(pPtr, &regs, sizeof (regs));
 		pPtr += 8;
 		CHECK_LLPTR_CLIP(sbuf,pPtr);
-		*((registers_4 *)pPtr) = regs;
+		memcpy(pPtr, &regs, sizeof (regs));
 		pPtr += 8;
         count -= 16;
       }
       if (count >= 8) {
         CHECK_LLPTR_CLIP(sbuf,pPtr);
-        *((registers_4 *)pPtr) = regs;
+        memcpy(pPtr, &regs, sizeof (regs));
         pPtr += 8;
         count -= 8;
       }
       if (count >= 4) {
         CHECK_LLPTR_CLIP(sbuf,pPtr);
-        *((jlong *)pPtr) = lcol;
+        memcpy(pPtr, &lcol, sizeof (lcol));
         pPtr += 4;
         count -= 4;
       }

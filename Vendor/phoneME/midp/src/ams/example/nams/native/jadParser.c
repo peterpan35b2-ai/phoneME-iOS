@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -665,7 +666,7 @@ long readJadFile(const pcsl_string * filename, char** result_buf) {
     int fd = 0;
     char* err = NULL;
     long bufsize = -1;
-    int numread = 0;
+    long numread = 0;
     char* res = *result_buf;
 
     if (pcsl_string_length(filename) <= 0) {
@@ -688,7 +689,13 @@ long readJadFile(const pcsl_string * filename, char** result_buf) {
         return IO_ERROR;
     }
 
-    res = (char*)midpMalloc(bufsize+1);
+    if (bufsize >= UINT_MAX) {
+        storageClose(&err, fd);
+        storageFreeError(err);
+        return OUT_OF_MEMORY;
+    }
+
+    res = (char*)midpMalloc((unsigned int)(bufsize + 1));
     if (res == NULL || (err != NULL)) {
         REPORT_INFO1(LC_AMS, "readJadFile():Can't allocate memory. %s", err);
         storageFreeError(err);
@@ -701,13 +708,13 @@ long readJadFile(const pcsl_string * filename, char** result_buf) {
 
     numread = storageRead(&err, fd, res, bufsize);
     if((numread <= 0) || (numread != bufsize) || (err)) {
-        REPORT_INFO3(LC_AMS, "size = %ld, numread = %d, err = %s.",
+        REPORT_INFO3(LC_AMS, "size = %ld, numread = %ld, err = %s.",
                bufsize, numread, err);
         storageClose(&err, fd);
         return IO_ERROR;
     }
 
-    REPORT_INFO2(LC_AMS, "size = %ld, numread = %d", bufsize, numread);
+    REPORT_INFO2(LC_AMS, "size = %ld, numread = %ld", bufsize, numread);
 
     storageClose(&err, fd);
     if(err != NULL) {

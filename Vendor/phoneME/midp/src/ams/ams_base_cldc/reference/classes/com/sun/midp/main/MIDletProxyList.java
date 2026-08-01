@@ -1157,9 +1157,11 @@ public class MIDletProxyList
             foregroundMidlet.notifyMIDletHasForeground(true);
 
            /*
-            * Foreground MIDlet will run with a normal priority
+            * Foreground MIDlet gets the maximum isolate priority. Background
+            * MIDlets stay alive at minimum priority so sockets and audio can
+            * continue without letting busy game loops starve the visible app.
             */
-            MIDletProxyUtils.normalPriority(foregroundMidlet);
+            MIDletProxyUtils.maxPriority(foregroundMidlet);
 
             /*
              * IMPL_NOTE: there are no listeners for the certain

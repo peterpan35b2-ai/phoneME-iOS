@@ -630,7 +630,6 @@ void handleFatalError(void) {
     KNI_DeclareHandle(throwableObj);
     KNI_GetParameterAsObject(1, throwableObj);
 
-    /* IMPL NOTE: Figure out what throwable class this is and log the error? */
     REPORT_CRIT1(LC_CORE, "handleFatalError: uncaught exception in "
         "isolate %d event processing thread", getCurrentIsolateId());
     

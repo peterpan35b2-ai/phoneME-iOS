@@ -77,6 +77,10 @@ static char *PrintableClassname(char *classname);
 
 extern char tmp_dir[32];
 
+#ifdef PHONEME_PREVERIFIER_LIBRARY
+extern const char *phoneme_preverify_output_path;
+#endif
+
 char *output_dir = "output";
 unsigned char *class_buf;
 int class_buf_size = 0;
@@ -609,6 +613,7 @@ WriteClass(ClassClass *cb)
 {
     int fd;
     char fname[1024];
+    const char *output_name = fname;
     char buff[BUFSIZ];
     char *nativeName = &buff[0];
 
@@ -693,15 +698,29 @@ WriteClass(ClassClass *cb)
     /* Conversion for Japanese filenames */
     utf2native(cbName(cb), nativeName, BUFSIZ);
 
+#ifdef PHONEME_PREVERIFIER_LIBRARY
+    if (phoneme_preverify_output_path != NULL) {
+        output_name = phoneme_preverify_output_path;
+    } else
+#endif
     if (JARfile) {
+        int path_length;
         /* classes need to be put in a JAR file */
-        sprintf(fname, "%s/%s.class", tmp_dir, nativeName);
+        path_length = snprintf(fname, sizeof(fname), "%s/%s.class", tmp_dir,
+                               nativeName);
+        if (path_length < 0 || path_length >= (int)sizeof(fname)) {
+            panic("output class path is too long");
+        }
     } else {
-        sprintf(fname, "%s/%s.class", output_dir, nativeName);
+        int path_length = snprintf(fname, sizeof(fname), "%s/%s.class",
+                                   output_dir, nativeName);
+        if (path_length < 0 || path_length >= (int)sizeof(fname)) {
+            panic("output class path is too long");
+        }
     }
 
     {
-        char *dir = strdup(fname);
+        char *dir = strdup(output_name);
         char *q;
 
         q = strrchr(dir, '/');
@@ -714,14 +733,14 @@ WriteClass(ClassClass *cb)
     }
 
 #ifdef UNIX
-    fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC , 0644);
+    fd = open(output_name, O_WRONLY | O_CREAT | O_TRUNC , 0644);
 #endif
 #ifdef WIN32
-    fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
+    fd = open(output_name, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
 #endif
 
     if (fd < 0) {
-        panic("failed to open %s", fname);
+        panic("failed to open %s", output_name);
     }
 
     tmpDirExists = TRUE;   /* tmpDir exists with verified classes */
@@ -771,6 +790,7 @@ char *PrintableClassname(char *class_name)
     char *p;
     static char class_copy[257];
     strncpy(class_copy, class_name, 256);
+    class_copy[256] = '\0';
 
     /* Convert all slashes in the classname to periods */
     for (p = class_copy; ((p = strchr(p, '/')) != 0); *p++ = '.');

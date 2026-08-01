@@ -410,7 +410,16 @@ enum {
   }
 
   static inline address get_class_by_id(jushort id) {
-    return *(address*)(_class_list_base + id * BytesPerWord);
+    address klass = *(address*)(_class_list_base + id * BytesPerWord);
+#if ENABLE_ISOLATES
+    if (klass == NULL) {
+      ObjArray::Raw system_classes = Universe::system_class_list();
+      if (system_classes.not_null() && id < system_classes().length()) {
+        klass = (address)system_classes().obj_at(id);
+      }
+    }
+#endif
+    return klass;
   }
 
   static inline address get_method_from_ci(address ci, jint idx) {
@@ -1701,7 +1710,7 @@ enum {
     address clazz = NULL;
     jushort id = get_holder_id(method);
     address task_mirror = get_mirror_by_id(id);
-    if (task_mirror != get_cib_marker()) {
+    if (task_mirror != NULL && task_mirror != get_cib_marker()) {
       real_mirror = get_real_mirror(task_mirror);
       return false;
     }
@@ -2254,7 +2263,7 @@ enum {
     jushort class_id = first_ushort_from_cpool(cpool, idx);
 #if ENABLE_ISOLATES
     address obj = get_mirror_by_id(class_id);
-    if (obj == get_cib_marker()) {
+    if (obj == NULL || obj == get_cib_marker()) {
       address klass = get_class_by_id(class_id);
       if (interpreter_call_vm_1((address)task_barrier, T_OBJECT,
                                 (native_arg_t)klass)) {
@@ -2273,7 +2282,8 @@ enum {
       GUARANTEE(cpool == GET_FRAME(cpool), "No GC should have happened");
     }
 #endif
-    return obj + second_ushort_from_cpool(cpool, idx); // offset
+    const jushort field_offset = second_ushort_from_cpool(cpool, idx);
+    return obj + field_offset;
   }
 
   static void return_internal(BasicType type) {
@@ -2448,7 +2458,7 @@ enum {
         jushort class_id = get_holder_id(method);
 #if ENABLE_ISOLATES
         address mirror = get_mirror_by_id(class_id);
-        if (mirror == get_cib_marker()) {
+        if (mirror == NULL || mirror == get_cib_marker()) {
           address klass = get_class_by_id(class_id);
           if (interpreter_call_vm_1((address)task_barrier, T_OBJECT,
                                     (native_arg_t)klass)) {

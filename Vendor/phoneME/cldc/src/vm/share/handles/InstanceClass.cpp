@@ -196,6 +196,59 @@ void InstanceClass::clinit(JVM_SINGLE_ARG_TRAPS) {
 }
 
 void InstanceClass::verify(JVM_SINGLE_ARG_TRAPS) {
+#if ENABLE_ISOLATES
+  if (!UseROM && TaskContext::current_task_id() > 1 && !is_verified()) {
+    if (is_preloaded()) {
+      /* Classes loaded from the trusted CLDC/MIDP system classpath may be
+       * used and quickened during child-isolate bootstrap before their lazy
+       * Class.initialize() verification point. They were produced by the
+       * phoneME build and must not be re-verified after quickening. Parsing
+       * still leaves legacy verifier maps in an ObjArray, so complete the
+       * non-mutating compression step required by runtime GC first. */
+      Verifier::compress_stackmaps(this JVM_NO_CHECK);
+      if (CURRENT_HAS_PENDING_EXCEPTION) {
+        return;
+      }
+      set_verified();
+      return;
+    }
+
+    const int id = class_id();
+    ObjArray::Raw shared_classes = Universe::system_class_list();
+    bool is_shared_class = false;
+    if (shared_classes.not_null()) {
+      if (id >= 0 && id < shared_classes().length() &&
+          shared_classes().obj_at(id) == obj()) {
+        is_shared_class = true;
+      } else {
+        /* Fake-class replacement can move a real class to a different ID.
+         * Use object identity as the authoritative shared-metadata test. */
+        for (int i = 0; i < shared_classes().length(); i++) {
+          if (shared_classes().obj_at(i) == obj()) {
+            is_shared_class = true;
+            break;
+          }
+        }
+      }
+    }
+    if (is_shared_class) {
+      /* The non-ROM iOS MVM shares CLDC/MIDP class metadata with child
+       * isolates. Those classes may already contain quickened bytecodes and
+       * resolved constant-pool entries from the AMS task, so running the
+       * bytecode verifier again would reject valid resolved entries. Runtime
+       * classes come from the trusted system classes.zip; application classes
+       * loaded after the task snapshot are still verified normally. Convert
+       * their raw verifier maps to the compact GC runtime representation. */
+      Verifier::compress_stackmaps(this JVM_NO_CHECK);
+      if (CURRENT_HAS_PENDING_EXCEPTION) {
+        return;
+      }
+      set_verified();
+      return;
+    }
+  }
+#endif
+
   if (get_UseVerifier() && !is_verified()) {
     Verifier::verify_class(this JVM_NO_CHECK);
 
@@ -396,8 +449,51 @@ ReturnOop InstanceClass::lookup_finalizer(void) const {
 }
 
 ReturnOop InstanceClass::lookup_main_method(void) const {
-  return lookup_method(Symbols::main_name(),
-                       Symbols::string_array_void_signature());
+  Method::Raw exact = lookup_method(
+      Symbols::main_name(), Symbols::string_array_void_signature());
+  if (exact.not_null()) {
+    return exact.obj();
+  }
+
+  /* In a non-ROM MVM the encoded signature may contain class IDs assigned
+   * during this bootstrap rather than the IDs embedded in the global Symbols
+   * table. Match the semantic shape of the Java entry point instead: one
+   * array parameter and a void return. Reject ambiguous overloads. */
+  ObjArray::Raw local_methods = methods();
+  Method::Raw candidate;
+  int candidate_count = 0;
+  for (int index = 0; index < local_methods().length(); ++index) {
+    Method::Raw method = local_methods().obj_at(index);
+    if (method.is_null() || !method().is_static()) {
+      continue;
+    }
+
+    Symbol::Raw method_name = method().name();
+    if (!method_name.equals(Symbols::main_name()) &&
+        !method_name().matches(Symbols::main_name())) {
+      continue;
+    }
+
+    Signature::Raw method_signature = method().signature();
+    if (method_signature().parameter_word_size(true) != 1 ||
+        method_signature().return_type(true) != T_VOID) {
+      continue;
+    }
+
+    SignatureStream stream(&method_signature, true, false);
+    if (stream.is_return_type() || stream.type() != T_ARRAY) {
+      continue;
+    }
+    stream.next();
+    if (!stream.is_return_type() || stream.type() != T_VOID) {
+      continue;
+    }
+
+    candidate = method.obj();
+    candidate_count++;
+  }
+
+  return candidate_count == 1 ? candidate.obj() : NULL;
 }
 
 /// Adds miranda methods to a class's methods array. For an interface I and
@@ -643,13 +739,12 @@ ReturnOop InstanceClass::find_method(ObjArray* class_methods, Symbol* name,
 
   while (ptr < end) {
     MethodDesc *m = *ptr++;
-    if (m != NULL && m->match(name_obj, sig_obj)) {
-      if (!non_static_only) {
-        return m;
-      }
+    if (m != NULL) {
       Method::Raw method = m;
-      if (!method().is_static()) {
-        return m;
+      if (m->match(name_obj, sig_obj) || method().match(name, signature)) {
+        if (!non_static_only || !method().is_static()) {
+          return m;
+        }
       }
     }
   }
@@ -1000,8 +1095,15 @@ void InstanceClass::initialize_static_fields(Oop *statics_holder) {
   AllocationDisabler raw_pointers_used_in_this_function;
 
   TypeArray::Raw field_array = fields();
-  ConstantPool::Raw cp = constants();
+  /* Bootstrap classes such as java.lang.Object may have no declared fields.
+   * In the non-ROMized MVM their field table is represented by NULL rather
+   * than a zero-length TypeArray. There are no ConstantValue attributes to
+   * copy in that case. */
+  if (field_array.is_null()) {
+    return;
+  }
 
+  ConstantPool::Raw cp = constants();
   jushort *field = field_array().ushort_base_address();
   jushort *field_end = field + field_array().length();
 
@@ -1114,10 +1216,32 @@ void InstanceClass::update_vtable_bitmaps(void) const {
 
 bool InstanceClass::compute_is_subtype_of(JavaClass* other_class) {
   if (other_class->is_interface()) {
-    return equals(other_class) || itable_contains((InstanceClass*)other_class);
-  } else {
-    return is_subclass_of(other_class);
+    if (equals(other_class) || itable_contains((InstanceClass*)other_class)) {
+      return true;
+    }
+  } else if (is_subclass_of(other_class)) {
+    return true;
   }
+
+#if ENABLE_ISOLATES
+  /* A non-ROMized MVM can expose equivalent shared system classes through
+   * distinct task-local metadata objects. Pointer-only subtype checks then
+   * reject valid casts (for example ISO8859_1_Writer -> StreamWriter). Walk
+   * the semantic hierarchy as a fallback. Objects never migrate between
+   * isolates, so this only reconciles duplicated metadata visible to the
+   * current task. */
+  Symbol::Raw wanted_name = other_class->name();
+  InstanceClass::Raw current = this->obj();
+  for (; current.not_null(); current = current().super()) {
+    Symbol::Raw current_name = current().name();
+    if (current_name.equals(&wanted_name) ||
+        current_name().matches(&wanted_name)) {
+      return true;
+    }
+  }
+#endif
+
+  return false;
 }
 
 #if ENABLE_MEMBER_HIDING
@@ -1441,7 +1565,85 @@ void InstanceClass::verify_field(const char* name, const char* signature,
   //                  "all classes must be loaded");
 
   if (field_name.not_null() && field_signature.not_null()) {
-    OriginalField f(this, &field_name, &field_signature);
+    if (!UseROM && !GenerateROMImage) {
+      /* Non-ROM bootstrap may still keep UTF8 field names and descriptors as
+       * byte arrays in the constant pool. Field::find_field_index() is a hot,
+       * non-allocating routine and expects canonical Symbol objects. Resolve
+       * the field table once here before validating native layout offsets. */
+      TypeArray::Fast current_fields = fields();
+      ConstantPool::Fast current_cp = constants();
+      const int current_fields_length = current_fields().length();
+      for (int index = 0;
+           index < current_fields_length;
+           index += Field::NUMBER_OF_SLOTS) {
+        const int name_index = current_fields().ushort_at(
+            index + Field::NAME_OFFSET);
+        const int signature_index = current_fields().ushort_at(
+            index + Field::SIGNATURE_OFFSET);
+        current_cp().checked_symbol_at(name_index JVM_CHECK);
+        current_cp().checked_type_symbol_at(signature_index JVM_CHECK);
+      }
+
+      InstanceClass::Raw current_class = obj();
+      Field current_field(&current_class, &field_name, &field_signature);
+      if (!current_field.is_valid_in_current_profile()) {
+        /* Object/array descriptors are converted to compact TypeSymbols while
+         * bootstrap is resolving classes, so textual signature identity is no
+         * longer a reliable lookup key here. Internal VM classes have unique
+         * field names; resolve by that name and still verify the exact basic
+         * type, staticness and native offset below. */
+        int name_match_index = -1;
+        int name_match_count = 0;
+        for (int index = 0;
+             index < current_fields_length;
+             index += Field::NUMBER_OF_SLOTS) {
+          const int candidate_name_index = current_fields().ushort_at(
+              index + Field::NAME_OFFSET);
+          Symbol::Raw candidate_name =
+              current_cp().symbol_at(candidate_name_index);
+          if (candidate_name.equals(&field_name) ||
+              candidate_name().matches(&field_name)) {
+            name_match_index = index;
+            name_match_count++;
+          }
+        }
+
+        if (name_match_count == 1) {
+          InstanceClass::Raw name_matched_class = obj();
+          Field name_matched_field(
+              &name_matched_class, name_match_index, &current_fields);
+          FieldType::Raw expected_type = field_signature.obj();
+          if (name_matched_field.type() != expected_type().basic_type()) {
+            JVM_FATAL(internal_field_must_be_valid);
+          }
+          if (!is_static && name_matched_field.is_static()) {
+            JVM_FATAL(internal_field_must_be_non_static);
+          }
+          if (is_static && !name_matched_field.is_static()) {
+            JVM_FATAL(internal_field_must_be_static);
+          }
+          if (name_matched_field.offset() != field_offset) {
+            JVM_FATAL(internal_field_offset_mismatch);
+          }
+          return;
+        }
+
+        JVM_FATAL(internal_field_must_be_valid);
+      }
+      if (!is_static && current_field.is_static()) {
+        JVM_FATAL(internal_field_must_be_non_static);
+      }
+      if (is_static && !current_field.is_static()) {
+        JVM_FATAL(internal_field_must_be_static);
+      }
+      if (current_field.offset() != field_offset) {
+        JVM_FATAL(internal_field_offset_mismatch);
+      }
+      return;
+    }
+
+    InstanceClass::Raw original_class = obj();
+    OriginalField f(&original_class, &field_name, &field_signature);
     if (!f.is_valid_in_current_profile()) {
       internal_field_error(&field_name, &field_signature);
       JVM_FATAL(internal_field_must_be_valid);

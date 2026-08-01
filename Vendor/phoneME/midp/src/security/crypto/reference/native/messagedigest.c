@@ -97,9 +97,9 @@ Java_com_sun_midp_crypto_MD2_nativeUpdate() {
 
 KNIEXPORT KNI_RETURNTYPE_VOID
 Java_com_sun_midp_crypto_MD2_nativeFinal() {
-    unsigned long outoff = KNI_GetParameterAsInt(5);
-    unsigned long  inlen = KNI_GetParameterAsInt(3);
-    unsigned long  inoff = KNI_GetParameterAsInt(2);
+    jsize outoff = KNI_GetParameterAsInt(5);
+    jint inlen = KNI_GetParameterAsInt(3);
+    jint inoff = KNI_GetParameterAsInt(2);
     unsigned char md[16];
     int i,j;
     MD2_CTX c;
@@ -181,9 +181,9 @@ Java_com_sun_midp_crypto_MD2_nativeFinal() {
 
 KNIEXPORT KNI_RETURNTYPE_VOID
 Java_com_sun_midp_crypto_MD5_nativeFinal() {
-    unsigned long outoff = KNI_GetParameterAsInt(5);
-    unsigned long  inlen = KNI_GetParameterAsInt(3);
-    unsigned long  inoff = KNI_GetParameterAsInt(2);
+    jsize outoff = KNI_GetParameterAsInt(5);
+    jint inlen = KNI_GetParameterAsInt(3);
+    jint inoff = KNI_GetParameterAsInt(2);
     unsigned char md[16];
     int i,j;
     MD5_CTX c;
@@ -332,9 +332,9 @@ Java_com_sun_midp_crypto_MD5_nativeUpdate() {
 
 KNIEXPORT KNI_RETURNTYPE_VOID
 Java_com_sun_midp_crypto_SHA_nativeFinal() {
-    unsigned long outoff = KNI_GetParameterAsInt(5);
-    unsigned long  inlen = KNI_GetParameterAsInt(3);
-    unsigned long  inoff = KNI_GetParameterAsInt(2);
+    jsize outoff = KNI_GetParameterAsInt(5);
+    jint inlen = KNI_GetParameterAsInt(3);
+    jint inoff = KNI_GetParameterAsInt(2);
     unsigned char md[20];
     int i, j;
     SHA_CTX c;

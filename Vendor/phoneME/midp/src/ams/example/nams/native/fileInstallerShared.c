@@ -24,6 +24,8 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <midpMalloc.h>
@@ -72,6 +74,19 @@ PCSL_DEFINE_STATIC_ASCII_STRING_LITERAL_START(class_suffix)
 PCSL_DEFINE_STATIC_ASCII_STRING_LITERAL_END(class_suffix);
 
 extern char* getApplicationDir(char *cmd);
+
+/* Exposed to the native iOS host so it can map a library item to the suite
+ * created (or already present) in the shared MVM suite store. */
+static SuiteIdType lastInstalledSuiteId = UNUSED_SUITE_ID;
+static int lastInstallerStage = 0;
+
+int phoneme_file_installer_last_suite_id(void) {
+    return (int)lastInstalledSuiteId;
+}
+
+int phoneme_file_installer_last_stage(void) {
+    return lastInstallerStage;
+}
 
 PCSL_DEFINE_ASCII_STRING_LITERAL_START(ENTRY_NAME)
     {'M', 'E', 'T', 'A', '-', 'I', 'N', 'F', '/',
@@ -372,7 +387,11 @@ int midpCheckVersion(const pcsl_string * ver) {
  *         (in bytes).
  */
 int midpGetMaxJarSizePermitted() {
-    return 1024*512;
+    /* The reference NAMS installer kept the 2006 feature-phone limit of
+     * 512 KiB. Modern J2ME game packs, language resources and patched JARs
+     * can be tens of megabytes; keep a finite iOS-side safety ceiling while
+     * allowing the same library the direct-JAR launcher already supported. */
+    return 256 * 1024 * 1024;
 }
 
 /**
@@ -744,7 +763,10 @@ void midpParseMIDletN(const pcsl_string* in, int index, pcsl_string* p_out) {
             }
 
 
-            length = (p - res + 1);
+            if (p < res || p - res >= INT_MAX) {
+                break;
+            }
+            length = (int)(p - res + 1);
             if (length <= 1) {
                 break;
             }
@@ -810,6 +832,9 @@ pcsl_string_status createRelativeURL(const pcsl_string * in,
  * @return <tt>0</tt> for success, otherwise <tt>-1</tt>
  */
 int fileInstaller(int argc, char* argv[]) {
+    lastInstalledSuiteId = UNUSED_SUITE_ID;
+    lastInstallerStage = 1;
+
     /* temporary variable to contain return results */
     int     res                    = 0;
     /* pointer to the manifest extracted from the jar */
@@ -817,7 +842,7 @@ int fileInstaller(int argc, char* argv[]) {
     /* pointer to the jad */
     char*   jad_buf                = NULL;
     int     jadsize                = 0;
-    int     realJarSize            = 0;
+    long    realJarSize            = 0;
     long    length                 = 0;
     void*   jarHandle              = NULL;
     int     pszError               = 0;
@@ -848,6 +873,8 @@ int fileInstaller(int argc, char* argv[]) {
     pcsl_string jadRelativeURL     = PCSL_STRING_NULL;
     /* jar relative url file:///jadname.jar */
     pcsl_string jarRelativeURL     = PCSL_STRING_NULL;
+    /* writable temporary JAR inside MIDP_HOME; iOS bundle/CWD is read-only */
+    pcsl_string tempJarURL         = PCSL_STRING_NULL;
 
     jboolean trusted = KNI_TRUE;
 
@@ -883,6 +910,7 @@ int fileInstaller(int argc, char* argv[]) {
     }
 
     REPORT_INFO2(LC_AMS, "argv[0] = %s, argv[1] = %s", argv[0], argv[1]);
+    lastInstallerStage = 10;
 
     /* get midp home directory, set it */
     appDir = getApplicationDir(argv[0]);
@@ -891,12 +919,14 @@ int fileInstaller(int argc, char* argv[]) {
     }
     /* set up appDir before calling initialize */
     midpSetAppDir(appDir);
+    lastInstallerStage = 20;
 
     if (midpInitialize() != 0) {
         REPORT_ERROR(LC_AMS, "Not enough memory");
         return OUT_OF_MEMORY;
     }
 
+    lastInstallerStage = 30;
     length = strlen(argv[1]);
     if (IS_JAR_FILE(argv[1], length)) {
         usingWhat = USING_JAR;
@@ -974,6 +1004,8 @@ int fileInstaller(int argc, char* argv[]) {
 
     }/* end of if using JAD */
 
+    lastInstallerStage = 40;
+
     /* get the jar file */
     /* IMPL NOTE: jarURL is either absolute or relative to jad URL, but
        the open function needs a path relative to the current directory -- mg */
@@ -992,10 +1024,11 @@ int fileInstaller(int argc, char* argv[]) {
         midpFinalize();
         return NO_JAR_FILE;
     }
+    lastInstallerStage = 50;
     /* get the jar file real size */
     realJarSize = midpGetJarSize(jarHandle);
     if (realJarSize <= 0) {
-        REPORT_ERROR1(LC_AMS, "Jar size error %d", realJarSize);
+        REPORT_ERROR1(LC_AMS, "Jar size error %ld", realJarSize);
         if (usingWhat == USING_JAD) {
             pcsl_string_free(&jadRelativeURL);
             pcsl_string_free(&jadURL);
@@ -1012,7 +1045,7 @@ int fileInstaller(int argc, char* argv[]) {
 
     permittedJarSize = midpGetMaxJarSizePermitted();
     if (realJarSize > permittedJarSize) {
-        REPORT_ERROR2(LC_AMS, "Jar size to big %d > %d",
+        REPORT_ERROR2(LC_AMS, "Jar size too big %ld > %d",
                       realJarSize, permittedJarSize);
         if (usingWhat == USING_JAD) {
             pcsl_string_free(&jadRelativeURL);
@@ -1028,6 +1061,7 @@ int fileInstaller(int argc, char* argv[]) {
         return OUT_OF_STORAGE;
     }
 
+    lastInstallerStage = 60;
     if (usingWhat == USING_JAD) {
         jarSizeString = midp_find_property(&jadsmp, &JAR_SIZE_PROP);
 
@@ -1092,11 +1126,19 @@ int fileInstaller(int argc, char* argv[]) {
         return NO_MF_FILE;
     }
 
+    lastInstallerStage = 70;
     /*
      * Manifest file will be parsed and verified for existence
      * of mandatory fields in mf_main().
      */
-    mfsmp = mf_main(mf_buf, length);
+    if (length > INT_MAX) {
+        midpFree(mf_buf);
+        mf_buf = NULL;
+        midpCloseJar(jarHandle);
+        midpFinalize();
+        return OUT_OF_MEMORY;
+    }
+    mfsmp = mf_main(mf_buf, (int)length);
     switch (mfsmp.status) {
     case BAD_PARAMS:
     case BAD_MF_KEY:
@@ -1144,7 +1186,9 @@ int fileInstaller(int argc, char* argv[]) {
      * JAD and in Manifest and exist in jar
      */
     /* if jadsmp is empty only manifest will be verified */
+    lastInstallerStage = 80;
     res = verifyMidletN(&jadsmp, &mfsmp, jarHandle);
+    lastInstallerStage = 9000 + res;
 
 #ifdef ENABLE_JSR_211
     if (res >= 0) {
@@ -1175,6 +1219,7 @@ int fileInstaller(int argc, char* argv[]) {
         return -1;
     }
 
+    lastInstallerStage = 100;
     mf_name = midp_find_property(&mfsmp, &SUITE_NAME_PROP);
     if (pcsl_string_is_null(mf_name)) {
         REPORT_ERROR(LC_AMS,  "Can't get SUITE_NAME_PROP from Manifest. "
@@ -1212,11 +1257,14 @@ int fileInstaller(int argc, char* argv[]) {
     }
 
     /* verify that jar wasn't previously installed */
+    lastInstallerStage = 110;
     err = midp_get_suite_id(mf_vendor, mf_name, &suiteId);
     /* err should be ALL_OK if the suite exists of NOT_FOUND if it doesn't */
     if (err == ALL_OK) {
-        REPORT_ERROR(LC_AMS,
-                     "Suite already exists. Remove the existing one.");
+        /* Installation is intentionally idempotent for the iOS library. The
+         * already-installed suite is exactly what the multitasking host needs. */
+        lastInstalledSuiteId = suiteId;
+        REPORT_INFO(LC_AMS, "Suite already installed; reusing it.");
         if (usingWhat == USING_JAD) {
             pcsl_string_free(&jadURL);
             midp_free_properties(&jadsmp);
@@ -1230,9 +1278,10 @@ int fileInstaller(int argc, char* argv[]) {
         midp_free_properties(&mfsmp);
         pcsl_string_free(&jarRelativeURL);
         midpFinalize();
-        return -1;
+        return ALL_OK;
     }
 
+    lastInstallerStage = 120;
     if (OUT_OF_MEM_LEN == midp_create_suite_id(&suiteId)) {
         REPORT_ERROR(LC_AMS, "Out Of Memory");
         if (usingWhat == USING_JAD) {
@@ -1252,11 +1301,41 @@ int fileInstaller(int argc, char* argv[]) {
     /* printPcslStringWithMessage("Ready to install: ", &suiteId); */
 
     /*
-     * midp_store_suite assumes the JAR was copied over HTTP and so moves it
-     * to avoid making another copy and deleting the downloaded one.
-     * Since this JAR was not copied, copy it now.
+     * midp_store_suite assumes the JAR was copied over HTTP and so moves it.
+     * The reference installer used a relative "temp.jar", which resolves to
+     * the read-only app bundle (or /) on iOS. Put the staging file in the
+     * writable MIDP_HOME/appdb directory instead.
      */
-    if (copyFile(p_jarURL, &TEMP_JAR_NAME) != 0) {
+    lastInstallerStage = 130;
+    {
+        static const char tempSuffix[] = "/temp.jar";
+        size_t appDirLength = strlen(appDir);
+        char* tempJarPath = (char*)midpMalloc(
+            appDirLength + sizeof(tempSuffix)
+        );
+        if (tempJarPath == NULL) {
+            lastInstallerStage = 131;
+            midpFinalize();
+            return OUT_OF_MEMORY;
+        }
+        memcpy(tempJarPath, appDir, appDirLength);
+        memcpy(
+            tempJarPath + appDirLength,
+            tempSuffix,
+            sizeof(tempSuffix)
+        );
+        if (pcsl_string_from_chars(tempJarPath, &tempJarURL) !=
+                PCSL_STRING_OK) {
+            lastInstallerStage = 132;
+            midpFree(tempJarPath);
+            midpFinalize();
+            return OUT_OF_MEMORY;
+        }
+        midpFree(tempJarPath);
+    }
+
+    lastInstallerStage = 133;
+    if (copyFile(p_jarURL, &tempJarURL) != 0) {
         if (usingWhat == USING_JAD) {
             pcsl_string_free(&jadURL);
             midp_free_properties(&jadsmp);
@@ -1267,20 +1346,32 @@ int fileInstaller(int argc, char* argv[]) {
         }
         midp_free_properties(&mfsmp);
         pcsl_string_free(&jarRelativeURL);
+        pcsl_string_free(&tempJarURL);
         midpFinalize();
-        return -1;
+        return IO_ERROR;
     }
 
-    /* preverify all classes within the JAR to do no more
-     * classes verification duiring MIDlet launching and work */
-#if VERIFY_ONCE
+    /*
+     * The reference file installer runs in a disposable process, so its
+     * JVM_Verify() pass is allowed to bootstrap and tear down the CLDC VM.
+     * phoneME-iOS embeds the installer and NAMS in the same process. Starting
+     * that temporary VM leaves global Universe state behind and the following
+     * midp_system_start() crashes while bootstrapping a second VM.
+     *
+     * Imported iOS JARs have already had CLDC StackMap attributes normalized.
+     * Do not create a VERIFY_ONCE hash here; the real VM will verify classes as
+     * they are loaded instead of trusting a process-local installer pass.
+     */
+#if VERIFY_ONCE && !defined(__APPLE__)
+    lastInstallerStage = 140;
     do {
         int hashError;
-        jsize tempJarNameLen = PCSL_STRING_LITERAL_LENGTH(TEMP_JAR_NAME) + 1;
+        jsize tempJarNameLen = pcsl_string_utf16_length(&tempJarURL) + 1;
         JvmPathChar *tempJarName = midpMalloc(tempJarNameLen
                                               * sizeof(JvmPathChar));
         res = ALL_OK;
         if (tempJarName == NULL) {
+            lastInstallerStage = 141;
             res = OUT_OF_MEMORY;
             REPORT_ERROR(LC_AMS, "Out Of Memory");
             break;
@@ -1303,8 +1394,9 @@ int fileInstaller(int argc, char* argv[]) {
          *   }
          */
         if (PCSL_STRING_OK !=
-            pcsl_string_convert_to_utf16(&TEMP_JAR_NAME, tempJarName,
+            pcsl_string_convert_to_utf16(&tempJarURL, tempJarName,
                                          tempJarNameLen, NULL)) {
+            lastInstallerStage = 142;
             res = OUT_OF_MEMORY;
             REPORT_ERROR(LC_AMS, "Out Of Memory");
             break;
@@ -1315,6 +1407,7 @@ int fileInstaller(int argc, char* argv[]) {
          * guarantee there is working multitasking VM that can be asked for
          * verification of the suite being installed, so start new VM to
          * verify all suite classes */
+        lastInstallerStage = 143;
         if (JVM_Verify(tempJarName) != KNI_TRUE) {
             res = GENERAL_ERROR;
         }
@@ -1327,7 +1420,8 @@ int fileInstaller(int argc, char* argv[]) {
 
         /* all suite classes successfully passed verification,
          * evaluate hash value for JAR package and continue installation */
-        hashError = midp_get_file_hash(&TEMP_JAR_NAME,
+        lastInstallerStage = 144;
+        hashError = midp_get_file_hash(&tempJarURL,
             &verifyHash, &verifyHashLen);
         if (hashError != MIDP_HASH_OK) {
             res = GENERAL_ERROR;
@@ -1347,10 +1441,11 @@ int fileInstaller(int argc, char* argv[]) {
         }
         midp_free_properties(&mfsmp);
         pcsl_string_free(&jarRelativeURL);
+        pcsl_string_free(&tempJarURL);
         midpFinalize();
-        return -1;
+        return res;
     }
-#endif /* VERIFY_ONCE */
+#endif /* VERIFY_ONCE && !__APPLE__ */
 
     do {
         MidpInstallInfo installInfo;
@@ -1396,7 +1491,7 @@ int fileInstaller(int argc, char* argv[]) {
         suiteData.varSuiteData.displayName = PCSL_STRING_NULL;
         suiteData.varSuiteData.suiteVersion = PCSL_STRING_NULL;
         suiteData.varSuiteData.iconName = PCSL_STRING_NULL;
-        suiteData.varSuiteData.pathToJar = TEMP_JAR_NAME;
+        suiteData.varSuiteData.pathToJar = tempJarURL;
         suiteData.varSuiteData.pathToSettings = PCSL_STRING_NULL;
         suiteData.storageId = INTERNAL_STORAGE_ID;
         suiteData.numberOfMidlets = 0;
@@ -1410,9 +1505,18 @@ int fileInstaller(int argc, char* argv[]) {
         suiteData.isEnabled = 1;
         suiteData.isTrusted = trusted;
         suiteData.jarHashLen = 0;
-        suiteData.type = COMPONENT_PREINSTALLED_SUITE;
+        /* Imported JARs are mutable user-installed suites. Marking them as
+         * preinstalled excludes them from create_unique_id(), causing every
+         * subsequent import to reuse suite ID 2 and overwrite the first JAR. */
+        suiteData.type = COMPONENT_REGULAR_SUITE;
 
+        lastInstallerStage = 150;
         res = midp_store_suite(&installInfo, &suiteSettings, &suiteData);
+        lastInstallerStage = 15000 + res;
+
+        if (res == ALL_OK) {
+            lastInstalledSuiteId = suiteId;
+        }
 
         if (res != ALL_OK) {
             /* something wrong */
@@ -1455,8 +1559,16 @@ int fileInstaller(int argc, char* argv[]) {
         pcsl_string_free(p_jarURL);
     }
 
+    pcsl_string_free(&tempJarURL);
     midpFinalize();
-    return ALL_OK;
+    if (res != ALL_OK) {
+        return res;
+    }
+    if (lastInstalledSuiteId != UNUSED_SUITE_ID) {
+        lastInstallerStage = 99999;
+        return ALL_OK;
+    }
+    return GENERAL_ERROR;
 
 }/* end of fileInstaller main */
 

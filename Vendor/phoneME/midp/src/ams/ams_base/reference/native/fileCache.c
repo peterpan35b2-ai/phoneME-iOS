@@ -24,6 +24,7 @@
  * information or have any questions.
  */
 
+#include <limits.h>
 #include <string.h>
 
 #include <kni.h>
@@ -282,7 +283,8 @@ int loadFileFromCache(SuiteIdType suiteId, const pcsl_string * resName,
     int                len = -1;
     int                handle;
     char*              errmsg = NULL;
-    int                bytesRead;
+    long               fileSize;
+    long               bytesRead;
     pcsl_string        path;
     pcsl_string        resNameFix;
     MIDPError          errorCode;
@@ -334,15 +336,23 @@ int loadFileFromCache(SuiteIdType suiteId, const pcsl_string * resName,
 
     do {
         /* Get size of file and allocate buffer */
-        len = storageSizeOf(&errmsg, handle);
-        *bufPtr = midpMalloc(len);
+        fileSize = storageSizeOf(&errmsg, handle);
+        if (errmsg != NULL || fileSize < 0 || fileSize > INT_MAX ||
+                (unsigned long)fileSize > UINT_MAX) {
+            len = -1;
+            storageFreeError(errmsg);
+            errmsg = NULL;
+            break;
+        }
+        len = (int)fileSize;
+        *bufPtr = midpMalloc((unsigned int)len);
         if (*bufPtr == NULL) {
             len = -1;
             break;
         }
 
         /* Read data */
-        bytesRead = storageRead(&errmsg, handle, (char*)*bufPtr, len);
+        bytesRead = storageRead(&errmsg, handle, (char*)*bufPtr, (long)len);
         if (errmsg != NULL) {
             len = -1;
             midpFree(*bufPtr);

@@ -27,7 +27,29 @@
 #include <errno.h>
 #include <string.h>
 
-#ifdef UNIX
+#if defined(PHONEME_PREVERIFIER_LIBRARY)
+
+/* iOS passes UTF-8 paths into the embedded verifier. Avoid the host iconv
+ * dependency entirely; filenames and class names are already UTF-8. */
+int native2utf8(const char* from, char* to, int buflen) {
+    int length;
+    if (from == NULL || to == NULL || buflen <= 0) {
+        return 0;
+    }
+    length = (int)strlen(from);
+    if (length >= buflen) {
+        length = buflen - 1;
+    }
+    memcpy(to, from, (size_t)length);
+    to[length] = '\0';
+    return length;
+}
+
+int utf2native(const char* from, char* to, int buflen) {
+    return native2utf8(from, to, buflen);
+}
+
+#elif defined(UNIX)
 #include <langinfo.h>
 #include <iconv.h>
 #include <locale.h>

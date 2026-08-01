@@ -44,6 +44,12 @@ ReturnOop Java_com_sun_cldc_isolate_Isolate_currentIsolate0() {
   return Task::current()->primary_isolate_obj();
 }
 
+// private native static boolean hasAPIAccess0();
+jint Java_com_sun_cldc_isolate_Isolate_hasAPIAccess0() {
+  IsolateObj::Raw isolate = Task::current()->primary_isolate_obj();
+  return isolate.not_null() && isolate().api_access_init() != 0;
+}
+
 // private native void registerNewIsolate();
 void Java_com_sun_cldc_isolate_Isolate_registerNewIsolate() {
   IsolateObj::Raw isolate_obj = GET_PARAMETER_AS_OOP(0);

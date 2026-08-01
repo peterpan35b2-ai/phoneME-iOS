@@ -605,10 +605,11 @@ bool VerifierFrame::is_assignable_to(StackMapKind from_type,
 bool VerifierFrame::compute_is_subtype_of(Symbol *from_name, Symbol *to_name
                                           JVM_TRAPS) {
   // Let's look at the two easiest ones first
-  if (from_name->equals(to_name)) {
+  if (from_name->equals(to_name) || from_name->matches(to_name)) {
     return true;
   }
-  if (to_name->equals(Symbols::java_lang_Object())) {
+  if (to_name->equals(Symbols::java_lang_Object()) ||
+      to_name->matches(Symbols::java_lang_Object())) {
     return true;
   }
   UsingFastOops fast_oops;
@@ -619,7 +620,7 @@ bool VerifierFrame::compute_is_subtype_of(Symbol *from_name, Symbol *to_name
   Symbol::Fast name;
   for(; !from_ancestor.is_null(); from_ancestor = from_ancestor().super()) {
     name = from_ancestor().name();
-    if (to_name->equals(&name)) {
+    if (to_name->equals(&name) || to_name->matches(&name)) {
       return true;
     }
   }

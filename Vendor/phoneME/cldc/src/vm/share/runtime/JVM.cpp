@@ -220,6 +220,30 @@ inline bool JVM::load_main_class(JVM_SINGLE_ARG_TRAPS) {
   // Make the argument list
   ObjArray::Fast arguments = get_main_args(JVM_SINGLE_ARG_CHECK_0);
 
+  /* Class-file UTF8 entries may still be byte arrays in a non-ROM runtime.
+   * MethodDesc::match() is deliberately allocation-free and expects canonical
+   * name/signature symbols, so resolve local method metadata before lookup. */
+  ObjArray::Fast local_methods = klass().methods();
+  for (int index = 0; index < local_methods().length(); ++index) {
+    Method::Raw method = local_methods().obj_at(index);
+    if (method.not_null()) {
+      ConstantPool::Raw method_constants = method().constants();
+      method_constants().checked_symbol_at(
+          method().name_index() JVM_CHECK_0);
+      method_constants().checked_type_symbol_at(
+          method().signature_index() JVM_CHECK_0);
+    }
+  }
+
+#if ENABLE_ISOLATES
+  // The first task is the trusted AMS. Its Isolate mirror may be replaced
+  // while loading the NAMS main class and dependencies, so grant access again
+  // at the end of bootstrap, immediately before Java execution begins.
+  if (Task::current()->task_id() == Task::FIRST_TASK) {
+    IsolateObj::set_current_api_access(1);
+  }
+#endif
+
   // Find the method to invoke
   Method::Fast main_method = klass().lookup_main_method();
   if (main_method.is_null() || !main_method().is_static()) {

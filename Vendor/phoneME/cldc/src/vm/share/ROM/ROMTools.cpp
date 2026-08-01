@@ -404,12 +404,15 @@ jint ROMVector::compare_to_forwarder(const void* p1, const void *p2) {
 // This is a fix that carves off the end of an object. Since
 // the GC wants all the heap objects to be contiguous, we must fill
 // the hole with a valid heap object of the desired size.
-void ROMTools::shrink_object(Oop *obj, size_t old_size, size_t reduction) {  
-  GUARANTEE((reduction & WordAlignmentMask) == 0, "must be aligned");
-
+void ROMTools::shrink_object(Oop *obj, size_t old_size, size_t reduction) {
+  /* A four-byte logical reduction is valid on arm64, but is too small to
+   * materialize as a standalone filler object. Keep the original allocation
+   * in that case, just as the existing small-reduction path intends. */
   if (reduction < sizeof(OopDesc)) {
     return;
   }
+
+  GUARANTEE((reduction & WordAlignmentMask) == 0, "must be aligned");
 
   OopDesc *stuffing = DERIVED(OopDesc*, obj->obj(), old_size - reduction);
   Oop *oop = (Oop*)&stuffing;

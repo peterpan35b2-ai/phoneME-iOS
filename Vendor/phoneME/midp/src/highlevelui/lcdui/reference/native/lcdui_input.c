@@ -93,10 +93,11 @@ KNIDECL(javax_microedition_lcdui_KeyConverter_getKeyName) {
     if (keyName != NULL) {
         KNI_NewStringUTF(keyName, str);
     } else {
-        if (keymap_is_invalid_key_code(keyCode)) {
+        if (keymap_is_invalid_key_code(keyCode) ||
+                keyCode < 0 || keyCode > 0xffff) {
             KNI_ReleaseHandle(str); /* Set 'str' to null String object */
         } else {
-            jchar charCode = keyCode;
+            jchar charCode = (jchar)(unsigned int)keyCode;
             KNI_NewString(&charCode, 1, str);
         }
     }

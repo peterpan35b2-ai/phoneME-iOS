@@ -30,6 +30,9 @@
  * This file is for utility function that depend on KNI VM functions
  * so that other files do not have to be dependent on the VM.
  */
+#include <limits.h>
+#include <stddef.h>
+
 #include <kni.h>
 #include <midp_logging.h>
 #include <midpMalloc.h>
@@ -376,7 +379,18 @@ pcsl_string_status midp_jstring_from_pcsl_string(KNIDECLARGS
  * @return jchar string
  */
 pcsl_string_status pcsl_string_from_chars(const char* in, pcsl_string* out) {
-    return pcsl_string_convert_from_utf8((jbyte*)in, strlen(in), out);
+    size_t length;
+
+    if (in == NULL || out == NULL) {
+        return PCSL_STRING_EINVAL;
+    }
+
+    length = strlen(in);
+    if (length > (size_t)INT_MAX) {
+        return PCSL_STRING_EINVAL;
+    }
+
+    return pcsl_string_convert_from_utf8((jbyte*)in, (jsize)length, out);
 }
 
 /**

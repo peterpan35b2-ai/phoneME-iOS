@@ -188,8 +188,8 @@ typedef FILE *JarCompressedType;
 typedef const unsigned char *JarCompressedType;
 */
 
-bool_t inflate(JarCompressedType data, int compLen,
-           unsigned char *decompData, int decompLen);
+bool_t phoneme_preverify_inflate(JarCompressedType data, int compLen,
+                                 unsigned char *decompData, int decompLen);
 
 /* Any caller to inflate must ensure that it is safe to read at least
  * this many bytes beyond compData + compLen

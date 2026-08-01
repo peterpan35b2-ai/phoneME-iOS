@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct PhoneMERuntimeLayout {
@@ -213,15 +214,15 @@ enum PhoneMERuntimeResources {
     }
 
     private static func runtimeFingerprint(for classesURL: URL) throws -> String {
-        let values = try classesURL.resourceValues(
-            forKeys: [.fileSizeKey, .contentModificationDateKey]
-        )
-        let bundleVersion = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "0"
-        let size = values.fileSize ?? 0
-        let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
-        return "\(bundleVersion)|\(size)|\(modified)"
+        // Bundle resources may preserve their size and modification timestamp
+        // across incremental builds. Using that metadata allowed an older
+        // cached classes.zip to survive even after APIs such as WMA were added.
+        // Hash the actual archive so every byte-level runtime change refreshes
+        // the installed read-only payload deterministically.
+        let archive = try Data(contentsOf: classesURL, options: .mappedIfSafe)
+        return SHA256.hash(data: archive)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private static func replaceItem(

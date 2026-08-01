@@ -498,7 +498,48 @@ ReturnOop TypeSymbol::parse_array_class_name(Symbol *external_name JVM_TRAPS) {
 
 BasicType TypeSymbol::object_basic_type_at(int index) const {
   int klass_index = decode_ushort_at(index);
-  OopDesc *klass = Universe::class_from_id(klass_index);  
+#if ENABLE_ISOLATES
+  /* Compact signatures store a task-local class id. Resolve it in the task
+   * that owns this TypeSymbol, matching print_type_at() and preventing child
+   * isolates from indexing their still-incomplete class list with an AMS id. */
+  int task_id = ObjectHeap::owner_task_id(obj());
+  if (task_id == MAX_TASKS) {
+    task_id = TaskContext::current_task_id();
+  }
+  const TaskGCContext task_context(task_id);
+#endif
+  OopDesc *klass = Universe::class_from_id(klass_index);
+  if (klass == NULL) {
+    ObjArray::Raw system_classes = Universe::system_class_list();
+    if (system_classes.not_null() &&
+        klass_index >= 0 && klass_index < system_classes().length()) {
+      klass = system_classes().obj_at(klass_index);
+    }
+  }
+  if (klass == NULL) {
+    /* Primitive array classes are global VM handles and are intentionally not
+     * stored in each task's instance-class list. Compact signatures still use
+     * their class IDs, so classify them directly before treating an absent
+     * slot as a class-under-construction reference. */
+    if (klass_index == Universe::bool_array_class()->class_id() ||
+        klass_index == Universe::char_array_class()->class_id() ||
+        klass_index == Universe::byte_array_class()->class_id() ||
+        klass_index == Universe::short_array_class()->class_id() ||
+        klass_index == Universe::int_array_class()->class_id() ||
+        klass_index == Universe::long_array_class()->class_id()
+#if ENABLE_FLOAT
+        || klass_index == Universe::float_array_class()->class_id()
+        || klass_index == Universe::double_array_class()->class_id()
+#endif
+       ) {
+      return T_ARRAY;
+    }
+    /* During non-ROM class parsing a compact signature can refer to the class
+     * currently being defined before its class-list slot is published. Such a
+     * descriptor is an object reference. Shared object-array classes are
+     * recovered from system_class_list above. */
+    return T_OBJECT;
+  }
   if (klass->is_instance_class()) {
     return T_OBJECT;
   } else {

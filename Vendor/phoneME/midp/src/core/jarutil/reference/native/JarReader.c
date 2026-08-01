@@ -24,6 +24,8 @@
  * information or have any questions. 
  */
 
+#include <limits.h>
+
 #include <sni.h>
 
 #include <midpJar.h>
@@ -64,12 +66,18 @@ KNIDECL(com_sun_midp_jarutil_JarReader_readJarEntry0) {
                 sizeOfEntry = midpGetJarEntry(jarHandle, &entryName,
                                               &entryData);
                 if (sizeOfEntry > 0) {
-                    SNI_NewArray(SNI_BYTE_ARRAY, sizeOfEntry, entryObj);
-                    if (KNI_IsNullHandle(entryObj)) {
-                        KNI_ThrowNew(midpOutOfMemoryError, NULL);
+                    if (sizeOfEntry > INT_MAX) {
+                        KNI_ThrowNew(midpOutOfMemoryError,
+                                     "JAR entry is too large");
                     } else {
-                        KNI_SetRawArrayRegion(entryObj, 0, sizeOfEntry,
-                                              (jbyte*)entryData);
+                        jsize entryLength = (jsize)sizeOfEntry;
+                        SNI_NewArray(SNI_BYTE_ARRAY, entryLength, entryObj);
+                        if (KNI_IsNullHandle(entryObj)) {
+                            KNI_ThrowNew(midpOutOfMemoryError, NULL);
+                        } else {
+                            KNI_SetRawArrayRegion(entryObj, 0, entryLength,
+                                                  (jbyte*)entryData);
+                        }
                     }
 
                     midpFree(entryData);

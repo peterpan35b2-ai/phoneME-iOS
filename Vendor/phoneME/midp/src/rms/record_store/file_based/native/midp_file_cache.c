@@ -24,6 +24,8 @@
  * information or have any questions.
  */
 
+#include <limits.h>
+#include <stddef.h>
 #include <kni.h>
 #include "midp_file_cache.h"
 #include <midpMalloc.h>
@@ -107,7 +109,7 @@ static void updateCachedSizes(long lengthWritten) {
 
 /* Directly write to storage. File position will be updated also. */
 static
-void uncachedWrite(char** ppszError, int handle, char *buffer, int length) {
+void uncachedWrite(char** ppszError, int handle, char *buffer, long length) {
     *ppszError = NULL;
     storagePosition(ppszError, handle, mFileCache->cachedPosition);
     if (*ppszError == NULL) {
@@ -130,7 +132,10 @@ static void initFileCacheLimit() {
             /* set XML constant value as property value */
             rmsCacheLimit = RMS_CACHE_LIMIT;
         }
-        fileCacheLimit = (unsigned)rmsCacheLimit;
+        if (rmsCacheLimit < 0) {
+            rmsCacheLimit = RMS_CACHE_LIMIT;
+        }
+        fileCacheLimit = (unsigned int)rmsCacheLimit;
     }
 }
 
@@ -232,8 +237,8 @@ void midp_file_cache_flush_using_buffer(char** ppszError, int handle,
 }
 
 void midp_file_cache_flush(char** ppszError, int handle) {
-    char *buf;     /* write buffer */
-    long bufsize;  /* its size */
+    char *buf;             /* write buffer */
+    unsigned int bufsize;  /* its size */
     *ppszError = NULL;
 
     if (mFileCache == NULL || mFileCache->handle != handle
@@ -243,7 +248,9 @@ void midp_file_cache_flush(char** ppszError, int handle) {
 
     /* allocate a buffer, as large as possible, but no larger than the cache */
     /* the buffer will be freed before the function returns */
-    bufsize = mFileCache->size;
+    bufsize = mFileCache->size > 0
+        ? (unsigned int)mFileCache->size
+        : 0U;
     do {
          buf = (char*)midpMalloc(bufsize);
 
@@ -324,6 +331,7 @@ void midp_file_cache_write(char** ppszError, int handle,
                            char* buffer, long length) {
 
     MidpFileCacheBlock *p, *b;
+    size_t allocationSize;
     *ppszError = NULL;
 
     if (length <= 0) {
@@ -370,21 +378,30 @@ void midp_file_cache_write(char** ppszError, int handle,
 
     /* This is a new write block that has not been cached */
 
+    if ((unsigned long)length >
+            (unsigned long)UINT_MAX - sizeof (MidpFileCacheBlock)) {
+        uncachedWrite(ppszError, handle, buffer, length);
+        return;
+    }
+    allocationSize = sizeof (MidpFileCacheBlock) + (size_t)length;
+
     /* Never try to cache large write that is bigger than cache limit */
-    if (sizeof(MidpFileCacheBlock)+length > fileCacheLimit) {
+    if (allocationSize > (size_t)fileCacheLimit ||
+            allocationSize > (size_t)INT_MAX) {
         uncachedWrite(ppszError, handle, buffer, length);
         return;
     }
 
     /* If cache is full, flush it before caching new write */
-    if (mFileCache->size+sizeof(MidpFileCacheBlock)+length > fileCacheLimit) {
+    if ((size_t)mFileCache->size + allocationSize >
+            (size_t)fileCacheLimit) {
         midp_file_cache_flush(ppszError, handle);
         /* Reset previous block pointer after flush */
         p = NULL;
     }
 
     /* Cache is not full, check if memory is full */
-    b = (MidpFileCacheBlock *)midpMalloc(sizeof(MidpFileCacheBlock)+length);
+    b = (MidpFileCacheBlock *)midpMalloc((unsigned int)allocationSize);
     if (b == NULL) {
         /* Out of memory. Write directly to storage */
         uncachedWrite(ppszError, handle, buffer, length);
@@ -406,7 +423,7 @@ void midp_file_cache_write(char** ppszError, int handle,
         p->next = b;
     }
 
-    mFileCache->size += sizeof(MidpFileCacheBlock)+length;
+    mFileCache->size += (int)allocationSize;
     updateCachedSizes(length);
 }
 
