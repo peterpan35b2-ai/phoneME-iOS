@@ -1069,13 +1069,13 @@ Core/Tools/test-push-dispatch-host.sh
 # 11. Graphics/Image/Font pixel accuracy và performance
 
 **TRẠNG THÁI**
-- Trạng thái: `CLAIMED`
+- Trạng thái: `READY_FOR_INTEGRATION`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 18:51 +07:00`
+- Cập nhật cuối: `2026-08-02 19:17 +07:00`
 - Blocker: `-`
-- Handoff: `-`
+- Handoff: `Implementation commit 935db5b; không có source mới/CMake change; host có thể dùng Image::dirty_region()/clear_dirty_region() để upload vùng thay đổi; module, VM, ASan/UBSan và iphoneos arm64 build đều pass.`
 
 **Loại:** SONG SONG, P1
 
