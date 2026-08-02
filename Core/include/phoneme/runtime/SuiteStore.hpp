@@ -25,8 +25,11 @@ struct Suite final {
     std::array<u8, 32> identity_sha256 {};
     std::array<u8, 32> archive_sha256 {};
     std::vector<std::string> declared_midlets;
+    std::vector<std::string> declared_required_permissions;
+    std::vector<std::string> declared_optional_permissions;
     std::vector<std::string> declared_permissions;
     bool has_permission_declarations {false};
+    ArchiveTrustEvidence trust_evidence;
     std::unordered_map<std::string, std::string> raw_properties;
     std::unordered_map<std::u16string, std::u16string> properties;
     u32 archive_crc32 {0};

@@ -95,6 +95,8 @@ std::string make_jad(const std::filesystem::path& jar,
     } else {
         result.append(" javax.microedition.io.Connector.socket\n");
     }
+    result.append("MIDlet-Permissions-Opt: ");
+    result.append("javax.microedition.media.control.VolumeControl\n");
     result.append("Custom-UTF8: Tiếng Việt\n");
     return result;
 }
@@ -181,8 +183,14 @@ void test_install_flow(const std::filesystem::path& root,
         check(suite->declared_midlets.size() == 1U &&
                   suite->declared_midlets[0] == "SuiteApp",
               "parse MIDlet-n declaration");
-        check(suite->declared_permissions.size() == 2U,
-              "merge continued permission declaration");
+        check(suite->declared_required_permissions.size() == 2U &&
+                  suite->declared_optional_permissions.size() == 1U &&
+                  suite->declared_permissions.size() == 3U,
+              "separate required and optional permission declarations");
+        check(suite->trust_evidence.has_signature_metadata() &&
+                  !suite->trust_evidence.cryptographically_verified() &&
+                  suite->trust_evidence.signature_files.size() == 2U,
+              "expose unverified JAR signature evidence without granting trust");
         check(suite->raw_properties.contains("Custom-UTF8") &&
                   suite->properties.contains(u"Custom-UTF8"),
               "expose merged UTF-8 JAD properties to MIDlet runtime");
@@ -340,6 +348,14 @@ void test_validation(const std::filesystem::path& root,
         check(jar_only_suite != nullptr && jar_only_suite->jad_path.empty() &&
                   jar_only_suite->version == "1.0.0",
               "persist JAR-only suite without synthetic JAD");
+        check(jar_only_suite != nullptr &&
+                  jar_only_suite->declared_required_permissions.size() == 2U &&
+                  jar_only_suite->declared_optional_permissions.empty(),
+              "preserve structured manifest permission categories");
+        check(jar_only_suite != nullptr &&
+                  jar_only_suite->trust_evidence.has_signature_metadata() &&
+                  !jar_only_suite->trust_evidence.cryptographically_verified(),
+              "preserve signature evidence for JAR-only install");
     }
 
     auto jar_only_descriptor = SuiteInstaller::inspect(jar_v1.string());

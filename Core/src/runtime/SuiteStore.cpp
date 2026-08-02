@@ -567,8 +567,13 @@ Result<Suite> SuiteStore::make_suite(
         .identity_sha256 = descriptor.identity_sha256,
         .archive_sha256 = descriptor.archive_sha256,
         .declared_midlets = descriptor.midlet_classes,
+        .declared_required_permissions =
+            descriptor.declared_required_permissions,
+        .declared_optional_permissions =
+            descriptor.declared_optional_permissions,
         .declared_permissions = descriptor.declared_permissions,
         .has_permission_declarations = descriptor.has_permission_declarations,
+        .trust_evidence = descriptor.trust_evidence,
         .raw_properties = descriptor.properties,
         .properties = std::move(decoded_properties),
         .archive_crc32 = descriptor.archive_crc32,

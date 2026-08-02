@@ -25,6 +25,34 @@ struct SuiteInstallerLimits final {
     };
 };
 
+enum class ArchiveSignatureState : u8 {
+    unsigned_archive,
+    metadata_present_unverified,
+};
+
+struct ArchiveSignatureFile final {
+    std::string entry_name;
+    std::array<u8, 32> sha256 {};
+    u64 size {0};
+};
+
+struct ArchiveTrustEvidence final {
+    ArchiveSignatureState signature_state {
+        ArchiveSignatureState::unsigned_archive};
+    std::vector<ArchiveSignatureFile> signature_files;
+
+    [[nodiscard]] bool has_signature_metadata() const noexcept {
+        return signature_state ==
+            ArchiveSignatureState::metadata_present_unverified;
+    }
+
+    // Item 05 only records deterministic evidence. Trust must remain false
+    // until item 06 verifies the certificate chain and signed manifest.
+    [[nodiscard]] constexpr bool cryptographically_verified() const noexcept {
+        return false;
+    }
+};
+
 struct SuiteDescriptor final {
     std::string name;
     std::string vendor;
@@ -32,8 +60,11 @@ struct SuiteDescriptor final {
     std::string jar_url;
     u64 declared_jar_size {0};
     std::vector<std::string> midlet_classes;
+    std::vector<std::string> declared_required_permissions;
+    std::vector<std::string> declared_optional_permissions;
     std::vector<std::string> declared_permissions;
     bool has_permission_declarations {false};
+    ArchiveTrustEvidence trust_evidence;
     std::unordered_map<std::string, std::string> properties;
     std::string identity_key;
     std::array<u8, 32> identity_sha256 {};

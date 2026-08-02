@@ -265,6 +265,61 @@ void append_permissions(std::vector<std::string>& output,
     }
 }
 
+[[nodiscard]] std::string ascii_upper(std::string_view value) {
+    std::string result(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](char byte) {
+        return static_cast<char>(
+            std::toupper(static_cast<unsigned char>(byte)));
+    });
+    return result;
+}
+
+[[nodiscard]] bool is_signature_metadata_entry(
+    std::string_view entry_name) {
+    const std::string uppercase = ascii_upper(entry_name);
+    constexpr std::string_view prefix = "META-INF/";
+    if (!uppercase.starts_with(prefix)) {
+        return false;
+    }
+    const std::string_view leaf =
+        std::string_view(uppercase).substr(prefix.size());
+    if (leaf.empty() || leaf.find('/') != std::string_view::npos) {
+        return false;
+    }
+    return leaf.ends_with(".SF") || leaf.ends_with(".RSA") ||
+           leaf.ends_with(".DSA") || leaf.ends_with(".EC");
+}
+
+[[nodiscard]] Result<ArchiveTrustEvidence> collect_trust_evidence(
+    const archive::ZipArchive& archive) {
+    ArchiveTrustEvidence evidence;
+    for (const archive::ZipEntry& entry : archive.entries()) {
+        if (!is_signature_metadata_entry(entry.name)) {
+            continue;
+        }
+        auto bytes = archive.read(entry);
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        evidence.signature_files.push_back(ArchiveSignatureFile {
+            .entry_name = entry.name,
+            .sha256 = sha256(*bytes),
+            .size = static_cast<u64>(bytes->size()),
+        });
+    }
+    std::sort(evidence.signature_files.begin(),
+              evidence.signature_files.end(),
+              [](const ArchiveSignatureFile& left,
+                 const ArchiveSignatureFile& right) {
+                  return left.entry_name < right.entry_name;
+              });
+    if (!evidence.signature_files.empty()) {
+        evidence.signature_state =
+            ArchiveSignatureState::metadata_present_unverified;
+    }
+    return evidence;
+}
+
 [[nodiscard]] bool contains_token_prefix(std::string_view value,
                                          std::string_view prefix) noexcept {
     usize offset = 0;
@@ -517,15 +572,39 @@ Result<SuiteDescriptor> SuiteInstaller::inspect(
         midlet_classes.push_back(std::move(class_name));
     }
 
-    std::vector<std::string> permissions;
-    bool has_permission_declarations = false;
-    for (const std::string_view key : {
-             std::string_view("MIDlet-Permissions"),
-             std::string_view("MIDlet-Permissions-Opt")}) {
-        if (const std::string* value = find_property(merged, key); value != nullptr) {
-            has_permission_declarations = true;
-            append_permissions(permissions, *value);
+    std::vector<std::string> required_permissions;
+    std::vector<std::string> optional_permissions;
+    if (const std::string* value =
+            find_property(merged, "MIDlet-Permissions");
+        value != nullptr) {
+        append_permissions(required_permissions, *value);
+    }
+    if (const std::string* value =
+            find_property(merged, "MIDlet-Permissions-Opt");
+        value != nullptr) {
+        append_permissions(optional_permissions, *value);
+    }
+    std::erase_if(optional_permissions,
+                  [&required_permissions](const std::string& permission) {
+                      return std::find(required_permissions.begin(),
+                                       required_permissions.end(),
+                                       permission) !=
+                          required_permissions.end();
+                  });
+    std::vector<std::string> permissions = required_permissions;
+    for (const std::string& permission : optional_permissions) {
+        if (std::find(permissions.begin(), permissions.end(), permission) ==
+            permissions.end()) {
+            permissions.push_back(permission);
         }
+    }
+    const bool has_permission_declarations =
+        find_property(merged, "MIDlet-Permissions") != nullptr ||
+        find_property(merged, "MIDlet-Permissions-Opt") != nullptr;
+
+    auto trust_evidence = collect_trust_evidence(*archive);
+    if (!trust_evidence) {
+        return std::unexpected(trust_evidence.error());
     }
 
     for (const auto& [key, value] : merged) {
@@ -548,8 +627,11 @@ Result<SuiteDescriptor> SuiteInstaller::inspect(
         .jar_url = std::move(jar_url),
         .declared_jar_size = declared_size,
         .midlet_classes = std::move(midlet_classes),
+        .declared_required_permissions = std::move(required_permissions),
+        .declared_optional_permissions = std::move(optional_permissions),
         .declared_permissions = std::move(permissions),
         .has_permission_declarations = has_permission_declarations,
+        .trust_evidence = std::move(*trust_evidence),
         .properties = std::move(merged),
         .identity_key = identity_key,
         .identity_sha256 = sha256(identity_key),

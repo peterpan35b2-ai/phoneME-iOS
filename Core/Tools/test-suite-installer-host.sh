@@ -73,6 +73,15 @@ JAR_ZIP_BOMB="$TEST_ROOT/zip-bomb.jar"
 "$JAR" cfm "$JAR_V2" "$MANIFEST_V2" -C "$FIXTURE_CLASSES" SuiteApp.class
 "$JAR" cfm "$JAR_MISSING" "$MANIFEST_MISSING" -C "$FIXTURE_CLASSES" SuiteApp.class
 
+SIGNATURE_ROOT="$TEST_ROOT/signature-fixture"
+mkdir -p "$SIGNATURE_ROOT/META-INF"
+printf '%s\n' 'Signature-Version: 1.0' > "$SIGNATURE_ROOT/META-INF/PHONE.SF"
+printf '%s\n' 'unverified-test-signature-block' > "$SIGNATURE_ROOT/META-INF/PHONE.RSA"
+"$JAR" uf "$JAR_V1" -C "$SIGNATURE_ROOT" META-INF/PHONE.SF \
+  -C "$SIGNATURE_ROOT" META-INF/PHONE.RSA
+"$JAR" uf "$JAR_V2" -C "$SIGNATURE_ROOT" META-INF/PHONE.SF \
+  -C "$SIGNATURE_ROOT" META-INF/PHONE.RSA
+
 "$PYTHON" -c '
 import pathlib, sys, zipfile
 manifest = pathlib.Path(sys.argv[1]).read_bytes()
