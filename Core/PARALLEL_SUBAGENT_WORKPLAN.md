@@ -1073,9 +1073,9 @@ Core/Tools/test-push-dispatch-host.sh
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 19:22 +07:00`
+- Cập nhật cuối: `2026-08-02 20:00 +07:00`
 - Blocker: `-`
-- Handoff: `Implementation commits 935db5b + ee56ae0; xử lý R11-20260802-01..04; không có source mới/CMake change; host có thể dùng Image::dirty_region()/clear_dirty_region() để upload vùng thay đổi; module, VM, ASan/UBSan và iphoneos arm64 build đều pass; visual/performance trên thiết bị thật cần mục 20 xác minh.`
+- Handoff: `Commits 935db5b + ee56ae0 + 153e88e. R11-05: benchmark dùng warmup + median/slowest, chỉ gate regression và report riêng 60 FPS/device. R11-06: toàn bộ ownership mục 11 đã commit sạch. R11-04: thêm GraphicsStore::consume_dirty_update() trả pixel packed đúng dirty rect và clear generation; mục 20 cần nối Runtime/Framebuffer/C API/Swift để partial upload end-to-end. Clean worktree pass module, VM, ASan/UBSan và iphoneos arm64 iOS 16.0.`
 
 **Loại:** SONG SONG, P1
 
