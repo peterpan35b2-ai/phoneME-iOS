@@ -237,10 +237,9 @@ void test_anchor_matrix_and_transform() {
         phoneme::graphics::anchor_bottom,
         phoneme::graphics::anchor_vcenter,
     };
-    constexpr std::array<i32, 4> text_vertical {
+    constexpr std::array<i32, 3> text_vertical {
         phoneme::graphics::anchor_top,
         phoneme::graphics::anchor_bottom,
-        phoneme::graphics::anchor_vcenter,
         phoneme::graphics::anchor_baseline,
     };
     for (const i32 horizontal_anchor : horizontal) {
@@ -282,6 +281,14 @@ void test_anchor_matrix_and_transform() {
                  false)
                  .has_value(),
             "baseline anchor is invalid for images");
+    require(!phoneme::graphics::anchored_rect(
+                 0, 0, 1, 1,
+                 phoneme::graphics::anchor_left |
+                     phoneme::graphics::anchor_vcenter,
+                 true,
+                 1)
+                 .has_value(),
+            "vertical-center anchor is invalid for text");
     require(!phoneme::graphics::anchored_rect(
                  0, 0, 1, 1,
                  phoneme::graphics::anchor_left |

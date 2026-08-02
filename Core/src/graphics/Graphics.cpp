@@ -488,7 +488,7 @@ Result<Rect> anchored_rect(i32 x,
     const i32 horizontal = anchor &
         (anchor_left | anchor_right | anchor_hcenter);
     const i32 vertical_mask = text
-        ? (anchor_top | anchor_bottom | anchor_vcenter | anchor_baseline)
+        ? (anchor_top | anchor_bottom | anchor_baseline)
         : (anchor_top | anchor_bottom | anchor_vcenter);
     const i32 vertical = anchor & vertical_mask;
     const i32 allowed = (anchor_left | anchor_right | anchor_hcenter) |
