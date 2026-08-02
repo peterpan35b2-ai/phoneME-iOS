@@ -25,16 +25,61 @@ constexpr u32 kCurrentFormatVersion = 2;
 constexpr u32 kSupportedFeatureFlags = 0;
 constexpr usize kMaximumStoreNameBytes = 128;
 
-void append_u32(std::vector<u8>& output, u32 value) {
-    output.push_back(static_cast<u8>(value >> 24U));
-    output.push_back(static_cast<u8>(value >> 16U));
-    output.push_back(static_cast<u8>(value >> 8U));
-    output.push_back(static_cast<u8>(value));
+[[nodiscard]] constexpr std::array<u8, 4> encode_u32(u32 value) noexcept {
+    return {
+        static_cast<u8>(value >> 24U),
+        static_cast<u8>(value >> 16U),
+        static_cast<u8>(value >> 8U),
+        static_cast<u8>(value),
+    };
 }
 
-void append_u64(std::vector<u8>& output, u64 value) {
-    append_u32(output, static_cast<u32>(value >> 32U));
-    append_u32(output, static_cast<u32>(value));
+[[nodiscard]] constexpr std::array<u8, 8> encode_u64(u64 value) noexcept {
+    const auto high = encode_u32(static_cast<u32>(value >> 32U));
+    const auto low = encode_u32(static_cast<u32>(value));
+    return {
+        high[0], high[1], high[2], high[3],
+        low[0], low[1], low[2], low[3],
+    };
+}
+
+[[nodiscard]] uLong update_crc(uLong checksum,
+                               std::span<const u8> bytes) noexcept {
+    return ::crc32(checksum,
+                   bytes.data(),
+                   static_cast<uInt>(bytes.size()));
+}
+
+[[nodiscard]] std::string base64url_encode(std::string_view value) {
+    static constexpr std::array<char, 64> alphabet {
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+        'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+        'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+        'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+        'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+        'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+        'w', 'x', 'y', 'z', '0', '1', '2', '3',
+        '4', '5', '6', '7', '8', '9', '-', '_',
+    };
+    std::string result;
+    result.reserve((value.size() * 4U + 2U) / 3U);
+    u32 accumulator = 0;
+    usize bits = 0;
+    for (const char character : value) {
+        accumulator = (accumulator << 8U) |
+            static_cast<u8>(static_cast<unsigned char>(character));
+        bits += 8U;
+        while (bits >= 6U) {
+            bits -= 6U;
+            result.push_back(alphabet[static_cast<usize>(
+                (accumulator >> bits) & 0x3FU)]);
+        }
+    }
+    if (bits != 0U) {
+        result.push_back(alphabet[static_cast<usize>(
+            (accumulator << (6U - bits)) & 0x3FU)]);
+    }
+    return result;
 }
 
 [[nodiscard]] Result<u32> read_u32(std::span<const u8> input,
@@ -201,6 +246,17 @@ Status RecordStoreRegistry::configure(std::string root_directory) {
     return {};
 }
 
+void RecordStoreRegistry::set_fault_injector(
+    RecordStoreFaultInjector injector) {
+    std::scoped_lock lock(mutex_);
+    fault_injector_ = std::move(injector);
+}
+
+void RecordStoreRegistry::clear_fault_injector() {
+    std::scoped_lock lock(mutex_);
+    fault_injector_ = {};
+}
+
 Status RecordStoreRegistry::validate_name(std::string_view name) {
     if (name.empty() || name.size() > kMaximumStoreNameBytes) {
         return fail(ErrorCode::invalid_argument,
@@ -226,12 +282,22 @@ Result<RecordStoreRegistry::Store*> RecordStoreRegistry::load_unlocked(
     if (existing != stores_.end()) return &existing->second;
 
     const std::string path = path_for_name(name);
-    auto loaded = recover_file_unlocked(path);
-    if (loaded) {
-        if (loaded->name != name) {
-            return fail(ErrorCode::malformed_archive,
-                        "RMS file hash collision or name mismatch");
+    auto loaded = recover_file_unlocked(path, name);
+    if (!loaded && loaded.error().code == ErrorCode::class_not_found) {
+        const std::string legacy_path = legacy_path_for_name(name);
+        if (legacy_path != path) {
+            auto legacy = recover_file_unlocked(legacy_path, name);
+            if (legacy) {
+                auto migrated = migrate_legacy_path_unlocked(
+                    *legacy, legacy_path);
+                if (!migrated) return std::unexpected(migrated.error());
+                loaded = std::move(legacy);
+            } else if (legacy.error().code != ErrorCode::class_not_found) {
+                return std::unexpected(legacy.error());
+            }
         }
+    }
+    if (loaded) {
         const auto [iterator, inserted] = stores_.emplace(
             loaded->name, std::move(*loaded));
         (void)inserted;
@@ -306,16 +372,14 @@ Status RecordStoreRegistry::delete_store(std::string_view name) {
     }
 
     const std::string path = path_for_name(name);
-    bool removed = false;
-    for (const std::string& suffix : {std::string {},
-                                      std::string {".tmp"},
-                                      std::string {".bak"}}) {
-        if (::unlink((path + suffix).c_str()) == 0) {
-            removed = true;
-        } else if (errno != ENOENT) {
-            return fail(ErrorCode::io_error,
-                        "failed to delete RMS store");
-        }
+    const std::string legacy_path = legacy_path_for_name(name);
+    auto removed_current = remove_path_family_unlocked(path);
+    if (!removed_current) return std::unexpected(removed_current.error());
+    bool removed = *removed_current;
+    if (legacy_path != path) {
+        auto removed_legacy = remove_path_family_unlocked(legacy_path);
+        if (!removed_legacy) return std::unexpected(removed_legacy.error());
+        removed = removed || *removed_legacy;
     }
     if (!removed) {
         return fail(ErrorCode::class_not_found,
@@ -364,7 +428,18 @@ Result<std::vector<std::string>> RecordStoreRegistry::list_store_names() {
     }
     for (const auto& path : canonical_paths) {
         auto store = recover_file_unlocked(path);
-        if (!store) return std::unexpected(store.error());
+        if (!store) {
+            if (store.error().code == ErrorCode::io_error) {
+                return std::unexpected(store.error());
+            }
+            continue;
+        }
+        const std::string current_path = path_for_name(store->name);
+        if (path != current_path &&
+            path == legacy_path_for_name(store->name)) {
+            auto migrated = migrate_legacy_path_unlocked(*store, path);
+            if (!migrated) return std::unexpected(migrated.error());
+        }
         names.insert(store->name);
     }
     return std::vector<std::string>(names.begin(), names.end());
@@ -407,7 +482,10 @@ Result<i32> RecordStoreRegistry::add_record(
                     "RMS suite quota is exceeded");
     }
 
-    Store backup = **store;
+    const i32 previous_next_id = (*store)->next_record_id;
+    const i32 previous_version = (*store)->version;
+    const i64 previous_modified = (*store)->last_modified_ms;
+    const u32 previous_format = (*store)->storage_format;
     const i32 id = (*store)->next_record_id++;
     (*store)->records.emplace(id,
                               std::vector<u8>(bytes.begin(), bytes.end()));
@@ -417,7 +495,11 @@ Result<i32> RecordStoreRegistry::add_record(
     (*store)->storage_format = kCurrentFormatVersion;
     auto persisted = persist_unlocked(**store);
     if (!persisted) {
-        **store = std::move(backup);
+        (*store)->records.erase(id);
+        (*store)->next_record_id = previous_next_id;
+        (*store)->version = previous_version;
+        (*store)->last_modified_ms = previous_modified;
+        (*store)->storage_format = previous_format;
         return std::unexpected(persisted.error());
     }
     return id;
@@ -448,15 +530,21 @@ Status RecordStoreRegistry::set_record(std::string_view name,
         }
     }
 
-    Store backup = **store;
-    record->second.assign(bytes.begin(), bytes.end());
+    const i32 previous_version = (*store)->version;
+    const i64 previous_modified = (*store)->last_modified_ms;
+    const u32 previous_format = (*store)->storage_format;
+    std::vector<u8> replacement(bytes.begin(), bytes.end());
+    record->second.swap(replacement);
     ++(*store)->version;
     (*store)->last_modified_ms = next_modified_time(
         (*store)->last_modified_ms);
     (*store)->storage_format = kCurrentFormatVersion;
     auto persisted = persist_unlocked(**store);
     if (!persisted) {
-        **store = std::move(backup);
+        record->second.swap(replacement);
+        (*store)->version = previous_version;
+        (*store)->last_modified_ms = previous_modified;
+        (*store)->storage_format = previous_format;
         return persisted;
     }
     return {};
@@ -477,15 +565,20 @@ Status RecordStoreRegistry::delete_record(std::string_view name,
                     "RMS store version is exhausted");
     }
 
-    Store backup = **store;
-    (*store)->records.erase(record);
+    const i32 previous_version = (*store)->version;
+    const i64 previous_modified = (*store)->last_modified_ms;
+    const u32 previous_format = (*store)->storage_format;
+    auto removed = (*store)->records.extract(record);
     ++(*store)->version;
     (*store)->last_modified_ms = next_modified_time(
         (*store)->last_modified_ms);
     (*store)->storage_format = kCurrentFormatVersion;
     auto persisted = persist_unlocked(**store);
     if (!persisted) {
-        **store = std::move(backup);
+        (*store)->records.insert(std::move(removed));
+        (*store)->version = previous_version;
+        (*store)->last_modified_ms = previous_modified;
+        (*store)->storage_format = previous_format;
         return persisted;
     }
     return {};
@@ -655,14 +748,16 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::read_file_unlocked(
 }
 
 Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
-    const std::string& canonical_path) const {
+    const std::string& canonical_path,
+    std::optional<std::string_view> expected_name) const {
     struct Candidate final {
         Store store;
         std::string path;
-        usize priority {0};
     };
 
-    std::optional<Candidate> best;
+    std::optional<Candidate> canonical;
+    std::optional<Candidate> temporary;
+    std::optional<Candidate> backup;
     std::optional<Error> first_error;
     bool found_file = false;
     const std::array<std::string, 3> paths {
@@ -670,9 +765,9 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
         canonical_path + ".tmp",
         canonical_path + ".bak",
     };
-    for (usize priority = 0; priority < paths.size(); ++priority) {
+    for (usize index = 0; index < paths.size(); ++index) {
         std::error_code exists_error;
-        if (!std::filesystem::exists(paths[priority], exists_error)) {
+        if (!std::filesystem::exists(paths[index], exists_error)) {
             if (exists_error && !first_error.has_value()) {
                 first_error = Error::make(
                     ErrorCode::io_error,
@@ -682,38 +777,52 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
             continue;
         }
         found_file = true;
-        auto candidate = read_file_unlocked(paths[priority]);
-        if (!candidate) {
-            if (!first_error.has_value() || priority == 0U) {
-                first_error = candidate.error();
+        auto store = read_file_unlocked(paths[index]);
+        if (!store) {
+            if (!first_error.has_value() || index == 0U) {
+                first_error = store.error();
             }
             continue;
         }
-        if (path_for_name(candidate->name) != canonical_path) {
-            if (!first_error.has_value() || priority == 0U) {
+        const bool name_matches = expected_name.has_value()
+            ? store->name == *expected_name
+            : path_for_name(store->name) == canonical_path ||
+                legacy_path_for_name(store->name) == canonical_path;
+        if (!name_matches) {
+            if (!first_error.has_value() || index == 0U) {
                 first_error = Error::make(
                     ErrorCode::malformed_archive,
-                    "RMS recovery candidate has a mismatched store hash");
+                    "RMS recovery candidate has a mismatched store name");
             }
             continue;
         }
-        const bool newer = !best.has_value() ||
-            candidate->version > best->store.version ||
-            (candidate->version == best->store.version &&
-             candidate->last_modified_ms > best->store.last_modified_ms) ||
-            (candidate->version == best->store.version &&
-             candidate->last_modified_ms == best->store.last_modified_ms &&
-             priority < best->priority);
-        if (newer) {
-            best = Candidate {
-                .store = std::move(*candidate),
-                .path = paths[priority],
-                .priority = priority,
-            };
+        Candidate candidate {
+            .store = std::move(*store),
+            .path = paths[index],
+        };
+        if (index == 0U) {
+            canonical = std::move(candidate);
+        } else if (index == 1U) {
+            temporary = std::move(candidate);
+        } else {
+            backup = std::move(candidate);
         }
     }
 
-    if (!best.has_value()) {
+    // A valid canonical file is the committed generation. A backup is the
+    // previous committed generation and therefore wins over a leftover tmp.
+    // The temporary file is only a last-resort recovery source when neither
+    // committed generation remains readable.
+    std::optional<Candidate> selected;
+    if (canonical.has_value()) {
+        selected = std::move(canonical);
+    } else if (backup.has_value()) {
+        selected = std::move(backup);
+    } else if (temporary.has_value()) {
+        selected = std::move(temporary);
+    }
+
+    if (!selected.has_value()) {
         if (first_error.has_value()) return std::unexpected(*first_error);
         return fail(found_file ? ErrorCode::malformed_archive
                                : ErrorCode::class_not_found,
@@ -721,12 +830,20 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
                                : "RMS store does not exist");
     }
 
-    const bool needs_restore = best->path != canonical_path ||
-        best->store.storage_format != kCurrentFormatVersion;
-    if (needs_restore) {
-        auto restored = persist_unlocked(best->store);
-        if (!restored) return std::unexpected(restored.error());
-        best->store.storage_format = kCurrentFormatVersion;
+    if (selected->path != canonical_path) {
+        if (::rename(selected->path.c_str(), canonical_path.c_str()) != 0) {
+            return fail(ErrorCode::io_error,
+                        "failed to restore the selected RMS generation");
+        }
+        auto synchronized = sync_directory_unlocked(false);
+        if (!synchronized) return std::unexpected(synchronized.error());
+        selected->path = canonical_path;
+    }
+
+    if (selected->store.storage_format != kCurrentFormatVersion) {
+        auto migrated = persist_unlocked(selected->store);
+        if (!migrated) return std::unexpected(migrated.error());
+        selected->store.storage_format = kCurrentFormatVersion;
     } else {
         bool removed = false;
         for (const std::string& suffix : {std::string {".tmp"},
@@ -739,51 +856,77 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
             }
         }
         if (removed) {
-            auto synchronized = sync_directory_unlocked();
+            auto synchronized = sync_directory_unlocked(false);
             if (!synchronized) return std::unexpected(synchronized.error());
         }
     }
-    return std::move(best->store);
+    return std::move(selected->store);
 }
 
 Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
-    std::vector<u8> payload;
-    const usize estimated = 4U + store.name.size() + 24U +
-        used_bytes_unlocked(store) + store.records.size() * 8U;
-    payload.reserve(estimated);
-    append_u32(payload, static_cast<u32>(store.name.size()));
-    for (const char character : store.name) {
-        payload.push_back(static_cast<u8>(
-            static_cast<unsigned char>(character)));
+    if (store.version < 0 || store.next_record_id <= 0 ||
+        store.last_modified_ms < 0 ||
+        store.records.size() > std::numeric_limits<u32>::max()) {
+        return fail(ErrorCode::overflow,
+                    "RMS metadata is outside the serializable range");
     }
-    append_u32(payload, static_cast<u32>(store.version));
-    append_u32(payload, static_cast<u32>(store.next_record_id));
-    append_u64(payload, static_cast<u64>(store.last_modified_ms));
-    append_u32(payload, kSupportedFeatureFlags);
-    append_u32(payload, static_cast<u32>(store.records.size()));
+
+    u64 payload_size = 28U + static_cast<u64>(store.name.size());
     for (const auto& [id, bytes] : store.records) {
         if (id <= 0 || bytes.size() > std::numeric_limits<u32>::max()) {
             return fail(ErrorCode::overflow,
                         "RMS record is too large or has an invalid ID");
         }
-        append_u32(payload, static_cast<u32>(id));
-        append_u32(payload, static_cast<u32>(bytes.size()));
-        payload.insert(payload.end(), bytes.begin(), bytes.end());
+        payload_size += 8U + static_cast<u64>(bytes.size());
+        if (payload_size > std::numeric_limits<u32>::max()) {
+            return fail(ErrorCode::overflow,
+                        "RMS store is too large to serialize");
+        }
     }
-    if (payload.size() > std::numeric_limits<u32>::max()) {
-        return fail(ErrorCode::overflow,
-                    "RMS store is too large to serialize");
+
+    const auto name_length = encode_u32(
+        static_cast<u32>(store.name.size()));
+    const auto version = encode_u32(static_cast<u32>(store.version));
+    const auto next_id = encode_u32(
+        static_cast<u32>(store.next_record_id));
+    const auto modified = encode_u64(
+        static_cast<u64>(store.last_modified_ms));
+    const auto feature_flags = encode_u32(kSupportedFeatureFlags);
+    const auto record_count = encode_u32(
+        static_cast<u32>(store.records.size()));
+    const std::span<const u8> name_bytes(
+        reinterpret_cast<const u8*>(store.name.data()),
+        store.name.size());
+
+    uLong checksum = ::crc32(0L, Z_NULL, 0);
+    checksum = update_crc(checksum, name_length);
+    checksum = update_crc(checksum, name_bytes);
+    checksum = update_crc(checksum, version);
+    checksum = update_crc(checksum, next_id);
+    checksum = update_crc(checksum, modified);
+    checksum = update_crc(checksum, feature_flags);
+    checksum = update_crc(checksum, record_count);
+    for (const auto& [id, bytes] : store.records) {
+        const auto encoded_id = encode_u32(static_cast<u32>(id));
+        const auto encoded_length = encode_u32(
+            static_cast<u32>(bytes.size()));
+        checksum = update_crc(checksum, encoded_id);
+        checksum = update_crc(checksum, encoded_length);
+        checksum = update_crc(checksum, bytes);
     }
-    const uLong checksum = ::crc32(
-        ::crc32(0L, Z_NULL, 0), payload.data(),
-        static_cast<uInt>(payload.size()));
-    std::vector<u8> file;
-    file.reserve(16U + payload.size());
-    file.insert(file.end(), kMagic.begin(), kMagic.end());
-    append_u32(file, kCurrentFormatVersion);
-    append_u32(file, static_cast<u32>(payload.size()));
-    append_u32(file, static_cast<u32>(checksum));
-    file.insert(file.end(), payload.begin(), payload.end());
+
+    std::array<u8, 16> header {};
+    std::copy(kMagic.begin(), kMagic.end(), header.begin());
+    const auto format = encode_u32(kCurrentFormatVersion);
+    const auto encoded_payload_size = encode_u32(
+        static_cast<u32>(payload_size));
+    const auto encoded_checksum = encode_u32(
+        static_cast<u32>(checksum));
+    std::copy(format.begin(), format.end(), header.begin() + 4);
+    std::copy(encoded_payload_size.begin(), encoded_payload_size.end(),
+              header.begin() + 8);
+    std::copy(encoded_checksum.begin(), encoded_checksum.end(),
+              header.begin() + 12);
 
     const std::string path = path_for_name(store.name);
     const std::string temporary = path + ".tmp";
@@ -795,75 +938,153 @@ Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
         return fail(ErrorCode::io_error,
                     "failed to create temporary RMS file");
     }
-    auto written = write_all(descriptor, file);
-    if (!written) {
-        ::close(descriptor);
-        ::unlink(temporary.c_str());
-        return written;
+    const auto abort_temporary = [&](Status status) -> Status {
+        (void)::close(descriptor);
+        (void)::unlink(temporary.c_str());
+        return status;
+    };
+    const auto write_piece = [&](std::span<const u8> bytes) -> Status {
+        auto injected = inject_fault_unlocked(RecordStoreFaultPoint::write);
+        if (!injected) return injected;
+        return write_all(descriptor, bytes);
+    };
+
+    auto written = write_piece(header);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(name_length);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(name_bytes);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(version);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(next_id);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(modified);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(feature_flags);
+    if (!written) return abort_temporary(std::move(written));
+    written = write_piece(record_count);
+    if (!written) return abort_temporary(std::move(written));
+    for (const auto& [id, bytes] : store.records) {
+        const auto encoded_id = encode_u32(static_cast<u32>(id));
+        const auto encoded_length = encode_u32(
+            static_cast<u32>(bytes.size()));
+        written = write_piece(encoded_id);
+        if (!written) return abort_temporary(std::move(written));
+        written = write_piece(encoded_length);
+        if (!written) return abort_temporary(std::move(written));
+        written = write_piece(bytes);
+        if (!written) return abort_temporary(std::move(written));
     }
+
+    auto injected = inject_fault_unlocked(RecordStoreFaultPoint::file_sync);
+    if (!injected) return abort_temporary(std::move(injected));
     if (::fsync(descriptor) != 0) {
-        ::close(descriptor);
-        ::unlink(temporary.c_str());
-        return fail(ErrorCode::io_error,
-                    "failed to synchronize RMS file");
+        return abort_temporary(fail(
+            ErrorCode::io_error,
+            "failed to synchronize RMS file"));
     }
+    injected = inject_fault_unlocked(
+        RecordStoreFaultPoint::after_file_sync);
+    if (!injected) return abort_temporary(std::move(injected));
     if (::close(descriptor) != 0) {
-        ::unlink(temporary.c_str());
+        (void)::unlink(temporary.c_str());
         return fail(ErrorCode::io_error,
                     "failed to close RMS file");
     }
 
     (void)::unlink(backup.c_str());
     bool has_backup = false;
+    injected = inject_fault_unlocked(RecordStoreFaultPoint::backup_link);
+    if (!injected) {
+        (void)::unlink(temporary.c_str());
+        return injected;
+    }
     if (::link(path.c_str(), backup.c_str()) == 0) {
         has_backup = true;
+        injected = inject_fault_unlocked(
+            RecordStoreFaultPoint::after_backup_link);
+        if (!injected) {
+            (void)::unlink(temporary.c_str());
+            (void)::unlink(backup.c_str());
+            return injected;
+        }
     } else if (errno != ENOENT) {
-        ::unlink(temporary.c_str());
+        (void)::unlink(temporary.c_str());
         return fail(ErrorCode::io_error,
                     "failed to preserve the previous RMS generation");
     }
+
+    injected = inject_fault_unlocked(RecordStoreFaultPoint::rename);
+    if (!injected) {
+        (void)::unlink(temporary.c_str());
+        if (has_backup) (void)::unlink(backup.c_str());
+        return injected;
+    }
     if (::rename(temporary.c_str(), path.c_str()) != 0) {
-        ::unlink(temporary.c_str());
+        (void)::unlink(temporary.c_str());
         if (has_backup) (void)::unlink(backup.c_str());
         return fail(ErrorCode::io_error,
                     "failed to atomically replace RMS file");
     }
-    auto synchronized = sync_directory_unlocked();
-    if (!synchronized) {
+
+    const auto rollback_disk = [&](const Error& original) -> Status {
+        bool restored = false;
         if (has_backup) {
-            (void)::rename(backup.c_str(), path.c_str());
+            restored = ::rename(backup.c_str(), path.c_str()) == 0;
         } else {
-            (void)::unlink(path.c_str());
+            restored = ::unlink(path.c_str()) == 0 || errno == ENOENT;
         }
-        (void)sync_directory_unlocked();
-        return synchronized;
-    }
+        auto synchronized = sync_directory_unlocked(false);
+        if (!restored || !synchronized) {
+            return fail(ErrorCode::io_error,
+                        "failed to roll back an RMS persistence failure");
+        }
+        return std::unexpected(original);
+    };
+
+    injected = inject_fault_unlocked(RecordStoreFaultPoint::after_rename);
+    if (!injected) return rollback_disk(injected.error());
+    auto synchronized = sync_directory_unlocked();
+    if (!synchronized) return rollback_disk(synchronized.error());
+
     if (has_backup) {
         (void)::unlink(backup.c_str());
-        (void)sync_directory_unlocked();
+        (void)sync_directory_unlocked(false);
     }
     return {};
 }
 
-Status RecordStoreRegistry::sync_directory_unlocked() const {
+Status RecordStoreRegistry::sync_directory_unlocked(bool inject_fault) const {
     const int descriptor = ::open(root_directory_.c_str(),
                                   O_RDONLY | O_CLOEXEC);
     if (descriptor < 0) {
         return fail(ErrorCode::io_error,
                     "failed to open RMS directory for synchronization");
     }
+    if (inject_fault) {
+        auto injected = inject_fault_unlocked(
+            RecordStoreFaultPoint::directory_sync);
+        if (!injected) {
+            (void)::close(descriptor);
+            return injected;
+        }
+    }
     if (::fsync(descriptor) != 0) {
         const int saved_errno = errno;
-        ::close(descriptor);
-        if (saved_errno == EINVAL || saved_errno == ENOTSUP) {
-            return {};
+        (void)::close(descriptor);
+        if (saved_errno != EINVAL && saved_errno != ENOTSUP) {
+            return fail(ErrorCode::io_error,
+                        "failed to synchronize RMS directory");
         }
-        return fail(ErrorCode::io_error,
-                    "failed to synchronize RMS directory");
-    }
-    if (::close(descriptor) != 0) {
+    } else if (::close(descriptor) != 0) {
         return fail(ErrorCode::io_error,
                     "failed to close RMS directory");
+    }
+    if (inject_fault) {
+        auto injected = inject_fault_unlocked(
+            RecordStoreFaultPoint::after_directory_sync);
+        if (!injected) return injected;
     }
     return {};
 }
@@ -909,17 +1130,63 @@ Result<usize> RecordStoreRegistry::suite_used_bytes_unlocked() const {
         auto store = recover_file_unlocked(path);
         if (!store) return std::unexpected(store.error());
         if (loaded_names.contains(store->name)) continue;
+        const std::string current_path = path_for_name(store->name);
+        if (path != current_path &&
+            path == legacy_path_for_name(store->name)) {
+            auto migrated = migrate_legacy_path_unlocked(*store, path);
+            if (!migrated) return std::unexpected(migrated.error());
+        }
         const usize used = used_bytes_unlocked(*store);
         if (used > std::numeric_limits<usize>::max() - total) {
             return fail(ErrorCode::overflow,
                         "RMS suite size overflowed");
         }
         total += used;
+        loaded_names.insert(store->name);
     }
     return total;
 }
 
+Result<bool> RecordStoreRegistry::remove_path_family_unlocked(
+    const std::string& canonical_path) const {
+    bool removed = false;
+    for (const std::string& suffix : {std::string {},
+                                      std::string {".tmp"},
+                                      std::string {".bak"}}) {
+        if (::unlink((canonical_path + suffix).c_str()) == 0) {
+            removed = true;
+        } else if (errno != ENOENT) {
+            return fail(ErrorCode::io_error,
+                        "failed to remove RMS storage file");
+        }
+    }
+    return removed;
+}
+
+Status RecordStoreRegistry::migrate_legacy_path_unlocked(
+    const Store& store,
+    const std::string& legacy_path) const {
+    if (legacy_path == path_for_name(store.name)) return {};
+    auto persisted = persist_unlocked(store);
+    if (!persisted) return persisted;
+    auto removed = remove_path_family_unlocked(legacy_path);
+    if (!removed) return std::unexpected(removed.error());
+    if (*removed) return sync_directory_unlocked();
+    return {};
+}
+
+Status RecordStoreRegistry::inject_fault_unlocked(
+    RecordStoreFaultPoint point) const {
+    if (!fault_injector_) return {};
+    return fault_injector_(point);
+}
+
 std::string RecordStoreRegistry::path_for_name(
+    std::string_view name) const {
+    return root_directory_ + "/rms-" + base64url_encode(name) + ".rms";
+}
+
+std::string RecordStoreRegistry::legacy_path_for_name(
     std::string_view name) const {
     return root_directory_ + "/" + hexadecimal_u64(fnv1a(name)) + ".rms";
 }

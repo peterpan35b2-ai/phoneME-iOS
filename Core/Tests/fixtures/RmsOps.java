@@ -16,6 +16,9 @@ public final class RmsOps {
     private static int listenerChanged;
     private static int listenerDeleted;
     private static RecordStore listenerStore;
+    private static final Object THREAD_LOCK = new Object();
+    private static int threadErrors;
+    private static int threadAdds;
 
     private static final class CountingListener implements RecordListener {
         public void recordAdded(RecordStore store, int recordId) {
@@ -47,6 +50,129 @@ public final class RmsOps {
         public int compare(byte[] left, byte[] right) {
             if (left[0] == right[0]) return EQUIVALENT;
             return left[0] > right[0] ? PRECEDES : FOLLOWS;
+        }
+    }
+
+    private static final class AscendingComparator implements RecordComparator {
+        public int compare(byte[] left, byte[] right) {
+            if (left[0] == right[0]) return EQUIVALENT;
+            return left[0] < right[0] ? PRECEDES : FOLLOWS;
+        }
+    }
+
+    private static final class ThrowingFilter implements RecordFilter {
+        public boolean matches(byte[] candidate) {
+            throw new IllegalStateException();
+        }
+    }
+
+    private static final class ThrowingComparator implements RecordComparator {
+        public int compare(byte[] left, byte[] right) {
+            throw new IllegalStateException();
+        }
+    }
+
+    private static final class HandleCountingListener implements RecordListener {
+        private final RecordStore expected;
+        int added;
+        int changed;
+        int deleted;
+
+        HandleCountingListener(RecordStore expected) {
+            this.expected = expected;
+        }
+
+        public void recordAdded(RecordStore store, int recordId) {
+            if (store == expected && recordId > 0) added++;
+        }
+
+        public void recordChanged(RecordStore store, int recordId) {
+            if (store == expected && recordId > 0) changed++;
+        }
+
+        public void recordDeleted(RecordStore store, int recordId) {
+            if (store == expected && recordId > 0) deleted++;
+        }
+    }
+
+    private static final class MutatingListener implements RecordListener {
+        private final RecordStore store;
+        private final RecordListener replacement;
+        int added;
+
+        MutatingListener(RecordStore store, RecordListener replacement) {
+            this.store = store;
+            this.replacement = replacement;
+        }
+
+        public void recordAdded(RecordStore callbackStore, int recordId) {
+            added++;
+            if (added == 1) {
+                store.removeRecordListener(this);
+                store.addRecordListener(replacement);
+            }
+        }
+
+        public void recordChanged(RecordStore callbackStore, int recordId) {
+        }
+
+        public void recordDeleted(RecordStore callbackStore, int recordId) {
+        }
+    }
+
+    private static final class ThreadListener implements RecordListener {
+        private final RecordStore expected;
+
+        ThreadListener(RecordStore expected) {
+            this.expected = expected;
+        }
+
+        public void recordAdded(RecordStore store, int recordId) {
+            if (store == expected && recordId > 0) {
+                synchronized (THREAD_LOCK) {
+                    threadAdds++;
+                }
+            }
+        }
+
+        public void recordChanged(RecordStore store, int recordId) {
+        }
+
+        public void recordDeleted(RecordStore store, int recordId) {
+        }
+    }
+
+    private static final class ConcurrentWriter implements Runnable {
+        private final String storeName;
+        private final int marker;
+
+        ConcurrentWriter(String storeName, int marker) {
+            this.storeName = storeName;
+            this.marker = marker;
+        }
+
+        public void run() {
+            RecordStore store = null;
+            try {
+                store = RecordStore.openRecordStore(storeName, false);
+                for (int index = 0; index < 20; index++) {
+                    store.addRecord(new byte[] {
+                        (byte) marker, (byte) index
+                    }, 0, 2);
+                    if ((index & 3) == 0) Thread.yield();
+                }
+                store.closeRecordStore();
+            } catch (Exception failure) {
+                synchronized (THREAD_LOCK) {
+                    threadErrors++;
+                }
+                if (store != null) {
+                    try {
+                        store.closeRecordStore();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
         }
     }
 
@@ -257,6 +383,134 @@ public final class RmsOps {
         reopened.closeRecordStore();
         RecordStore.deleteRecordStore(name);
         listenerStore = null;
+        return result;
+    }
+
+    public static int callbackAndCursorSemantics() throws Exception {
+        final String name = "rms-callback-cursor";
+        try {
+            RecordStore.deleteRecordStore(name);
+        } catch (RecordStoreNotFoundException expected) {
+        }
+
+        int result = 0;
+        RecordStore first = RecordStore.openRecordStore(name, true);
+        RecordStore second = RecordStore.openRecordStore(name, false);
+        HandleCountingListener firstListener =
+            new HandleCountingListener(first);
+        HandleCountingListener secondListener =
+            new HandleCountingListener(second);
+        first.addRecordListener(firstListener);
+        second.addRecordListener(secondListener);
+
+        int id1 = second.addRecord(new byte[] {1}, 0, 1);
+        if (firstListener.added == 1 && secondListener.added == 1) {
+            result |= 1;
+        }
+
+        HandleCountingListener replacement =
+            new HandleCountingListener(first);
+        MutatingListener mutating = new MutatingListener(first, replacement);
+        first.addRecordListener(mutating);
+        int id2 = second.addRecord(new byte[] {2}, 0, 1);
+        if (mutating.added == 1 && replacement.added == 0) {
+            result |= 2;
+        }
+        int id3 = second.addRecord(new byte[] {3}, 0, 1);
+        if (mutating.added == 1 && replacement.added == 1) {
+            result |= 4;
+        }
+
+        first.removeRecordListener(firstListener);
+        second.removeRecordListener(secondListener);
+        first.removeRecordListener(replacement);
+
+        RecordEnumeration live = first.enumerateRecords(
+            null, new AscendingComparator(), true);
+        if (live.nextRecord()[0] == 1
+                && live.nextRecord()[0] == 2
+                && live.nextRecord()[0] == 3) {
+            int id0 = second.addRecord(new byte[] {0}, 0, 1);
+            if (!live.hasNextElement() && id0 > id3) {
+                result |= 8;
+            }
+            int id4 = second.addRecord(new byte[] {4}, 0, 1);
+            if (live.hasNextElement() && live.nextRecordId() == id4) {
+                result |= 16;
+            }
+        }
+
+        live.reset();
+        if (live.nextRecord()[0] == 0) {
+            second.deleteRecord(id1);
+            if (live.nextRecordId() == id2) {
+                result |= 32;
+            }
+        }
+
+        try {
+            first.enumerateRecords(new ThrowingFilter(), null, false);
+        } catch (IllegalStateException expected) {
+            result |= 64;
+        }
+        try {
+            first.enumerateRecords(null, new ThrowingComparator(), false);
+        } catch (IllegalStateException expected) {
+            result |= 128;
+        }
+
+        live.destroy();
+        try {
+            live.numRecords();
+        } catch (IllegalStateException expected) {
+            result |= 256;
+        }
+
+        first.closeRecordStore();
+        second.closeRecordStore();
+        RecordStore.deleteRecordStore(name);
+        return result;
+    }
+
+    public static int concurrentThreadSemantics() throws Exception {
+        final String name = "rms-java-threads";
+        try {
+            RecordStore.deleteRecordStore(name);
+        } catch (RecordStoreNotFoundException expected) {
+        }
+
+        threadErrors = 0;
+        threadAdds = 0;
+        RecordStore observer = RecordStore.openRecordStore(name, true);
+        ThreadListener listener = new ThreadListener(observer);
+        observer.addRecordListener(listener);
+        Thread first = new Thread(new ConcurrentWriter(name, 1));
+        Thread second = new Thread(new ConcurrentWriter(name, 2));
+        first.start();
+        second.start();
+        first.join();
+        second.join();
+
+        int result = 0;
+        if (threadErrors == 0 && !first.isAlive() && !second.isAlive()) {
+            result |= 1;
+        }
+        if (threadAdds == 40 && observer.getNumRecords() == 40) {
+            result |= 2;
+        }
+        if (observer.getNextRecordID() == 41) {
+            result |= 4;
+        }
+        observer.removeRecordListener(listener);
+        observer.closeRecordStore();
+
+        RecordStore reopened = RecordStore.openRecordStore(name, false);
+        if (reopened.getNumRecords() == 40
+                && reopened.getNextRecordID() == 41) {
+            result |= 8;
+        }
+        reopened.closeRecordStore();
+        RecordStore.deleteRecordStore(name);
         return result;
     }
 }

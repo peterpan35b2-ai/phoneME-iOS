@@ -765,24 +765,37 @@ filtered_and_sorted_snapshot(Machine& machine,
     if (!store_name) return std::unexpected(store_name.error());
 
     i32 old_index = 0;
-    std::optional<i32> anchor_id;
+    std::optional<i32> next_anchor_id;
+    std::optional<i32> previous_anchor_id;
     if (!reset_index) {
         auto current_index = enumeration_index(machine, enumeration);
-        if (current_index) old_index = std::max(0, *current_index);
+        if (!current_index) return std::unexpected(current_index.error());
+        old_index = std::max(0, *current_index);
         auto ids_value = machine.heap().field(
             enumeration, kEnumerationIdsField);
-        if (ids_value) {
-            auto ids = ids_value->as_reference();
-            if (ids && !ids->is_null()) {
-                auto length = machine.heap().array_length(*ids);
-                if (length && static_cast<usize>(old_index) < *length) {
-                    auto value = machine.heap().element(
-                        *ids, static_cast<usize>(old_index));
-                    if (value) {
-                        auto id = value->as_int();
-                        if (id) anchor_id = *id;
-                    }
-                }
+        if (!ids_value) return std::unexpected(ids_value.error());
+        auto ids = ids_value->as_reference();
+        if (!ids) return std::unexpected(ids.error());
+        if (!ids->is_null()) {
+            auto length = machine.heap().array_length(*ids);
+            if (!length) return std::unexpected(length.error());
+            const auto read_anchor = [&](usize index)
+                -> Result<i32> {
+                auto value = machine.heap().element(*ids, index);
+                if (!value) return std::unexpected(value.error());
+                return value->as_int();
+            };
+            if (static_cast<usize>(old_index) < *length) {
+                auto anchor = read_anchor(static_cast<usize>(old_index));
+                if (!anchor) return std::unexpected(anchor.error());
+                next_anchor_id = *anchor;
+            }
+            if (old_index > 0 &&
+                static_cast<usize>(old_index - 1) < *length) {
+                auto anchor = read_anchor(
+                    static_cast<usize>(old_index - 1));
+                if (!anchor) return std::unexpected(anchor.error());
+                previous_anchor_id = *anchor;
             }
         }
     }
@@ -816,15 +829,30 @@ filtered_and_sorted_snapshot(Machine& machine,
     if (!reset_index) {
         new_index = std::min<i32>(
             old_index, static_cast<i32>(snapshot->size()));
-        if (anchor_id.has_value()) {
-            const auto found = std::find_if(
+        const auto find_record = [&](i32 record_id) {
+            return std::find_if(
                 snapshot->begin(), snapshot->end(),
-                [anchor_id](const runtime::RecordSnapshot& record) {
-                    return record.id == *anchor_id;
+                [record_id](const runtime::RecordSnapshot& record) {
+                    return record.id == record_id;
                 });
+        };
+        if (next_anchor_id.has_value()) {
+            const auto found = find_record(*next_anchor_id);
             if (found != snapshot->end()) {
                 new_index = static_cast<i32>(
                     std::distance(snapshot->begin(), found));
+            } else if (previous_anchor_id.has_value()) {
+                const auto previous = find_record(*previous_anchor_id);
+                if (previous != snapshot->end()) {
+                    new_index = static_cast<i32>(
+                        std::distance(snapshot->begin(), previous) + 1);
+                }
+            }
+        } else if (previous_anchor_id.has_value()) {
+            const auto previous = find_record(*previous_anchor_id);
+            if (previous != snapshot->end()) {
+                new_index = static_cast<i32>(
+                    std::distance(snapshot->begin(), previous) + 1);
             }
         }
     }

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,6 +27,21 @@ struct RecordSnapshot final {
     i32 id {0};
     std::vector<u8> bytes;
 };
+
+enum class RecordStoreFaultPoint : u8 {
+    write,
+    file_sync,
+    backup_link,
+    rename,
+    directory_sync,
+    after_file_sync,
+    after_backup_link,
+    after_rename,
+    after_directory_sync,
+};
+
+using RecordStoreFaultInjector =
+    std::function<Status(RecordStoreFaultPoint)>;
 
 class RecordStoreRegistry final {
 public:
@@ -51,6 +68,9 @@ public:
         std::string_view name);
     [[nodiscard]] Result<usize> available_bytes(std::string_view name);
 
+    void set_fault_injector(RecordStoreFaultInjector injector);
+    void clear_fault_injector();
+
 private:
     struct Store final {
         std::string name;
@@ -69,11 +89,22 @@ private:
     [[nodiscard]] Result<Store> read_file_unlocked(
         const std::string& path) const;
     [[nodiscard]] Result<Store> recover_file_unlocked(
-        const std::string& canonical_path) const;
+        const std::string& canonical_path,
+        std::optional<std::string_view> expected_name = std::nullopt) const;
     [[nodiscard]] Status persist_unlocked(const Store& store) const;
-    [[nodiscard]] Status sync_directory_unlocked() const;
+    [[nodiscard]] Status sync_directory_unlocked(
+        bool inject_fault = true) const;
     [[nodiscard]] Result<usize> suite_used_bytes_unlocked() const;
+    [[nodiscard]] Result<bool> remove_path_family_unlocked(
+        const std::string& canonical_path) const;
+    [[nodiscard]] Status migrate_legacy_path_unlocked(
+        const Store& store,
+        const std::string& legacy_path) const;
+    [[nodiscard]] Status inject_fault_unlocked(
+        RecordStoreFaultPoint point) const;
     [[nodiscard]] std::string path_for_name(std::string_view name) const;
+    [[nodiscard]] std::string legacy_path_for_name(
+        std::string_view name) const;
     [[nodiscard]] usize used_bytes_unlocked(const Store& store) const noexcept;
     [[nodiscard]] static i64 current_time_millis() noexcept;
 
@@ -81,6 +112,7 @@ private:
     std::string root_directory_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Store> stores_;
+    RecordStoreFaultInjector fault_injector_;
 };
 
 } // namespace phoneme::runtime
