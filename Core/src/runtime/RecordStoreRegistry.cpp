@@ -371,23 +371,82 @@ Status RecordStoreRegistry::delete_store(std::string_view name) {
                     "cannot delete an open RMS store");
     }
 
+    struct MovedPath final {
+        std::string original;
+        std::string tombstone;
+    };
+    std::vector<MovedPath> moved;
+    moved.reserve(6U);
+    const std::string tombstone_suffix =
+        ".delete-" + std::to_string(static_cast<u64>(::getpid()));
+
+    const auto rollback = [&](const Error& original) -> Status {
+        bool restored = true;
+        for (auto iterator = moved.rbegin(); iterator != moved.rend();
+             ++iterator) {
+            if (::rename(iterator->tombstone.c_str(),
+                         iterator->original.c_str()) != 0) {
+                restored = false;
+            }
+        }
+        auto synchronized = sync_directory_unlocked(false);
+        if (!restored || !synchronized) {
+            return fail(ErrorCode::io_error,
+                        "failed to roll back RMS store deletion");
+        }
+        return std::unexpected(original);
+    };
+
+    const auto stage_family = [&](const std::string& canonical_path)
+        -> Status {
+        for (const std::string& suffix : {std::string {},
+                                          std::string {".tmp"},
+                                          std::string {".bak"}}) {
+            const std::string original = canonical_path + suffix;
+            const std::string tombstone = original + tombstone_suffix;
+            if (::unlink(tombstone.c_str()) != 0 && errno != ENOENT) {
+                return rollback(Error::make(
+                    ErrorCode::io_error,
+                    "failed to clear stale RMS delete tombstone"));
+            }
+            if (::rename(original.c_str(), tombstone.c_str()) == 0) {
+                moved.push_back(MovedPath {
+                    .original = original,
+                    .tombstone = tombstone,
+                });
+            } else if (errno != ENOENT) {
+                return rollback(Error::make(
+                    ErrorCode::io_error,
+                    "failed to stage RMS store deletion"));
+            }
+        }
+        return {};
+    };
+
     const std::string path = path_for_name(name);
+    auto staged = stage_family(path);
+    if (!staged) return staged;
     const std::string legacy_path = legacy_path_for_name(name);
-    auto removed_current = remove_path_family_unlocked(path);
-    if (!removed_current) return std::unexpected(removed_current.error());
-    bool removed = *removed_current;
     if (legacy_path != path) {
-        auto removed_legacy = remove_path_family_unlocked(legacy_path);
-        if (!removed_legacy) return std::unexpected(removed_legacy.error());
-        removed = removed || *removed_legacy;
+        staged = stage_family(legacy_path);
+        if (!staged) return staged;
     }
-    if (!removed) {
+    if (moved.empty()) {
         return fail(ErrorCode::class_not_found,
                     "RMS store does not exist");
     }
+
     auto synchronized = sync_directory_unlocked();
-    if (!synchronized) return synchronized;
+    if (!synchronized) return rollback(synchronized.error());
+
     stores_.erase(std::string(name));
+    bool cleaned = false;
+    for (const auto& entry : moved) {
+        if (::unlink(entry.tombstone.c_str()) == 0) {
+            cleaned = true;
+        }
+    }
+    if (cleaned) (void)sync_directory_unlocked(false);
     return {};
 }
 
@@ -429,10 +488,8 @@ Result<std::vector<std::string>> RecordStoreRegistry::list_store_names() {
     for (const auto& path : canonical_paths) {
         auto store = recover_file_unlocked(path);
         if (!store) {
-            if (store.error().code == ErrorCode::io_error) {
-                return std::unexpected(store.error());
-            }
-            continue;
+            if (store.error().code == ErrorCode::class_not_found) continue;
+            return std::unexpected(store.error());
         }
         const std::string current_path = path_for_name(store->name);
         if (path != current_path &&

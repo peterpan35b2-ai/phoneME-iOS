@@ -363,6 +363,78 @@ void test_fault_rollback(const fs::path& root) {
     }
 }
 
+void test_delete_store_rollback(const fs::path& root) {
+    const std::array<RecordStoreFaultPoint, 2> points {
+        RecordStoreFaultPoint::directory_sync,
+        RecordStoreFaultPoint::after_directory_sync,
+    };
+    for (usize index = 0; index < points.size(); ++index) {
+        const fs::path case_root = root / std::to_string(index);
+        clear_directory(case_root);
+        RecordStoreRegistry registry;
+        require(registry.configure(case_root.string()).has_value(),
+                "configure delete rollback registry");
+        require(registry.open("delete-rollback", true).has_value(),
+                "create delete rollback store");
+        constexpr std::array<u8, 3> baseline {4U, 5U, 6U};
+        auto record_id = registry.add_record("delete-rollback", baseline);
+        require(record_id.has_value() && *record_id == 1,
+                "write delete rollback baseline");
+        require(registry.close("delete-rollback").has_value(),
+                "close delete rollback baseline");
+
+        bool fired = false;
+        registry.set_fault_injector(
+            [&, target = points[index]](RecordStoreFaultPoint point)
+                -> phoneme::Status {
+                if (!fired && point == target) {
+                    fired = true;
+                    return phoneme::fail(
+                        ErrorCode::io_error,
+                        "injected RMS delete directory sync failure");
+                }
+                return {};
+            });
+        auto deleted = registry.delete_store("delete-rollback");
+        require(!deleted.has_value() && fired,
+                "delete failure is reported before committing removal");
+        registry.clear_fault_injector();
+
+        auto names = registry.list_store_names();
+        require(names.has_value() &&
+                    std::find(names->begin(), names->end(),
+                              "delete-rollback") != names->end(),
+                "failed delete remains visible in current registry");
+        require(registry.open("delete-rollback", false).has_value(),
+                "failed delete remains openable in current registry");
+        auto record = registry.record("delete-rollback", 1);
+        require(record.has_value() &&
+                    *record == std::vector<u8>(baseline.begin(),
+                                               baseline.end()),
+                "failed delete preserves current registry record data");
+        require(registry.close("delete-rollback").has_value(),
+                "close current registry after failed delete");
+
+        RecordStoreRegistry reloaded;
+        require(reloaded.configure(case_root.string()).has_value(),
+                "configure delete rollback reload");
+        require(reloaded.open("delete-rollback", false).has_value(),
+                "failed delete remains durable after restart");
+        auto durable_record = reloaded.record("delete-rollback", 1);
+        require(durable_record.has_value() &&
+                    *durable_record == std::vector<u8>(baseline.begin(),
+                                                       baseline.end()),
+                "failed delete restores the durable generation");
+        require(reloaded.close("delete-rollback").has_value(),
+                "close delete rollback reload");
+        require(reloaded.delete_store("delete-rollback").has_value(),
+                "delete succeeds after fault injector is removed");
+        auto removed_names = reloaded.list_store_names();
+        require(removed_names.has_value() && removed_names->empty(),
+                "successful delete removes store from listing");
+    }
+}
+
 struct Generations final {
     std::string filename;
     std::vector<u8> first;
@@ -465,6 +537,11 @@ void test_recovery_selection(const fs::path& root) {
                 (opened.error().code == ErrorCode::checksum_mismatch ||
                  opened.error().code == ErrorCode::malformed_archive),
             "recovery rejects all corrupt generations");
+    auto listed = broken.list_store_names();
+    require(!listed.has_value() &&
+                (listed.error().code == ErrorCode::checksum_mismatch ||
+                 listed.error().code == ErrorCode::malformed_archive),
+            "listing reports an all-corrupt RMS store");
 }
 
 void initialize_crash_store(const fs::path& root) {
@@ -585,6 +662,10 @@ void test_migration_and_future_version(const fs::path& root) {
     require(!future_opened.has_value() &&
                 future_opened.error().code == ErrorCode::unsupported_archive,
             "future RMS format is rejected");
+    auto future_listed = future_reader.list_store_names();
+    require(!future_listed.has_value() &&
+                future_listed.error().code == ErrorCode::unsupported_archive,
+            "listing reports an unsupported future RMS format");
 }
 
 void test_suite_isolation_and_names(const fs::path& root) {
@@ -745,6 +826,7 @@ int main(int argc, char** argv) {
     test_suite_quota(root / "quota");
     test_concurrent_registry(root / "concurrent");
     test_fault_rollback(root / "faults");
+    test_delete_store_rollback(root / "delete-faults");
     test_recovery_selection(root / "recovery");
     test_process_crash_recovery(root / "crash", crash_harness);
     test_migration_and_future_version(root / "formats");
