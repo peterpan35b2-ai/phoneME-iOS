@@ -75,6 +75,11 @@ enum JarCompatibilityPatcher {
     /// Writes a normalized JAR when a known malformed class is present.
     /// Returns false without creating the destination when no patch applies.
     static func writeNormalizedJar(from sourceURL: URL, to destinationURL: URL) throws -> Bool {
+#if DEBUG
+        if ProcessInfo.processInfo.environment["PHONEME_DISABLE_COMPATIBILITY"] == "1" {
+            return false
+        }
+#endif
         let archive = try CompatibilityZipArchive(data: Data(contentsOf: sourceURL))
         var replacements: [String: Data] = [:]
 
@@ -90,7 +95,7 @@ enum JarCompatibilityPatcher {
             )
         }
 
-        if let patchSet = try BinaryClassPatchSet.loadFromBundle() {
+        if false, let patchSet = try BinaryClassPatchSet.loadFromBundle() {
             let generated = try patchSet.replacements(
                 in: archive,
                 overlay: replacements
@@ -149,16 +154,37 @@ enum JarCompatibilityPatcher {
     private static func targetedPreverificationClassPaths(
         in archive: CompatibilityZipArchive
     ) throws -> [String] {
-        var matchingPaths: [String] = []
+        var matchingPaths = Set<String>()
+
         for (path, knownHashes) in classesRequiringPreverification {
             guard let classData = try archive.data(forExactPath: path) else {
                 continue
             }
             if knownHashes.contains(sha256(classData)) {
-                matchingPaths.append(path)
+                matchingPaths.insert(path)
             }
         }
-        return matchingPaths
+
+        // CLDC-preverified classes use version 45.3. Java 1.2-1.4 class
+        // files (46-48) are otherwise bytecode-compatible with phoneME, but
+        // they commonly lack the legacy StackMap attribute required by the
+        // CLDC verifier. Re-run only those classes through the embedded
+        // preverifier instead of maintaining game-specific hash lists.
+        for path in archive.classPaths {
+            guard let classData = try archive.data(forExactPath: path),
+                  classData.count >= 8,
+                  classData.uint32BE(at: 0) == 0xCAFEBABE else {
+                continue
+            }
+            let minorVersion = classData.uint16BE(at: 4)
+            let majorVersion = classData.uint16BE(at: 6)
+            if (majorVersion == 45 && minorVersion != 3)
+                || (46...48).contains(majorVersion) {
+                matchingPaths.insert(path)
+            }
+        }
+
+        return archive.classPaths.filter { matchingPaths.contains($0) }
     }
 
     private static func preverifyCompatibilityClasses(

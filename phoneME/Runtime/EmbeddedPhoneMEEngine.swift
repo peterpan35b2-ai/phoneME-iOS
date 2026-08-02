@@ -71,6 +71,24 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    private final class LaunchToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            let value = cancelled
+            lock.unlock()
+            return value
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
     private struct VisibleScreen: Equatable, Sendable {
         let id: Int32
         let componentType: Int32
@@ -306,6 +324,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
     private var runtime: PhoneMECAPI.RuntimeHandle?
     private var foregroundGameID: UUID?
     private var foregroundAppID: Int32?
+    private var pendingForegroundGameID: UUID?
+    private var launchToken = LaunchToken()
     private var pollTimer: DispatchSourceTimer?
     private var pollTimerIsSuspended = false
     private var runtimeIsSuspended = false
@@ -561,13 +581,41 @@ final class EmbeddedPhoneMEEngine: NSObject {
         _ = immediateProcessing
         _ = parallelScreenRedrawing
 
+        let previousPendingGameID = pendingForegroundGameID
+        launchToken.cancel()
+        let currentLaunchToken = LaunchToken()
+        launchToken = currentLaunchToken
+
         let currentLaunchIdentifier = UUID()
         launchIdentifier = currentLaunchIdentifier
+
+        let previousForegroundGameID = foregroundGameID
+        stopForegroundPolling()
+        foregroundGameID = nil
+        foregroundAppID = nil
+        pendingForegroundGameID = gameID
+        if let previousPendingGameID, previousPendingGameID != gameID {
+            onApplicationStateChange?(previousPendingGameID, .active)
+        }
+        if previousForegroundGameID != nil {
+            onForegroundApplicationChange?(nil)
+        }
         setState(.starting)
 
         let context = runtimeContext
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
         runtimeQueue.async { [weak self] in
             do {
+                // A foreground transition owns the process-global LCDUI and
+                // framebuffer bridges. Wait for every operation submitted by
+                // the previous screen before changing the NAMS foreground app.
+                inputQueue.sync { }
+                pollQueue.sync { }
+                renderQueue.sync { }
+                guard !currentLaunchToken.isCancelled else { return }
+
                 let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
                     in: context
                 )
@@ -590,6 +638,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     context.suiteIDs[gameID] = installedSuiteID
                     suiteID = installedSuiteID
                 }
+
+                guard !currentLaunchToken.isCancelled else { return }
 
                 let keymapResult = loadedAPI.configureKeymap(
                     createdRuntime,
@@ -676,6 +726,17 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     }
                 }
 
+                guard try Self.waitForForegroundApplication(
+                    api: loadedAPI,
+                    runtime: createdRuntime,
+                    appID: appID,
+                    screenWidth: screenWidth,
+                    screenHeight: screenHeight,
+                    token: currentLaunchToken
+                ) else {
+                    return
+                }
+
                 Self.configureMediaMetadata(
                     title: mediaTitle,
                     artist: mediaArtist,
@@ -685,7 +746,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 DispatchQueue.main.async {
                     guard
                         let self,
-                        self.launchIdentifier == currentLaunchIdentifier
+                        self.launchIdentifier == currentLaunchIdentifier,
+                        self.launchToken === currentLaunchToken,
+                        !currentLaunchToken.isCancelled
                     else {
                         return
                     }
@@ -693,6 +756,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     self.runtime = createdRuntime
                     self.foregroundGameID = gameID
                     self.foregroundAppID = appID
+                    self.pendingForegroundGameID = nil
                     self.runtimeIsSuspended = false
                     self.runtimeSuspensionRequested = false
                     self.setState(.running)
@@ -716,10 +780,12 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 DispatchQueue.main.async { [weak self] in
                     guard
                         let self,
-                        self.launchIdentifier == currentLaunchIdentifier
+                        self.launchIdentifier == currentLaunchIdentifier,
+                        self.launchToken === currentLaunchToken
                     else {
                         return
                     }
+                    self.pendingForegroundGameID = nil
                     self.setState(.failed(error.localizedDescription))
                 }
             }
@@ -727,23 +793,42 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func hideCurrentApplication() {
-        guard let api, let runtime, let gameID = foregroundGameID else {
+        guard let gameID = foregroundGameID ?? pendingForegroundGameID else {
             return
         }
 
+        launchToken.cancel()
         launchIdentifier = UUID()
         stopForegroundPolling()
         foregroundGameID = nil
         foregroundAppID = nil
+        pendingForegroundGameID = nil
         onApplicationStateChange?(gameID, .active)
         onForegroundApplicationChange?(nil)
 
+        let context = runtimeContext
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
         runtimeQueue.async {
+            inputQueue.sync { }
+            pollQueue.sync { }
+            renderQueue.sync { }
+            guard
+                let api = context.api,
+                let runtime = context.runtime
+            else {
+                return
+            }
             _ = api.setForeground(
                 runtime,
                 appID: nil,
                 screenWidth: 1,
                 screenHeight: 1
+            )
+            Self.waitUntilNoForegroundApplication(
+                api: api,
+                runtime: runtime
             )
         }
     }
@@ -751,15 +836,29 @@ final class EmbeddedPhoneMEEngine: NSObject {
     func terminateApplication(gameID: UUID) {
         let context = runtimeContext
         let wasForeground = foregroundGameID == gameID
-        if wasForeground {
+        let wasPending = pendingForegroundGameID == gameID
+        let wasVisible = wasForeground || wasPending
+        if wasPending {
+            launchToken.cancel()
+        }
+        if wasVisible {
             launchIdentifier = UUID()
             stopForegroundPolling()
             foregroundGameID = nil
             foregroundAppID = nil
+            pendingForegroundGameID = nil
             onForegroundApplicationChange?(nil)
         }
 
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
         runtimeQueue.async { [weak self] in
+            if wasVisible {
+                inputQueue.sync { }
+                pollQueue.sync { }
+                renderQueue.sync { }
+            }
             guard
                 let loadedAPI = context.api,
                 let createdRuntime = context.runtime,
@@ -780,7 +879,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.onApplicationStateChange?(gameID, .destroyed)
-                if wasForeground {
+                if wasVisible {
                     self.setState(.stopped)
                 }
                 if shouldShutdown {
@@ -846,6 +945,64 @@ final class EmbeddedPhoneMEEngine: NSObject {
         return (api, runtime)
     }
 
+    nonisolated private static func waitForForegroundApplication(
+        api: PhoneMECAPI,
+        runtime: PhoneMECAPI.RuntimeHandle,
+        appID: Int32,
+        screenWidth: Int,
+        screenHeight: Int,
+        token: LaunchToken
+    ) throws -> Bool {
+        var settleDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+        var didReassertForeground = false
+
+        while ProcessInfo.processInfo.systemUptime < settleDeadline {
+            if token.isCancelled {
+                return false
+            }
+
+            let state = api.midletState(runtime, appID: appID)
+            if state == .destroyed || state == .error {
+                throw PhoneMECoreError.foregroundActivationFailed
+            }
+
+            // NAMS state/display callbacks are optional and arrive late on a
+            // few phoneME builds. Re-assert only after the proxy is known to be
+            // active; otherwise retain the original start request and finish a
+            // short serialized settle instead of producing a false timeout.
+            if state == .active,
+               !didReassertForeground,
+               api.foregroundAppID(runtime) != appID {
+                let result = api.setForeground(
+                    runtime,
+                    appID: appID,
+                    screenWidth: screenWidth,
+                    screenHeight: screenHeight
+                )
+                guard result == 0 else {
+                    throw PhoneMECoreError.launchFailed(result)
+                }
+                didReassertForeground = true
+                settleDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+            }
+
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        return !token.isCancelled
+    }
+
+    nonisolated private static func waitUntilNoForegroundApplication(
+        api: PhoneMECAPI,
+        runtime: PhoneMECAPI.RuntimeHandle,
+        timeout: TimeInterval = 2
+    ) {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while api.foregroundAppID(runtime) != nil,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+    }
+
     nonisolated private static func configureMediaMetadata(
         title: String,
         artist: String,
@@ -879,7 +1036,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
         let currentRuntime = runtime
         let needsResume = runtimeIsSuspended
             || runtimeSuspensionRequested
+        launchToken.cancel()
         launchIdentifier = UUID()
+        pendingForegroundGameID = nil
         clearCurrentRuntime()
         setState(.stopped)
 
@@ -1024,14 +1183,14 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func sendKey(_ key: J2MEKey, pressed: Bool) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         inputQueue.async {
             api.sendKey(runtime, key: key, pressed: pressed)
         }
     }
 
     func sendPointer(x: Int32, y: Int32, action: Int32) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
 
         // Drag motion is a latest-value signal. Queueing every intermediate
         // coordinate can delay the eventual pointer-up and all LCDUI actions
@@ -1050,21 +1209,21 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func selectLCDUICommand(_ id: Int32) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         inputQueue.async {
             api.selectLCDUICommand(runtime, id: id)
         }
     }
 
     func focusLCDUIItem(_ componentID: Int32) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         inputQueue.async {
             api.focusLCDUIItem(runtime, componentID: componentID)
         }
     }
 
     func activateLCDUIItem(_ componentID: Int32) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         inputQueue.async {
             api.activateLCDUIItem(runtime, componentID: componentID)
         }
@@ -1075,7 +1234,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         text: String,
         caretPosition: Int
     ) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         scheduleContinuousInputFlush(
             if: continuousInputBuffer.submitText(
                 componentID: componentID,
@@ -1092,7 +1251,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         index: Int,
         selected: Bool
     ) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         inputQueue.async {
             api.setLCDUIChoice(
                 runtime,
@@ -1104,7 +1263,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func setLCDUIGauge(componentID: Int32, value: Int) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         scheduleContinuousInputFlush(
             if: continuousInputBuffer.submitGauge(
                 componentID: componentID,
@@ -1116,7 +1275,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func setLCDUIDate(componentID: Int32, date: Date) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         scheduleContinuousInputFlush(
             if: continuousInputBuffer.submitDate(
                 componentID: componentID,
@@ -1128,7 +1287,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     func setLCDUIScrollPosition(_ position: Int) {
-        guard let api, let runtime else { return }
+        guard foregroundAppID != nil, let api, let runtime else { return }
         scheduleContinuousInputFlush(
             if: continuousInputBuffer.submitScrollPosition(position),
             api: api,
@@ -1442,9 +1601,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
         state: PhoneMECAPI.AppState
     ) {
         let context = runtimeContext
+        launchToken.cancel()
         stopForegroundPolling()
         foregroundGameID = nil
         foregroundAppID = nil
+        if pendingForegroundGameID == gameID {
+            pendingForegroundGameID = nil
+        }
         onApplicationStateChange?(gameID, state)
         onForegroundApplicationChange?(nil)
         setState(
@@ -1506,6 +1669,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     private func clearCurrentRuntime() {
+        launchToken.cancel()
+        pendingForegroundGameID = nil
+        foregroundGameID = nil
+        foregroundAppID = nil
         if let pollTimer {
             // Dispatch sources must be resumed before their final cancellation.
             if pollTimerIsSuspended {

@@ -41,6 +41,9 @@ struct PhoneMEApp: App {
                         !session.runningApplications.isEmpty
                     )
                     updateLifecycle(for: scenePhase)
+#if DEBUG
+                    debugLaunchIfRequested()
+#endif
                 }
                 .onChange(of: session.runningApplications.count) { count in
                     backgroundExecution.setHasRunningApplications(count > 0)
@@ -58,6 +61,50 @@ struct PhoneMEApp: App {
         }
 #endif
     }
+
+#if DEBUG
+    private func debugLaunchIfRequested() {
+        guard let path = ProcessInfo.processInfo.environment["PHONEME_DEBUG_JAR"],
+              !path.isEmpty else {
+            return
+        }
+
+        let sourceURL = URL(fileURLWithPath: path)
+        Task { @MainActor in
+            let reportURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("phoneme-debug-report.txt")
+            do {
+                let game = try library.importJar(from: sourceURL)
+                let jarURL = try library.prepareJarForLaunch(game)
+                session.launch(
+                    game: game,
+                    jarURL: jarURL,
+                    artworkURL: library.iconURL(for: game),
+                    profile: .default
+                )
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                let appState = session.runningApplications[game.id]
+                    .map { String(describing: $0.state) } ?? "missing"
+                let report = [
+                    "source=\(sourceURL.lastPathComponent)",
+                    "mainClass=\(game.mainClass)",
+                    "state=\(String(describing: session.state))",
+                    "application=\(appState)",
+                    "frame=\(session.frame != nil)",
+                    "fps=\(session.fpsStore.value)",
+                    "presentation=\(String(describing: session.presentationMode))",
+                    "nativeLCDUI=\(session.isPresentingNativeLCDUI)"
+                ].joined(separator: "\n")
+                try report.write(to: reportURL, atomically: true, encoding: .utf8)
+                print("[PhoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
+            } catch {
+                let report = "source=\(sourceURL.lastPathComponent)\nsetupError=\(String(describing: error))\nlocalized=\(error.localizedDescription)"
+                try? report.write(to: reportURL, atomically: true, encoding: .utf8)
+                print("[PhoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
+            }
+        }
+    }
+#endif
 
     private func updateLifecycle(for phase: ScenePhase) {
         switch phase {

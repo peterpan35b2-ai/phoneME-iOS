@@ -103,6 +103,7 @@ extern int phoneme_ios_nams_enqueue_pause(int32_t appId);
 extern int phoneme_ios_nams_enqueue_resume(int32_t appId);
 extern int phoneme_ios_nams_enqueue_destroy(int32_t appId, int32_t timeoutMs);
 extern int phoneme_ios_nams_enqueue_stop(void);
+extern int phoneme_ios_nams_enqueue_release_input(int32_t isolateId);
 extern void phoneme_ios_nams_reset_queue(void);
 extern int JVM_ParseOneArg(int argc, char** argv);
 extern int fileInstaller(int argc, char** argv);
@@ -116,6 +117,14 @@ extern void phoneme_ios_port_configure_display(
     int32_t width,
     int32_t height
 );
+extern void phoneme_ios_port_set_isolate_display(
+    int32_t isolate_id,
+    int32_t width,
+    int32_t height
+);
+extern void phoneme_ios_port_prepare_foreground(int32_t isolate_id);
+extern void phoneme_ios_port_commit_foreground(int32_t isolate_id);
+extern void phoneme_ios_port_release_isolate(int32_t isolate_id);
 extern void phoneme_ios_port_reset(void);
 extern void phoneme_ios_port_request_stop(void);
 extern int phoneme_ios_port_should_stop(void);
@@ -147,6 +156,8 @@ extern int32_t phoneme_ios_port_copy_frame_rgba(
     uint64_t* generation
 );
 extern void phoneme_ios_lcdui_reset(void);
+extern void phoneme_ios_lcdui_prepare_foreground(int32_t isolate_id);
+extern void phoneme_ios_lcdui_commit_foreground(int32_t isolate_id);
 extern void phoneme_ios_media_suspend(void);
 extern void phoneme_ios_media_resume(void);
 extern void phoneme_ios_media_reset(void);
@@ -193,7 +204,11 @@ typedef struct {
     int systemActive;
     int lastExitCode;
     int32_t foregroundAppId;
+    int32_t requestedForegroundAppId;
     int32_t appStates[PHONEME_MAX_APPS + 1];
+    int32_t appIsolateIds[PHONEME_MAX_APPS + 1];
+    int32_t appScreenWidths[PHONEME_MAX_APPS + 1];
+    int32_t appScreenHeights[PHONEME_MAX_APPS + 1];
     int32_t appUsedMemory[PHONEME_MAX_APPS + 1];
     uint64_t appRuntimeInfoGeneration[PHONEME_MAX_APPS + 1];
     char* runtimeHome;
@@ -424,6 +439,7 @@ static void update_mvm_worker_qos(PhoneMERuntime* runtime) {
 
 static void nams_system_listener(const PhoneMENamsEventData* eventData) {
     PhoneMERuntime* runtime = current_active_runtime();
+    int detachHost = 0;
     if (runtime == NULL || eventData == NULL) {
         return;
     }
@@ -455,51 +471,170 @@ static void nams_system_listener(const PhoneMENamsEventData* eventData) {
             eventData->state == PHONEME_SYSTEM_STATE_ERROR) {
         runtime->systemActive = 0;
         runtime->foregroundAppId = 0;
+        runtime->requestedForegroundAppId = 0;
+        detachHost = 1;
     }
     pthread_cond_broadcast(&runtime->condition);
     pthread_mutex_unlock(&runtime->mutex);
+    if (detachHost) {
+        phoneme_ios_port_commit_foreground(0);
+        phoneme_ios_lcdui_commit_foreground(0);
+    }
 }
 
 static void nams_midlet_listener(const PhoneMENamsEventData* eventData) {
     PhoneMERuntime* runtime = current_active_runtime();
+    int shouldSetForeground = 0;
+    int detachedForeground = 0;
     if (runtime == NULL || eventData == NULL ||
             eventData->event != PHONEME_NAMS_EVENT_STATE_CHANGED ||
             eventData->appId < 1 || eventData->appId > PHONEME_MAX_APPS) {
         return;
     }
 
+    fprintf(
+        stderr,
+        "[phoneME NAMS midlet] app=%d state=%d reason=%d requested=%d foreground=%d isolate=%d\n",
+        eventData->appId,
+        eventData->state,
+        eventData->reason,
+        runtime->requestedForegroundAppId,
+        runtime->foregroundAppId,
+        runtime->appIsolateIds[eventData->appId]
+    );
+    fflush(stderr);
+#if defined(__APPLE__)
+    os_log_error(
+        OS_LOG_DEFAULT,
+        "phoneME NAMS midlet app=%{public}d state=%{public}d reason=%{public}d requested=%{public}d foreground=%{public}d isolate=%{public}d",
+        eventData->appId,
+        eventData->state,
+        eventData->reason,
+        runtime->requestedForegroundAppId,
+        runtime->foregroundAppId,
+        runtime->appIsolateIds[eventData->appId]
+    );
+#endif
+
     pthread_mutex_lock(&runtime->mutex);
     runtime->appStates[eventData->appId] = eventData->state;
+    if (eventData->reason > 0 &&
+            eventData->state != PHONEME_APP_STATE_ERROR &&
+            eventData->state != PHONEME_APP_STATE_DESTROYED) {
+        runtime->appIsolateIds[eventData->appId] = eventData->reason;
+    }
+    if (eventData->state == PHONEME_APP_STATE_ACTIVE &&
+            runtime->requestedForegroundAppId == eventData->appId &&
+            runtime->foregroundAppId != eventData->appId) {
+        /* NAMS creates the MIDlet proxy asynchronously. A foreground command
+         * queued immediately after create_start races the proxy registration
+         * and is rejected as "Invalid App Id", leaving Canvas black. Defer
+         * foregrounding until NAMS confirms that the MIDlet is active. */
+        shouldSetForeground = 1;
+    }
     if (eventData->state == PHONEME_APP_STATE_DESTROYED ||
             eventData->state == PHONEME_APP_STATE_ERROR) {
         runtime->appUsedMemory[eventData->appId] = -1;
         runtime->appRuntimeInfoGeneration[eventData->appId] += 1U;
+        runtime->appIsolateIds[eventData->appId] = 0;
         if (runtime->foregroundAppId == eventData->appId) {
             runtime->foregroundAppId = 0;
+            detachedForeground = 1;
+        }
+        if (runtime->requestedForegroundAppId == eventData->appId) {
+            runtime->requestedForegroundAppId = 0;
         }
     }
     pthread_cond_broadcast(&runtime->condition);
     pthread_mutex_unlock(&runtime->mutex);
+
+    if (detachedForeground) {
+        phoneme_ios_port_commit_foreground(0);
+        phoneme_ios_lcdui_commit_foreground(0);
+    }
+    /* Do not release native display storage from the NAMS lifecycle callback.
+     * The isolate can still be unwinding LCDUI/native graphics teardown after
+     * it reports DESTROYED/ERROR. finalizeFrameBuffer() owns the safe release
+     * point; full runtime reset handles abnormal exits that never finalize. */
+
+    if (shouldSetForeground) {
+        int isolateId;
+        int screenWidth;
+        int screenHeight;
+        pthread_mutex_lock(&runtime->mutex);
+        isolateId = runtime->appIsolateIds[eventData->appId];
+        screenWidth = runtime->appScreenWidths[eventData->appId];
+        screenHeight = runtime->appScreenHeights[eventData->appId];
+        pthread_mutex_unlock(&runtime->mutex);
+        phoneme_ios_port_set_isolate_display(
+            isolateId,
+            screenWidth,
+            screenHeight
+        );
+        phoneme_ios_port_prepare_foreground(isolateId);
+        phoneme_ios_lcdui_prepare_foreground(isolateId);
+        if (phoneme_ios_nams_enqueue_set_foreground(eventData->appId) != 0) {
+            phoneme_ios_port_commit_foreground(0);
+            phoneme_ios_lcdui_commit_foreground(0);
+        }
+    }
     update_mvm_worker_qos(runtime);
 }
 
 static void nams_display_listener(const PhoneMENamsEventData* eventData) {
     PhoneMERuntime* runtime = current_active_runtime();
+    int commitIsolateId = -1;
     if (runtime == NULL || eventData == NULL || eventData->appId < 0) {
         return;
     }
+
+    fprintf(
+        stderr,
+        "[phoneME NAMS display] app=%d state=%d reason=%d requested=%d foreground=%d\n",
+        eventData->appId,
+        eventData->state,
+        eventData->reason,
+        runtime->requestedForegroundAppId,
+        runtime->foregroundAppId
+    );
+    fflush(stderr);
+#if defined(__APPLE__)
+    os_log_error(
+        OS_LOG_DEFAULT,
+        "phoneME NAMS display app=%{public}d state=%{public}d reason=%{public}d requested=%{public}d foreground=%{public}d",
+        eventData->appId,
+        eventData->state,
+        eventData->reason,
+        runtime->requestedForegroundAppId,
+        runtime->foregroundAppId
+    );
+#endif
 
     pthread_mutex_lock(&runtime->mutex);
     if (eventData->state == PHONEME_DISPLAY_STATE_FOREGROUND ||
             eventData->state == PHONEME_DISPLAY_STATE_FOREGROUND_REQUEST) {
         runtime->foregroundAppId = eventData->appId;
+        if (eventData->appId == PHONEME_NO_FOREGROUND_APP_ID) {
+            commitIsolateId = 0;
+        } else if (eventData->reason > 0) {
+            runtime->appIsolateIds[eventData->appId] = eventData->reason;
+            commitIsolateId = eventData->reason;
+        } else if (eventData->appId <= PHONEME_MAX_APPS) {
+            commitIsolateId = runtime->appIsolateIds[eventData->appId];
+        }
     } else if ((eventData->state == PHONEME_DISPLAY_STATE_BACKGROUND ||
             eventData->state == PHONEME_DISPLAY_STATE_BACKGROUND_REQUEST) &&
             runtime->foregroundAppId == eventData->appId) {
         runtime->foregroundAppId = 0;
+        commitIsolateId = 0;
     }
     pthread_cond_broadcast(&runtime->condition);
     pthread_mutex_unlock(&runtime->mutex);
+
+    if (commitIsolateId >= 0) {
+        phoneme_ios_port_commit_foreground(commitIsolateId);
+        phoneme_ios_lcdui_commit_foreground(commitIsolateId);
+    }
     update_mvm_worker_qos(runtime);
 }
 
@@ -510,7 +645,11 @@ static void finish_nams_worker(void* context) {
     runtime->running = 0;
     runtime->systemActive = 0;
     runtime->foregroundAppId = 0;
+    runtime->requestedForegroundAppId = 0;
     memset(runtime->appStates, 0, sizeof(runtime->appStates));
+    memset(runtime->appIsolateIds, 0, sizeof(runtime->appIsolateIds));
+    memset(runtime->appScreenWidths, 0, sizeof(runtime->appScreenWidths));
+    memset(runtime->appScreenHeights, 0, sizeof(runtime->appScreenHeights));
     memset(runtime->appUsedMemory, 0, sizeof(runtime->appUsedMemory));
     memset(
         runtime->appRuntimeInfoGeneration,
@@ -1017,7 +1156,11 @@ int32_t phoneme_start_system(PhoneMERuntimeRef runtimeRef) {
     runtime->suspended = 0;
     runtime->systemActive = 0;
     runtime->foregroundAppId = 0;
+    runtime->requestedForegroundAppId = 0;
     memset(runtime->appStates, 0, sizeof(runtime->appStates));
+    memset(runtime->appIsolateIds, 0, sizeof(runtime->appIsolateIds));
+    memset(runtime->appScreenWidths, 0, sizeof(runtime->appScreenWidths));
+    memset(runtime->appScreenHeights, 0, sizeof(runtime->appScreenHeights));
     createResult = pthread_create(
         &runtime->worker,
         NULL,
@@ -1050,6 +1193,7 @@ int32_t phoneme_start_midlet(
     PhoneMERuntime* runtime = (PhoneMERuntime*)runtimeRef;
     PhoneMEJChar* className;
     int32_t classNameLength = 0;
+    int previousForegroundIsolateId = 0;
     int result;
 
     if (runtime == NULL || suiteId <= 0 || appId < 1 ||
@@ -1069,10 +1213,27 @@ int32_t phoneme_start_midlet(
     }
 
     phoneme_ios_port_configure_display(screenWidth, screenHeight);
-    phoneme_ios_lcdui_reset();
+
+    pthread_mutex_lock(&runtime->mutex);
+    if (runtime->foregroundAppId >= 1 &&
+            runtime->foregroundAppId <= PHONEME_MAX_APPS) {
+        previousForegroundIsolateId =
+            runtime->appIsolateIds[runtime->foregroundAppId];
+    }
+    pthread_mutex_unlock(&runtime->mutex);
+    if (previousForegroundIsolateId > 0) {
+        (void)phoneme_ios_nams_enqueue_release_input(
+            previousForegroundIsolateId
+        );
+    }
+    phoneme_ios_port_prepare_foreground(0);
+    phoneme_ios_lcdui_prepare_foreground(0);
 
     pthread_mutex_lock(&runtime->mutex);
     runtime->appStates[appId] = PHONEME_APP_STATE_NONE;
+    runtime->appScreenWidths[appId] = screenWidth;
+    runtime->appScreenHeights[appId] = screenHeight;
+    runtime->requestedForegroundAppId = appId;
     pthread_mutex_unlock(&runtime->mutex);
 
     result = phoneme_ios_nams_enqueue_start(
@@ -1085,12 +1246,16 @@ int32_t phoneme_start_midlet(
     if (result != 0) {
         pthread_mutex_lock(&runtime->mutex);
         runtime->appStates[appId] = PHONEME_APP_STATE_ERROR;
+        if (runtime->requestedForegroundAppId == appId) {
+            runtime->requestedForegroundAppId = 0;
+        }
         pthread_mutex_unlock(&runtime->mutex);
+        phoneme_ios_port_commit_foreground(previousForegroundIsolateId);
+        phoneme_ios_lcdui_commit_foreground(previousForegroundIsolateId);
         return PHONEME_ERROR_SYSTEM_START;
     }
 
-    result = phoneme_ios_nams_enqueue_set_foreground(appId);
-    return result == 0 ? PHONEME_OK : PHONEME_ERROR_SYSTEM_START;
+    return PHONEME_OK;
 }
 
 int32_t phoneme_set_foreground(
@@ -1100,6 +1265,9 @@ int32_t phoneme_set_foreground(
         int32_t screenHeight) {
     PhoneMERuntime* runtime = (PhoneMERuntime*)runtimeRef;
     int running;
+    int shouldEnqueue;
+    int targetIsolateId = 0;
+    int previousForegroundIsolateId = 0;
     int result;
 
     if (runtime == NULL || appId < 0 || appId > PHONEME_MAX_APPS ||
@@ -1110,17 +1278,60 @@ int32_t phoneme_set_foreground(
 
     pthread_mutex_lock(&runtime->mutex);
     running = runtime->running && runtime->systemActive;
+    if (running) {
+        runtime->requestedForegroundAppId = appId;
+    }
+    if (runtime->foregroundAppId >= 1 &&
+            runtime->foregroundAppId <= PHONEME_MAX_APPS) {
+        previousForegroundIsolateId =
+            runtime->appIsolateIds[runtime->foregroundAppId];
+    }
+    if (appId >= 1 && appId <= PHONEME_MAX_APPS) {
+        targetIsolateId = runtime->appIsolateIds[appId];
+        runtime->appScreenWidths[appId] = screenWidth;
+        runtime->appScreenHeights[appId] = screenHeight;
+    }
+    shouldEnqueue = appId == PHONEME_NO_FOREGROUND_APP_ID ||
+        (appId >= 1 &&
+         (runtime->appStates[appId] == PHONEME_APP_STATE_ACTIVE ||
+          runtime->appStates[appId] == PHONEME_APP_STATE_PAUSED));
     pthread_mutex_unlock(&runtime->mutex);
     if (!running) {
         return PHONEME_ERROR_NOT_RUNNING;
     }
 
+    if (previousForegroundIsolateId > 0 &&
+            previousForegroundIsolateId != targetIsolateId) {
+        (void)phoneme_ios_nams_enqueue_release_input(
+            previousForegroundIsolateId
+        );
+    }
+
     if (appId != PHONEME_NO_FOREGROUND_APP_ID) {
         phoneme_ios_port_configure_display(screenWidth, screenHeight);
-        phoneme_ios_lcdui_reset();
+        phoneme_ios_port_set_isolate_display(
+            targetIsolateId,
+            screenWidth,
+            screenHeight
+        );
+        phoneme_ios_port_prepare_foreground(targetIsolateId);
+        phoneme_ios_lcdui_prepare_foreground(targetIsolateId);
+    } else {
+        phoneme_ios_port_prepare_foreground(0);
+        phoneme_ios_lcdui_prepare_foreground(0);
+        phoneme_ios_port_commit_foreground(0);
+        phoneme_ios_lcdui_commit_foreground(0);
+    }
+    if (!shouldEnqueue) {
+        return PHONEME_OK;
     }
     result = phoneme_ios_nams_enqueue_set_foreground(appId);
-    return result == 0 ? PHONEME_OK : PHONEME_ERROR_SYSTEM_START;
+    if (result != 0) {
+        phoneme_ios_port_commit_foreground(previousForegroundIsolateId);
+        phoneme_ios_lcdui_commit_foreground(previousForegroundIsolateId);
+        return PHONEME_ERROR_SYSTEM_START;
+    }
+    return PHONEME_OK;
 }
 
 int32_t phoneme_pause_midlet(PhoneMERuntimeRef runtimeRef, int32_t appId) {

@@ -634,6 +634,7 @@ enum PhoneMECoreError: LocalizedError {
     case mainClassMissing
     case applicationNotPrepared
     case tooManyApplications
+    case foregroundActivationFailed
     case launchFailed(Int32)
 
     var errorDescription: String? {
@@ -650,6 +651,8 @@ enum PhoneMECoreError: LocalizedError {
             return "This application was imported after multitasking started. Close the running applications once so it can be prepared."
         case .tooManyApplications:
             return "The maximum of 64 simultaneous J2ME applications has been reached."
+        case .foregroundActivationFailed:
+            return "The J2ME application could not become active in the foreground."
         case let .launchFailed(code):
             return "Failed to start application (error \(code))."
         }

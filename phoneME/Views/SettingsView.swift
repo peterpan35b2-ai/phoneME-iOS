@@ -64,27 +64,6 @@ struct SettingsView: View {
                 )
             }
 
-            if backgroundExecution.isEnabled {
-                LabeledContent {
-                    Text(backgroundExecution.status.description)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    SettingsLabel(
-                        title: "Background status",
-                        systemImage: backgroundExecution.isKeepingAlive
-                            ? "checkmark.circle.fill"
-                            : "info.circle.fill",
-                        tint: backgroundExecution.isKeepingAlive ? .green : .secondary
-                    )
-                }
-
-                if backgroundExecution.status.requiresSystemSettings {
-                    Button("Open Location Settings") {
-                        backgroundExecution.openSystemSettings()
-                    }
-                }
-            }
 #endif
 
             NavigationLink {

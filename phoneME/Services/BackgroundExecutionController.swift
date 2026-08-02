@@ -20,6 +20,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         case waitingForApplication
         case readyForBackground
         case requestingPermission
+        case alwaysPermissionRequired
         case active
         case denied
         case restricted
@@ -35,7 +36,9 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
             case .readyForBackground:
                 return "Ready for background use"
             case .requestingPermission:
-                return "Location permission is required"
+                return "Choose Always Allow for background execution"
+            case .alwaysPermissionRequired:
+                return "Always Location access is required"
             case .active:
                 return "Background execution is active"
             case .denied:
@@ -51,7 +54,8 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
         var requiresSystemSettings: Bool {
             switch self {
-            case .denied, .restricted, .locationServicesDisabled:
+            case .alwaysPermissionRequired, .denied, .restricted,
+                 .locationServicesDisabled:
                 return true
             default:
                 return false
@@ -85,7 +89,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         locationManager.distanceFilter = 3_000
         locationManager.pausesLocationUpdatesAutomatically = false
         locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.showsBackgroundLocationIndicator = true
+        locationManager.showsBackgroundLocationIndicator = false
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -143,12 +147,15 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         }
 
         switch locationManager.authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
+        case .authorizedAlways:
             guard shouldKeepAlive else {
                 stopLocationUpdates(status: .readyForBackground)
                 return
             }
             startLocationUpdatesIfNeeded()
+
+        case .authorizedWhenInUse:
+            stopLocationUpdates(status: .alwaysPermissionRequired)
 
         case .notDetermined:
             stopLocationUpdates(status: .requestingPermission)
@@ -159,7 +166,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
                 return
             }
             isRequestingAuthorization = true
-            locationManager.requestWhenInUseAuthorization()
+            locationManager.requestAlwaysAuthorization()
 
         case .denied:
             stopLocationUpdates(status: .denied)
@@ -181,6 +188,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
             return
         }
 
+        locationManager.showsBackgroundLocationIndicator = false
         locationManager.startUpdatingLocation()
         isKeepingAlive = true
         status = .active
