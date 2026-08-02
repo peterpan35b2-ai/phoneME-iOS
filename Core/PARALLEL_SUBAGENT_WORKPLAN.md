@@ -564,13 +564,13 @@ Core/Tools/test-cldc-library-host.sh
 # 05. JAD, installer và persistent Suite Store
 
 **TRẠNG THÁI**
-- Trạng thái: `CLAIMED`
+- Trạng thái: `READY_FOR_INTEGRATION`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 18:51 +07:00`
+- Cập nhật cuối: `2026-08-02 19:23 +07:00`
 - Blocker: `-`
-- Handoff: `-`
+- Handoff: `7cf49d5 + b25c246; checkpoint Review 05 đọc 2026-08-02 19:23 +07:00, đã xử lý R05-20260802-01/02/03/04. Mục 20 cần thêm JadParser.cpp, SuiteInstaller.cpp, SuiteDatabase.cpp vào CMake và gọi SuiteStore::configure với runtime_home trước install; full host regression hiện dừng ở fixture Game API Layer/Sprite/TiledLayer ngoài ownership mục 05.`
 
 **Loại:** SONG SONG, P1
 
