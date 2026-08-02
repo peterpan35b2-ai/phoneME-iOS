@@ -1,3 +1,4 @@
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -15,15 +16,19 @@ namespace {
 
 using phoneme::ErrorCode;
 using phoneme::Result;
+using phoneme::Status;
 using phoneme::SuiteId;
 using phoneme::u8;
 using phoneme::u64;
+using phoneme::usize;
 using phoneme::runtime::AttributeParserLimits;
 using phoneme::runtime::DuplicatePropertyPolicy;
 using phoneme::runtime::JadParser;
+using phoneme::runtime::SuiteDatabaseFaultPoint;
 using phoneme::runtime::SuiteInstaller;
 using phoneme::runtime::SuiteStore;
 using phoneme::runtime::SuiteStoreConfig;
+using phoneme::runtime::SuiteStoreFaultPoint;
 using phoneme::runtime::SuiteUninstallPolicy;
 
 int failures = 0;
@@ -73,7 +78,9 @@ u64 fixture_file_size(const std::filesystem::path& path) {
 std::string make_jad(const std::filesystem::path& jar,
                      std::string_view version,
                      u64 declared_size,
-                     bool continued = false) {
+                     bool continued = false,
+                     std::string_view profile = "MIDP-2.0",
+                     std::string_view configuration = "CLDC-1.1") {
     std::string result;
     result.append("MIDlet-Name: Installer Test\n");
     result.append("MIDlet-Vendor: phoneME\n");
@@ -86,8 +93,12 @@ std::string make_jad(const std::filesystem::path& jar,
     result.append("MIDlet-Jar-Size: ");
     result.append(std::to_string(declared_size));
     result.push_back('\n');
-    result.append("MicroEdition-Profile: MIDP-2.0\n");
-    result.append("MicroEdition-Configuration: CLDC-1.1\n");
+    result.append("MicroEdition-Profile: ");
+    result.append(profile);
+    result.push_back('\n');
+    result.append("MicroEdition-Configuration: ");
+    result.append(configuration);
+    result.push_back('\n');
     result.append("MIDlet-1: Installer Test,,SuiteApp\n");
     result.append("MIDlet-Permissions: javax.microedition.io.Connector.http,");
     if (continued) {
@@ -328,6 +339,306 @@ void test_install_flow(const std::filesystem::path& root,
           "remove persisted permissions under explicit uninstall policy");
 }
 
+void test_transaction_faults(const std::filesystem::path& root,
+                             const std::filesystem::path& jar_v1,
+                             const std::filesystem::path& jar_v2) {
+    const std::array store_fault_points {
+        SuiteStoreFaultPoint::before_staged_jar_sync,
+        SuiteStoreFaultPoint::before_staged_jad_sync,
+        SuiteStoreFaultPoint::before_stage_directory_sync,
+        SuiteStoreFaultPoint::before_stage_parent_sync,
+        SuiteStoreFaultPoint::before_backup_rename,
+        SuiteStoreFaultPoint::before_backup_parent_sync,
+        SuiteStoreFaultPoint::before_activation_rename,
+        SuiteStoreFaultPoint::before_activation_parent_sync,
+    };
+
+    for (usize index = 0; index < store_fault_points.size(); ++index) {
+        const std::filesystem::path case_root =
+            root / ("install-fault-" + std::to_string(index));
+        std::error_code error;
+        std::filesystem::remove_all(case_root, error);
+        std::filesystem::create_directories(case_root, error);
+        check(!error, "create install fault case root");
+
+        const std::filesystem::path imported_v1 = case_root / "v1.jar";
+        const std::filesystem::path imported_v2 = case_root / "v2.jar";
+        const std::filesystem::path jad_v1 = case_root / "v1.jad";
+        const std::filesystem::path jad_v2 = case_root / "v2.jad";
+        check(copy_fixture_file(jar_v1, imported_v1) &&
+                  copy_fixture_file(jar_v2, imported_v2),
+              "copy transaction fault fixtures");
+        check(write_text(jad_v1, make_jad(
+                  imported_v1, "1.0.0", fixture_file_size(imported_v1))) &&
+                  write_text(jad_v2, make_jad(
+                      imported_v2, "1.1.0", fixture_file_size(imported_v2))),
+              "write transaction fault JAD files");
+
+        bool armed = false;
+        bool fired = false;
+        SuiteStore store;
+        SuiteStoreConfig config;
+        config.root_path = case_root.string();
+        config.fault_injector = [&](SuiteStoreFaultPoint point) -> Status {
+            if (armed && !fired && point == store_fault_points[index]) {
+                fired = true;
+                return phoneme::fail(
+                    ErrorCode::io_error, "injected suite transaction fault");
+            }
+            return {};
+        };
+        auto configured = store.configure(config);
+        check(configured.has_value(), "configure install fault store");
+        if (!configured) continue;
+        auto baseline = store.install(jad_v1.string(), imported_v1.string());
+        check(baseline.has_value(), "install baseline before transaction fault");
+        if (!baseline) continue;
+
+        armed = true;
+        auto upgraded = store.install(jad_v2.string(), imported_v2.string());
+        check_error(upgraded, ErrorCode::io_error,
+                    "surface injected suite transaction failure");
+        check(fired, "execute requested suite transaction fault point");
+        const auto* current = store.find(*baseline);
+        check(current != nullptr && current->version == "1.0.0",
+              "rollback in-memory suite after transaction failure");
+
+        store.clear();
+        auto restarted = store.configure(
+            SuiteStoreConfig {.root_path = case_root.string()});
+        check(restarted.has_value(),
+              "restart store after transaction fault rollback");
+        const auto* persisted = store.find(*baseline);
+        check(persisted != nullptr && persisted->version == "1.0.0",
+              "preserve durable baseline after transaction fault");
+    }
+
+    const std::array uninstall_fault_points {
+        SuiteStoreFaultPoint::before_uninstall_rename,
+        SuiteStoreFaultPoint::before_uninstall_parent_sync,
+    };
+    for (usize index = 0; index < uninstall_fault_points.size(); ++index) {
+        const std::filesystem::path case_root =
+            root / ("uninstall-fault-" + std::to_string(index));
+        std::error_code error;
+        std::filesystem::remove_all(case_root, error);
+        std::filesystem::create_directories(case_root, error);
+        const std::filesystem::path imported = case_root / "app.jar";
+        const std::filesystem::path jad = case_root / "app.jad";
+        check(copy_fixture_file(jar_v1, imported),
+              "copy uninstall fault fixture");
+        check(write_text(jad, make_jad(
+                  imported, "1.0.0", fixture_file_size(imported))),
+              "write uninstall fault JAD");
+
+        bool armed = false;
+        bool fired = false;
+        SuiteStore store;
+        SuiteStoreConfig config;
+        config.root_path = case_root.string();
+        config.fault_injector = [&](SuiteStoreFaultPoint point) -> Status {
+            if (armed && !fired && point == uninstall_fault_points[index]) {
+                fired = true;
+                return phoneme::fail(
+                    ErrorCode::io_error, "injected uninstall transaction fault");
+            }
+            return {};
+        };
+        check(store.configure(config).has_value(),
+              "configure uninstall fault store");
+        auto installed = store.install(jad.string(), imported.string());
+        check(installed.has_value(), "install baseline for uninstall fault");
+        if (!installed) continue;
+        armed = true;
+        auto uninstalled = store.uninstall(*installed);
+        check(!uninstalled.has_value() &&
+                  uninstalled.error().code == ErrorCode::io_error,
+              "surface injected uninstall transaction failure");
+        check(fired && store.find(*installed) != nullptr,
+              "rollback uninstall transaction failure");
+        store.clear();
+        check(store.configure(
+                  SuiteStoreConfig {.root_path = case_root.string()}).has_value(),
+              "restart after uninstall transaction failure");
+        check(store.find(*installed) != nullptr,
+              "preserve suite after uninstall transaction rollback");
+    }
+}
+
+void test_database_durability_unknown(
+    const std::filesystem::path& root,
+    const std::filesystem::path& jar_v1,
+    const std::filesystem::path& jar_v2) {
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    std::filesystem::create_directories(root, error);
+    check(!error, "create database fault root");
+
+    const std::filesystem::path imported_v1 = root / "v1.jar";
+    const std::filesystem::path imported_v2 = root / "v2.jar";
+    const std::filesystem::path jad_v1 = root / "v1.jad";
+    const std::filesystem::path jad_v2 = root / "v2.jad";
+    check(copy_fixture_file(jar_v1, imported_v1) &&
+              copy_fixture_file(jar_v2, imported_v2),
+          "copy database durability fixtures");
+    check(write_text(jad_v1, make_jad(
+              imported_v1, "1.0.0", fixture_file_size(imported_v1))) &&
+              write_text(jad_v2, make_jad(
+                  imported_v2, "1.1.0", fixture_file_size(imported_v2))),
+          "write database durability JAD files");
+
+    bool armed = false;
+    bool fired = false;
+    SuiteStore store;
+    SuiteStoreConfig config;
+    config.root_path = root.string();
+    config.database_fault_injector =
+        [&](SuiteDatabaseFaultPoint point) -> Status {
+            if (armed && !fired &&
+                point == SuiteDatabaseFaultPoint::before_primary_directory_sync) {
+                fired = true;
+                return phoneme::fail(
+                    ErrorCode::io_error,
+                    "injected database directory sync failure");
+            }
+            return {};
+        };
+    check(store.configure(config).has_value(),
+          "configure database durability store");
+    auto baseline = store.install(jad_v1.string(), imported_v1.string());
+    check(baseline.has_value(), "install database durability baseline");
+    if (!baseline) return;
+
+    armed = true;
+    auto upgraded = store.install(jad_v2.string(), imported_v2.string());
+    check(upgraded.has_value() && *upgraded == *baseline && fired,
+          "preserve activated suite when database durability is unknown");
+    const std::filesystem::path suite_backup =
+        root / "suites" / (".backup-" + std::to_string(baseline->value));
+    check(std::filesystem::is_directory(suite_backup, error) && !error,
+          "retain old suite candidate while database durability is unknown");
+    check(copy_fixture_file(root / "suites.db.bak", root / "suites.db"),
+          "simulate crash selecting previous database generation");
+
+    store.clear();
+    auto recovered = store.configure(
+        SuiteStoreConfig {.root_path = root.string()});
+    check(recovered.has_value(),
+          "recover previous database generation after uncertain commit");
+    const auto* recovered_suite = store.find(*baseline);
+    check(recovered_suite != nullptr && recovered_suite->version == "1.0.0",
+          "select suite files matching recovered database generation");
+    check(!std::filesystem::exists(suite_backup, error) && !error,
+          "clean obsolete suite candidate after recovery");
+
+    bool uninstall_armed = false;
+    bool uninstall_fired = false;
+    store.clear();
+    SuiteStoreConfig uninstall_config;
+    uninstall_config.root_path = root.string();
+    uninstall_config.database_fault_injector =
+        [&](SuiteDatabaseFaultPoint point) -> Status {
+            if (uninstall_armed && !uninstall_fired &&
+                point == SuiteDatabaseFaultPoint::before_primary_directory_sync) {
+                uninstall_fired = true;
+                return phoneme::fail(
+                    ErrorCode::io_error,
+                    "injected uninstall database sync failure");
+            }
+            return {};
+        };
+    check(store.configure(uninstall_config).has_value(),
+          "configure uncertain uninstall store");
+    const std::filesystem::path uncertain_rms =
+        root / "rms" / std::to_string(baseline->value) / "marker.bin";
+    const std::filesystem::path uncertain_files =
+        root / "files" / std::to_string(baseline->value) / "marker.bin";
+    const std::filesystem::path uncertain_permissions =
+        root / "security" /
+        (std::to_string(baseline->value) + ".permissions");
+    std::filesystem::create_directories(uncertain_rms.parent_path(), error);
+    std::filesystem::create_directories(uncertain_files.parent_path(), error);
+    std::filesystem::create_directories(
+        uncertain_permissions.parent_path(), error);
+    check(!error && write_text(uncertain_rms, "keep") &&
+              write_text(uncertain_files, "keep") &&
+              write_text(uncertain_permissions, "keep"),
+          "create data protected by uncertain uninstall");
+    uninstall_armed = true;
+    auto uncertain_uninstall = store.uninstall(
+        *baseline,
+        SuiteUninstallPolicy {
+            .remove_rms = true,
+            .remove_files = true,
+            .remove_permissions = true,
+        });
+    check(uncertain_uninstall.has_value() && uninstall_fired,
+          "preserve tombstone when uninstall database durability is unknown");
+    const std::filesystem::path tombstone =
+        root / "suites" / (".delete-" + std::to_string(baseline->value));
+    check(std::filesystem::is_directory(tombstone, error) && !error,
+          "retain uninstall candidate for crash recovery");
+    check(std::filesystem::exists(uncertain_rms, error) && !error &&
+              std::filesystem::exists(uncertain_files, error) && !error &&
+              std::filesystem::exists(uncertain_permissions, error) && !error,
+          "defer destructive uninstall policy while durability is unknown");
+    check(copy_fixture_file(root / "suites.db.bak", root / "suites.db"),
+          "simulate crash selecting database before uninstall");
+    store.clear();
+    check(store.configure(
+              SuiteStoreConfig {.root_path = root.string()}).has_value(),
+          "recover uncertain uninstall transaction");
+    check(store.find(*baseline) != nullptr,
+          "restore suite when recovered database still references it");
+    check(std::filesystem::exists(uncertain_rms, error) && !error &&
+              std::filesystem::exists(uncertain_files, error) && !error &&
+              std::filesystem::exists(uncertain_permissions, error) && !error,
+          "preserve suite data when uncertain uninstall is rolled back");
+
+    const std::filesystem::path orphan_root = root / "orphan-install";
+    std::filesystem::remove_all(orphan_root, error);
+    std::filesystem::create_directories(orphan_root, error);
+    const std::filesystem::path orphan_jar = orphan_root / "app.jar";
+    const std::filesystem::path orphan_jad = orphan_root / "app.jad";
+    check(copy_fixture_file(jar_v1, orphan_jar) &&
+              write_text(orphan_jad, make_jad(
+                  orphan_jar, "1.0.0", fixture_file_size(orphan_jar))),
+          "prepare uncertain first install fixture");
+    bool first_install_fired = false;
+    SuiteStore orphan_store;
+    SuiteStoreConfig orphan_config;
+    orphan_config.root_path = orphan_root.string();
+    orphan_config.database_fault_injector =
+        [&](SuiteDatabaseFaultPoint point) -> Status {
+            if (!first_install_fired &&
+                point == SuiteDatabaseFaultPoint::before_primary_directory_sync) {
+                first_install_fired = true;
+                return phoneme::fail(
+                    ErrorCode::io_error,
+                    "injected first-install database sync failure");
+            }
+            return {};
+        };
+    check(orphan_store.configure(orphan_config).has_value(),
+          "configure uncertain first install store");
+    auto uncertain_first = orphan_store.install(
+        orphan_jad.string(), orphan_jar.string());
+    check(uncertain_first.has_value() && first_install_fired,
+          "complete first install with unknown database durability");
+    std::filesystem::remove(orphan_root / "suites.db", error);
+    check(!error, "simulate loss of unsynced first database generation");
+    orphan_store.clear();
+    check(orphan_store.configure(
+              SuiteStoreConfig {.root_path = orphan_root.string()}).has_value(),
+          "restart after losing first database generation");
+    check(orphan_store.list().empty(),
+          "do not expose orphan suite without a persistent database record");
+    check(!std::filesystem::exists(
+              orphan_root / "suites" /
+                  std::to_string(uncertain_first->value), error) && !error,
+          "remove unreferenced numeric suite directory during recovery");
+}
+
 void test_validation(const std::filesystem::path& root,
                      const std::filesystem::path& jar_v1,
                      const std::filesystem::path& missing_class_jar,
@@ -376,6 +687,44 @@ void test_validation(const std::filesystem::path& root,
     check_error(mismatch, ErrorCode::checksum_mismatch,
                 "reject JAD size mismatch");
 
+    const std::filesystem::path unsupported_profile_jad =
+        root / "unsupported-profile.jad";
+    check(write_text(
+              unsupported_profile_jad,
+              make_jad(jar_v1, "1.0.0", fixture_file_size(jar_v1),
+                       false, "MIDP-3.0", "CLDC-1.1")),
+          "write unsupported MIDP profile JAD");
+    auto unsupported_profile = SuiteInstaller::inspect(
+        jar_v1.string(),
+        std::optional<std::string>(unsupported_profile_jad.string()));
+    check_error(unsupported_profile, ErrorCode::unsupported_feature,
+                "reject unsupported MIDP profile version");
+
+    const std::filesystem::path unsupported_configuration_jad =
+        root / "unsupported-configuration.jad";
+    check(write_text(
+              unsupported_configuration_jad,
+              make_jad(jar_v1, "1.0.0", fixture_file_size(jar_v1),
+                       false, "MIDP-2.0", "CLDC-2.0")),
+          "write unsupported CLDC configuration JAD");
+    auto unsupported_configuration = SuiteInstaller::inspect(
+        jar_v1.string(),
+        std::optional<std::string>(unsupported_configuration_jad.string()));
+    check_error(unsupported_configuration, ErrorCode::unsupported_feature,
+                "reject unsupported CLDC configuration version");
+
+    const std::filesystem::path mixed_profile_jad = root / "mixed-profile.jad";
+    check(write_text(
+              mixed_profile_jad,
+              make_jad(jar_v1, "1.0.0", fixture_file_size(jar_v1),
+                       false, "MIDP-3.0 MIDP-2.0", "CLDC-1.1")),
+          "write mixed supported profile JAD");
+    auto mixed_profile = SuiteInstaller::inspect(
+        jar_v1.string(),
+        std::optional<std::string>(mixed_profile_jad.string()));
+    check(mixed_profile.has_value(),
+          "accept capability list containing an exact supported profile");
+
     auto missing = SuiteInstaller::inspect(missing_class_jar.string());
     check_error(missing, ErrorCode::class_not_found,
                 "reject manifest referencing missing MIDlet class");
@@ -401,6 +750,9 @@ int main(int argc, char** argv) {
     const std::filesystem::path root(argv[1]);
     test_parser();
     test_install_flow(root / "store", argv[2], argv[3]);
+    test_transaction_faults(root / "transaction-faults", argv[2], argv[3]);
+    test_database_durability_unknown(
+        root / "database-durability", argv[2], argv[3]);
     test_validation(root / "validation", argv[2], argv[4], argv[5], argv[6]);
 
     if (failures != 0) {

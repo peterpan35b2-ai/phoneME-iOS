@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,10 +39,28 @@ struct Suite final {
     bool managed {false};
 };
 
+enum class SuiteStoreFaultPoint : u8 {
+    before_staged_jar_sync,
+    before_staged_jad_sync,
+    before_stage_directory_sync,
+    before_stage_parent_sync,
+    before_backup_rename,
+    before_backup_parent_sync,
+    before_activation_rename,
+    before_activation_parent_sync,
+    before_uninstall_rename,
+    before_uninstall_parent_sync,
+};
+
+// Optional deterministic test hook. Production configurations leave it empty.
+using SuiteStoreFaultInjector = std::function<Status(SuiteStoreFaultPoint)>;
+
 struct SuiteStoreConfig final {
     std::string root_path;
     SuiteInstallerLimits installer_limits {};
     bool recover_database_from_backup {true};
+    SuiteStoreFaultInjector fault_injector;
+    SuiteDatabaseFaultInjector database_fault_injector;
 };
 
 struct SuiteUninstallPolicy final {
@@ -105,9 +124,11 @@ private:
     [[nodiscard]] Status remove_policy_data(
         SuiteId id,
         const SuiteUninstallPolicy& policy) const;
+    [[nodiscard]] Status inject_fault(SuiteStoreFaultPoint point) const;
 
     std::string root_path_;
     SuiteInstallerLimits installer_limits_ {};
+    SuiteStoreFaultInjector fault_injector_;
     SuiteDatabase database_;
     u64 database_generation_ {0};
     bool configured_ {false};

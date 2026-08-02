@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -34,23 +35,44 @@ struct SuiteDatabaseSnapshot final {
     bool recovered_from_backup {false};
 };
 
+enum class SuiteDatabaseCommitDurability : u8 {
+    durable,
+    // The new primary is visible, but its parent-directory entry was not
+    // confirmed durable. Callers must keep both transaction generations so
+    // startup recovery can follow whichever database survives a crash.
+    unknown,
+};
+
+enum class SuiteDatabaseFaultPoint : u8 {
+    before_primary_directory_sync,
+};
+
+// Optional deterministic test hook. Production configurations leave it empty.
+using SuiteDatabaseFaultInjector =
+    std::function<Status(SuiteDatabaseFaultPoint)>;
+
 class SuiteDatabase final {
 public:
     SuiteDatabase() = default;
     explicit SuiteDatabase(std::string path) : path_(std::move(path)) {}
 
     void set_path(std::string path) { path_ = std::move(path); }
+    void set_fault_injector(SuiteDatabaseFaultInjector fault_injector) {
+        fault_injector_ = std::move(fault_injector);
+    }
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
 
     [[nodiscard]] Result<SuiteDatabaseSnapshot> load(
         bool recover_from_backup = true) const;
-    [[nodiscard]] Status commit(const SuiteDatabaseSnapshot& snapshot) const;
+    [[nodiscard]] Result<SuiteDatabaseCommitDurability> commit(
+        const SuiteDatabaseSnapshot& snapshot) const;
 
 private:
     [[nodiscard]] Result<SuiteDatabaseSnapshot> load_path(
         const std::string& path) const;
 
     std::string path_;
+    SuiteDatabaseFaultInjector fault_injector_;
 };
 
 } // namespace phoneme::runtime

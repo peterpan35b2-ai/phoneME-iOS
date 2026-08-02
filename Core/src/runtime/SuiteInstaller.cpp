@@ -320,26 +320,47 @@ void append_permissions(std::vector<std::string>& output,
     return evidence;
 }
 
-[[nodiscard]] bool contains_token_prefix(std::string_view value,
-                                         std::string_view prefix) noexcept {
+[[nodiscard]] Status require_supported_capability(
+    std::string_view value,
+    std::span<const std::string> supported,
+    std::string_view family_prefix,
+    std::string_view property_name) {
+    bool declares_family = false;
     usize offset = 0;
     while (offset < value.size()) {
         while (offset < value.size() &&
                std::isspace(static_cast<unsigned char>(value[offset])) != 0) {
             ++offset;
         }
+        if (offset >= value.size()) break;
         const usize end = value.find_first_of(" \t", offset);
         const std::string_view token = value.substr(
-            offset, end == std::string_view::npos ? value.size() - offset : end - offset);
-        if (token.starts_with(prefix)) {
-            return true;
+            offset,
+            end == std::string_view::npos ? value.size() - offset : end - offset);
+        declares_family = declares_family || token.starts_with(family_prefix);
+        if (std::find(supported.begin(), supported.end(), token) !=
+            supported.end()) {
+            return {};
         }
-        if (end == std::string_view::npos) {
-            break;
-        }
+        if (end == std::string_view::npos) break;
         offset = end + 1U;
     }
-    return false;
+
+    if (!declares_family) {
+        return fail(ErrorCode::invalid_argument,
+                    std::string(property_name) + " does not declare " +
+                        std::string(family_prefix));
+    }
+
+    std::string message(property_name);
+    message.append(" is not supported by this Core: ");
+    message.append(value);
+    message.append("; supported values: ");
+    for (usize index = 0; index < supported.size(); ++index) {
+        if (index != 0U) message.append(", ");
+        message.append(supported[index]);
+    }
+    return fail(ErrorCode::unsupported_feature, std::move(message));
 }
 
 [[nodiscard]] Result<u64> parse_decimal_u64(std::string_view text,
@@ -478,13 +499,21 @@ Result<SuiteDescriptor> SuiteInstaller::inspect(
     if (!parsed_version) {
         return std::unexpected(parsed_version.error());
     }
-    if (!contains_token_prefix(*profile, "MIDP-")) {
-        return fail(ErrorCode::invalid_argument,
-                    "MicroEdition-Profile does not declare a MIDP profile");
+    auto supported_profile = require_supported_capability(
+        *profile,
+        limits.capabilities.profiles,
+        "MIDP-",
+        "MicroEdition-Profile");
+    if (!supported_profile) {
+        return std::unexpected(supported_profile.error());
     }
-    if (!contains_token_prefix(*configuration, "CLDC-")) {
-        return fail(ErrorCode::invalid_argument,
-                    "MicroEdition-Configuration does not declare CLDC");
+    auto supported_configuration = require_supported_capability(
+        *configuration,
+        limits.capabilities.configurations,
+        "CLDC-",
+        "MicroEdition-Configuration");
+    if (!supported_configuration) {
+        return std::unexpected(supported_configuration.error());
     }
 
     const auto raw = archive->raw_bytes();

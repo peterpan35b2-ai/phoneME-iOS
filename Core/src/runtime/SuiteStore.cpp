@@ -124,8 +124,30 @@ namespace {
     return {};
 }
 
-[[nodiscard]] Status copy_file_synced(const std::filesystem::path& source,
-                                      const std::filesystem::path& destination) {
+[[nodiscard]] Status sync_directory(const std::filesystem::path& path,
+                                    std::string_view operation) {
+    const int descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0) {
+        return fail(ErrorCode::io_error,
+                    std::string(operation) + ": " +
+                        std::string(std::strerror(errno)));
+    }
+    const int result = ::fsync(descriptor);
+    const int saved_errno = errno;
+    static_cast<void>(::close(descriptor));
+    if (result != 0) {
+        return fail(ErrorCode::io_error,
+                    std::string(operation) + ": " +
+                        std::string(std::strerror(saved_errno)));
+    }
+    return {};
+}
+
+[[nodiscard]] Status copy_file_synced(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    const SuiteStoreFaultInjector& fault_injector,
+    SuiteStoreFaultPoint fault_point) {
     std::error_code error;
     if (!std::filesystem::is_regular_file(source, error) || error) {
         return filesystem_error("suite import path is not a regular file", error);
@@ -136,6 +158,10 @@ namespace {
         error);
     if (error) {
         return filesystem_error("unable to copy suite into managed storage", error);
+    }
+    if (fault_injector) {
+        auto injected = fault_injector(fault_point);
+        if (!injected) return injected;
     }
     return sync_file(destination);
 }
@@ -229,7 +255,9 @@ Status SuiteStore::configure(const SuiteStoreConfig& config) {
 
     root_path_ = normalized.string();
     installer_limits_ = config.installer_limits;
+    fault_injector_ = config.fault_injector;
     database_.set_path((normalized / "suites.db").string());
+    database_.set_fault_injector(config.database_fault_injector);
 
     auto snapshot = database_.load(config.recover_database_from_backup);
     if (!snapshot) {
@@ -343,17 +371,51 @@ Result<SuiteId> SuiteStore::install_impl(
     auto stage_status = ensure_directory(stage_path);
     if (!stage_status) return std::unexpected(stage_status.error());
 
-    auto copied_jar = copy_file_synced(jar_path, stage_path / "app.jar");
+    auto copied_jar = copy_file_synced(
+        jar_path,
+        stage_path / "app.jar",
+        fault_injector_,
+        SuiteStoreFaultPoint::before_staged_jar_sync);
     if (!copied_jar) {
         static_cast<void>(remove_tree(stage_path));
         return std::unexpected(copied_jar.error());
     }
     if (jad_path.has_value()) {
-        auto copied_jad = copy_file_synced(*jad_path, stage_path / "app.jad");
+        auto copied_jad = copy_file_synced(
+            *jad_path,
+            stage_path / "app.jad",
+            fault_injector_,
+            SuiteStoreFaultPoint::before_staged_jad_sync);
         if (!copied_jad) {
             static_cast<void>(remove_tree(stage_path));
             return std::unexpected(copied_jad.error());
         }
+    }
+
+    auto stage_sync_fault = inject_fault(
+        SuiteStoreFaultPoint::before_stage_directory_sync);
+    if (!stage_sync_fault) {
+        static_cast<void>(remove_tree(stage_path));
+        return std::unexpected(stage_sync_fault.error());
+    }
+    auto stage_synced = sync_directory(
+        stage_path, "unable to sync staged suite directory");
+    if (!stage_synced) {
+        static_cast<void>(remove_tree(stage_path));
+        return std::unexpected(stage_synced.error());
+    }
+    auto stage_parent_fault = inject_fault(
+        SuiteStoreFaultPoint::before_stage_parent_sync);
+    if (!stage_parent_fault) {
+        static_cast<void>(remove_tree(stage_path));
+        return std::unexpected(stage_parent_fault.error());
+    }
+    auto stage_parent_synced = sync_directory(
+        suites_directory(root_path_),
+        "unable to sync suite directory after staging");
+    if (!stage_parent_synced) {
+        static_cast<void>(remove_tree(stage_path));
+        return std::unexpected(stage_parent_synced.error());
     }
 
     auto removed_backup = remove_tree(backup_path);
@@ -368,20 +430,90 @@ Result<SuiteId> SuiteStore::install_impl(
         return std::unexpected(final_exists.error());
     }
     if (*final_exists) {
+        auto backup_rename_fault = inject_fault(
+            SuiteStoreFaultPoint::before_backup_rename);
+        if (!backup_rename_fault) {
+            static_cast<void>(remove_tree(stage_path));
+            return std::unexpected(backup_rename_fault.error());
+        }
         auto backed_up = rename_path(final_path, backup_path);
         if (!backed_up) {
             static_cast<void>(remove_tree(stage_path));
             return std::unexpected(backed_up.error());
         }
+        auto backup_parent_fault = inject_fault(
+            SuiteStoreFaultPoint::before_backup_parent_sync);
+        Status backup_parent_synced = backup_parent_fault;
+        if (backup_parent_synced) {
+            backup_parent_synced = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after backup rename");
+        }
+        if (!backup_parent_synced) {
+            auto restored = rename_path(backup_path, final_path);
+            if (restored) {
+                restored = sync_directory(
+                    suites_directory(root_path_),
+                    "unable to sync suite directory after backup rollback");
+            }
+            static_cast<void>(remove_tree(stage_path));
+            if (!restored) return std::unexpected(restored.error());
+            return std::unexpected(backup_parent_synced.error());
+        }
     }
 
-    auto activated = rename_path(stage_path, final_path);
-    if (!activated) {
+    auto activation_rename_fault = inject_fault(
+        SuiteStoreFaultPoint::before_activation_rename);
+    if (!activation_rename_fault) {
+        Status restored;
         if (*final_exists) {
-            static_cast<void>(rename_path(backup_path, final_path));
+            restored = rename_path(backup_path, final_path);
+            if (restored) {
+                restored = sync_directory(
+                    suites_directory(root_path_),
+                    "unable to sync suite directory after activation rollback");
+            }
         }
         static_cast<void>(remove_tree(stage_path));
+        if (!restored) return std::unexpected(restored.error());
+        return std::unexpected(activation_rename_fault.error());
+    }
+    auto activated = rename_path(stage_path, final_path);
+    if (!activated) {
+        Status restored;
+        if (*final_exists) {
+            restored = rename_path(backup_path, final_path);
+            if (restored) {
+                restored = sync_directory(
+                    suites_directory(root_path_),
+                    "unable to sync suite directory after activation rollback");
+            }
+        }
+        static_cast<void>(remove_tree(stage_path));
+        if (!restored) return std::unexpected(restored.error());
         return std::unexpected(activated.error());
+    }
+    auto activation_parent_fault = inject_fault(
+        SuiteStoreFaultPoint::before_activation_parent_sync);
+    Status activation_parent_synced = activation_parent_fault;
+    if (activation_parent_synced) {
+        activation_parent_synced = sync_directory(
+            suites_directory(root_path_),
+            "unable to sync suite directory after suite activation");
+    }
+    if (!activation_parent_synced) {
+        auto removed_final = remove_tree(final_path);
+        Status restored = removed_final;
+        if (restored && *final_exists) {
+            restored = rename_path(backup_path, final_path);
+        }
+        if (restored) {
+            restored = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after activation rollback");
+        }
+        if (!restored) return std::unexpected(restored.error());
+        return std::unexpected(activation_parent_synced.error());
     }
 
     auto managed_suite = make_suite(
@@ -391,10 +523,17 @@ Result<SuiteId> SuiteStore::install_impl(
         jad_path.has_value() ? (final_path / "app.jad").string() : std::string {},
         true);
     if (!managed_suite) {
-        static_cast<void>(remove_tree(final_path));
-        if (*final_exists) {
-            static_cast<void>(rename_path(backup_path, final_path));
+        auto removed_final = remove_tree(final_path);
+        Status restored = removed_final;
+        if (restored && *final_exists) {
+            restored = rename_path(backup_path, final_path);
         }
+        if (restored) {
+            restored = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after suite construction rollback");
+        }
+        if (!restored) return std::unexpected(restored.error());
         return std::unexpected(managed_suite.error());
     }
 
@@ -414,15 +553,29 @@ Result<SuiteId> SuiteStore::install_impl(
         } else {
             suites_.erase(id.value);
         }
-        static_cast<void>(remove_tree(final_path));
-        if (*final_exists) {
-            static_cast<void>(rename_path(backup_path, final_path));
+        auto removed_final = remove_tree(final_path);
+        Status restored = removed_final;
+        if (restored && *final_exists) {
+            restored = rename_path(backup_path, final_path);
         }
+        if (restored) {
+            restored = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after database rollback");
+        }
+        if (!restored) return std::unexpected(restored.error());
         return std::unexpected(committed.error());
     }
 
     database_generation_ = snapshot.generation;
-    static_cast<void>(remove_tree(backup_path));
+    if (*committed == SuiteDatabaseCommitDurability::durable) {
+        auto removed = remove_tree(backup_path);
+        if (removed) {
+            static_cast<void>(sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after transaction cleanup"));
+        }
+    }
     return id;
 }
 
@@ -453,8 +606,29 @@ Status SuiteStore::uninstall(SuiteId id,
         return fail(ErrorCode::io_error,
                     "managed suite directory is missing during uninstall");
     }
+    auto uninstall_rename_fault = inject_fault(
+        SuiteStoreFaultPoint::before_uninstall_rename);
+    if (!uninstall_rename_fault) return uninstall_rename_fault;
     auto moved = rename_path(final_path, tombstone_path);
     if (!moved) return moved;
+    auto uninstall_parent_fault = inject_fault(
+        SuiteStoreFaultPoint::before_uninstall_parent_sync);
+    Status uninstall_parent_synced = uninstall_parent_fault;
+    if (uninstall_parent_synced) {
+        uninstall_parent_synced = sync_directory(
+            suites_directory(root_path_),
+            "unable to sync suite directory after uninstall rename");
+    }
+    if (!uninstall_parent_synced) {
+        auto restored = rename_path(tombstone_path, final_path);
+        if (restored) {
+            restored = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after uninstall rollback");
+        }
+        if (!restored) return restored;
+        return uninstall_parent_synced;
+    }
 
     suites_.erase(iterator);
     SuiteDatabaseSnapshot snapshot =
@@ -462,14 +636,31 @@ Status SuiteStore::uninstall(SuiteId id,
     auto committed = database_.commit(snapshot);
     if (!committed) {
         suites_.insert_or_assign(id.value, previous);
-        static_cast<void>(rename_path(tombstone_path, final_path));
-        return committed;
+        auto restored = rename_path(tombstone_path, final_path);
+        if (restored) {
+            restored = sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after uninstall database rollback");
+        }
+        if (!restored) return restored;
+        return std::unexpected(committed.error());
     }
 
     database_generation_ = snapshot.generation;
-    auto removed = remove_tree(tombstone_path);
-    if (!removed) return removed;
-    return remove_policy_data(id, policy);
+    if (*committed == SuiteDatabaseCommitDurability::durable) {
+        auto removed = remove_tree(tombstone_path);
+        if (removed) {
+            static_cast<void>(sync_directory(
+                suites_directory(root_path_),
+                "unable to sync suite directory after uninstall cleanup"));
+        }
+        return remove_policy_data(id, policy);
+    }
+
+    // The previous database generation may win after a crash. Keep RMS,
+    // files and permission state until a later durable uninstall confirms
+    // that the suite cannot be recovered.
+    return {};
 }
 
 const Suite* SuiteStore::find(SuiteId id) const noexcept {
@@ -534,7 +725,10 @@ bool SuiteStore::contains_main_class(SuiteId id,
 void SuiteStore::clear() noexcept {
     suites_.clear();
     root_path_.clear();
+    installer_limits_ = {};
+    fault_injector_ = {};
     database_.set_path({});
+    database_.set_fault_injector({});
     database_generation_ = 0;
     configured_ = false;
 }
@@ -685,6 +879,7 @@ SuiteId SuiteStore::allocate_id(
 
 Status SuiteStore::recover_transactions(
     const SuiteDatabaseSnapshot& snapshot) {
+    bool directory_changed = false;
     std::vector<i32> referenced_ids;
     referenced_ids.reserve(snapshot.records.size());
     for (const SuiteDatabaseRecord& record : snapshot.records) {
@@ -743,20 +938,27 @@ Status SuiteStore::recover_transactions(
             if (*final_exists) {
                 auto removed = remove_tree(final_path);
                 if (!removed) return removed;
+                directory_changed = true;
             }
             auto restored = rename_path(*selected, final_path);
             if (!restored) return restored;
+            directory_changed = true;
         }
         if (*backup_exists && *selected != backup_path) {
             auto removed = remove_tree(backup_path);
             if (!removed) return removed;
+            directory_changed = true;
         }
         if (*tombstone_exists && *selected != tombstone_path) {
             auto removed = remove_tree(tombstone_path);
             if (!removed) return removed;
+            directory_changed = true;
         }
+        auto stage_exists = path_exists(stage_path);
+        if (!stage_exists) return std::unexpected(stage_exists.error());
         auto removed_stage = remove_tree(stage_path);
         if (!removed_stage) return removed_stage;
+        directory_changed = directory_changed || *stage_exists;
     }
 
     std::error_code error;
@@ -770,6 +972,12 @@ Status SuiteStore::recover_transactions(
         const std::filesystem::path path = iterator->path();
         const std::string name = path.filename().string();
         bool remove = name.starts_with(".stage-");
+        if (const auto direct_id = parse_transaction_id(name, "");
+            direct_id.has_value() &&
+            std::find(referenced_ids.begin(), referenced_ids.end(), *direct_id) ==
+                referenced_ids.end()) {
+            remove = true;
+        }
         for (const std::string_view prefix : {
                  std::string_view(".backup-"),
                  std::string_view(".delete-")}) {
@@ -783,6 +991,7 @@ Status SuiteStore::recover_transactions(
         if (remove) {
             auto removed = remove_tree(path);
             if (!removed) return removed;
+            directory_changed = true;
         }
         iterator.increment(error);
         if (error) {
@@ -790,7 +999,17 @@ Status SuiteStore::recover_transactions(
                 "unable to continue suite transaction enumeration", error);
         }
     }
+    if (directory_changed) {
+        return sync_directory(
+            suites_directory(root_path_),
+            "unable to sync suite directory after transaction recovery");
+    }
     return {};
+}
+
+Status SuiteStore::inject_fault(SuiteStoreFaultPoint point) const {
+    if (!fault_injector_) return {};
+    return fault_injector_(point);
 }
 
 Status SuiteStore::remove_policy_data(

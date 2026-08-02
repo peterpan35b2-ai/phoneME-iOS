@@ -518,7 +518,8 @@ Result<SuiteDatabaseSnapshot> SuiteDatabase::load_path(
     return snapshot;
 }
 
-Status SuiteDatabase::commit(const SuiteDatabaseSnapshot& snapshot) const {
+Result<SuiteDatabaseCommitDurability> SuiteDatabase::commit(
+    const SuiteDatabaseSnapshot& snapshot) const {
     if (path_.empty()) {
         return fail(ErrorCode::not_configured,
                     "suite database path is not configured");
@@ -562,7 +563,7 @@ Status SuiteDatabase::commit(const SuiteDatabaseSnapshot& snapshot) const {
     }
     if (!written) {
         std::filesystem::remove(temporary_path, error);
-        return written;
+        return std::unexpected(written.error());
     }
 
     error.clear();
@@ -598,9 +599,19 @@ Status SuiteDatabase::commit(const SuiteDatabaseSnapshot& snapshot) const {
                         error.message());
     }
 
-    if (!directory.empty()) {
-        auto synced = fsync_directory(directory);
-        if (!synced) return synced;
+    Status directory_sync;
+    if (fault_injector_) {
+        directory_sync = fault_injector_(
+            SuiteDatabaseFaultPoint::before_primary_directory_sync);
+    }
+    if (directory_sync && !directory.empty()) {
+        directory_sync = fsync_directory(directory);
+    }
+    if (!directory_sync) {
+        // The new primary is visible in this process, but its directory entry
+        // may not survive a crash. Keep the previous generation in .bak and
+        // tell the caller to preserve both suite-file transaction candidates.
+        return SuiteDatabaseCommitDurability::unknown;
     }
 
     // Keep a checksum-valid mirror of the committed generation. This is
@@ -622,7 +633,7 @@ Status SuiteDatabase::commit(const SuiteDatabaseSnapshot& snapshot) const {
             static_cast<void>(fsync_directory(directory));
         }
     }
-    return {};
+    return SuiteDatabaseCommitDurability::durable;
 }
 
 } // namespace phoneme::runtime

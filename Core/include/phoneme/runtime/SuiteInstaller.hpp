@@ -11,8 +11,16 @@
 
 namespace phoneme::runtime {
 
+struct SuiteInstallerCapabilities final {
+    std::vector<std::string> profiles {
+        "MIDP-1.0", "MIDP-2.0"};
+    std::vector<std::string> configurations {
+        "CLDC-1.0", "CLDC-1.1"};
+};
+
 struct SuiteInstallerLimits final {
     archive::ZipLimits archive_limits {};
+    SuiteInstallerCapabilities capabilities {};
     AttributeParserLimits jad_limits {};
     AttributeParserLimits manifest_limits {
         .maximum_document_bytes = 256U * 1024U,
