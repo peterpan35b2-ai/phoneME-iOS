@@ -1,0 +1,5 @@
+# Ignore only generated code-review and test build artifacts.
+graph.db
+*.db
+build/
+generated/

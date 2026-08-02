@@ -1,0 +1,96 @@
+#include "phoneme/runtime/Framebuffer.hpp"
+
+#include <algorithm>
+#include <utility>
+
+namespace phoneme::runtime
+{
+  namespace
+  {
+
+    [[nodiscard]] Result<usize> rgba_size(Dimensions dimensions)
+    {
+      if (!dimensions.valid() || dimensions.width > Framebuffer::kMaximumDimension ||
+          dimensions.height > Framebuffer::kMaximumDimension)
+      {
+        return fail(ErrorCode::invalid_argument,
+                    "framebuffer dimensions are outside the supported range");
+      }
+      auto width = checked_narrow<usize>(dimensions.width);
+      auto height = checked_narrow<usize>(dimensions.height);
+      if (!width || !height)
+      {
+        return fail(ErrorCode::overflow, "framebuffer dimension conversion failed");
+      }
+      auto pixels = checked_multiply(*width, *height);
+      if (!pixels)
+      {
+        return std::unexpected(pixels.error());
+      }
+      return checked_multiply(*pixels, 4);
+    }
+
+  } // namespace
+
+  Status Framebuffer::resize(Dimensions dimensions)
+  {
+    auto required = rgba_size(dimensions);
+    if (!required)
+    {
+      return std::unexpected(required.error());
+    }
+
+    std::vector<u8> replacement(*required, 0);
+    for (usize offset = 3; offset < replacement.size(); offset += 4)
+    {
+      replacement[offset] = 0xFFU;
+    }
+
+    std::scoped_lock lock(mutex_);
+    dimensions_ = dimensions;
+    rgba_ = std::move(replacement);
+    ++generation_;
+    return {};
+  }
+
+  Status Framebuffer::replace(Dimensions dimensions,
+                              std::span<const u8> rgba)
+  {
+    auto required = rgba_size(dimensions);
+    if (!required)
+    {
+      return std::unexpected(required.error());
+    }
+    if (rgba.size() != *required)
+    {
+      return fail(ErrorCode::invalid_argument,
+                  "RGBA frame size does not match its dimensions");
+    }
+
+    std::vector<u8> replacement(rgba.begin(), rgba.end());
+    std::scoped_lock lock(mutex_);
+    dimensions_ = dimensions;
+    rgba_ = std::move(replacement);
+    ++generation_;
+    return {};
+  }
+
+  FrameSnapshot Framebuffer::snapshot() const
+  {
+    std::scoped_lock lock(mutex_);
+    return FrameSnapshot{
+        .dimensions = dimensions_,
+        .generation = generation_,
+        .rgba = rgba_,
+    };
+  }
+
+  void Framebuffer::clear() noexcept
+  {
+    std::scoped_lock lock(mutex_);
+    dimensions_ = {};
+    rgba_.clear();
+    ++generation_;
+  }
+
+} // namespace phoneme::runtime

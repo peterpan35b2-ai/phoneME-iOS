@@ -1,0 +1,1228 @@
+#include "phoneme/runtime/Runtime.hpp"
+
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "phoneme/graphics/Color.hpp"
+#include "phoneme/graphics/Graphics.hpp"
+#include "phoneme/graphics/Image.hpp"
+#include "phoneme/runtime/CanvasRuntime.hpp"
+#include "phoneme/vm/ClassRepository.hpp"
+#include "phoneme/vm/LcduiBridge.hpp"
+#include "phoneme/vm/Machine.hpp"
+
+namespace phoneme::runtime {
+
+class ApplicationVM final {
+public:
+    ApplicationVM(Dimensions dimensions,
+                  std::array<i32, 7> keymap,
+                  Framebuffer& framebuffer);
+
+    vm::ClassRepository classes;
+    vm::Machine machine;
+    CanvasRuntime canvas;
+    vm::ObjectRef midlet;
+};
+
+namespace {
+
+constexpr usize kImageWidthField = 0;
+constexpr usize kImageHeightField = 1;
+constexpr usize kImageMutableField = 2;
+constexpr usize kGraphicsTargetField = 0;
+
+[[nodiscard]] Result<vm::ObjectRef> create_canvas_graphics(
+    vm::Machine& machine,
+    Framebuffer& framebuffer,
+    Dimensions dimensions,
+    vm::CanvasRect clip) {
+    auto image = graphics::Image::create_mutable(dimensions.width,
+                                                  dimensions.height);
+    if (!image) return std::unexpected(image.error());
+
+    const FrameSnapshot current = framebuffer.snapshot();
+    if (current.dimensions.width == dimensions.width &&
+        current.dimensions.height == dimensions.height &&
+        current.rgba.size() == image->pixels().size() * 4U) {
+        auto pixels = image->mutable_pixels();
+        for (usize index = 0; index < pixels.size(); ++index) {
+            const usize offset = index * 4U;
+            pixels[index] = graphics::argb(current.rgba[offset + 3U],
+                                           current.rgba[offset],
+                                           current.rgba[offset + 1U],
+                                           current.rgba[offset + 2U]);
+        }
+    }
+
+    auto image_object = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/lcdui/Image");
+    if (!image_object) return std::unexpected(image_object.error());
+    auto width_stored = machine.heap().set_field(
+        *image_object, kImageWidthField, vm::Value::from_int(dimensions.width));
+    auto height_stored = machine.heap().set_field(
+        *image_object, kImageHeightField, vm::Value::from_int(dimensions.height));
+    auto mutable_stored = machine.heap().set_field(
+        *image_object, kImageMutableField, vm::Value::from_int(1));
+    if (!width_stored) return std::unexpected(width_stored.error());
+    if (!height_stored) return std::unexpected(height_stored.error());
+    if (!mutable_stored) return std::unexpected(mutable_stored.error());
+    auto image_attached = machine.graphics().attach_image(
+        image_object->bits, std::move(*image));
+    if (!image_attached) return std::unexpected(image_attached.error());
+
+    auto graphics_object = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/lcdui/Graphics");
+    if (!graphics_object) return std::unexpected(graphics_object.error());
+    auto target_stored = machine.heap().set_field(
+        *graphics_object,
+        kGraphicsTargetField,
+        vm::Value::from_reference(*image_object));
+    if (!target_stored) return std::unexpected(target_stored.error());
+    auto context_attached = machine.graphics().attach_context(
+        graphics_object->bits, image_object->bits);
+    if (!context_attached) return std::unexpected(context_attached.error());
+
+    auto context = machine.graphics().context(graphics_object->bits);
+    auto target = machine.graphics().image(image_object->bits);
+    if (!context) return std::unexpected(context.error());
+    if (!target) return std::unexpected(target.error());
+    auto clipped = graphics::set_clip(**context,
+                                      **target,
+                                      clip.x,
+                                      clip.y,
+                                      clip.width,
+                                      clip.height);
+    if (!clipped) return std::unexpected(clipped.error());
+    return *graphics_object;
+}
+
+[[nodiscard]] Status publish_canvas_graphics(vm::Machine& machine,
+                                             Framebuffer& framebuffer,
+                                             vm::ObjectRef graphics_object) {
+    if (graphics_object.is_null()) return {};
+    auto target_value = machine.heap().field(graphics_object,
+                                             kGraphicsTargetField);
+    if (!target_value) return std::unexpected(target_value.error());
+    auto image_object = target_value->as_reference();
+    if (!image_object) return std::unexpected(image_object.error());
+    auto image = machine.graphics().image(image_object->bits);
+    if (!image) return std::unexpected(image.error());
+
+    std::vector<u8> rgba((*image)->pixels().size() * 4U);
+    usize offset = 0;
+    for (graphics::Pixel pixel : (*image)->pixels()) {
+        rgba[offset++] = graphics::red(pixel);
+        rgba[offset++] = graphics::green(pixel);
+        rgba[offset++] = graphics::blue(pixel);
+        rgba[offset++] = graphics::alpha(pixel);
+    }
+    return framebuffer.replace(
+        Dimensions {(*image)->width(), (*image)->height()}, rgba);
+}
+
+[[nodiscard]] bool is_directory(const std::string& path) noexcept {
+    struct stat status {};
+    return !path.empty() && ::stat(path.c_str(), &status) == 0 &&
+           S_ISDIR(status.st_mode);
+}
+
+[[nodiscard]] bool is_regular_file(const std::string& path) noexcept {
+    struct stat status {};
+    return !path.empty() && ::stat(path.c_str(), &status) == 0 &&
+           S_ISREG(status.st_mode);
+}
+
+[[nodiscard]] Status require_normal_completion(
+    vm::Machine& machine,
+    const vm::ExecutionResult& result,
+    std::string_view lifecycle_phase) {
+    if (result.completed_normally()) {
+        return {};
+    }
+    if (!result.throwable.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    std::string(lifecycle_phase) +
+                        " ended abnormally without a throwable");
+    }
+    auto class_name = machine.heap().class_name(*result.throwable);
+    if (!class_name) {
+        return std::unexpected(class_name.error());
+    }
+    return fail(ErrorCode::java_exception,
+                std::string(lifecycle_phase) +
+                    " threw an uncaught Java exception: " + *class_name);
+}
+
+} // namespace
+
+ApplicationVM::ApplicationVM(Dimensions dimensions,
+                             std::array<i32, 7> keymap,
+                             Framebuffer& framebuffer)
+    : machine(classes), canvas(machine, dimensions, keymap) {
+    machine.configure_canvas_bridge(&canvas);
+    CanvasRenderHooks hooks;
+    hooks.acquire_paint_graphics = [&framebuffer](
+        vm::Machine& target_machine,
+        vm::ObjectRef,
+        Dimensions target_dimensions,
+        vm::CanvasRect repaint_region) {
+        return create_canvas_graphics(target_machine,
+                                      framebuffer,
+                                      target_dimensions,
+                                      repaint_region);
+    };
+    hooks.commit_paint = [&framebuffer](
+        vm::Machine& target_machine,
+        vm::ObjectRef,
+        vm::ObjectRef graphics,
+        vm::CanvasRect) {
+        return publish_canvas_graphics(target_machine,
+                                       framebuffer,
+                                       graphics);
+    };
+    hooks.acquire_game_graphics = [&framebuffer](
+        vm::Machine& target_machine,
+        vm::ObjectRef,
+        Dimensions target_dimensions) {
+        return create_canvas_graphics(
+            target_machine,
+            framebuffer,
+            target_dimensions,
+            vm::CanvasRect {0, 0,
+                            target_dimensions.width,
+                            target_dimensions.height});
+    };
+    hooks.flush_game_graphics = [&framebuffer](
+        vm::Machine& target_machine,
+        vm::ObjectRef,
+        vm::ObjectRef graphics,
+        vm::CanvasRect) {
+        return publish_canvas_graphics(target_machine,
+                                       framebuffer,
+                                       graphics);
+    };
+    canvas.configure_render_hooks(std::move(hooks));
+}
+
+Runtime::Runtime() : input_queue_(1'024), ui_queue_(1'024) {}
+
+Runtime::~Runtime() { stop(); }
+
+Status Runtime::configure(std::string runtime_home,
+                          std::string optional_class_archive) {
+    if (!is_directory(runtime_home)) {
+        return fail(ErrorCode::invalid_argument,
+                    "runtime home is not an accessible directory");
+    }
+    if (!optional_class_archive.empty() &&
+        !is_regular_file(optional_class_archive)) {
+        return fail(ErrorCode::invalid_argument,
+                    "optional class archive is not an accessible file");
+    }
+
+    std::scoped_lock lock(mutex_);
+    if (running_) {
+        return fail(ErrorCode::already_running,
+                    "runtime cannot be reconfigured while running");
+    }
+    runtime_home_ = std::move(runtime_home);
+    optional_class_archive_ = std::move(optional_class_archive);
+    permission_policies_.clear();
+    configured_ = true;
+    last_exit_code_ = 0;
+    return {};
+}
+
+Status Runtime::configure_keymap(std::array<i32, 7> keymap) {
+    std::scoped_lock lock(mutex_);
+    keymap_ = keymap;
+    for (auto& [id, app] : apps_) {
+        (void)id;
+        if (app.vm != nullptr) {
+            app.vm->canvas.set_keymap(keymap_);
+        }
+    }
+    return {};
+}
+
+Status Runtime::configure_permission_prompt(
+    security::PermissionPromptCallback prompt) {
+    std::scoped_lock lock(mutex_);
+    if (running_) {
+        return fail(ErrorCode::already_running,
+                    "permission prompt cannot change while running");
+    }
+    permission_prompt_ = std::move(prompt);
+    permission_policies_.clear();
+    return {};
+}
+
+Status Runtime::set_suite_trust(SuiteId suite_id,
+                                security::SuiteTrust trust) {
+    if (!suite_id.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "suite trust requires a valid suite ID");
+    }
+    std::scoped_lock lock(mutex_);
+    if (running_) {
+        return fail(ErrorCode::already_running,
+                    "suite trust cannot change while running");
+    }
+    if (suite_store_.find(suite_id) == nullptr) {
+        return fail(ErrorCode::invalid_argument,
+                    "suite trust references an unknown suite");
+    }
+    suite_trust_.insert_or_assign(suite_id.value, trust);
+    permission_policies_.erase(suite_id.value);
+    return {};
+}
+
+Result<SuiteId> Runtime::install_jar(const std::string& jar_path) {
+    if (!is_regular_file(jar_path)) {
+        return fail(ErrorCode::invalid_argument,
+                    "JAR path is not an accessible regular file");
+    }
+
+    std::scoped_lock lock(mutex_);
+    if (!configured_) {
+        return fail(ErrorCode::not_configured,
+                    "runtime must be configured before installing a suite");
+    }
+    if (running_) {
+        return fail(ErrorCode::invalid_state,
+                    "suite installation is blocked while the VM is running");
+    }
+    return suite_store_.install(jar_path);
+}
+
+Status Runtime::start_system() {
+    std::scoped_lock lock(mutex_);
+    if (!configured_) {
+        return fail(ErrorCode::not_configured,
+                    "runtime must be configured before startup");
+    }
+    if (running_) {
+        return {};
+    }
+    running_ = true;
+    suspended_ = false;
+    last_exit_code_ = 0;
+    return {};
+}
+
+Status Runtime::start_midlet(SuiteId suite_id,
+                             std::string main_class,
+                             AppId app_id,
+                             Dimensions dimensions) {
+    if (!suite_id.valid() || !app_id.valid() || main_class.empty() ||
+        !dimensions.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "invalid MIDlet launch arguments");
+    }
+
+    std::scoped_lock lock(mutex_);
+    auto running = require_running_unlocked();
+    if (!running) {
+        return running;
+    }
+    if (apps_.contains(app_id.value)) {
+        return fail(ErrorCode::invalid_state, "application ID is already in use");
+    }
+
+    const Suite* suite = suite_store_.find(suite_id);
+    if (suite == nullptr) {
+        return fail(ErrorCode::invalid_argument, "suite ID does not exist");
+    }
+
+    security::SharedPermissionPolicy permission_policy;
+    if (const auto existing = permission_policies_.find(suite_id.value);
+        existing != permission_policies_.end()) {
+        permission_policy = existing->second;
+    } else {
+        permission_policy = std::make_shared<security::PermissionPolicy>();
+        const auto trust = suite_trust_.find(suite_id.value);
+        const security::SuiteTrust suite_trust =
+            trust == suite_trust_.end()
+                ? security::SuiteTrust::untrusted
+                : trust->second;
+        auto security_configured = permission_policy->configure(
+            security::PermissionPolicyConfig {
+                .suite_id = suite_id,
+                .trust = suite_trust,
+                .persistence_path = runtime_home_ + "/security/" +
+                    std::to_string(suite_id.value) + ".permissions",
+                .declared_permissions = {},
+                .enforce_declared_permissions = false,
+                .trusted_default_allow = true,
+                .prompt = permission_prompt_,
+            });
+        if (!security_configured) {
+            return std::unexpected(security_configured.error());
+        }
+        permission_policies_.insert_or_assign(suite_id.value,
+                                               permission_policy);
+    }
+
+    auto application_vm = std::make_shared<ApplicationVM>(
+        dimensions, keymap_, framebuffer_);
+    application_vm->machine.set_permission_policy(permission_policy);
+    application_vm->machine.configure_ui_bridge(
+        app_id.value,
+        [this](vm::UiBridgeEvent event) {
+            ui_queue_.push(UiEvent {
+                .kind = event.kind,
+                .component_id = event.component_id,
+                .parent_id = event.parent_id,
+                .component_type = event.component_type,
+                .index = event.index,
+                .arguments = event.arguments,
+                .value64 = event.value64,
+                .generation = event.generation,
+                .text = std::move(event.text),
+                .detail = std::move(event.detail),
+            });
+        });
+    auto network_configured =
+        application_vm->machine.configure_network_owner(app_id.value);
+    if (!network_configured) {
+        return std::unexpected(network_configured.error());
+    }
+    const std::string rms_root = runtime_home_ + "/rms/" +
+                                 std::to_string(suite_id.value);
+    auto rms_configured =
+        application_vm->machine.configure_record_store_root(rms_root);
+    if (!rms_configured) {
+        return std::unexpected(rms_configured.error());
+    }
+    const std::string push_root = runtime_home_ + "/push";
+    auto push_configured = application_vm->machine.configure_push_registry(
+        push_root, suite_id);
+    if (!push_configured) {
+        return std::unexpected(push_configured.error());
+    }
+    const std::string file_root = runtime_home_ + "/files/" +
+                                  std::to_string(suite_id.value);
+    const std::string temporary_root = runtime_home_ + "/tmp/" +
+                                       std::to_string(suite_id.value) + "/" +
+                                       std::to_string(app_id.value);
+    auto filesystem_configured = application_vm->machine.configure_filesystem(
+        file_root, temporary_root);
+    if (!filesystem_configured) {
+        return std::unexpected(filesystem_configured.error());
+    }
+    auto game_classpath = application_vm->classes.add_archive(suite->jar_path);
+    if (!game_classpath) {
+        return std::unexpected(game_classpath.error());
+    }
+    if (!optional_class_archive_.empty()) {
+        auto optional_classpath = application_vm->classes.add_archive(
+            optional_class_archive_);
+        if (!optional_classpath) {
+            return std::unexpected(optional_classpath.error());
+        }
+    }
+    for (const auto& [key, value] : suite->properties) {
+        application_vm->machine.set_app_property(key, value);
+    }
+    auto is_midlet = application_vm->classes.is_assignable(
+        main_class,
+        "javax/microedition/midlet/MIDlet");
+    if (!is_midlet) {
+        return std::unexpected(is_midlet.error());
+    }
+    if (!*is_midlet) {
+        return fail(ErrorCode::invalid_argument,
+                    "MIDlet main class does not extend MIDlet");
+    }
+
+    App app {
+        .id = app_id,
+        .suite_id = suite_id,
+        .main_class = main_class,
+        .dimensions = dimensions,
+        .state = AppState::error,
+        .generation = ++sequence_,
+        .vm = application_vm,
+    };
+
+    auto receiver = application_vm->machine.class_states().allocate_instance(
+        application_vm->machine.heap(), main_class);
+    if (!receiver) {
+        apps_.insert_or_assign(app_id.value, std::move(app));
+        last_exit_code_ = -1;
+        return std::unexpected(receiver.error());
+    }
+    application_vm->midlet = *receiver;
+
+    auto constructor = application_vm->machine.invoke_instance(
+        *receiver, main_class, "<init>", "()V");
+    if (!constructor) {
+        apps_.insert_or_assign(app_id.value, std::move(app));
+        last_exit_code_ = -1;
+        return std::unexpected(constructor.error());
+    }
+    auto constructor_completion = require_normal_completion(
+        application_vm->machine,
+        *constructor,
+        "MIDlet constructor");
+    if (!constructor_completion) {
+        apps_.insert_or_assign(app_id.value, std::move(app));
+        last_exit_code_ = -1;
+        return constructor_completion;
+    }
+
+    auto started = application_vm->machine.invoke_instance(
+        *receiver, main_class, "startApp", "()V");
+    if (!started) {
+        apps_.insert_or_assign(app_id.value, std::move(app));
+        last_exit_code_ = -1;
+        return std::unexpected(started.error());
+    }
+    auto start_completion = require_normal_completion(
+        application_vm->machine,
+        *started,
+        "MIDlet startApp");
+    if (!start_completion) {
+        apps_.insert_or_assign(app_id.value, std::move(app));
+        last_exit_code_ = -1;
+        return start_completion;
+    }
+
+    const vm::MidletSignal launch_signal =
+        application_vm->machine.consume_midlet_signal();
+    if (launch_signal == vm::MidletSignal::destroyed) {
+        app.state = AppState::destroyed;
+        app.vm.reset();
+    } else if (launch_signal == vm::MidletSignal::paused) {
+        app.state = AppState::paused;
+    } else {
+        app.state = AppState::active;
+    }
+    app.generation = ++sequence_;
+
+    if (launch_signal != vm::MidletSignal::destroyed &&
+        foreground_app_id_.valid() && foreground_app_id_ != app_id) {
+        App* previous = find_app_unlocked(foreground_app_id_);
+        if (previous != nullptr && previous->vm != nullptr) {
+            auto hidden = previous->vm->canvas.set_host_foreground(false);
+            if (!hidden) {
+                mark_canvas_failure_unlocked(*previous, hidden.error());
+                return std::unexpected(hidden.error());
+            }
+            auto pumped = pump_canvas_unlocked(*previous);
+            if (!pumped) return pumped;
+        }
+    }
+
+    apps_.insert_or_assign(app_id.value, std::move(app));
+
+    if (launch_signal != vm::MidletSignal::destroyed) {
+        foreground_app_id_ = app_id;
+        auto resized = framebuffer_.resize(dimensions);
+        if (!resized) return resized;
+        App* launched = find_app_unlocked(app_id);
+        if (launched != nullptr && launched->vm != nullptr) {
+            auto foregrounded =
+                launched->vm->canvas.set_host_foreground(true);
+            if (!foregrounded) {
+                mark_canvas_failure_unlocked(*launched,
+                                             foregrounded.error());
+                return std::unexpected(foregrounded.error());
+            }
+            auto pumped = pump_canvas_unlocked(*launched);
+            if (!pumped) return pumped;
+        }
+    }
+    last_exit_code_ = 0;
+    ui_queue_.push(UiEvent {
+        .kind = 1,
+        .component_id = app_id.value,
+        .generation = sequence_,
+        .detail = launch_signal == vm::MidletSignal::destroyed
+            ? "MIDlet notified destruction from startApp"
+            : (launch_signal == vm::MidletSignal::paused
+                   ? "MIDlet notified pause from startApp"
+                   : "MIDlet constructor and startApp completed in the C++ VM"),
+    });
+    return {};
+}
+
+Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
+    if (!app_id.valid() || !dimensions.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "invalid foreground application arguments");
+    }
+
+    std::scoped_lock lock(mutex_);
+    auto running = require_running_unlocked();
+    if (!running) {
+        return running;
+    }
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr || app->state == AppState::destroyed) {
+        return fail(ErrorCode::invalid_argument,
+                    "foreground application does not exist");
+    }
+    if (foreground_app_id_.valid() && foreground_app_id_ != app_id) {
+        App* previous = find_app_unlocked(foreground_app_id_);
+        if (previous != nullptr && previous->vm != nullptr) {
+            auto hidden = previous->vm->canvas.set_host_foreground(false);
+            if (!hidden) {
+                mark_canvas_failure_unlocked(*previous, hidden.error());
+                return std::unexpected(hidden.error());
+            }
+            auto pumped = pump_canvas_unlocked(*previous);
+            if (!pumped) return pumped;
+        }
+    }
+
+    app->dimensions = dimensions;
+    app->generation = ++sequence_;
+    auto canvas_resized = app->vm->canvas.set_dimensions(dimensions);
+    if (!canvas_resized) {
+        mark_canvas_failure_unlocked(*app, canvas_resized.error());
+        return std::unexpected(canvas_resized.error());
+    }
+    foreground_app_id_ = app_id;
+    auto resized = framebuffer_.resize(dimensions);
+    if (!resized) return resized;
+    auto foregrounded = app->vm->canvas.set_host_foreground(true);
+    if (!foregrounded) {
+        mark_canvas_failure_unlocked(*app, foregrounded.error());
+        return std::unexpected(foregrounded.error());
+    }
+    return pump_canvas_unlocked(*app);
+}
+
+Status Runtime::pause_midlet(AppId app_id) {
+    std::scoped_lock lock(mutex_);
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr || app->state == AppState::destroyed || app->vm == nullptr) {
+        return fail(ErrorCode::invalid_argument, "application does not exist");
+    }
+    if (app->state == AppState::paused) {
+        return {};
+    }
+
+    auto paused = app->vm->machine.invoke_instance(app->vm->midlet,
+                                                    app->main_class,
+                                                    "pauseApp",
+                                                    "()V");
+    if (!paused) {
+        app->state = AppState::error;
+        app->generation = ++sequence_;
+        last_exit_code_ = -1;
+        return std::unexpected(paused.error());
+    }
+    auto pause_completion = require_normal_completion(app->vm->machine,
+                                                       *paused,
+                                                       "MIDlet pauseApp");
+    if (!pause_completion) {
+        app->state = AppState::error;
+        app->generation = ++sequence_;
+        last_exit_code_ = -1;
+        return pause_completion;
+    }
+    const vm::MidletSignal signal =
+        app->vm->machine.consume_midlet_signal();
+    if (foreground_app_id_ == app_id &&
+        signal != vm::MidletSignal::resume_requested) {
+        auto hidden = app->vm->canvas.set_host_foreground(false);
+        if (!hidden) {
+            mark_canvas_failure_unlocked(*app, hidden.error());
+            return std::unexpected(hidden.error());
+        }
+        auto pumped = pump_canvas_unlocked(*app);
+        if (!pumped) return pumped;
+    }
+    if (signal == vm::MidletSignal::destroyed) {
+        app->state = AppState::destroyed;
+        app->vm.reset();
+        if (foreground_app_id_ == app_id) {
+            foreground_app_id_ = {};
+            framebuffer_.clear();
+        }
+    } else if (signal == vm::MidletSignal::resume_requested) {
+        app->state = AppState::active;
+        app->vm->machine.media().resume();
+    } else {
+        app->state = AppState::paused;
+        app->vm->machine.media().suspend();
+    }
+    app->generation = ++sequence_;
+    return {};
+}
+
+Status Runtime::resume_midlet(AppId app_id) {
+    std::scoped_lock lock(mutex_);
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr || app->state == AppState::destroyed || app->vm == nullptr) {
+        return fail(ErrorCode::invalid_argument, "application does not exist");
+    }
+    if (app->state == AppState::error) {
+        return fail(ErrorCode::invalid_state,
+                    "application cannot resume from the error state");
+    }
+    if (app->state == AppState::active) {
+        return {};
+    }
+
+    auto resumed = app->vm->machine.invoke_instance(app->vm->midlet,
+                                                     app->main_class,
+                                                     "startApp",
+                                                     "()V");
+    if (!resumed) {
+        app->state = AppState::error;
+        app->generation = ++sequence_;
+        last_exit_code_ = -1;
+        return std::unexpected(resumed.error());
+    }
+    auto resume_completion = require_normal_completion(app->vm->machine,
+                                                        *resumed,
+                                                        "MIDlet startApp");
+    if (!resume_completion) {
+        app->state = AppState::error;
+        app->generation = ++sequence_;
+        last_exit_code_ = -1;
+        return resume_completion;
+    }
+    const vm::MidletSignal signal =
+        app->vm->machine.consume_midlet_signal();
+    if (signal == vm::MidletSignal::destroyed) {
+        app->state = AppState::destroyed;
+        app->vm.reset();
+        if (foreground_app_id_ == app_id) {
+            foreground_app_id_ = {};
+            framebuffer_.clear();
+        }
+    } else if (signal == vm::MidletSignal::paused) {
+        app->state = AppState::paused;
+        app->vm->machine.media().suspend();
+    } else {
+        app->state = AppState::active;
+        app->vm->machine.media().resume();
+    }
+    if (app->vm != nullptr && foreground_app_id_ == app_id) {
+        auto visible = app->vm->canvas.set_host_foreground(
+            app->state == AppState::active);
+        if (!visible) {
+            mark_canvas_failure_unlocked(*app, visible.error());
+            return std::unexpected(visible.error());
+        }
+        auto pumped = pump_canvas_unlocked(*app);
+        if (!pumped) return pumped;
+    }
+    app->generation = ++sequence_;
+    return {};
+}
+
+Status Runtime::destroy_midlet(AppId app_id) {
+    std::scoped_lock lock(mutex_);
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr) {
+        return fail(ErrorCode::invalid_argument, "application does not exist");
+    }
+
+    if (app->state != AppState::destroyed && app->vm != nullptr) {
+        if (foreground_app_id_ == app_id) {
+            auto hidden = app->vm->canvas.set_host_foreground(false);
+            if (!hidden) {
+                mark_canvas_failure_unlocked(*app, hidden.error());
+                return std::unexpected(hidden.error());
+            }
+            auto pumped = pump_canvas_unlocked(*app);
+            if (!pumped) return pumped;
+        }
+        const vm::Value unconditional = vm::Value::from_int(1);
+        auto destroyed = app->vm->machine.invoke_instance(
+            app->vm->midlet,
+            app->main_class,
+            "destroyApp",
+            "(Z)V",
+            std::span<const vm::Value>(&unconditional, 1));
+        if (!destroyed) {
+            app->state = AppState::error;
+            app->generation = ++sequence_;
+            last_exit_code_ = -1;
+            return std::unexpected(destroyed.error());
+        }
+        auto destroy_completion = require_normal_completion(
+            app->vm->machine,
+            *destroyed,
+            "MIDlet destroyApp");
+        if (!destroy_completion) {
+            app->state = AppState::error;
+            app->generation = ++sequence_;
+            last_exit_code_ = -1;
+            return destroy_completion;
+        }
+    }
+
+    app->state = AppState::destroyed;
+    app->generation = ++sequence_;
+    app->vm.reset();
+    if (foreground_app_id_ == app_id) {
+        foreground_app_id_ = {};
+        framebuffer_.clear();
+    }
+    return {};
+}
+
+Status Runtime::set_push_background_policy(
+    SuiteId suite_id,
+    push::BackgroundPolicy policy) {
+    std::string push_root;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "runtime must be configured before PushRegistry access");
+        }
+        if (!suite_id.valid() || suite_store_.find(suite_id) == nullptr) {
+            return fail(ErrorCode::invalid_argument,
+                        "PushRegistry suite ID does not exist");
+        }
+        push_root = runtime_home_ + "/push";
+    }
+
+    push::PushRegistry registry;
+    auto configured = registry.configure(std::move(push_root), suite_id);
+    if (!configured) return configured;
+    return registry.set_background_policy(policy);
+}
+
+Status Runtime::notify_push_connection_available(
+    SuiteId suite_id,
+    std::string connection,
+    i64 received_at_millis) {
+    std::string push_root;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "runtime must be configured before PushRegistry access");
+        }
+        if (!suite_id.valid() || suite_store_.find(suite_id) == nullptr) {
+            return fail(ErrorCode::invalid_argument,
+                        "PushRegistry suite ID does not exist");
+        }
+        push_root = runtime_home_ + "/push";
+    }
+
+    push::PushRegistry registry;
+    auto configured = registry.configure(std::move(push_root), suite_id);
+    if (!configured) return configured;
+    return registry.notify_connection_available(connection,
+                                                 received_at_millis);
+}
+
+Result<std::vector<push::LaunchRequest>>
+Runtime::poll_push_launch_requests(
+    SuiteId suite_id,
+    i64 now_millis,
+    bool background_execution_granted,
+    usize limit) {
+    std::string push_root;
+    bool suite_is_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "runtime must be configured before PushRegistry access");
+        }
+        if (!suite_id.valid() || suite_store_.find(suite_id) == nullptr) {
+            return fail(ErrorCode::invalid_argument,
+                        "PushRegistry suite ID does not exist");
+        }
+        push_root = runtime_home_ + "/push";
+        if (!suspended_ && foreground_app_id_.valid()) {
+            const App* foreground = find_app_unlocked(foreground_app_id_);
+            suite_is_foreground = foreground != nullptr &&
+                                  foreground->suite_id == suite_id &&
+                                  foreground->state == AppState::active;
+        }
+    }
+
+    push::PushRegistry registry;
+    auto configured = registry.configure(std::move(push_root), suite_id);
+    if (!configured) return std::unexpected(configured.error());
+    return registry.eligible_launch_requests(now_millis,
+                                             suite_is_foreground,
+                                             background_execution_granted,
+                                             limit);
+}
+
+Status Runtime::acknowledge_push_launch_request(
+    SuiteId suite_id,
+    u64 request_id) {
+    std::string push_root;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "runtime must be configured before PushRegistry access");
+        }
+        if (!suite_id.valid() || suite_store_.find(suite_id) == nullptr) {
+            return fail(ErrorCode::invalid_argument,
+                        "PushRegistry suite ID does not exist");
+        }
+        push_root = runtime_home_ + "/push";
+    }
+
+    push::PushRegistry registry;
+    auto configured = registry.configure(std::move(push_root), suite_id);
+    if (!configured) return configured;
+    return registry.acknowledge_launch_request(request_id);
+}
+
+AppState Runtime::app_state(AppId app_id) const noexcept {
+    std::scoped_lock lock(mutex_);
+    const App* app = find_app_unlocked(app_id);
+    return app == nullptr ? AppState::none : app->state;
+}
+
+AppId Runtime::foreground_app_id() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return foreground_app_id_;
+}
+
+i64 Runtime::app_used_memory(AppId app_id) const noexcept {
+    std::scoped_lock lock(mutex_);
+    const App* app = find_app_unlocked(app_id);
+    if (app == nullptr) {
+        return -1;
+    }
+    usize estimated = sizeof(App) + app->main_class.capacity();
+    if (app->vm != nullptr) {
+        const vm::HeapStats heap_stats = app->vm->machine.heap().stats();
+        if (heap_stats.estimated_bytes >
+            std::numeric_limits<usize>::max() - estimated) {
+            return std::numeric_limits<i64>::max();
+        }
+        estimated += heap_stats.estimated_bytes;
+        const usize canvas_bytes = app->vm->canvas.estimated_bytes();
+        if (canvas_bytes > std::numeric_limits<usize>::max() - estimated) {
+            return std::numeric_limits<i64>::max();
+        }
+        estimated += canvas_bytes;
+    }
+    if (estimated > static_cast<usize>(std::numeric_limits<i64>::max())) {
+        return std::numeric_limits<i64>::max();
+    }
+    return static_cast<i64>(estimated);
+}
+
+void Runtime::stop() noexcept {
+    std::scoped_lock lock(mutex_);
+    for (auto& [id, app] : apps_) {
+        (void)id;
+        app.state = AppState::destroyed;
+        app.generation = ++sequence_;
+    }
+    apps_.clear();
+    permission_policies_.clear();
+    input_queue_.clear();
+    ui_queue_.clear();
+    framebuffer_.clear();
+    foreground_app_id_ = {};
+    running_ = false;
+    suspended_ = false;
+    last_exit_code_ = 0;
+}
+
+void Runtime::suspend() noexcept {
+    std::scoped_lock lock(mutex_);
+    if (!running_ || suspended_) {
+        return;
+    }
+    App* foreground = find_app_unlocked(foreground_app_id_);
+    if (foreground != nullptr && foreground->vm != nullptr) {
+        auto hidden = foreground->vm->canvas.set_host_foreground(false);
+        if (!hidden) {
+            mark_canvas_failure_unlocked(*foreground, hidden.error());
+        } else {
+            auto pumped = pump_canvas_unlocked(*foreground);
+            (void)pumped;
+        }
+    }
+    suspended_ = true;
+    for (auto& [id, app] : apps_) {
+        (void)id;
+        if (app.vm != nullptr && app.state != AppState::destroyed) {
+            app.vm->machine.media().suspend();
+        }
+    }
+}
+
+void Runtime::resume() noexcept {
+    std::scoped_lock lock(mutex_);
+    if (!running_ || !suspended_) {
+        return;
+    }
+    suspended_ = false;
+    for (auto& [id, app] : apps_) {
+        (void)id;
+        if (app.vm != nullptr && app.state == AppState::active) {
+            app.vm->machine.media().resume();
+        }
+    }
+    App* foreground = find_app_unlocked(foreground_app_id_);
+    if (foreground != nullptr && foreground->vm != nullptr &&
+        (foreground->state == AppState::active ||
+         foreground->state == AppState::paused)) {
+        auto shown = foreground->vm->canvas.set_host_foreground(true);
+        if (!shown) {
+            mark_canvas_failure_unlocked(*foreground, shown.error());
+        } else {
+            auto pumped = pump_canvas_unlocked(*foreground);
+            (void)pumped;
+        }
+    }
+}
+
+bool Runtime::is_running() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return running_;
+}
+
+bool Runtime::is_suspended() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return suspended_;
+}
+
+i32 Runtime::last_exit_code() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return last_exit_code_;
+}
+
+void Runtime::send_key(i32 key_code, bool pressed) {
+    std::scoped_lock lock(mutex_);
+    if (!running_ || suspended_) {
+        return;
+    }
+    App* app = find_app_unlocked(foreground_app_id_);
+    if (app == nullptr || app->vm == nullptr ||
+        (app->state != AppState::active && app->state != AppState::paused)) {
+        return;
+    }
+    input_queue_.push(InputEvent {
+        .kind = InputKind::key,
+        .app_id = app->id,
+        .app_generation = app->generation,
+        .first = mapped_key_code_unlocked(key_code),
+        .second = pressed ? 1 : 0,
+        .sequence = ++sequence_,
+    });
+    dispatch_input_unlocked();
+}
+
+void Runtime::send_pointer(i32 x, i32 y, i32 action) {
+    std::scoped_lock lock(mutex_);
+    if (!running_ || suspended_) {
+        return;
+    }
+    App* app = find_app_unlocked(foreground_app_id_);
+    if (app == nullptr || app->vm == nullptr ||
+        (app->state != AppState::active && app->state != AppState::paused)) {
+        return;
+    }
+    input_queue_.push(InputEvent {
+        .kind = InputKind::pointer,
+        .app_id = app->id,
+        .app_generation = app->generation,
+        .first = x,
+        .second = y,
+        .third = action,
+        .sequence = ++sequence_,
+    });
+    dispatch_input_unlocked();
+}
+
+FrameSnapshot Runtime::frame_snapshot() {
+    std::scoped_lock lock(mutex_);
+    if (running_ && !suspended_) {
+        App* app = find_app_unlocked(foreground_app_id_);
+        if (app != nullptr && app->vm != nullptr &&
+            (app->state == AppState::active || app->state == AppState::paused)) {
+            auto pumped = pump_canvas_unlocked(*app);
+            (void)pumped;
+        }
+    }
+    return framebuffer_.snapshot();
+}
+
+std::optional<UiEvent> Runtime::poll_ui_event() { return ui_queue_.pop(); }
+
+void Runtime::ui_select_command(i32 command_id) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(100, command_id, 0, 0);
+}
+
+void Runtime::ui_focus_item(i32 component_id) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(101, component_id, 0, 0);
+}
+
+void Runtime::ui_activate_item(i32 component_id) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(102, component_id, 0, 0);
+}
+
+void Runtime::ui_set_text(i32 component_id,
+                          std::string text,
+                          i32 caret_position) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(103, component_id, caret_position, 0, std::move(text));
+}
+
+void Runtime::ui_set_choice(i32 component_id,
+                            i32 element_index,
+                            bool selected) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(104, component_id, element_index, selected ? 1 : 0);
+}
+
+void Runtime::ui_set_gauge(i32 component_id, i32 value) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(105, component_id, value, 0);
+}
+
+void Runtime::ui_set_date(i32 component_id, i64 unix_seconds) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(106, component_id, 0, unix_seconds);
+}
+
+void Runtime::ui_set_scroll_position(i32 position) {
+    std::scoped_lock lock(mutex_);
+    push_ui_action(107, 0, position, 0);
+}
+
+App* Runtime::find_app_unlocked(AppId app_id) noexcept {
+    const auto iterator = apps_.find(app_id.value);
+    return iterator == apps_.end() ? nullptr : &iterator->second;
+}
+
+const App* Runtime::find_app_unlocked(AppId app_id) const noexcept {
+    const auto iterator = apps_.find(app_id.value);
+    return iterator == apps_.end() ? nullptr : &iterator->second;
+}
+
+Status Runtime::require_running_unlocked() const {
+    if (!running_) {
+        return fail(ErrorCode::not_running, "runtime is not running");
+    }
+    return {};
+}
+
+i32 Runtime::mapped_key_code_unlocked(i32 host_key_code) const noexcept {
+    switch (host_key_code) {
+    case -1: return keymap_[0];
+    case -2: return keymap_[1];
+    case -3: return keymap_[2];
+    case -4: return keymap_[3];
+    case -5: return keymap_[4];
+    case -6: return keymap_[5];
+    case -7: return keymap_[6];
+    default: return host_key_code;
+    }
+}
+
+void Runtime::dispatch_input_unlocked() {
+    while (auto event = input_queue_.pop()) {
+        if (!running_ || suspended_) return;
+        App* app = find_app_unlocked(event->app_id);
+        if (app == nullptr || app->vm == nullptr ||
+            app->generation != event->app_generation ||
+            foreground_app_id_ != event->app_id ||
+            (app->state != AppState::active &&
+             app->state != AppState::paused)) {
+            continue;
+        }
+        if (event->kind == InputKind::key) {
+            app->vm->canvas.enqueue_key(event->first,
+                                        event->second != 0,
+                                        event->sequence);
+        } else {
+            app->vm->canvas.enqueue_pointer(event->first,
+                                            event->second,
+                                            event->third,
+                                            event->sequence);
+        }
+        auto pumped = pump_canvas_unlocked(*app);
+        if (!pumped) return;
+    }
+}
+
+Status Runtime::pump_canvas_unlocked(App& app) {
+    if (app.vm == nullptr) return {};
+    auto pumped = app.vm->canvas.pump();
+    if (!pumped) {
+        mark_canvas_failure_unlocked(app, pumped.error());
+        return std::unexpected(pumped.error());
+    }
+    return {};
+}
+
+void Runtime::mark_canvas_failure_unlocked(App& app, const Error& error) {
+    app.state = AppState::error;
+    app.generation = ++sequence_;
+    last_exit_code_ = -1;
+    ui_queue_.push(UiEvent {
+        .kind = -1,
+        .component_id = app.id.value,
+        .generation = sequence_,
+        .detail = "Canvas dispatcher failed: " + error.message,
+    });
+}
+
+void Runtime::push_ui_action(i32 kind,
+                             i32 component_id,
+                             i32 first,
+                             i64 value64,
+                             std::string text) {
+    if (!running_ || suspended_) {
+        return;
+    }
+    App* app = find_app_unlocked(foreground_app_id_);
+    if (app != nullptr && app->vm != nullptr &&
+        (app->state == AppState::active || app->state == AppState::paused)) {
+        auto handled = vm::handle_lcdui_action(app->vm->machine,
+                                              kind,
+                                              component_id,
+                                              first,
+                                              value64,
+                                              text);
+        if (handled) {
+            auto pumped = pump_canvas_unlocked(*app);
+            (void)pumped;
+            return;
+        }
+        ui_queue_.push(UiEvent {
+            .kind = kind,
+            .component_id = component_id,
+            .arguments = {first, 0, 0, 0},
+            .value64 = value64,
+            .generation = ++sequence_,
+            .text = std::move(text),
+            .detail = handled.error().message,
+        });
+        return;
+    }
+    ui_queue_.push(UiEvent {
+        .kind = kind,
+        .component_id = component_id,
+        .arguments = {first, 0, 0, 0},
+        .value64 = value64,
+        .generation = ++sequence_,
+        .text = std::move(text),
+    });
+}
+
+} // namespace phoneme::runtime

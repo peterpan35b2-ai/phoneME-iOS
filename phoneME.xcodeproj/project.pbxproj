@@ -363,6 +363,10 @@
 					"-liconv",
 					"-framework",
 					CoreText,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					CoreFoundation,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
@@ -398,6 +402,10 @@
 					"-liconv",
 					"-framework",
 					CoreText,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					CoreFoundation,
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;

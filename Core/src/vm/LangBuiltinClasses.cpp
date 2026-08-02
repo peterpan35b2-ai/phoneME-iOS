@@ -1,0 +1,444 @@
+#include "phoneme/vm/BuiltinClassRegistry.hpp"
+
+#include <array>
+#include <string>
+
+#include "BuiltinClassSupport.hpp"
+
+namespace phoneme::vm {
+namespace {
+
+using namespace builtin;
+
+[[nodiscard]] ClassPtr build_lang_class(std::string_view name) {
+    if (name == "java/lang/Object") {
+        return make_class("java/lang/Object", "", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "getClass", "()Ljava/lang/Class;"),
+            method(kProtected, "clone", "()Ljava/lang/Object;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/Class") {
+        return make_class("java/lang/Class", "java/lang/Object",
+                          kOrdinary | kFinal, {}, {
+            method(kPublic, "getName", "()Ljava/lang/String;"),
+            method(kPublic, "newInstance", "()Ljava/lang/Object;"),
+            method(kPublic, "isInterface", "()Z"),
+            method(kPublic, "isArray", "()Z"),
+            method(kPublic, "isInstance", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "isAssignableFrom", "(Ljava/lang/Class;)Z"),
+            method(kPublic, "getSuperclass", "()Ljava/lang/Class;"),
+            method(kPublic, "getComponentType", "()Ljava/lang/Class;"),
+            method(kPublic, "desiredAssertionStatus", "()Z"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic, "getResourceAsStream",
+                   "(Ljava/lang/String;)Ljava/io/InputStream;"),
+            method(kPublic | kStatic, "forName",
+                   "(Ljava/lang/String;)Ljava/lang/Class;"),
+        });
+    }
+    if (name == "java/lang/String") {
+        return make_class("java/lang/String", "java/lang/Object",
+                          kOrdinary | kFinal, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "([C)V"),
+            method(kPublic, "<init>", "([CII)V"),
+            method(kPublic, "<init>", "([B)V"),
+            method(kPublic, "<init>", "([BII)V"),
+            method(kPublic, "<init>", "([BLjava/lang/String;)V"),
+            method(kPublic, "<init>", "([BIILjava/lang/String;)V"),
+            method(kPublic, "length", "()I"),
+            method(kPublic, "isEmpty", "()Z"),
+            method(kPublic, "charAt", "(I)C"),
+            method(kPublic, "getChars", "(II[CI)V"),
+            method(kPublic, "toCharArray", "()[C"),
+            method(kPublic, "getBytes", "()[B"),
+            method(kPublic, "getBytes", "(Ljava/lang/String;)[B"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "equalsIgnoreCase", "(Ljava/lang/String;)Z"),
+            method(kPublic, "compareTo", "(Ljava/lang/String;)I"),
+            method(kPublic, "startsWith", "(Ljava/lang/String;)Z"),
+            method(kPublic, "startsWith", "(Ljava/lang/String;I)Z"),
+            method(kPublic, "endsWith", "(Ljava/lang/String;)Z"),
+            method(kPublic, "indexOf", "(I)I"),
+            method(kPublic, "indexOf", "(II)I"),
+            method(kPublic, "indexOf", "(Ljava/lang/String;)I"),
+            method(kPublic, "indexOf", "(Ljava/lang/String;I)I"),
+            method(kPublic, "lastIndexOf", "(I)I"),
+            method(kPublic, "lastIndexOf", "(II)I"),
+            method(kPublic, "lastIndexOf", "(Ljava/lang/String;)I"),
+            method(kPublic, "lastIndexOf", "(Ljava/lang/String;I)I"),
+            method(kPublic, "substring", "(I)Ljava/lang/String;"),
+            method(kPublic, "substring", "(II)Ljava/lang/String;"),
+            method(kPublic, "concat", "(Ljava/lang/String;)Ljava/lang/String;"),
+            method(kPublic, "replace", "(CC)Ljava/lang/String;"),
+            method(kPublic, "trim", "()Ljava/lang/String;"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "intern", "()Ljava/lang/String;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf",
+                   "(Ljava/lang/Object;)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "([C)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "([CII)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(Z)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(C)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(I)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(J)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/StringBuilder") {
+        return make_class("java/lang/StringBuilder", "java/lang/Object",
+                          kOrdinary | kFinal, {},
+                          text_builder_methods("java/lang/StringBuilder", false));
+    }
+    if (name == "java/lang/StringBuffer") {
+        return make_class("java/lang/StringBuffer", "java/lang/Object",
+                          kOrdinary | kFinal, {},
+                          text_builder_methods("java/lang/StringBuffer", true));
+    }
+    if (name == "java/lang/System") {
+        return make_class("java/lang/System", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPublic | kStatic | kFinal, "in", "Ljava/io/InputStream;"),
+            field(kPublic | kStatic | kFinal, "out", "Ljava/io/PrintStream;"),
+            field(kPublic | kStatic | kFinal, "err", "Ljava/io/PrintStream;"),
+        }, {
+            method(kPublic | kStatic, "currentTimeMillis", "()J"),
+            method(kPublic | kStatic, "nanoTime", "()J"),
+            method(kPublic | kStatic, "identityHashCode", "(Ljava/lang/Object;)I"),
+            method(kPublic | kStatic, "arraycopy",
+                   "(Ljava/lang/Object;ILjava/lang/Object;II)V"),
+            method(kPublic | kStatic, "getProperty",
+                   "(Ljava/lang/String;)Ljava/lang/String;"),
+            method(kPublic | kStatic, "getProperty",
+                   "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+            method(kPublic | kStatic, "gc", "()V"),
+            method(kPublic | kStatic, "exit", "(I)V"),
+        });
+    }
+    if (name == "java/lang/Runtime") {
+        return make_class("java/lang/Runtime", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kStatic | kFinal, "currentRuntime",
+                  "Ljava/lang/Runtime;"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPublic | kStatic, "getRuntime", "()Ljava/lang/Runtime;"),
+            method(kPublic, "totalMemory", "()J"),
+            method(kPublic, "freeMemory", "()J"),
+            method(kPublic, "gc", "()V"),
+        });
+    }
+    if (name == "java/lang/Thread") {
+        return make_class("java/lang/Thread", "java/lang/Object", kOrdinary,
+                          {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic | kStatic, "yield", "()V"),
+        });
+    }
+    if (name == "java/lang/Number") {
+        return make_class("java/lang/Number", "java/lang/Object",
+                          kOrdinary | kAbstract, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic | kAbstract, "intValue", "()I"),
+            method(kPublic | kAbstract, "longValue", "()J"),
+            method(kPublic | kAbstract, "floatValue", "()F"),
+            method(kPublic | kAbstract, "doubleValue", "()D"),
+        });
+    }
+    if (name == "java/lang/Boolean") {
+        return make_class("java/lang/Boolean", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "Z"),
+            field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
+        }, {
+            method(kPublic, "<init>", "(Z)V"),
+            method(kPublic, "booleanValue", "()Z"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(Z)Ljava/lang/Boolean;"),
+            method(kPublic | kStatic, "parseBoolean", "(Ljava/lang/String;)Z"),
+            method(kPublic | kStatic, "toString", "(Z)Ljava/lang/String;"),
+        });
+    }
+
+    const auto number_wrapper = [&](std::string class_name,
+                                    std::string super_name,
+                                    const char* value_descriptor,
+                                    std::vector<classfile::Method> methods) {
+        return make_class(std::move(class_name), std::move(super_name),
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", value_descriptor),
+            field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
+        }, std::move(methods));
+    };
+    if (name == "java/lang/Byte") {
+        return number_wrapper("java/lang/Byte", "java/lang/Number", "B", {
+            method(kPublic, "<init>", "(B)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(B)Ljava/lang/Byte;"),
+            method(kPublic | kStatic, "parseByte", "(Ljava/lang/String;)B"),
+            method(kPublic | kStatic, "parseByte", "(Ljava/lang/String;I)B"),
+            method(kPublic | kStatic, "toString", "(B)Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/Short") {
+        return number_wrapper("java/lang/Short", "java/lang/Number", "S", {
+            method(kPublic, "<init>", "(S)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(S)Ljava/lang/Short;"),
+            method(kPublic | kStatic, "parseShort", "(Ljava/lang/String;)S"),
+            method(kPublic | kStatic, "parseShort", "(Ljava/lang/String;I)S"),
+            method(kPublic | kStatic, "toString", "(S)Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/Integer") {
+        return number_wrapper("java/lang/Integer", "java/lang/Number", "I", {
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic, "compareTo", "(Ljava/lang/Integer;)I"),
+            method(kPublic | kStatic, "valueOf", "(I)Ljava/lang/Integer;"),
+            method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;)I"),
+            method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;I)I"),
+            method(kPublic | kStatic, "toString", "(I)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toString", "(II)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toHexString", "(I)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toOctalString", "(I)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toBinaryString", "(I)Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/Long") {
+        return number_wrapper("java/lang/Long", "java/lang/Number", "J", {
+            method(kPublic, "<init>", "(J)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic, "compareTo", "(Ljava/lang/Long;)I"),
+            method(kPublic | kStatic, "valueOf", "(J)Ljava/lang/Long;"),
+            method(kPublic | kStatic, "parseLong", "(Ljava/lang/String;)J"),
+            method(kPublic | kStatic, "parseLong", "(Ljava/lang/String;I)J"),
+            method(kPublic | kStatic, "toString", "(J)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toString", "(JI)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toHexString", "(J)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toOctalString", "(J)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toBinaryString", "(J)Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/lang/Character") {
+        return make_class("java/lang/Character", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "C"),
+            field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
+        }, {
+            method(kPublic, "<init>", "(C)V"),
+            method(kPublic, "charValue", "()C"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(C)Ljava/lang/Character;"),
+            method(kPublic | kStatic, "isDigit", "(C)Z"),
+            method(kPublic | kStatic, "isLetter", "(C)Z"),
+            method(kPublic | kStatic, "isLetterOrDigit", "(C)Z"),
+            method(kPublic | kStatic, "isWhitespace", "(C)Z"),
+            method(kPublic | kStatic, "toLowerCase", "(C)C"),
+            method(kPublic | kStatic, "toUpperCase", "(C)C"),
+        });
+    }
+    if (name == "java/lang/Float") {
+        return number_wrapper("java/lang/Float", "java/lang/Number", "F", {
+            method(kPublic, "<init>", "(F)V"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/Float;"),
+            method(kPublic | kStatic, "parseFloat", "(Ljava/lang/String;)F"),
+            method(kPublic | kStatic, "toString", "(F)Ljava/lang/String;"),
+            method(kPublic | kStatic, "floatToIntBits", "(F)I"),
+            method(kPublic | kStatic, "intBitsToFloat", "(I)F"),
+        });
+    }
+    if (name == "java/lang/Double") {
+        return number_wrapper("java/lang/Double", "java/lang/Number", "D", {
+            method(kPublic, "<init>", "(D)V"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/Double;"),
+            method(kPublic | kStatic, "parseDouble", "(Ljava/lang/String;)D"),
+            method(kPublic | kStatic, "toString", "(D)Ljava/lang/String;"),
+            method(kPublic | kStatic, "doubleToLongBits", "(D)J"),
+            method(kPublic | kStatic, "longBitsToDouble", "(J)D"),
+        });
+    }
+    if (name == "java/lang/Void") {
+        return make_class("java/lang/Void", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
+        }, {method(kPrivate, "<init>", "()V")});
+    }
+    if (name == "java/lang/Math") {
+        return make_class("java/lang/Math", "java/lang/Object",
+                          kOrdinary | kFinal, {}, {
+            method(kPublic | kStatic, "abs", "(I)I"),
+            method(kPublic | kStatic, "abs", "(J)J"),
+            method(kPublic | kStatic, "abs", "(F)F"),
+            method(kPublic | kStatic, "abs", "(D)D"),
+            method(kPublic | kStatic, "min", "(II)I"),
+            method(kPublic | kStatic, "min", "(JJ)J"),
+            method(kPublic | kStatic, "min", "(FF)F"),
+            method(kPublic | kStatic, "min", "(DD)D"),
+            method(kPublic | kStatic, "max", "(II)I"),
+            method(kPublic | kStatic, "max", "(JJ)J"),
+            method(kPublic | kStatic, "max", "(FF)F"),
+            method(kPublic | kStatic, "max", "(DD)D"),
+            method(kPublic | kStatic, "sin", "(D)D"),
+            method(kPublic | kStatic, "cos", "(D)D"),
+            method(kPublic | kStatic, "tan", "(D)D"),
+            method(kPublic | kStatic, "asin", "(D)D"),
+            method(kPublic | kStatic, "acos", "(D)D"),
+            method(kPublic | kStatic, "atan", "(D)D"),
+            method(kPublic | kStatic, "atan2", "(DD)D"),
+            method(kPublic | kStatic, "exp", "(D)D"),
+            method(kPublic | kStatic, "log", "(D)D"),
+            method(kPublic | kStatic, "sqrt", "(D)D"),
+            method(kPublic | kStatic, "ceil", "(D)D"),
+            method(kPublic | kStatic, "floor", "(D)D"),
+            method(kPublic | kStatic, "pow", "(DD)D"),
+            method(kPublic | kStatic, "IEEEremainder", "(DD)D"),
+            method(kPublic | kStatic, "rint", "(D)D"),
+            method(kPublic | kStatic, "round", "(F)I"),
+            method(kPublic | kStatic, "round", "(D)J"),
+            method(kPublic | kStatic, "toDegrees", "(D)D"),
+            method(kPublic | kStatic, "toRadians", "(D)D"),
+            method(kPublic | kStatic, "random", "()D"),
+        });
+    }
+    if (name == "java/lang/Runnable") {
+        return make_class("java/lang/Runnable", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "run", "()V"),
+        });
+    }
+    if (name == "java/lang/Cloneable") {
+        return make_class("java/lang/Cloneable", "java/lang/Object",
+                          kPublic | kInterface | kAbstract);
+    }
+
+    struct Hierarchy final {
+        const char* name;
+        const char* super_name;
+    };
+    static constexpr std::array<Hierarchy, 29> hierarchy {{
+        {"java/lang/Throwable", "java/lang/Object"},
+        {"java/lang/Exception", "java/lang/Throwable"},
+        {"java/lang/RuntimeException", "java/lang/Exception"},
+        {"java/lang/Error", "java/lang/Throwable"},
+        {"java/lang/VirtualMachineError", "java/lang/Error"},
+        {"java/lang/LinkageError", "java/lang/Error"},
+        {"java/lang/BootstrapMethodError", "java/lang/LinkageError"},
+        {"java/lang/ExceptionInInitializerError", "java/lang/LinkageError"},
+        {"java/lang/NoClassDefFoundError", "java/lang/LinkageError"},
+        {"java/lang/ClassFormatError", "java/lang/LinkageError"},
+        {"java/lang/VerifyError", "java/lang/LinkageError"},
+        {"java/lang/IncompatibleClassChangeError", "java/lang/LinkageError"},
+        {"java/lang/NoSuchMethodError", "java/lang/IncompatibleClassChangeError"},
+        {"java/lang/NoSuchFieldError", "java/lang/IncompatibleClassChangeError"},
+        {"java/lang/AbstractMethodError", "java/lang/IncompatibleClassChangeError"},
+        {"java/lang/InstantiationError", "java/lang/IncompatibleClassChangeError"},
+        {"java/lang/UnsatisfiedLinkError", "java/lang/LinkageError"},
+        {"java/lang/NullPointerException", "java/lang/RuntimeException"},
+        {"java/lang/ArithmeticException", "java/lang/RuntimeException"},
+        {"java/lang/ArrayIndexOutOfBoundsException", "java/lang/IndexOutOfBoundsException"},
+        {"java/lang/NegativeArraySizeException", "java/lang/RuntimeException"},
+        {"java/lang/ArrayStoreException", "java/lang/RuntimeException"},
+        {"java/lang/IllegalMonitorStateException", "java/lang/RuntimeException"},
+        {"java/lang/ClassCastException", "java/lang/RuntimeException"},
+        {"java/lang/IllegalArgumentException", "java/lang/RuntimeException"},
+        {"java/lang/IllegalStateException", "java/lang/RuntimeException"},
+        {"java/lang/OutOfMemoryError", "java/lang/VirtualMachineError"},
+        {"java/lang/StackOverflowError", "java/lang/VirtualMachineError"},
+        {"java/lang/InterruptedException", "java/lang/Exception"},
+    }};
+    for (const Hierarchy& entry : hierarchy) {
+        if (name == entry.name) {
+            return make_class(entry.name, entry.super_name, kOrdinary, {}, {
+                method(kPublic, "<init>", "()V"),
+            });
+        }
+    }
+
+    static constexpr std::array<Hierarchy, 10> secondary_hierarchy {{
+        {"java/lang/NumberFormatException", "java/lang/IllegalArgumentException"},
+        {"java/lang/ClassNotFoundException", "java/lang/Exception"},
+        {"java/lang/InstantiationException", "java/lang/Exception"},
+        {"java/lang/IllegalAccessException", "java/lang/Exception"},
+        {"java/lang/CloneNotSupportedException", "java/lang/Exception"},
+        {"java/lang/IndexOutOfBoundsException", "java/lang/RuntimeException"},
+        {"java/lang/StringIndexOutOfBoundsException", "java/lang/IndexOutOfBoundsException"},
+        {"java/lang/UnsupportedOperationException", "java/lang/RuntimeException"},
+        {"java/lang/SecurityException", "java/lang/RuntimeException"},
+        {"java/lang/IllegalThreadStateException", "java/lang/IllegalArgumentException"},
+    }};
+    for (const Hierarchy& entry : secondary_hierarchy) {
+        if (name == entry.name) {
+            return make_class(entry.name, entry.super_name, kOrdinary, {}, {
+                method(kPublic, "<init>", "()V"),
+            });
+        }
+    }
+
+    return nullptr;
+}
+
+} // namespace
+
+void register_lang_classes(BuiltinClassRegistry& registry) {
+    registry.add_factory(build_lang_class);
+}
+
+} // namespace phoneme::vm
