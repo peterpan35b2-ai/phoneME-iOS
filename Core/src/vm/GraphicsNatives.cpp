@@ -595,6 +595,10 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             for (const auto& value : values) {
                 if (!value) return std::unexpected(value.error());
             }
+            if (source_reference->bits == bound->context->target_key) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "drawRegion source equals destination");
+            }
             auto transform = graphics::transform_from_int(*values[4]);
             if (!transform) return graphics_error(transform.error());
             auto source = image_payload(machine, *source_reference);
@@ -622,6 +626,10 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!bound) return std::unexpected(bound.error());
             for (const auto& value : values) {
                 if (!value) return std::unexpected(value.error());
+            }
+            if (bound->context->display_target) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "copyArea is unavailable on display Graphics");
             }
             return status_result(graphics::copy_area(
                 *bound->target, *bound->context,
@@ -653,10 +661,18 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto pixels = int_array(machine, *rgb_reference,
                                     "Graphics.drawRGB");
             if (!pixels) return std::unexpected(pixels.error());
-            return status_result(graphics::draw_rgb(
+            auto drawn = graphics::draw_rgb(
                 *bound->target, *bound->context, *pixels,
                 *values[0], *values[1], *values[2], *values[3],
-                *values[4], *values[5], *values[6] != 0));
+                *values[4], *values[5], *values[6] != 0);
+            if (!drawn) {
+                if (drawn.error().code == ErrorCode::out_of_range) {
+                    return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                     drawn.error().message);
+                }
+                return graphics_error(drawn.error());
+            }
+            return std::optional<Value> {};
         });
 
     add(registry, graphics_owner, "drawString",

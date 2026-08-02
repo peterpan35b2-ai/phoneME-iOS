@@ -338,11 +338,20 @@ void register_image_natives(NativeMethodRegistry& registry) {
             if (!height) return std::unexpected(height.error());
             auto image = image_payload(machine, *image_reference);
             if (!image) return std::unexpected(image.error());
-            if (*width < 0 || *height < 0 || *x < 0 || *y < 0 ||
-                *x > (*image)->width() - *width ||
-                *y > (*image)->height() - *height) {
+            const i64 source_right = static_cast<i64>(*x) + *width;
+            const i64 source_bottom = static_cast<i64>(*y) + *height;
+            if (*x < 0 || *y < 0 ||
+                source_right > (*image)->width() ||
+                source_bottom > (*image)->height()) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "getRGB source region is outside the image");
+            }
+            const i64 scan_magnitude = *scan_length < 0
+                ? -static_cast<i64>(*scan_length)
+                : static_cast<i64>(*scan_length);
+            if (scan_magnitude < static_cast<i64>(*width)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "getRGB scanlength overlaps source rows");
             }
             auto class_name = machine.heap().class_name(*destination);
             auto destination_length = machine.heap().array_length(*destination);
@@ -350,12 +359,8 @@ void register_image_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "getRGB destination must be int[]");
             }
-            if (*width == 0 || *height == 0) {
+            if (*width <= 0 || *height <= 0) {
                 return std::optional<Value> {};
-            }
-            if (*scan_length == 0) {
-                return fail_java("java/lang/IllegalArgumentException",
-                                 "getRGB scanlength cannot be zero");
             }
             const i64 first = *offset;
             const i64 last_row = static_cast<i64>(*offset) +

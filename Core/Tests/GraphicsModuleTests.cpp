@@ -11,12 +11,14 @@
 #include <zlib.h>
 
 #include "phoneme/graphics/Graphics.hpp"
+#include "phoneme/graphics/GraphicsStore.hpp"
 #include "phoneme/graphics/PngDecoder.hpp"
 #include "phoneme/graphics/TextRasterizer.hpp"
 
 namespace {
 
 using phoneme::i32;
+using phoneme::i64;
 using phoneme::u8;
 using phoneme::u32;
 using phoneme::u64;
@@ -696,6 +698,58 @@ void test_font_unicode_and_measurement() {
             "far-clipped text avoids full measured-width mask allocation");
 }
 
+void test_dirty_update_contract() {
+    phoneme::graphics::GraphicsStore store;
+    auto image = Image::create_mutable(8, 8);
+    require(image.has_value(), "create dirty update image");
+    require(store.attach_image(101U, std::move(*image)).has_value(),
+            "attach dirty update image");
+    require(store.attach_context(202U, 101U, true).has_value(),
+            "attach display graphics context");
+    auto display_context = store.context(202U);
+    require(display_context.has_value() && (*display_context)->display_target,
+            "graphics store preserves display-target semantics");
+
+    auto initial = store.consume_dirty_update(101U);
+    require(initial.has_value() && initial->has_value(),
+            "initial mutable image publishes one full dirty update");
+    require_equal((*initial)->region.x, 0, "initial dirty update x");
+    require_equal((*initial)->region.y, 0, "initial dirty update y");
+    require_equal((*initial)->region.width, 8, "initial dirty update width");
+    require_equal((*initial)->region.height, 8, "initial dirty update height");
+    require_equal((*initial)->pixels.size(), static_cast<usize>(64),
+                  "initial dirty update packs only covered pixels");
+
+    auto empty_update = store.consume_dirty_update(101U);
+    require(empty_update.has_value() && !empty_update->has_value(),
+            "consuming a dirty update clears its generation");
+
+    auto target = store.image(101U);
+    require(target.has_value(), "lookup dirty update image");
+    phoneme::graphics::GraphicsContext context;
+    context.clip = phoneme::graphics::target_bounds(**target);
+    context.color = 0xFF123456U;
+    require(phoneme::graphics::fill_rect(**target, context, 2, 3, 2, 2)
+                .has_value(),
+            "draw bounded dirty rectangle");
+
+    auto update = store.consume_dirty_update(101U);
+    require(update.has_value() && update->has_value(),
+            "consume bounded dirty rectangle");
+    require_equal((*update)->image_width, 8, "dirty update image width");
+    require_equal((*update)->image_height, 8, "dirty update image height");
+    require_equal((*update)->region.x, 2, "dirty update x");
+    require_equal((*update)->region.y, 3, "dirty update y");
+    require_equal((*update)->region.width, 2, "dirty update width");
+    require_equal((*update)->region.height, 2, "dirty update height");
+    require_equal((*update)->pixels.size(), static_cast<usize>(4),
+                  "dirty update excludes unchanged framebuffer pixels");
+    for (const Pixel pixel : (*update)->pixels) {
+        require_equal(pixel, static_cast<Pixel>(0xFF123456U),
+                      "dirty update preserves packed ARGB pixels");
+    }
+}
+
 void test_sprite_heavy_benchmark() {
     constexpr std::array<Pixel, 16> sprite_pixels {
         0xFFFF0000U, 0xFF00FF00U, 0xFF0000FFU, 0xFFFFFFFFU,
@@ -710,26 +764,52 @@ void test_sprite_heavy_benchmark() {
     phoneme::graphics::GraphicsContext context;
     context.clip = phoneme::graphics::target_bounds(*framebuffer);
 
-    const auto start = std::chrono::steady_clock::now();
-    for (i32 index = 0; index < 10'000; ++index) {
-        const i32 x = (index * 37) % 317;
-        const i32 y = (index * 53) % 237;
-        require(phoneme::graphics::draw_image(
-                    *framebuffer,
-                    context,
-                    *sprite,
-                    x,
-                    y,
-                    phoneme::graphics::anchor_left |
-                        phoneme::graphics::anchor_top)
-                    .has_value(),
-                "sprite benchmark draw call");
+    constexpr i32 kDrawCalls = 10'000;
+    const auto draw_workload = [&]() {
+        for (i32 index = 0; index < kDrawCalls; ++index) {
+            const i32 x = (index * 37) % 317;
+            const i32 y = (index * 53) % 237;
+            require(phoneme::graphics::draw_image(
+                        *framebuffer,
+                        context,
+                        *sprite,
+                        x,
+                        y,
+                        phoneme::graphics::anchor_left |
+                            phoneme::graphics::anchor_top)
+                        .has_value(),
+                    "sprite benchmark draw call");
+        }
+    };
+
+    draw_workload();
+    std::array<i64, 5> samples_us {};
+    for (i64& sample : samples_us) {
+        const auto start = std::chrono::steady_clock::now();
+        draw_workload();
+        sample = std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::steady_clock::now() - start)
+                     .count();
     }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
-    std::cout << "10,000 sprite draw calls: " << elapsed.count() << " ms\n";
-    require(elapsed < std::chrono::seconds(2),
-            "10,000 sprite calls stay bounded without per-call full-image copy");
+    std::sort(samples_us.begin(), samples_us.end());
+    const i64 median_us = samples_us[samples_us.size() / 2U];
+    const i64 slowest_us = samples_us.back();
+    constexpr i64 kSixtyFpsFrameBudgetUs = 16'667;
+    constexpr i64 kHostRegressionCeilingUs = 250'000;
+    const double calls_per_second =
+        static_cast<double>(kDrawCalls) * 1'000'000.0 /
+        static_cast<double>(std::max<i64>(median_us, 1));
+
+    std::cout << "graphics_benchmark draws=" << kDrawCalls
+              << " median_us=" << median_us
+              << " slowest_us=" << slowest_us
+              << " calls_per_second=" << static_cast<u64>(calls_per_second)
+              << " core_only_60fps_budget="
+              << (median_us <= kSixtyFpsFrameBudgetUs ? "pass" : "miss")
+              << " host_regression_only=true"
+              << " device_60fps_gate_required=true\n";
+    require(median_us < kHostRegressionCeilingUs,
+            "sprite benchmark avoids catastrophic full-image-copy regression");
 }
 
 } // namespace
@@ -741,6 +821,7 @@ int main() {
     test_self_overlap_copy_and_region();
     test_png_variants_limits_and_fuzz();
     test_font_unicode_and_measurement();
+    test_dirty_update_contract();
     test_sprite_heavy_benchmark();
     std::cout << "Graphics module tests passed\n";
     return 0;

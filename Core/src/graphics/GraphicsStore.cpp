@@ -1,5 +1,6 @@
 #include "phoneme/graphics/GraphicsStore.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace phoneme::graphics {
@@ -14,7 +15,8 @@ Status GraphicsStore::attach_image(u64 object_key, Image image_value) {
 }
 
 Status GraphicsStore::attach_context(u64 object_key,
-                                     u64 target_image_key) {
+                                     u64 target_image_key,
+                                     bool display_target) {
     if (object_key == 0U || target_image_key == 0U) {
         return fail(ErrorCode::invalid_argument,
                     "graphics context keys must be non-zero");
@@ -29,6 +31,7 @@ Status GraphicsStore::attach_context(u64 object_key,
     }
     GraphicsContext context;
     context.target_key = target_image_key;
+    context.display_target = display_target;
     context.clip = target_bounds(**target);
     contexts_.insert_or_assign(object_key, context);
     return {};
@@ -68,6 +71,48 @@ Result<const GraphicsContext*> GraphicsStore::context(u64 object_key) const {
                     "Java Graphics has no native graphics context");
     }
     return &iterator->second;
+}
+
+Result<std::optional<DirtyImageUpdate>> GraphicsStore::consume_dirty_update(
+    u64 image_object_key) {
+    auto payload = image(image_object_key);
+    if (!payload) return std::unexpected(payload.error());
+    Image& source = **payload;
+    if (!source.has_dirty_region()) {
+        return std::optional<DirtyImageUpdate> {};
+    }
+
+    const ImageRegion region = source.dirty_region();
+    if (region.width <= 0 || region.height <= 0 || region.x < 0 ||
+        region.y < 0 ||
+        static_cast<i64>(region.x) + region.width > source.width() ||
+        static_cast<i64>(region.y) + region.height > source.height()) {
+        return fail(ErrorCode::internal_error,
+                    "image dirty region is outside its pixel storage");
+    }
+    auto count = validated_pixel_count(region.width, region.height);
+    if (!count) return std::unexpected(count.error());
+
+    DirtyImageUpdate update;
+    update.image_width = source.width();
+    update.image_height = source.height();
+    update.region = region;
+    update.pixels.resize(*count);
+    for (i32 row = 0; row < region.height; ++row) {
+        const usize source_offset =
+            static_cast<usize>(region.y + row) *
+                static_cast<usize>(source.width()) +
+            static_cast<usize>(region.x);
+        const usize destination_offset =
+            static_cast<usize>(row) * static_cast<usize>(region.width);
+        std::copy_n(source.pixels().begin() +
+                        static_cast<std::ptrdiff_t>(source_offset),
+                    static_cast<usize>(region.width),
+                    update.pixels.begin() +
+                        static_cast<std::ptrdiff_t>(destination_offset));
+    }
+    source.clear_dirty_region();
+    return std::optional<DirtyImageUpdate>(std::move(update));
 }
 
 void GraphicsStore::erase_image(u64 object_key) noexcept {

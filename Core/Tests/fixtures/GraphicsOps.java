@@ -11,6 +11,54 @@ public final class GraphicsOps {
     private GraphicsOps() {
     }
 
+    private static boolean testGetRgbRules(Image source) {
+        int[] reversedRows = new int[4];
+        source.getRGB(reversedRows, 2, -2, 0, 0, 2, 2);
+        if (reversedRows[0] != 0xFF0000FF ||
+                reversedRows[1] != 0xFFFFFFFF ||
+                reversedRows[2] != 0xFFFF0000 ||
+                reversedRows[3] != 0xFF00FF00) {
+            return false;
+        }
+
+        boolean overlapRejected = false;
+        try {
+            source.getRGB(new int[4], 0, 1, 0, 0, 2, 2);
+        } catch (IllegalArgumentException expected) {
+            overlapRejected = true;
+        }
+        if (!overlapRejected) {
+            return false;
+        }
+
+        int[] sentinel = new int[] {0x12345678};
+        source.getRGB(sentinel, 0, 0, 0, 0, 0, 2);
+        source.getRGB(sentinel, 0, 0, 1, 0, -1, 1);
+        return sentinel[0] == 0x12345678;
+    }
+
+    private static boolean testGraphicsRules(Image canvas,
+                                             Graphics graphics) {
+        boolean selfRegionRejected = false;
+        try {
+            graphics.drawRegion(canvas, 0, 0, 1, 1, TRANS_NONE,
+                                0, 0, Graphics.LEFT | Graphics.TOP);
+        } catch (IllegalArgumentException expected) {
+            selfRegionRejected = true;
+        }
+        if (!selfRegionRejected) {
+            return false;
+        }
+
+        try {
+            graphics.drawRGB(new int[] {0xFFFFFFFF}, 0, 1,
+                             0, 0, 2, 1, true);
+            return false;
+        } catch (ArrayIndexOutOfBoundsException expected) {
+            return true;
+        }
+    }
+
     private static boolean testUnicodeText() {
         Image textCanvas = Image.createImage(192, 32);
         Graphics textGraphics = textCanvas.getGraphics();
@@ -91,6 +139,9 @@ public final class GraphicsOps {
         if (source.isMutable()) {
             return 6;
         }
+        if (!testGetRgbRules(source)) {
+            return 14;
+        }
         Image copy = Image.createImage(source);
         if (copy.isMutable() || copy.getWidth() != 2 || copy.getHeight() != 2) {
             return 7;
@@ -155,6 +206,9 @@ public final class GraphicsOps {
         if (!testUnicodeText()) {
             return 12;
         }
+        if (!testGraphicsRules(canvas, graphics)) {
+            return 15;
+        }
 
         byte[] png = new byte[] {
             -119, 80, 78, 71, 13, 10, 26, 10,
@@ -176,7 +230,6 @@ public final class GraphicsOps {
                 decodedPixels[1] != 0x800000FF) {
             return 13;
         }
-
         return 0;
     }
 }

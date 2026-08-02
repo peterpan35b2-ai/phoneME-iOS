@@ -198,7 +198,7 @@ namespace phoneme::vm::graphics_native {
         return fail_java("java/lang/IllegalStateException", error.message);
     }
     if (error.code == ErrorCode::out_of_range) {
-        return fail_java("java/lang/IndexOutOfBoundsException", error.message);
+        return fail_java(std::string(java_class), error.message);
     }
     return fail_java(std::string(java_class), error.message);
 }
