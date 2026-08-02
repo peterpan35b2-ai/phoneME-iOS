@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cctype>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include "phoneme/graphics/TextRasterizer.hpp"
@@ -22,6 +23,19 @@ constexpr double kPi = 3.14159265358979323846;
         std::numeric_limits<i32>::max()));
 }
 
+[[nodiscard]] i32 rounded_i32(double value) noexcept {
+    if (!std::isfinite(value)) {
+        return 0;
+    }
+    const double minimum = static_cast<double>(
+        std::numeric_limits<i32>::min());
+    const double maximum = static_cast<double>(
+        std::numeric_limits<i32>::max());
+    return static_cast<i32>(std::llround(std::clamp(value,
+                                                    minimum,
+                                                    maximum)));
+}
+
 [[nodiscard]] bool contains(Rect rectangle, i32 x, i32 y) noexcept {
     if (rectangle.width <= 0 || rectangle.height <= 0) {
         return false;
@@ -32,6 +46,99 @@ constexpr double kPi = 3.14159265358979323846;
            static_cast<i64>(y) >= rectangle.y &&
            static_cast<i64>(x) < right &&
            static_cast<i64>(y) < bottom;
+}
+
+[[nodiscard]] std::optional<std::array<i32, 4>> clip_line(
+    i32 x1,
+    i32 y1,
+    i32 x2,
+    i32 y2,
+    Rect clip) noexcept {
+    if (empty(clip)) return std::nullopt;
+
+    const double minimum_x = static_cast<double>(clip.x);
+    const double minimum_y = static_cast<double>(clip.y);
+    const double maximum_x = static_cast<double>(
+        static_cast<i64>(clip.x) + clip.width - 1);
+    const double maximum_y = static_cast<double>(
+        static_cast<i64>(clip.y) + clip.height - 1);
+    const double start_x = static_cast<double>(x1);
+    const double start_y = static_cast<double>(y1);
+    const double delta_x = static_cast<double>(x2) - start_x;
+    const double delta_y = static_cast<double>(y2) - start_y;
+    const std::array<double, 4> p {-delta_x, delta_x,
+                                   -delta_y, delta_y};
+    const std::array<double, 4> q {start_x - minimum_x,
+                                   maximum_x - start_x,
+                                   start_y - minimum_y,
+                                   maximum_y - start_y};
+    double first = 0.0;
+    double last = 1.0;
+    for (usize index = 0; index < p.size(); ++index) {
+        if (p[index] == 0.0) {
+            if (q[index] < 0.0) return std::nullopt;
+            continue;
+        }
+        const double ratio = q[index] / p[index];
+        if (p[index] < 0.0) {
+            first = std::max(first, ratio);
+        } else {
+            last = std::min(last, ratio);
+        }
+        if (first > last) return std::nullopt;
+    }
+
+    const auto coordinate = [](double value,
+                               double minimum,
+                               double maximum) noexcept {
+        return static_cast<i32>(std::lround(
+            std::clamp(value, minimum, maximum)));
+    };
+    return std::array<i32, 4> {
+        coordinate(start_x + first * delta_x, minimum_x, maximum_x),
+        coordinate(start_y + first * delta_y, minimum_y, maximum_y),
+        coordinate(start_x + last * delta_x, minimum_x, maximum_x),
+        coordinate(start_y + last * delta_y, minimum_y, maximum_y),
+    };
+}
+
+[[nodiscard]] i32 half_magnitude(i32 value, i32 maximum) noexcept {
+    const i64 magnitude = value < 0 ? -static_cast<i64>(value)
+                                    : static_cast<i64>(value);
+    return static_cast<i32>(std::min<i64>(magnitude / 2, maximum));
+}
+
+[[nodiscard]] bool rectangles_overlap(Rect left, Rect right) noexcept {
+    return !empty(intersect(left, right));
+}
+
+[[nodiscard]] std::pair<i32, i32> transformed_source_coordinate(
+    i32 destination_x,
+    i32 destination_y,
+    i32 width,
+    i32 height,
+    Transform transform) noexcept {
+    switch (transform) {
+    case Transform::none:
+        return {destination_x, destination_y};
+    case Transform::mirror_rotate_180:
+        return {destination_x, height - 1 - destination_y};
+    case Transform::mirror:
+        return {width - 1 - destination_x, destination_y};
+    case Transform::rotate_180:
+        return {width - 1 - destination_x,
+                height - 1 - destination_y};
+    case Transform::mirror_rotate_270:
+        return {destination_y, destination_x};
+    case Transform::rotate_90:
+        return {destination_y, height - 1 - destination_x};
+    case Transform::rotate_270:
+        return {width - 1 - destination_y, destination_x};
+    case Transform::mirror_rotate_90:
+        return {width - 1 - destination_y,
+                height - 1 - destination_x};
+    }
+    return {destination_x, destination_y};
 }
 
 [[nodiscard]] Status require_mutable(const Image& image) {
@@ -60,16 +167,21 @@ constexpr double kPi = 3.14159265358979323846;
                                         i32 y1,
                                         i32 x2,
                                         i32 y2) {
-    i64 current_x = x1;
-    i64 current_y = y1;
-    const i64 destination_x = x2;
-    const i64 destination_y = y2;
-    const i64 delta_x = std::abs(destination_x - current_x);
+    auto clipped = clip_line(x1, y1, x2, y2, context.clip);
+    if (!clipped.has_value()) return {};
+    i64 current_x = (*clipped)[0];
+    i64 current_y = (*clipped)[1];
+    const i64 destination_x = (*clipped)[2];
+    const i64 destination_y = (*clipped)[3];
+    const i64 delta_x = std::llabs(destination_x - current_x);
     const i64 step_x = current_x < destination_x ? 1 : -1;
-    const i64 delta_y = -std::abs(destination_y - current_y);
+    const i64 delta_y = -std::llabs(destination_y - current_y);
     const i64 step_y = current_y < destination_y ? 1 : -1;
     i64 error = delta_x + delta_y;
-    usize sample = 0;
+    const u64 skipped = std::max(
+        static_cast<u64>(std::llabs(current_x - x1)),
+        static_cast<u64>(std::llabs(current_y - y1)));
+    usize sample = static_cast<usize>(skipped);
 
     while (true) {
         if (context.stroke_style == stroke_solid || (sample & 1U) == 0U) {
@@ -445,6 +557,23 @@ Status fill_rect(Image& target,
               .width = width,
               .height = height},
         context.clip);
+    if (empty(fill)) {
+        return {};
+    }
+    if (alpha(context.color) == 255U) {
+        auto pixels = target.mutable_pixels();
+        for (i32 row = 0; row < fill.height; ++row) {
+            const usize offset =
+                static_cast<usize>(fill.y + row) *
+                    static_cast<usize>(target.width()) +
+                static_cast<usize>(fill.x);
+            std::fill_n(pixels.begin() + static_cast<std::ptrdiff_t>(offset),
+                        fill.width,
+                        context.color);
+        }
+        target.mark_dirty_region(fill.x, fill.y, fill.width, fill.height);
+        return {};
+    }
     for (i32 row = 0; row < fill.height; ++row) {
         for (i32 column = 0; column < fill.width; ++column) {
             auto stored = target.set_pixel(fill.x + column,
@@ -468,15 +597,15 @@ Status draw_rect(Image& target,
     if (width < 0 || height < 0) {
         return {};
     }
-    auto status = draw_line(target, context, x, y, x + width, y);
+    const i32 right = saturated_add(x, width);
+    const i32 bottom = saturated_add(y, height);
+    auto status = draw_line(target, context, x, y, right, y);
     if (!status) return status;
-    status = draw_line(target, context, x, y, x, y + height);
+    status = draw_line(target, context, x, y, x, bottom);
     if (!status) return status;
-    status = draw_line(target, context, x + width, y,
-                       x + width, y + height);
+    status = draw_line(target, context, right, y, right, bottom);
     if (!status) return status;
-    return draw_line(target, context, x, y + height,
-                     x + width, y + height);
+    return draw_line(target, context, x, bottom, right, bottom);
 }
 
 Status draw_round_rect(Image& target,
@@ -491,12 +620,24 @@ Status draw_round_rect(Image& target,
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
     if (width <= 0 || height <= 0) return {};
-    const i32 radius_x = std::clamp(std::abs(arc_width) / 2, 0, width / 2);
-    const i32 radius_y = std::clamp(std::abs(arc_height) / 2, 0, height / 2);
+    const i32 radius_x = half_magnitude(arc_width, width / 2);
+    const i32 radius_y = half_magnitude(arc_height, height / 2);
     const i32 absolute_x = saturated_add(x, context.translate_x);
     const i32 absolute_y = saturated_add(y, context.translate_y);
-    for (i32 local_y = 0; local_y < height; ++local_y) {
-        for (i32 local_x = 0; local_x < width; ++local_x) {
+    const Rect visible = intersect(
+        Rect {.x = absolute_x, .y = absolute_y,
+              .width = width, .height = height},
+        context.clip);
+    for (i32 destination_y = visible.y;
+         destination_y < visible.y + visible.height;
+         ++destination_y) {
+        const i32 local_y = static_cast<i32>(
+            static_cast<i64>(destination_y) - absolute_y);
+        for (i32 destination_x = visible.x;
+             destination_x < visible.x + visible.width;
+             ++destination_x) {
+            const i32 local_x = static_cast<i32>(
+                static_cast<i64>(destination_x) - absolute_x);
             if (!rounded_contains(local_x, local_y, width, height,
                                   radius_x, radius_y)) {
                 continue;
@@ -511,11 +652,10 @@ Status draw_round_rect(Image& target,
                                      std::max(0, radius_y - 1));
                 if (inner) continue;
             }
-            auto stored = put_pixel(target,
-                                    context,
-                                    absolute_x + local_x,
-                                    absolute_y + local_y,
-                                    context.color);
+            auto stored = target.set_pixel(destination_x,
+                                           destination_y,
+                                           context.color,
+                                           true);
             if (!stored) return stored;
         }
     }
@@ -542,24 +682,32 @@ Status draw_arc(Image& target,
                             static_cast<double>(height - 1) / 2.0;
     const double radius_x = static_cast<double>(width - 1) / 2.0;
     const double radius_y = static_cast<double>(height - 1) / 2.0;
+    const i32 normalized_start = start_angle % 360;
     const i32 clamped_arc = std::clamp(arc_angle, -360, 360);
-    const i32 steps = std::max(1,
-        static_cast<i32>(std::ceil(
-            std::abs(static_cast<double>(clamped_arc)) *
-            std::max(width, height) / 90.0)));
-    i32 previous_x = static_cast<i32>(std::lround(
-        center_x + radius_x * std::cos(start_angle * kPi / 180.0)));
-    i32 previous_y = static_cast<i32>(std::lround(
-        center_y - radius_y * std::sin(start_angle * kPi / 180.0)));
+    const double desired_steps = std::ceil(
+        std::abs(static_cast<double>(clamped_arc)) *
+        static_cast<double>(std::max(width, height)) / 90.0);
+    const i64 target_step_budget = std::clamp<i64>(
+        8LL * (static_cast<i64>(target.width()) + target.height()),
+        64,
+        1'000'000);
+    const i32 steps = static_cast<i32>(std::clamp<double>(
+        desired_steps,
+        1.0,
+        static_cast<double>(target_step_budget)));
+    i32 previous_x = rounded_i32(
+        center_x + radius_x * std::cos(normalized_start * kPi / 180.0));
+    i32 previous_y = rounded_i32(
+        center_y - radius_y * std::sin(normalized_start * kPi / 180.0));
     for (i32 step = 0; step <= steps; ++step) {
         const double progress = static_cast<double>(step) / steps;
         const double angle_value =
-            (static_cast<double>(start_angle) + clamped_arc * progress) *
-            kPi / 180.0;
-        const i32 current_x = static_cast<i32>(std::lround(
-            center_x + radius_x * std::cos(angle_value)));
-        const i32 current_y = static_cast<i32>(std::lround(
-            center_y - radius_y * std::sin(angle_value)));
+            (static_cast<double>(normalized_start) +
+             clamped_arc * progress) * kPi / 180.0;
+        const i32 current_x = rounded_i32(
+            center_x + radius_x * std::cos(angle_value));
+        const i32 current_y = rounded_i32(
+            center_y - radius_y * std::sin(angle_value));
         auto status = draw_line_absolute(target,
                                          context,
                                          previous_x,
@@ -570,8 +718,8 @@ Status draw_arc(Image& target,
         if (fill) {
             status = draw_line_absolute(target,
                                         context,
-                                        static_cast<i32>(std::lround(center_x)),
-                                        static_cast<i32>(std::lround(center_y)),
+                                        rounded_i32(center_x),
+                                        rounded_i32(center_y),
                                         current_x,
                                         current_y);
             if (!status) return status;
@@ -598,37 +746,71 @@ Status fill_triangle(Image& target,
     y2 = saturated_add(y2, context.translate_y);
     x3 = saturated_add(x3, context.translate_x);
     y3 = saturated_add(y3, context.translate_y);
-    const Rect bounds = intersect(
-        Rect {.x = std::min({x1, x2, x3}),
-              .y = std::min({y1, y2, y3}),
-              .width = std::max({x1, x2, x3}) - std::min({x1, x2, x3}) + 1,
-              .height = std::max({y1, y2, y3}) - std::min({y1, y2, y3}) + 1},
-        context.clip);
+    const i64 minimum_x = std::min<i64>({x1, x2, x3});
+    const i64 maximum_x = std::max<i64>({x1, x2, x3});
+    const i64 minimum_y = std::min<i64>({y1, y2, y3});
+    const i64 maximum_y = std::max<i64>({y1, y2, y3});
+    const i64 clip_right = static_cast<i64>(context.clip.x) +
+                           context.clip.width - 1;
+    const i64 clip_bottom = static_cast<i64>(context.clip.y) +
+                            context.clip.height - 1;
+    const i64 visible_left = std::max<i64>(minimum_x, context.clip.x);
+    const i64 visible_right = std::min(maximum_x, clip_right);
+    const i64 visible_top = std::max<i64>(minimum_y, context.clip.y);
+    const i64 visible_bottom = std::min(maximum_y, clip_bottom);
     const auto edge = [](i32 ax, i32 ay, i32 bx, i32 by,
-                         i32 px, i32 py) -> i64 {
-        return (static_cast<i64>(px) - ax) *
-                   (static_cast<i64>(by) - ay) -
-               (static_cast<i64>(py) - ay) *
-                   (static_cast<i64>(bx) - ax);
+                         i32 px, i32 py) noexcept -> long double {
+        return (static_cast<long double>(bx) - ax) *
+                   (static_cast<long double>(py) - ay) -
+               (static_cast<long double>(by) - ay) *
+                   (static_cast<long double>(px) - ax);
     };
-    const i64 area = edge(x1, y1, x2, y2, x3, y3);
-    if (area == 0) {
+    long double area = edge(x1, y1, x2, y2, x3, y3);
+    if (area == 0.0L) {
         auto status = draw_line_absolute(target, context, x1, y1, x2, y2);
         if (!status) return status;
-        return draw_line_absolute(target, context, x2, y2, x3, y3);
+        status = draw_line_absolute(target, context, x2, y2, x3, y3);
+        if (!status) return status;
+        return draw_line_absolute(target, context, x3, y3, x1, y1);
     }
-    for (i32 y_value = bounds.y;
-         y_value < bounds.y + bounds.height;
-         ++y_value) {
-        for (i32 x_value = bounds.x;
-             x_value < bounds.x + bounds.width;
-             ++x_value) {
-            const i64 first = edge(x1, y1, x2, y2, x_value, y_value);
-            const i64 second = edge(x2, y2, x3, y3, x_value, y_value);
-            const i64 third = edge(x3, y3, x1, y1, x_value, y_value);
-            const bool has_negative = first < 0 || second < 0 || third < 0;
-            const bool has_positive = first > 0 || second > 0 || third > 0;
-            if (has_negative && has_positive) continue;
+    if (area < 0.0L) {
+        std::swap(x2, x3);
+        std::swap(y2, y3);
+        area = -area;
+    }
+    const auto top_left = [](i32 ax, i32 ay, i32 bx, i32 by) noexcept {
+        const i64 delta_x = static_cast<i64>(bx) - ax;
+        const i64 delta_y = static_cast<i64>(by) - ay;
+        return delta_y < 0 || (delta_y == 0 && delta_x > 0);
+    };
+    const bool first_top_left = top_left(x1, y1, x2, y2);
+    const bool second_top_left = top_left(x2, y2, x3, y3);
+    const bool third_top_left = top_left(x3, y3, x1, y1);
+    if (empty(context.clip) || visible_left > visible_right ||
+        visible_top > visible_bottom) {
+        return {};
+    }
+    for (i64 y_cursor = visible_top;
+         y_cursor <= visible_bottom;
+         ++y_cursor) {
+        const i32 y_value = static_cast<i32>(y_cursor);
+        for (i64 x_cursor = visible_left;
+             x_cursor <= visible_right;
+             ++x_cursor) {
+            const i32 x_value = static_cast<i32>(x_cursor);
+            const long double first = edge(x1, y1, x2, y2,
+                                           x_value, y_value);
+            const long double second = edge(x2, y2, x3, y3,
+                                            x_value, y_value);
+            const long double third = edge(x3, y3, x1, y1,
+                                           x_value, y_value);
+            const bool inside_first = first > 0.0L ||
+                (first == 0.0L && first_top_left);
+            const bool inside_second = second > 0.0L ||
+                (second == 0.0L && second_top_left);
+            const bool inside_third = third > 0.0L ||
+                (third == 0.0L && third_top_left);
+            if (!inside_first || !inside_second || !inside_third) continue;
             auto stored = target.set_pixel(x_value,
                                            y_value,
                                            context.color,
@@ -654,20 +836,59 @@ Status draw_image(Image& target,
     if (!placement) return std::unexpected(placement.error());
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
-    const std::vector<Pixel> source_pixels(source.pixels().begin(),
-                                           source.pixels().end());
-    for (i32 row = 0; row < source.height(); ++row) {
-        for (i32 column = 0; column < source.width(); ++column) {
-            const Pixel pixel_value =
-                source_pixels[static_cast<usize>(row) *
-                                  static_cast<usize>(source.width()) +
-                              static_cast<usize>(column)];
-            auto stored = put_pixel(target,
-                                    context,
-                                    placement->x + column,
-                                    placement->y + row,
-                                    pixel_value,
-                                    true);
+    const Rect visible = intersect(*placement, context.clip);
+    if (empty(visible)) {
+        return {};
+    }
+    const i32 first_source_x = static_cast<i32>(
+        static_cast<i64>(visible.x) - placement->x);
+    const i32 first_source_y = static_cast<i32>(
+        static_cast<i64>(visible.y) - placement->y);
+    const Rect sampled_source {
+        .x = first_source_x,
+        .y = first_source_y,
+        .width = visible.width,
+        .height = visible.height,
+    };
+    const bool needs_snapshot = &target == &source &&
+        rectangles_overlap(sampled_source, visible);
+    std::vector<Pixel> snapshot;
+    if (needs_snapshot) {
+        auto snapshot_count = validated_pixel_count(visible.width,
+                                                    visible.height);
+        if (!snapshot_count) {
+            return std::unexpected(snapshot_count.error());
+        }
+        snapshot.resize(*snapshot_count);
+        for (i32 row = 0; row < visible.height; ++row) {
+            const usize source_offset =
+                static_cast<usize>(first_source_y + row) *
+                    static_cast<usize>(source.width()) +
+                static_cast<usize>(first_source_x);
+            const usize destination_offset =
+                static_cast<usize>(row) *
+                static_cast<usize>(visible.width);
+            std::copy_n(source.pixels().begin() +
+                            static_cast<std::ptrdiff_t>(source_offset),
+                        visible.width,
+                        snapshot.begin() +
+                            static_cast<std::ptrdiff_t>(destination_offset));
+        }
+    }
+    for (i32 row = 0; row < visible.height; ++row) {
+        for (i32 column = 0; column < visible.width; ++column) {
+            const Pixel pixel_value = needs_snapshot
+                ? snapshot[static_cast<usize>(row) *
+                               static_cast<usize>(visible.width) +
+                           static_cast<usize>(column)]
+                : source.pixels()[
+                      static_cast<usize>(first_source_y + row) *
+                          static_cast<usize>(source.width()) +
+                      static_cast<usize>(first_source_x + column)];
+            auto stored = target.set_pixel(visible.x + column,
+                                           visible.y + row,
+                                           pixel_value,
+                                           true);
             if (!stored) return stored;
         }
     }
@@ -685,14 +906,89 @@ Status draw_region(Image& target,
                    i32 x,
                    i32 y,
                    i32 anchor) {
-    auto region = Image::transformed_region(source,
-                                            source_x,
-                                            source_y,
-                                            width,
-                                            height,
-                                            transform_value);
-    if (!region) return std::unexpected(region.error());
-    return draw_image(target, context, *region, x, y, anchor);
+    if (source_x < 0 || source_y < 0 || width <= 0 || height <= 0 ||
+        static_cast<i64>(source_x) + width > source.width() ||
+        static_cast<i64>(source_y) + height > source.height()) {
+        return fail(ErrorCode::out_of_range,
+                    "image region is outside the source image");
+    }
+    auto mutable_target = require_mutable(target);
+    if (!mutable_target) return mutable_target;
+    const Size output_size = transformed_size(width,
+                                              height,
+                                              transform_value);
+    auto placement = anchored_rect(saturated_add(x, context.translate_x),
+                                   saturated_add(y, context.translate_y),
+                                   output_size.width,
+                                   output_size.height,
+                                   anchor,
+                                   false);
+    if (!placement) return std::unexpected(placement.error());
+    const Rect visible = intersect(*placement, context.clip);
+    if (empty(visible)) {
+        return {};
+    }
+    const Rect source_bounds {
+        .x = source_x,
+        .y = source_y,
+        .width = width,
+        .height = height,
+    };
+    const bool needs_snapshot = &target == &source &&
+        rectangles_overlap(source_bounds, visible);
+    std::vector<Pixel> snapshot;
+    if (needs_snapshot) {
+        auto snapshot_count = validated_pixel_count(width, height);
+        if (!snapshot_count) {
+            return std::unexpected(snapshot_count.error());
+        }
+        snapshot.resize(*snapshot_count);
+        for (i32 row = 0; row < height; ++row) {
+            const usize source_offset =
+                static_cast<usize>(source_y + row) *
+                    static_cast<usize>(source.width()) +
+                static_cast<usize>(source_x);
+            const usize destination_offset =
+                static_cast<usize>(row) * static_cast<usize>(width);
+            std::copy_n(source.pixels().begin() +
+                            static_cast<std::ptrdiff_t>(source_offset),
+                        width,
+                        snapshot.begin() +
+                            static_cast<std::ptrdiff_t>(destination_offset));
+        }
+    }
+    for (i32 destination_y = visible.y;
+         destination_y < visible.y + visible.height;
+         ++destination_y) {
+        const i32 transformed_y = static_cast<i32>(
+            static_cast<i64>(destination_y) - placement->y);
+        for (i32 destination_x = visible.x;
+             destination_x < visible.x + visible.width;
+             ++destination_x) {
+            const i32 transformed_x = static_cast<i32>(
+                static_cast<i64>(destination_x) - placement->x);
+            const auto [local_source_x, local_source_y] =
+                transformed_source_coordinate(transformed_x,
+                                              transformed_y,
+                                              width,
+                                              height,
+                                              transform_value);
+            const Pixel pixel_value = needs_snapshot
+                ? snapshot[static_cast<usize>(local_source_y) *
+                               static_cast<usize>(width) +
+                           static_cast<usize>(local_source_x)]
+                : source.pixels()[
+                      static_cast<usize>(source_y + local_source_y) *
+                          static_cast<usize>(source.width()) +
+                      static_cast<usize>(source_x + local_source_x)];
+            auto stored = target.set_pixel(destination_x,
+                                           destination_y,
+                                           pixel_value,
+                                           true);
+            if (!stored) return stored;
+        }
+    }
+    return {};
 }
 
 Status copy_area(Image& target,
@@ -706,14 +1002,17 @@ Status copy_area(Image& target,
                  i32 anchor) {
     const i32 absolute_source_x = saturated_add(source_x, context.translate_x);
     const i32 absolute_source_y = saturated_add(source_y, context.translate_y);
-    auto region = Image::transformed_region(target,
-                                            absolute_source_x,
-                                            absolute_source_y,
-                                            width,
-                                            height,
-                                            Transform::none);
-    if (!region) return std::unexpected(region.error());
-    return draw_image(target, context, *region, x, y, anchor);
+    return draw_region(target,
+                       context,
+                       target,
+                       absolute_source_x,
+                       absolute_source_y,
+                       width,
+                       height,
+                       Transform::none,
+                       x,
+                       y,
+                       anchor);
 }
 
 Status draw_rgb(Image& target,
@@ -749,19 +1048,29 @@ Status draw_rgb(Image& target,
     }
     const i32 absolute_x = saturated_add(x, context.translate_x);
     const i32 absolute_y = saturated_add(y, context.translate_y);
-    for (i32 row = 0; row < height; ++row) {
+    const Rect visible = intersect(
+        Rect {.x = absolute_x, .y = absolute_y,
+              .width = width, .height = height},
+        context.clip);
+    for (i32 destination_y = visible.y;
+         destination_y < visible.y + visible.height;
+         ++destination_y) {
+        const i32 source_row = static_cast<i32>(
+            static_cast<i64>(destination_y) - absolute_y);
         const i64 row_start = static_cast<i64>(offset) +
-                              static_cast<i64>(row) * scan_length;
-        for (i32 column = 0; column < width; ++column) {
+                              static_cast<i64>(source_row) * scan_length;
+        for (i32 destination_x = visible.x;
+             destination_x < visible.x + visible.width;
+             ++destination_x) {
+            const i32 source_column = static_cast<i32>(
+                static_cast<i64>(destination_x) - absolute_x);
             Pixel pixel_value = pixels[static_cast<usize>(
-                row_start + column)];
+                row_start + source_column)];
             if (!process_alpha) pixel_value = opaque(pixel_value);
-            auto stored = put_pixel(target,
-                                    context,
-                                    absolute_x + column,
-                                    absolute_y + row,
-                                    pixel_value,
-                                    process_alpha);
+            auto stored = target.set_pixel(destination_x,
+                                           destination_y,
+                                           pixel_value,
+                                           process_alpha);
             if (!stored) return stored;
         }
     }

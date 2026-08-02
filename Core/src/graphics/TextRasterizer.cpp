@@ -21,6 +21,8 @@ namespace {
 
 #if defined(__APPLE__)
 
+constexpr usize kMaximumTextCodePoints = 262'144U;
+
 struct CachedFont final {
     CTFontRef font {nullptr};
     PlatformFontMetrics metrics {};
@@ -103,26 +105,18 @@ struct CachedFont final {
 [[nodiscard]] std::shared_ptr<const CachedFont> cached_font(
     const Font& font) {
     static std::mutex mutex;
-    static std::unordered_map<i32, std::weak_ptr<const CachedFont>> cache;
+    static std::unordered_map<i32, std::shared_ptr<const CachedFont>> cache;
 
     const i32 key = font_cache_key(font);
-    {
-        std::scoped_lock lock(mutex);
-        auto iterator = cache.find(key);
-        if (iterator != cache.end()) {
-            auto existing = iterator->second.lock();
-            if (existing) {
-                return existing;
-            }
-        }
-    }
-
-    auto created = create_font(font);
-    if (!created) {
-        return {};
-    }
     std::scoped_lock lock(mutex);
-    cache[key] = created;
+    auto iterator = cache.find(key);
+    if (iterator != cache.end()) {
+        return iterator->second;
+    }
+    auto created = create_font(font);
+    if (created) {
+        cache.emplace(key, created);
+    }
     return created;
 }
 
@@ -184,18 +178,6 @@ struct CachedFont final {
     return line;
 }
 
-[[nodiscard]] bool contains(const Rect& clip, i32 x, i32 y) noexcept {
-    if (clip.width <= 0 || clip.height <= 0) {
-        return false;
-    }
-    const i64 right = static_cast<i64>(clip.x) + clip.width;
-    const i64 bottom = static_cast<i64>(clip.y) + clip.height;
-    return static_cast<i64>(x) >= clip.x &&
-           static_cast<i64>(y) >= clip.y &&
-           static_cast<i64>(x) < right &&
-           static_cast<i64>(y) < bottom;
-}
-
 #endif
 
 } // namespace
@@ -219,6 +201,9 @@ std::optional<i32> platform_text_width(
 #if defined(__APPLE__)
     if (text.empty()) {
         return 0;
+    }
+    if (text.size() > kMaximumTextCodePoints) {
+        return std::nullopt;
     }
     auto resource = cached_font(font);
     if (!resource) {
@@ -260,6 +245,10 @@ Status draw_platform_text(Image& target,
     if (text.empty() || alpha(color) == 0U) {
         return {};
     }
+    if (text.size() > kMaximumTextCodePoints) {
+        return fail(ErrorCode::overflow,
+                    "CoreText input exceeds the bounded text budget");
+    }
     auto resource = cached_font(font);
     auto measured_width = platform_text_width(font, text);
     if (!resource || !measured_width) {
@@ -268,14 +257,26 @@ Status draw_platform_text(Image& target,
     }
     const i32 height = resource->metrics.height;
     const i32 padding = std::max(2, height / 4);
-    const i64 padded_width = static_cast<i64>(*measured_width) +
-                             static_cast<i64>(padding) * 2;
-    if (padded_width <= 0 ||
-        padded_width > std::numeric_limits<i32>::max()) {
-        return fail(ErrorCode::overflow,
-                    "CoreText glyph mask width overflows");
+    const i64 clip_left = std::max<i64>(0, clip.x);
+    const i64 clip_top = std::max<i64>(0, clip.y);
+    const i64 clip_right = std::min<i64>(
+        target.width(),
+        static_cast<i64>(clip.x) + std::max(0, clip.width));
+    const i64 clip_bottom = std::min<i64>(
+        target.height(),
+        static_cast<i64>(clip.y) + std::max(0, clip.height));
+    const i64 glyph_left = static_cast<i64>(x) - padding;
+    const i64 glyph_right = static_cast<i64>(x) + *measured_width + padding;
+    const i64 glyph_top = top;
+    const i64 glyph_bottom = static_cast<i64>(top) + height;
+    const i64 visible_left = std::max(clip_left, glyph_left);
+    const i64 visible_right = std::min(clip_right, glyph_right);
+    const i64 visible_top = std::max(clip_top, glyph_top);
+    const i64 visible_bottom = std::min(clip_bottom, glyph_bottom);
+    if (visible_right <= visible_left || visible_bottom <= visible_top) {
+        return {};
     }
-    const i32 mask_width = static_cast<i32>(padded_width);
+    const i32 mask_width = static_cast<i32>(visible_right - visible_left);
     const usize width_value = static_cast<usize>(mask_width);
     const usize height_value = static_cast<usize>(height);
     if (height_value != 0U &&
@@ -315,9 +316,10 @@ Status draw_platform_text(Image& target,
     CGContextSetGrayFillColor(context, 1.0, 1.0);
     const CGFloat baseline_from_bottom = static_cast<CGFloat>(
         height - resource->metrics.baseline);
-    CGContextSetTextPosition(context,
-                             static_cast<CGFloat>(padding),
-                             baseline_from_bottom);
+    CGContextSetTextPosition(
+        context,
+        static_cast<CGFloat>(static_cast<i64>(x) - visible_left),
+        baseline_from_bottom);
     CTLineDraw(line, context);
     CFRelease(line);
     CGContextRelease(context);
@@ -325,6 +327,9 @@ Status draw_platform_text(Image& target,
     const u32 base_alpha = alpha(color);
     for (i32 memory_y = 0; memory_y < height; ++memory_y) {
         const i32 destination_y = top + (height - 1 - memory_y);
+        if (destination_y < visible_top || destination_y >= visible_bottom) {
+            continue;
+        }
         for (i32 mask_x = 0; mask_x < mask_width; ++mask_x) {
             const u8 coverage = mask[
                 static_cast<usize>(memory_y) * width_value +
@@ -332,10 +337,8 @@ Status draw_platform_text(Image& target,
             if (coverage == 0U) {
                 continue;
             }
-            const i32 destination_x = x + mask_x - padding;
-            if (!contains(clip, destination_x, destination_y)) {
-                continue;
-            }
+            const i32 destination_x = static_cast<i32>(
+                visible_left + mask_x);
             const u8 source_alpha = static_cast<u8>(
                 (base_alpha * coverage + 127U) / 255U);
             const Pixel source = argb(source_alpha,

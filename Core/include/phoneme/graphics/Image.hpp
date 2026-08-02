@@ -24,6 +24,13 @@ struct Size final {
     i32 height {0};
 };
 
+struct ImageRegion final {
+    i32 x {0};
+    i32 y {0};
+    i32 width {0};
+    i32 height {0};
+};
+
 class Image final {
 public:
     [[nodiscard]] static Result<Image> create_mutable(i32 width,
@@ -49,6 +56,12 @@ public:
     [[nodiscard]] std::span<Pixel> mutable_pixels() noexcept {
         return pixels_;
     }
+    [[nodiscard]] bool has_dirty_region() const noexcept { return dirty_; }
+    [[nodiscard]] ImageRegion dirty_region() const noexcept {
+        return dirty_region_;
+    }
+    void clear_dirty_region() noexcept;
+    void mark_dirty_region(i32 x, i32 y, i32 width, i32 height) noexcept;
 
     [[nodiscard]] Result<Pixel> pixel(i32 x, i32 y) const;
     [[nodiscard]] Status set_pixel(i32 x,
@@ -66,6 +79,8 @@ private:
     i32 height_ {0};
     bool mutable_ {false};
     std::vector<Pixel> pixels_;
+    bool dirty_ {false};
+    ImageRegion dirty_region_ {};
 };
 
 [[nodiscard]] Result<Transform> transform_from_int(i32 value);
@@ -73,5 +88,6 @@ private:
                                     i32 height,
                                     Transform transform) noexcept;
 [[nodiscard]] Result<Size> validate_dimensions(i32 width, i32 height);
+[[nodiscard]] Result<usize> validated_pixel_count(i32 width, i32 height);
 
 } // namespace phoneme::graphics

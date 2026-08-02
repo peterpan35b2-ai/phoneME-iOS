@@ -9,25 +9,6 @@ namespace {
 
 constexpr usize kMaximumPixels = 64U * 1024U * 1024U;
 
-[[nodiscard]] Result<usize> pixel_count(i32 width, i32 height) {
-    auto validated = validate_dimensions(width, height);
-    if (!validated) {
-        return std::unexpected(validated.error());
-    }
-    const auto unsigned_width = static_cast<usize>(width);
-    const auto unsigned_height = static_cast<usize>(height);
-    if (unsigned_height != 0U &&
-        unsigned_width > std::numeric_limits<usize>::max() / unsigned_height) {
-        return fail(ErrorCode::overflow, "image pixel count overflows size_t");
-    }
-    const usize count = unsigned_width * unsigned_height;
-    if (count > kMaximumPixels) {
-        return fail(ErrorCode::overflow,
-                    "image exceeds the portable graphics pixel budget");
-    }
-    return count;
-}
-
 [[nodiscard]] std::pair<i32, i32> source_coordinate(
     i32 destination_x,
     i32 destination_y,
@@ -76,21 +57,42 @@ Result<Size> validate_dimensions(i32 width, i32 height) {
     return Size {.width = width, .height = height};
 }
 
+Result<usize> validated_pixel_count(i32 width, i32 height) {
+    auto validated = validate_dimensions(width, height);
+    if (!validated) {
+        return std::unexpected(validated.error());
+    }
+    const auto unsigned_width = static_cast<usize>(width);
+    const auto unsigned_height = static_cast<usize>(height);
+    if (unsigned_height != 0U &&
+        unsigned_width > std::numeric_limits<usize>::max() / unsigned_height) {
+        return fail(ErrorCode::overflow, "image pixel count overflows size_t");
+    }
+    const usize count = unsigned_width * unsigned_height;
+    if (count > kMaximumPixels) {
+        return fail(ErrorCode::overflow,
+                    "image exceeds the portable graphics pixel budget");
+    }
+    return count;
+}
+
 Result<Image> Image::create_mutable(i32 width, i32 height) {
-    auto count = pixel_count(width, height);
+    auto count = validated_pixel_count(width, height);
     if (!count) {
         return std::unexpected(count.error());
     }
-    return Image(width,
-                 height,
-                 true,
-                 std::vector<Pixel>(*count, 0xFFFFFFFFU));
+    Image image(width,
+                height,
+                true,
+                std::vector<Pixel>(*count, 0xFFFFFFFFU));
+    image.mark_dirty_region(0, 0, width, height);
+    return image;
 }
 
 Result<Image> Image::create_immutable(i32 width,
                                       i32 height,
                                       std::span<const Pixel> pixels) {
-    auto count = pixel_count(width, height);
+    auto count = validated_pixel_count(width, height);
     if (!count) {
         return std::unexpected(count.error());
     }
@@ -116,7 +118,8 @@ Result<Image> Image::transformed_region(const Image& source,
                     "image region is outside the source image");
     }
     const Size output_size = transformed_size(width, height, transform);
-    auto count = pixel_count(output_size.width, output_size.height);
+    auto count = validated_pixel_count(output_size.width,
+                                       output_size.height);
     if (!count) {
         return std::unexpected(count.error());
     }
@@ -150,6 +153,53 @@ Result<Image> Image::transformed_region(const Image& source,
                  std::move(output));
 }
 
+void Image::clear_dirty_region() noexcept {
+    dirty_ = false;
+    dirty_region_ = {};
+}
+
+void Image::mark_dirty_region(i32 x,
+                              i32 y,
+                              i32 width,
+                              i32 height) noexcept {
+    if (!mutable_ || width <= 0 || height <= 0) {
+        return;
+    }
+    const i64 left = std::max<i64>(0, x);
+    const i64 top = std::max<i64>(0, y);
+    const i64 right = std::min<i64>(
+        width_, static_cast<i64>(x) + static_cast<i64>(width));
+    const i64 bottom = std::min<i64>(
+        height_, static_cast<i64>(y) + static_cast<i64>(height));
+    if (right <= left || bottom <= top) {
+        return;
+    }
+    if (!dirty_) {
+        dirty_ = true;
+        dirty_region_ = ImageRegion {
+            .x = static_cast<i32>(left),
+            .y = static_cast<i32>(top),
+            .width = static_cast<i32>(right - left),
+            .height = static_cast<i32>(bottom - top),
+        };
+        return;
+    }
+    const i64 dirty_right = static_cast<i64>(dirty_region_.x) +
+                            dirty_region_.width;
+    const i64 dirty_bottom = static_cast<i64>(dirty_region_.y) +
+                             dirty_region_.height;
+    const i64 combined_left = std::min<i64>(dirty_region_.x, left);
+    const i64 combined_top = std::min<i64>(dirty_region_.y, top);
+    const i64 combined_right = std::max(dirty_right, right);
+    const i64 combined_bottom = std::max(dirty_bottom, bottom);
+    dirty_region_ = ImageRegion {
+        .x = static_cast<i32>(combined_left),
+        .y = static_cast<i32>(combined_top),
+        .width = static_cast<i32>(combined_right - combined_left),
+        .height = static_cast<i32>(combined_bottom - combined_top),
+    };
+}
+
 Result<Pixel> Image::pixel(i32 x, i32 y) const {
     if (x < 0 || y < 0 || x >= width_ || y >= height_) {
         return fail(ErrorCode::out_of_range,
@@ -173,7 +223,13 @@ Status Image::set_pixel(i32 x,
     Pixel& destination =
         pixels_[static_cast<usize>(y) * static_cast<usize>(width_) +
                 static_cast<usize>(x)];
-    destination = blend ? source_over(pixel_value, destination) : pixel_value;
+    const Pixel composited = blend
+        ? source_over(pixel_value, destination)
+        : pixel_value;
+    if (composited != destination) {
+        destination = composited;
+        mark_dirty_region(x, y, 1, 1);
+    }
     return {};
 }
 

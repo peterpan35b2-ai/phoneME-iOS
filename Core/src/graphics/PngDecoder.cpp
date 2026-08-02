@@ -17,7 +17,8 @@ namespace {
 constexpr std::array<u8, 8> kSignature {
     0x89U, 0x50U, 0x4EU, 0x47U, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
 };
-constexpr usize kMaximumInflatedBytes = 512U * 1024U * 1024U;
+constexpr usize kMaximumCompressedBytes = 64U * 1024U * 1024U;
+constexpr usize kMaximumInflatedBytes = 256U * 1024U * 1024U;
 
 struct Header final {
     i32 width {0};
@@ -54,6 +55,22 @@ constexpr std::array<Pass, 7> kAdam7 {{
 [[nodiscard]] u16 read_be16(std::span<const u8> bytes, usize offset) {
     return static_cast<u16>((static_cast<u16>(bytes[offset]) << 8U) |
                             static_cast<u16>(bytes[offset + 1U]));
+}
+
+[[nodiscard]] bool valid_chunk_type(std::span<const u8> type) noexcept {
+    if (type.size() != 4U) {
+        return false;
+    }
+    for (const u8 character : type) {
+        const bool uppercase = character >= static_cast<u8>('A') &&
+                               character <= static_cast<u8>('Z');
+        const bool lowercase = character >= static_cast<u8>('a') &&
+                               character <= static_cast<u8>('z');
+        if (!uppercase && !lowercase) {
+            return false;
+        }
+    }
+    return (type[2] & 0x20U) == 0U;
 }
 
 [[nodiscard]] Result<usize> checked_add(usize left,
@@ -353,6 +370,9 @@ Result<Image> decode_png(std::span<const u8> bytes) {
     bool has_header = false;
     bool has_end = false;
     bool has_idat = false;
+    bool has_palette = false;
+    bool has_transparency = false;
+    bool idat_ended = false;
     std::vector<u8> compressed;
     std::vector<Pixel> palette;
     std::vector<u8> palette_alpha;
@@ -381,6 +401,10 @@ Result<Image> decode_png(std::span<const u8> bytes) {
                         "PNG chunk payload is truncated");
         }
         const std::span<const u8> type = bytes.subspan(type_offset, 4U);
+        if (!valid_chunk_type(type)) {
+            return fail(ErrorCode::malformed_archive,
+                        "PNG chunk type is invalid");
+        }
         const std::span<const u8> data = bytes.subspan(data_offset,
                                                        chunk_length);
         const u32 expected_crc = read_be32(bytes, *data_end);
@@ -428,65 +452,97 @@ Result<Image> decode_png(std::span<const u8> bytes) {
                 return fail(ErrorCode::unsupported_feature,
                             "PNG bit depth/color type combination is unsupported");
             }
+            auto pixel_budget = validated_pixel_count(header.width,
+                                                      header.height);
+            if (!pixel_budget) {
+                return std::unexpected(pixel_budget.error());
+            }
             has_header = true;
         } else if (type_name == "PLTE") {
-            if (!has_header || has_idat || data.empty() ||
-                data.size() % 3U != 0U || data.size() > 768U) {
+            const usize entry_count = data.size() / 3U;
+            const usize maximum_entries = header.color_type == 3U
+                ? static_cast<usize>(1U << header.bit_depth)
+                : 256U;
+            if (!has_header || has_idat || has_palette || data.empty() ||
+                data.size() % 3U != 0U || data.size() > 768U ||
+                entry_count > maximum_entries ||
+                header.color_type == 0U || header.color_type == 4U) {
                 return fail(ErrorCode::malformed_archive,
                             "PNG PLTE chunk is malformed or out of order");
             }
-            palette.reserve(data.size() / 3U);
+            palette.reserve(entry_count);
             for (usize index = 0; index < data.size(); index += 3U) {
                 palette.push_back(argb(255U,
                                        data[index],
                                        data[index + 1U],
                                        data[index + 2U]));
             }
+            has_palette = true;
         } else if (type_name == "tRNS") {
-            if (!has_header || has_idat) {
+            if (!has_header || has_idat || has_transparency) {
                 return fail(ErrorCode::malformed_archive,
-                            "PNG tRNS chunk is out of order");
+                            "PNG tRNS chunk is duplicated or out of order");
             }
             if (header.color_type == 0U && data.size() == 2U) {
-                transparent_gray = read_be16(data, 0U);
+                const u16 value = read_be16(data, 0U);
+                const u32 maximum = header.bit_depth == 16U
+                    ? 65535U
+                    : (1U << header.bit_depth) - 1U;
+                if (value > maximum) {
+                    return fail(ErrorCode::malformed_archive,
+                                "PNG grayscale tRNS sample exceeds bit depth");
+                }
+                transparent_gray = value;
             } else if (header.color_type == 2U && data.size() == 6U) {
-                transparent_rgb = std::array<u16, 3> {
+                const std::array<u16, 3> values {
                     read_be16(data, 0U),
                     read_be16(data, 2U),
                     read_be16(data, 4U),
                 };
-            } else if (header.color_type == 3U &&
-                       !palette.empty() && data.size() <= palette.size()) {
+                if (header.bit_depth == 8U &&
+                    (values[0] > 255U || values[1] > 255U ||
+                     values[2] > 255U)) {
+                    return fail(ErrorCode::malformed_archive,
+                                "PNG truecolor tRNS sample exceeds bit depth");
+                }
+                transparent_rgb = values;
+            } else if (header.color_type == 3U && has_palette &&
+                       data.size() <= palette.size()) {
                 palette_alpha.assign(data.begin(), data.end());
             } else {
                 return fail(ErrorCode::malformed_archive,
                             "PNG tRNS chunk is invalid for its color type");
             }
+            has_transparency = true;
         } else if (type_name == "IDAT") {
-            if (!has_header) {
+            if (!has_header || idat_ended ||
+                (header.color_type == 3U && !has_palette)) {
                 return fail(ErrorCode::malformed_archive,
-                            "PNG IDAT appears before IHDR");
+                            "PNG IDAT is out of order");
             }
             auto combined = checked_add(compressed.size(), data.size(),
                                         "PNG compressed stream overflows");
             if (!combined) return std::unexpected(combined.error());
-            if (*combined > kMaximumInflatedBytes) {
+            if (*combined > kMaximumCompressedBytes) {
                 return fail(ErrorCode::overflow,
                             "PNG compressed stream exceeds the graphics budget");
             }
             compressed.insert(compressed.end(), data.begin(), data.end());
             has_idat = true;
         } else if (type_name == "IEND") {
-            if (!has_header || !has_idat || chunk_length != 0U) {
+            if (!has_header || !has_idat || has_end || chunk_length != 0U) {
                 return fail(ErrorCode::malformed_archive,
                             "PNG IEND is malformed or appears too early");
             }
             has_end = true;
+            idat_ended = true;
             cursor = *chunk_end;
             break;
         } else if ((type[0] & 0x20U) == 0U) {
             return fail(ErrorCode::unsupported_feature,
                         "PNG contains an unsupported critical chunk");
+        } else if (has_idat) {
+            idat_ended = true;
         }
         cursor = *chunk_end;
     }
@@ -494,6 +550,10 @@ Result<Image> decode_png(std::span<const u8> bytes) {
     if (!has_header || !has_idat || !has_end) {
         return fail(ErrorCode::malformed_archive,
                     "PNG is missing IHDR, IDAT or IEND");
+    }
+    if (cursor != bytes.size()) {
+        return fail(ErrorCode::malformed_archive,
+                    "PNG contains trailing data after IEND");
     }
     if (header.color_type == 3U && palette.empty()) {
         return fail(ErrorCode::malformed_archive,
@@ -521,9 +581,7 @@ Result<Image> decode_png(std::span<const u8> bytes) {
                     "PNG IDAT stream cannot be decompressed exactly");
     }
 
-    auto output_count = checked_multiply(static_cast<usize>(header.width),
-                                         static_cast<usize>(header.height),
-                                         "PNG output pixel count overflows");
+    auto output_count = validated_pixel_count(header.width, header.height);
     if (!output_count) return std::unexpected(output_count.error());
     std::vector<Pixel> output(*output_count, 0U);
     usize input_cursor = 0;
