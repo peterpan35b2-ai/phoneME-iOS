@@ -568,9 +568,9 @@ Core/Tools/test-cldc-library-host.sh
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 19:23 +07:00`
+- Cập nhật cuối: `2026-08-02 19:58 +07:00`
 - Blocker: `-`
-- Handoff: `7cf49d5 + b25c246; checkpoint Review 05 đọc 2026-08-02 19:23 +07:00, đã xử lý R05-20260802-01/02/03/04. Mục 20 cần thêm JadParser.cpp, SuiteInstaller.cpp, SuiteDatabase.cpp vào CMake và gọi SuiteStore::configure với runtime_home trước install; full host regression hiện dừng ở fixture Game API Layer/Sprite/TiledLayer ngoài ownership mục 05.`
+- Handoff: `7cf49d5 + b25c246 + 6548b5f; đã đọc checkpoint Review 05 lúc 2026-08-02 19:29 +07:00 và xử lý R05-20260802-05/06/07: fsync đầy đủ staged files/directories và suites parent trước DB commit, commit outcome phân biệt durable/unknown, giữ transaction candidates để crash recovery, capability matrix chính xác MIDP-1.0/2.0 và CLDC-1.0/1.1. Test pass: SuiteInstaller standalone, ASan/UBSan, full Core host, compile arm64-apple-ios16.0. Mục 20 vẫn cần tích hợp source mới vào CMake và gọi SuiteStore::configure(runtime_home).`
 
 **Loại:** SONG SONG, P1
 
