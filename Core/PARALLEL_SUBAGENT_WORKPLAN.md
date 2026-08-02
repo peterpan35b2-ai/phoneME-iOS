@@ -1075,7 +1075,7 @@ Core/Tools/test-push-dispatch-host.sh
 - Bắt đầu: `2026-08-02 18:51 +07:00`
 - Cập nhật cuối: `2026-08-02 19:17 +07:00`
 - Blocker: `-`
-- Handoff: `Implementation commit 935db5b; không có source mới/CMake change; host có thể dùng Image::dirty_region()/clear_dirty_region() để upload vùng thay đổi; module, VM, ASan/UBSan và iphoneos arm64 build đều pass.`
+- Handoff: `Implementation commit 935db5b; xử lý R11-20260802-01..04; không có source mới/CMake change; host có thể dùng Image::dirty_region()/clear_dirty_region() để upload vùng thay đổi; module, VM, ASan/UBSan và iphoneos arm64 build đều pass; visual/performance trên thiết bị thật cần mục 20 xác minh.`
 
 **Loại:** SONG SONG, P1
 
