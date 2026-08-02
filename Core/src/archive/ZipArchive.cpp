@@ -1,8 +1,10 @@
 #include "phoneme/archive/ZipArchive.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 #include <zlib.h>
@@ -21,6 +23,40 @@ constexpr usize kMaximumZipCommentSize = 65'535;
 constexpr usize kCentralDirectoryHeaderSize = 46;
 constexpr usize kLocalFileHeaderSize = 30;
 constexpr u16 kEncryptedFlag = 1U << 0U;
+
+[[nodiscard]] bool safe_entry_name(std::string_view name) noexcept {
+    if (name.empty() || name.front() == '/' || name.front() == '\\' ||
+        name.find('\\') != std::string_view::npos ||
+        name.find('\0') != std::string_view::npos) {
+        return false;
+    }
+    if (name.size() >= 2U &&
+        std::isalpha(static_cast<unsigned char>(name[0])) != 0 &&
+        name[1] == ':') {
+        return false;
+    }
+
+    usize offset = 0;
+    while (offset <= name.size()) {
+        const usize separator = name.find('/', offset);
+        const usize end = separator == std::string_view::npos ? name.size() : separator;
+        const std::string_view component = name.substr(offset, end - offset);
+        if (component == "." || component == "..") {
+            return false;
+        }
+        if (component.empty() && end != name.size()) {
+            return false;
+        }
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        offset = separator + 1U;
+        if (offset == name.size()) {
+            break;
+        }
+    }
+    return true;
+}
 
 [[nodiscard]] u16 read_le_u16_at(std::span<const u8> bytes, usize offset) {
     return static_cast<u16>(static_cast<u16>(bytes[offset]) |
@@ -111,12 +147,28 @@ constexpr u16 kEncryptedFlag = 1U << 0U;
 } // namespace
 
 Result<ZipArchive> ZipArchive::open(const std::string& path) {
+    return open(path, ZipLimits {});
+}
+
+Result<ZipArchive> ZipArchive::open(const std::string& path,
+                                    const ZipLimits& limits) {
+    if (limits.maximum_archive_bytes == 0 || limits.maximum_entries == 0 ||
+        limits.maximum_entry_uncompressed_bytes == 0 ||
+        limits.maximum_total_uncompressed_bytes == 0 ||
+        limits.maximum_compression_ratio == 0 ||
+        limits.maximum_entry_name_bytes == 0) {
+        return fail(ErrorCode::invalid_argument, "ZIP limits must be non-zero");
+    }
+
     auto file = platform::MappedFile::open_readonly(path);
     if (!file) {
         return std::unexpected(file.error());
     }
+    if (static_cast<u64>(file->bytes().size()) > limits.maximum_archive_bytes) {
+        return fail(ErrorCode::out_of_range, "JAR exceeds configured archive size limit");
+    }
 
-    ZipArchive archive(std::move(*file));
+    ZipArchive archive(std::move(*file), limits);
     auto parsed = archive.parse_directory();
     if (!parsed) {
         return std::unexpected(parsed.error());
@@ -177,6 +229,11 @@ Status ZipArchive::parse_directory() {
                     "ZIP64 JAR archives are not supported yet");
     }
 
+    if (static_cast<usize>(total_entries) > limits_.maximum_entries) {
+        return fail(ErrorCode::out_of_range,
+                    "JAR contains more entries than the configured limit");
+    }
+
     const usize directory_offset = static_cast<usize>(directory_offset_32);
     const usize directory_size = static_cast<usize>(directory_size_32);
     auto directory_end = require_range(bytes, directory_offset, directory_size);
@@ -185,8 +242,14 @@ Status ZipArchive::parse_directory() {
                     "ZIP central directory has an invalid range");
     }
 
+    central_directory_offset_ = directory_offset;
     entries_.clear();
     entries_.reserve(total_entries);
+    std::unordered_set<std::string> names;
+    if (limits_.reject_duplicate_names) {
+        names.reserve(total_entries);
+    }
+    u64 total_uncompressed = 0;
     usize cursor = directory_offset;
 
     for (u16 index = 0; index < total_entries; ++index) {
@@ -237,9 +300,45 @@ Status ZipArchive::parse_directory() {
         const auto name_bytes = bytes.subspan(*fixed_end, name_length);
         std::string name(reinterpret_cast<const char*>(name_bytes.data()),
                          name_bytes.size());
-        if (name.find('\0') != std::string::npos) {
+        if (name.size() > limits_.maximum_entry_name_bytes) {
+            return fail(ErrorCode::out_of_range,
+                        "JAR entry name exceeds configured size limit");
+        }
+        if (limits_.reject_unsafe_paths && !safe_entry_name(name)) {
             return fail(ErrorCode::malformed_archive,
-                        "JAR entry name contains a null byte");
+                        "JAR entry contains an unsafe path: " + name);
+        }
+        if (limits_.reject_duplicate_names && !names.insert(name).second) {
+            return fail(ErrorCode::malformed_archive,
+                        "JAR contains a duplicate entry name: " + name);
+        }
+        if (static_cast<u64>(uncompressed_size) >
+            limits_.maximum_entry_uncompressed_bytes) {
+            return fail(ErrorCode::out_of_range,
+                        "JAR entry exceeds configured uncompressed size limit");
+        }
+        if (total_uncompressed >
+            limits_.maximum_total_uncompressed_bytes -
+                std::min(limits_.maximum_total_uncompressed_bytes,
+                         static_cast<u64>(uncompressed_size))) {
+            return fail(ErrorCode::out_of_range,
+                        "JAR exceeds configured total uncompressed size limit");
+        }
+        total_uncompressed += static_cast<u64>(uncompressed_size);
+        if (static_cast<u64>(uncompressed_size) >=
+                limits_.compression_ratio_threshold_bytes &&
+            compressed_size == 0U && uncompressed_size != 0U) {
+            return fail(ErrorCode::malformed_archive,
+                        "JAR entry has an impossible compression ratio");
+        }
+        if (static_cast<u64>(uncompressed_size) >=
+                limits_.compression_ratio_threshold_bytes &&
+            compressed_size != 0U &&
+            static_cast<u64>(uncompressed_size) /
+                    static_cast<u64>(compressed_size) >
+                static_cast<u64>(limits_.maximum_compression_ratio)) {
+            return fail(ErrorCode::out_of_range,
+                        "JAR entry exceeds configured compression ratio limit");
         }
 
         entries_.push_back(ZipEntry {
@@ -306,9 +405,21 @@ Result<std::vector<u8>> ZipArchive::read(const ZipEntry& entry) const {
                     "ZIP local header conflicts with central directory");
     }
 
-    auto data_offset = checked_add(*fixed_end,
-                                   static_cast<usize>(name_length) +
-                                       static_cast<usize>(extra_length));
+    auto local_name_end = require_range(bytes, *fixed_end, name_length);
+    if (!local_name_end) {
+        return std::unexpected(local_name_end.error());
+    }
+    const auto local_name_bytes = bytes.subspan(*fixed_end, name_length);
+    const std::string_view local_name(
+        reinterpret_cast<const char*>(local_name_bytes.data()),
+        local_name_bytes.size());
+    if (local_name != entry.name) {
+        return fail(ErrorCode::malformed_archive,
+                    "ZIP local header name conflicts with central directory");
+    }
+
+    auto data_offset = checked_add(*local_name_end,
+                                   static_cast<usize>(extra_length));
     auto compressed_size = checked_narrow<usize>(entry.compressed_size);
     auto uncompressed_size = checked_narrow<usize>(entry.uncompressed_size);
     if (!data_offset || !compressed_size || !uncompressed_size) {
@@ -318,6 +429,10 @@ Result<std::vector<u8>> ZipArchive::read(const ZipEntry& entry) const {
     auto data_end = require_range(bytes, *data_offset, *compressed_size);
     if (!data_end) {
         return std::unexpected(data_end.error());
+    }
+    if (*data_end > central_directory_offset_) {
+        return fail(ErrorCode::malformed_archive,
+                    "ZIP entry data overlaps the central directory");
     }
     const auto compressed = bytes.subspan(*data_offset, *compressed_size);
 

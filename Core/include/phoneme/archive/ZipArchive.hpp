@@ -20,6 +20,18 @@ struct ZipEntry final {
     u64 local_header_offset {0};
 };
 
+struct ZipLimits final {
+    u64 maximum_archive_bytes {128U * 1024U * 1024U};
+    usize maximum_entries {10'000U};
+    u64 maximum_entry_uncompressed_bytes {64U * 1024U * 1024U};
+    u64 maximum_total_uncompressed_bytes {256U * 1024U * 1024U};
+    u64 compression_ratio_threshold_bytes {1024U * 1024U};
+    u32 maximum_compression_ratio {200U};
+    usize maximum_entry_name_bytes {1024U};
+    bool reject_unsafe_paths {true};
+    bool reject_duplicate_names {true};
+};
+
 class ZipArchive final {
 public:
     ZipArchive() = default;
@@ -30,6 +42,8 @@ public:
     ZipArchive& operator=(ZipArchive&&) noexcept = default;
 
     [[nodiscard]] static Result<ZipArchive> open(const std::string& path);
+    [[nodiscard]] static Result<ZipArchive> open(const std::string& path,
+                                                 const ZipLimits& limits);
 
     [[nodiscard]] const std::vector<ZipEntry>& entries() const noexcept {
         return entries_;
@@ -44,11 +58,14 @@ public:
     }
 
 private:
-    explicit ZipArchive(platform::MappedFile file) : file_(std::move(file)) {}
+    explicit ZipArchive(platform::MappedFile file, ZipLimits limits)
+        : file_(std::move(file)), limits_(limits) {}
 
     [[nodiscard]] Status parse_directory();
 
     platform::MappedFile file_;
+    ZipLimits limits_;
+    usize central_directory_offset_ {0};
     std::vector<ZipEntry> entries_;
 };
 
