@@ -564,11 +564,11 @@ Core/Tools/test-cldc-library-host.sh
 # 05. JAD, installer và persistent Suite Store
 
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
+- Trạng thái: `CLAIMED`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-02 18:51 +07:00`
+- Cập nhật cuối: `2026-08-02 18:51 +07:00`
 - Blocker: `-`
 - Handoff: `-`
 
