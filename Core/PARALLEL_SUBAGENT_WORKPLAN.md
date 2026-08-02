@@ -190,13 +190,13 @@ Tất cả mục
 # 01. Java scheduler, Thread và monitor blocking
 
 **TRẠNG THÁI**
-- Trạng thái: `CLAIMED`
+- Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:50 +07:00`
-- Cập nhật cuối: `2026-08-02 18:50 +07:00`
-- Blocker: `-`
-- Handoff: `-`
+- Cập nhật cuối: `2026-08-02 19:42 +07:00`
+- Blocker: `Review 01` vẫn còn finding `OPEN`; chờ reviewer xác nhận/đóng `RG-20260802-03`, `R01-20260802-01`, `R01-20260802-02`, `R01-20260802-03` trước khi chuyển `READY_FOR_INTEGRATION`.
+- Handoff: Checkpoint `3c4fd4a` (`feat(core): implement Java scheduler and monitor blocking`). Đã xử lý `RG-20260802-01/02/03/06` và `R01-20260802-01/02/03`: Java thread identity/state/interrupt/join/priority, execution-root snapshots, quantum safepoint, contended/reentrant monitor, `wait/notify/notifyAll`, abnormal cleanup và isolated test root. Test pass: normal, ASan+UBSan, TSan, 50 stress runs. Mục 20 cần đưa các source mới `ExecutionContext.cpp`, `JavaThread.cpp`, `Scheduler.cpp` và `SchedulerTests.cpp` vào CMake/Xcode/full regression; không có file trung tâm nào được commit trong checkpoint này.
 
 **Loại:** ĐỘC QUYỀN, P0  
 **Không giao cùng file cho agent khác.**
