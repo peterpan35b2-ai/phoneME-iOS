@@ -9,7 +9,9 @@
 #include <kni.h>
 #include <midpError.h>
 #include <midpMalloc.h>
+#include <midpServices.h>
 #include <midpUtilKni.h>
+#include <midp_foreground_id.h>
 #include <pcsl_string.h>
 
 #include <fbapp_export.h>
@@ -51,9 +53,20 @@ typedef struct {
     uint64_t imageGeneration;
 } IOSChoice;
 
+typedef struct {
+    int32_t id;
+    int32_t type;
+    int32_t priority;
+    int32_t scope;
+    int32_t order;
+    char label[IOS_LABEL_CAPACITY];
+    char longLabel[IOS_LABEL_CAPACITY];
+} IOSCommand;
+
 typedef struct _IOSNode {
     int32_t id;
     int32_t parentId;
+    int isolateId;
     MidpComponentType type;
     MidpItem* item;
     MidpDisplayable* displayable;
@@ -66,6 +79,8 @@ typedef struct _IOSNode {
     int contentHeight;
     int scrollPosition;
     int screenKind;
+    int isFullScreen;
+    int32_t focusedItemId;
     int layout;
     int maxSize;
     int constraints;
@@ -90,6 +105,8 @@ typedef struct _IOSNode {
     int imageWidth;
     int imageHeight;
     uint64_t imageGeneration;
+    IOSCommand* commands;
+    int commandCount;
     struct _IOSNode* next;
 } IOSNode;
 
@@ -109,9 +126,10 @@ static uint64_t eventGeneration;
 
 static pthread_mutex_t nodeMutex = PTHREAD_MUTEX_INITIALIZER;
 static IOSNode* firstNode;
-static int formScrollPosition;
-static int fullScreenMode;
-static int32_t focusedItemId;
+/* Host-visible state is selected by isolate. Background MIDlets continue to
+ * mutate their retained peers, but cannot publish into the foreground queue. */
+static int foregroundIsolateId;
+static int foregroundTransitionActive;
 
 #define IOS_FONT_REGISTRY_CAPACITY 96
 static pthread_mutex_t fontMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -119,6 +137,7 @@ static IOSFont fontRegistry[IOS_FONT_REGISTRY_CAPACITY];
 static int fontRegistryCount;
 
 static void emit_choice(IOSNode* node, int index);
+static void clear_event_queue(void);
 
 static int32_t choice_image_key(int32_t componentId, int index) {
     int64_t raw;
@@ -323,7 +342,20 @@ static int can_replace_last_event_locked(
     }
 }
 
-static void emit_event_with_value64(
+static int should_publish_event(int sourceIsolateId, int32_t kind) {
+    if (kind == PHONEME_LCDUI_EVENT_RESET) {
+        return 1;
+    }
+    if (__atomic_load_n(&foregroundTransitionActive, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    return sourceIsolateId > 0 &&
+        sourceIsolateId ==
+            __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE);
+}
+
+static void emit_event_with_value64_for_isolate(
+        int sourceIsolateId,
         int32_t kind,
         int32_t componentId,
         int32_t parentId,
@@ -338,6 +370,10 @@ static void emit_event_with_value64(
         const char* detail) {
     PhoneMELCDUIEvent* event = NULL;
     int replacingLastEvent = 0;
+
+    if (!should_publish_event(sourceIsolateId, kind)) {
+        return;
+    }
 
     pthread_mutex_lock(&eventMutex);
     if (eventCount > 0) {
@@ -409,7 +445,8 @@ static void emit_event_with_value64(
     pthread_mutex_unlock(&eventMutex);
 }
 
-static void emit_event(
+static void emit_event_for_isolate(
+        int sourceIsolateId,
         int32_t kind,
         int32_t componentId,
         int32_t parentId,
@@ -421,7 +458,8 @@ static void emit_event(
         int32_t arg3,
         const char* text,
         const char* detail) {
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        sourceIsolateId,
         kind,
         componentId,
         parentId,
@@ -441,13 +479,14 @@ static void emit_screen_mode(const IOSNode* node) {
     if (node == NULL) {
         return;
     }
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
         node->id,
         node->parentId,
         node->type,
         -1,
-        fullScreenMode,
+        node->isFullScreen,
         0,
         0,
         IOS_EVENT_SCREEN_MODE_METADATA,
@@ -480,6 +519,10 @@ static IOSNode* create_node(
     memset(node, 0, sizeof(*node));
     node->id = MidpComponentToId(component);
     node->parentId = parentId;
+    node->isolateId = MidpComponentIsolateId(component);
+    if (node->isolateId <= 0) {
+        node->isolateId = getCurrentIsolateId();
+    }
     node->type = component->type;
     node->displayable = displayable;
     node->item = item;
@@ -508,6 +551,9 @@ static void free_node(IOSNode* node) {
     }
     if (node->imageRGBA != NULL) {
         midpFree(node->imageRGBA);
+    }
+    if (node->commands != NULL) {
+        midpFree(node->commands);
     }
     midpFree(node);
 }
@@ -562,7 +608,8 @@ static void emit_node(int32_t kind, const IOSNode* node) {
     if (node == NULL) {
         return;
     }
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         kind,
         node->id,
         node->parentId,
@@ -581,7 +628,8 @@ static void emit_item_metadata(const IOSNode* node) {
     if (node == NULL || node->item == NULL) {
         return;
     }
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -601,7 +649,8 @@ static void emit_textfield_metadata(const IOSNode* node) {
     if (node == NULL || node->item == NULL) {
         return;
     }
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -616,13 +665,274 @@ static void emit_textfield_metadata(const IOSNode* node) {
     );
 }
 
-static void focus_item_locked(IOSNode* node) {
-    if (node == NULL || node->item == NULL || focusedItemId == node->id) {
+static void emit_gauge_metadata(const IOSNode* node) {
+    if (node == NULL || node->item == NULL) {
         return;
     }
-    focusedItemId = node->id;
+    emit_event_for_isolate(
+        node->isolateId,
+        PHONEME_LCDUI_EVENT_ITEM_UPDATED,
+        node->id,
+        node->parentId,
+        node->type,
+        -1,
+        node->value,
+        node->maxValue,
+        node->interactive,
+        -1002,
+        node->label,
+        NULL
+    );
+}
+
+static void emit_datefield_metadata(const IOSNode* node) {
+    if (node == NULL || node->item == NULL) {
+        return;
+    }
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
+        PHONEME_LCDUI_EVENT_ITEM_UPDATED,
+        node->id,
+        node->parentId,
+        node->type,
+        -1,
+        0,
+        node->inputMode,
+        0,
+        -1003,
+        (int64_t)node->dateValue,
+        node->label,
+        node->detail
+    );
+}
+
+static void emit_image_metadata(const IOSNode* node) {
+    int32_t kind;
+
+    if (node == NULL || node->imageRGBA == NULL ||
+            node->imageWidth <= 0 || node->imageHeight <= 0) {
+        return;
+    }
+    kind = node->item == NULL
+        ? PHONEME_LCDUI_EVENT_SCREEN_UPDATED
+        : PHONEME_LCDUI_EVENT_ITEM_UPDATED;
+    emit_event_for_isolate(
+        node->isolateId,
+        kind,
+        node->id,
+        node->parentId,
+        node->type,
+        -1,
+        node->imageWidth,
+        node->imageHeight,
+        (int32_t)(node->imageGeneration & 0x7fffffffU),
+        -1004,
+        node->label,
+        node->text
+    );
+}
+
+static IOSNode* screen_node_for_node_locked(const IOSNode* node) {
+    if (node == NULL) {
+        return NULL;
+    }
+    if (node->displayable != NULL) {
+        return (IOSNode*)node;
+    }
+    return node_for_id(node->parentId);
+}
+
+static void emit_commands_snapshot(const IOSNode* screen) {
+    int index;
+
+    if (screen == NULL) {
+        return;
+    }
+    emit_event_for_isolate(
+        screen->isolateId,
+        PHONEME_LCDUI_EVENT_COMMANDS_RESET,
+        0, 0, 0, -1,
+        screen->commandCount, 0, 0, 0,
+        NULL, NULL
+    );
+    for (index = 0; index < screen->commandCount; ++index) {
+        const IOSCommand* command = &screen->commands[index];
+        emit_event_for_isolate(
+            screen->isolateId,
+            PHONEME_LCDUI_EVENT_COMMAND,
+            command->id,
+            0,
+            0,
+            command->order,
+            command->type,
+            command->priority,
+            command->scope,
+            0,
+            command->label,
+            command->longLabel
+        );
+    }
+}
+
+static void emit_item_snapshot(const IOSNode* node) {
+    int index;
+    IOSNode* screen;
+
+    if (node == NULL || node->item == NULL) {
+        return;
+    }
+
+    emit_node(PHONEME_LCDUI_EVENT_ITEM_CREATED, node);
+    emit_item_metadata(node);
+
+    switch (node->type) {
+    case MIDP_TEXT_FIELD_TYPE:
+        emit_textfield_metadata(node);
+        break;
+    case MIDP_INTERACTIVE_GAUGE_TYPE:
+    case MIDP_NON_INTERACTIVE_GAUGE_TYPE:
+        emit_gauge_metadata(node);
+        break;
+    case MIDP_DATE_FIELD_TYPE:
+        emit_datefield_metadata(node);
+        break;
+    case MIDP_EXCLUSIVE_CHOICE_GROUP_TYPE:
+    case MIDP_MULTIPLE_CHOICE_GROUP_TYPE:
+    case MIDP_IMPLICIT_CHOICE_GROUP_TYPE:
+    case MIDP_POPUP_CHOICE_GROUP_TYPE:
+        for (index = 0; index < node->choiceCount; ++index) {
+            emit_choice((IOSNode*)node, index);
+        }
+        break;
+    default:
+        break;
+    }
+
+    emit_image_metadata(node);
+    if (node->visible) {
+        emit_node(PHONEME_LCDUI_EVENT_ITEM_SHOWN, node);
+    }
+    screen = screen_node_for_node_locked(node);
+    if (screen != NULL && screen->focusedItemId == node->id) {
+        emit_event_for_isolate(
+            node->isolateId,
+            PHONEME_LCDUI_EVENT_ITEM_FOCUSED,
+            node->id,
+            node->parentId,
+            node->type,
+            -1,
+            0,
+            0,
+            0,
+            0,
+            node->label,
+            node->text
+        );
+    }
+}
+
+/* nodeMutex must be held. Nodes are inserted at the head, so the first visible
+ * displayable is the most recently shown screen for that isolate (including
+ * an Alert layered over its previous Displayable). */
+static IOSNode* current_screen_node_for_isolate_locked(int isolateId) {
+    IOSNode* node = firstNode;
+    while (node != NULL) {
+        if (node->isolateId == isolateId &&
+                node->displayable != NULL && node->visible) {
+            return node;
+        }
+        node = node->next;
+    }
+    return NULL;
+}
+
+/* nodeMutex must be held. The snapshot is intentionally generated from the
+ * existing native peers so returning to a background MIDlet does not require
+ * recreating or invalidating any MidpDisplayable/MidpItem widgetPtr. */
+static void emit_foreground_snapshot_locked(IOSNode* screen) {
+    IOSNode* node;
+    const char* detail;
+
+    if (screen == NULL || screen->displayable == NULL) {
+        return;
+    }
+
+    detail = screen->type >= MIDP_NULL_ALERT_TYPE &&
+            screen->type <= MIDP_CONFIRMATION_ALERT_TYPE
+        ? screen->text
+        : screen->detail;
+
+    emit_event_for_isolate(
+        screen->isolateId,
+        PHONEME_LCDUI_EVENT_SCREEN_CREATED,
+        screen->id,
+        0,
+        screen->type,
+        -1,
+        0,
+        0,
+        0,
+        0,
+        screen->label,
+        detail
+    );
+    emit_event_for_isolate(
+        screen->isolateId,
+        PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
+        screen->id,
+        0,
+        screen->type,
+        -1,
+        screen->contentWidth,
+        screen->contentHeight,
+        screen->scrollPosition,
+        screen->visible,
+        screen->label,
+        detail
+    );
+    emit_image_metadata(screen);
+    emit_event_for_isolate(
+        screen->isolateId,
+        PHONEME_LCDUI_EVENT_SCREEN_SHOWN,
+        screen->id,
+        0,
+        screen->type,
+        -1,
+        screen->contentWidth,
+        screen->contentHeight,
+        screen->scrollPosition,
+        0,
+        screen->label,
+        detail
+    );
+    emit_screen_mode(screen);
+    emit_commands_snapshot(screen);
+
+    node = firstNode;
+    while (node != NULL) {
+        if (node->parentId == screen->id) {
+            emit_item_snapshot(node);
+        }
+        node = node->next;
+    }
+}
+
+static void focus_item_locked(IOSNode* node) {
+    IOSNode* screen;
+
+    if (node == NULL || node->item == NULL ||
+            node->isolateId !=
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    screen = screen_node_for_node_locked(node);
+    if (screen == NULL || screen->focusedItemId == node->id) {
+        return;
+    }
+    screen->focusedItemId = node->id;
     MidpFormFocusChanged(node);
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_FOCUSED,
         node->id,
         node->parentId,
@@ -657,7 +967,8 @@ static MidpError screen_set_ticker(
         return KNI_ENOMEM;
     }
     copy_pcsl(node->detail, sizeof(node->detail), ticker);
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
         node->id,
         node->parentId,
@@ -678,8 +989,11 @@ static MidpError screen_show(MidpFrame* frame) {
     if (node == NULL) {
         return KNI_ENOMEM;
     }
+
+    pthread_mutex_lock(&nodeMutex);
     node->visible = 1;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_SHOWN,
         node->id,
         0,
@@ -693,6 +1007,7 @@ static MidpError screen_show(MidpFrame* frame) {
         node->detail
     );
     emit_screen_mode(node);
+    pthread_mutex_unlock(&nodeMutex);
     return KNI_OK;
 }
 
@@ -703,7 +1018,7 @@ static MidpError screen_hide_delete(MidpFrame* frame, jboolean onExit) {
         return KNI_OK;
     }
     node->visible = 0;
-    focusedItemId = 0;
+    node->focusedItemId = 0;
     emit_node(PHONEME_LCDUI_EVENT_SCREEN_DELETED, node);
     frame->widgetPtr = NULL;
     delete_node(node);
@@ -740,7 +1055,8 @@ static MidpError initialize_displayable(
     displayable->frame.handleEvent = ignore_screen_event;
     displayable->setTitle = screen_set_title;
     displayable->setTicker = screen_set_ticker;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_CREATED,
         node->id,
         0,
@@ -879,8 +1195,11 @@ static MidpError item_destroy(MidpItem* item) {
     if (node == NULL) {
         return KNI_OK;
     }
-    if (focusedItemId == node->id) {
-        focusedItemId = 0;
+    {
+        IOSNode* screen = screen_node_for_node_locked(node);
+        if (screen != NULL && screen->focusedItemId == node->id) {
+            screen->focusedItemId = 0;
+        }
     }
     emit_node(PHONEME_LCDUI_EVENT_ITEM_DELETED, node);
     item->widgetPtr = NULL;
@@ -933,18 +1252,55 @@ static MidpError initialize_item(
     return KNI_OK;
 }
 
-void phoneme_ios_lcdui_reset(void) {
-    focusedItemId = 0;
-    formScrollPosition = 0;
-    fullScreenMode = 0;
-    fbapp_set_fullscreen_mode(0, 0);
-    clear_nodes();
+static void clear_event_queue(void) {
     pthread_mutex_lock(&eventMutex);
     eventReadIndex = 0;
     eventWriteIndex = 0;
     eventCount = 0;
     pthread_mutex_unlock(&eventMutex);
-    emit_event(PHONEME_LCDUI_EVENT_RESET, 0, 0, 0, -1, 0, 0, 0, 0, NULL, NULL);
+}
+
+static void emit_host_reset(void) {
+    emit_event_for_isolate(
+        0,
+        PHONEME_LCDUI_EVENT_RESET,
+        0, 0, 0, -1,
+        0, 0, 0, 0,
+        NULL, NULL
+    );
+}
+
+void phoneme_ios_lcdui_reset(void) {
+    __atomic_store_n(&foregroundTransitionActive, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&foregroundIsolateId, 0, __ATOMIC_RELEASE);
+    clear_nodes();
+    clear_event_queue();
+    emit_host_reset();
+    __atomic_store_n(&foregroundTransitionActive, 0, __ATOMIC_RELEASE);
+}
+
+void phoneme_ios_lcdui_prepare_foreground(int32_t isolateId) {
+    (void)isolateId;
+    __atomic_store_n(&foregroundTransitionActive, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&foregroundIsolateId, 0, __ATOMIC_RELEASE);
+    clear_event_queue();
+    emit_host_reset();
+}
+
+void phoneme_ios_lcdui_commit_foreground(int32_t isolateId) {
+    IOSNode* screen;
+
+    pthread_mutex_lock(&nodeMutex);
+    clear_event_queue();
+    __atomic_store_n(&foregroundIsolateId, isolateId, __ATOMIC_RELEASE);
+    __atomic_store_n(&foregroundTransitionActive, 0, __ATOMIC_RELEASE);
+    emit_host_reset();
+
+    screen = isolateId > 0
+        ? current_screen_node_for_isolate_locked(isolateId)
+        : NULL;
+    emit_foreground_snapshot_locked(screen);
+    pthread_mutex_unlock(&nodeMutex);
 }
 
 int32_t phoneme_ios_lcdui_poll_event(PhoneMELCDUIEvent* eventOut) {
@@ -1022,12 +1378,11 @@ static void capture_image(
             copy_utf8(label, sizeof(label), node->label);
             copy_utf8(text, sizeof(text), node->text);
         }
-        pthread_mutex_unlock(&nodeMutex);
-
         if (node != NULL && choiceIndex >= 0) {
             emit_choice(node, choiceIndex);
         } else if (node != NULL) {
-            emit_event(
+            emit_event_for_isolate(
+                node->isolateId,
                 eventKind,
                 componentId,
                 parentId,
@@ -1041,6 +1396,7 @@ static void capture_image(
                 text
             );
         }
+        pthread_mutex_unlock(&nodeMutex);
         return;
     }
 
@@ -1159,16 +1515,12 @@ static void capture_image(
         copy_utf8(text, sizeof(text), node->text);
         rgba = NULL;
     }
-    pthread_mutex_unlock(&nodeMutex);
-
-    if (rgba != NULL) {
-        midpFree(rgba);
-    }
 
     if (node != NULL && choiceUpdated) {
         emit_choice(node, choiceIndex);
     } else if (node != NULL) {
-        emit_event(
+        emit_event_for_isolate(
+            node->isolateId,
             eventKind,
             componentId,
             parentId,
@@ -1181,6 +1533,11 @@ static void capture_image(
             label,
             text
         );
+    }
+    pthread_mutex_unlock(&nodeMutex);
+
+    if (rgba != NULL) {
+        midpFree(rgba);
     }
 }
 
@@ -1221,6 +1578,11 @@ int32_t phoneme_ios_lcdui_copy_image_rgba(
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(nodeId);
+    if (node != NULL &&
+            node->isolateId !=
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
+        node = NULL;
+    }
     if (node != NULL && choiceIndex >= 0 && choiceIndex < node->choiceCount) {
         choice = &node->choices[choiceIndex];
         imageWidth = choice->imageWidth;
@@ -1251,7 +1613,31 @@ int32_t phoneme_ios_lcdui_copy_image_rgba(
 }
 
 void phoneme_ios_lcdui_select_command(int32_t commandId) {
-    if (commandId >= 0) {
+    int isolateId = __atomic_load_n(
+        &foregroundIsolateId,
+        __ATOMIC_ACQUIRE
+    );
+    IOSNode* screen;
+    int valid = 0;
+    int index;
+
+    if (commandId < 0 || isolateId <= 0) {
+        return;
+    }
+
+    pthread_mutex_lock(&nodeMutex);
+    screen = current_screen_node_for_isolate_locked(isolateId);
+    if (screen != NULL && screen->isolateId == isolateId) {
+        for (index = 0; index < screen->commandCount; ++index) {
+            if (screen->commands[index].id == commandId) {
+                valid = 1;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&nodeMutex);
+
+    if (valid) {
         MidpCommandSelected(commandId);
     }
 }
@@ -1270,7 +1656,9 @@ void phoneme_ios_lcdui_activate_item(int32_t componentId) {
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(componentId);
-    if (node != NULL && node->item != NULL) {
+    if (node != NULL && node->item != NULL &&
+            node->isolateId ==
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
         focus_item_locked(node);
         MidpFormItemPeerStateChangedByItem(node->item, -1);
     }
@@ -1286,7 +1674,9 @@ void phoneme_ios_lcdui_set_text(
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(componentId);
-    if (node != NULL) {
+    if (node != NULL &&
+            node->isolateId ==
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
         int changed;
         focus_item_locked(node);
         changed = strcmp(node->text, utf8Text == NULL ? "" : utf8Text) != 0 ||
@@ -1313,7 +1703,10 @@ void phoneme_ios_lcdui_set_choice(
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(componentId);
-    if (node != NULL && elementIndex >= 0 && elementIndex < node->choiceCount) {
+    if (node != NULL &&
+            node->isolateId ==
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE) &&
+            elementIndex >= 0 && elementIndex < node->choiceCount) {
         int changed = 0;
         jboolean resolvedSelected = selected ? KNI_TRUE : KNI_FALSE;
         focus_item_locked(node);
@@ -1345,7 +1738,9 @@ void phoneme_ios_lcdui_set_gauge(int32_t componentId, int32_t value) {
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(componentId);
-    if (node != NULL) {
+    if (node != NULL &&
+            node->isolateId ==
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
         focus_item_locked(node);
         if (value < 0) value = 0;
         if (value > node->maxValue) value = node->maxValue;
@@ -1366,7 +1761,9 @@ void phoneme_ios_lcdui_set_date(
 
     pthread_mutex_lock(&nodeMutex);
     node = node_for_id(componentId);
-    if (node != NULL) {
+    if (node != NULL &&
+            node->isolateId ==
+                __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
         long resolvedValue = (long)unixSeconds;
         focus_item_locked(node);
         if (node->dateValue != resolvedValue) {
@@ -1380,14 +1777,25 @@ void phoneme_ios_lcdui_set_date(
 }
 
 void phoneme_ios_lcdui_set_scroll_position(int32_t position) {
+    int isolateId = __atomic_load_n(
+        &foregroundIsolateId,
+        __ATOMIC_ACQUIRE
+    );
+    IOSNode* screen;
     int resolvedPosition = position < 0 ? 0 : position;
-    if (formScrollPosition == resolvedPosition) {
+
+    if (isolateId <= 0) {
         return;
     }
-    formScrollPosition = resolvedPosition;
-    if (MidpCurrentScreen != NULL && MidpCurrentScreen->widgetPtr != NULL) {
-        MidpFormViewportChanged(MidpCurrentScreen->widgetPtr, formScrollPosition);
+
+    pthread_mutex_lock(&nodeMutex);
+    screen = current_screen_node_for_isolate_locked(isolateId);
+    if (screen != NULL && screen->isolateId == isolateId &&
+            screen->scrollPosition != resolvedPosition) {
+        screen->scrollPosition = resolvedPosition;
+        MidpFormViewportChanged(screen, resolvedPosition);
     }
+    pthread_mutex_unlock(&nodeMutex);
 }
 
 void lfpport_refresh(int hardwareId, int x, int y, int w, int h) {
@@ -1396,15 +1804,24 @@ void lfpport_refresh(int hardwareId, int x, int y, int w, int h) {
 
 void lfpport_set_fullscreen_mode(int hardwareId, jboolean mode) {
     IOSNode* currentNode = NULL;
+    int isolateId = getCurrentIsolateId();
+    int resolvedMode = mode == KNI_TRUE ? 1 : 0;
 
-    fullScreenMode = mode == KNI_TRUE ? 1 : 0;
-    fbapp_set_fullscreen_mode(hardwareId, fullScreenMode);
-
+    pthread_mutex_lock(&nodeMutex);
     if (MidpCurrentScreen != NULL &&
             MidpCurrentScreen->component.type == MIDP_CANVAS_TYPE) {
         currentNode = (IOSNode*)MidpCurrentScreen->widgetPtr;
     }
-    emit_screen_mode(currentNode);
+    if (currentNode != NULL) {
+        currentNode->isFullScreen = resolvedMode;
+        emit_screen_mode(currentNode);
+    }
+    pthread_mutex_unlock(&nodeMutex);
+
+    if (isolateId ==
+            __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
+        fbapp_set_fullscreen_mode(hardwareId, resolvedMode);
+    }
 }
 
 jboolean lfpport_reverse_orientation(int hardwareId) {
@@ -1439,11 +1856,14 @@ void lfpport_ui_init(void) {
      * screen buffer remains 0x0 and every repaint is silently discarded.
      */
     fbapp_init();
-    phoneme_ios_lcdui_reset();
 }
 
 void lfpport_ui_finalize(void) {
-    emit_event(PHONEME_LCDUI_EVENT_RESET, 0, 0, 0, -1, 0, 0, 0, 0, NULL, NULL);
+    int isolateId = getCurrentIsolateId();
+    if (isolateId ==
+            __atomic_load_n(&foregroundIsolateId, __ATOMIC_ACQUIRE)) {
+        phoneme_ios_lcdui_commit_foreground(0);
+    }
     fbapp_finalize();
 }
 
@@ -1564,7 +1984,8 @@ void phoneme_lfpport_form_set_screen_kind(
     }
 
     node->screenKind = screenKind;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
         node->id,
         0,
@@ -1600,7 +2021,8 @@ MidpError lfpport_form_set_content_size(
     }
     node->contentWidth = width;
     node->contentHeight = height;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_SCREEN_UPDATED,
         node->id,
         0,
@@ -1618,48 +2040,50 @@ MidpError lfpport_form_set_content_size(
 
 MidpError lfpport_form_set_current_item(MidpItem* item, int yOffset) {
     IOSNode* node = item == NULL ? NULL : (IOSNode*)item->widgetPtr;
-    if (node != NULL) {
-        focusedItemId = node->id;
-        formScrollPosition = yOffset;
-        emit_event(
+    IOSNode* screen;
+
+    if (node == NULL) {
+        return KNI_OK;
+    }
+    pthread_mutex_lock(&nodeMutex);
+    screen = screen_node_for_node_locked(node);
+    if (screen != NULL) {
+        screen->focusedItemId = node->id;
+        screen->scrollPosition = yOffset < 0 ? 0 : yOffset;
+        emit_event_for_isolate(
+            node->isolateId,
             PHONEME_LCDUI_EVENT_ITEM_FOCUSED,
             node->id,
             node->parentId,
             node->type,
             -1,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             node->label,
             node->text
         );
-        emit_event(
-            PHONEME_LCDUI_EVENT_ITEM_UPDATED,
-            node->id,
-            node->parentId,
-            node->type,
-            -1,
-            node->x,
-            node->y,
-            node->width,
-            node->height,
-            node->label,
-            node->text
-        );
+        emit_node(PHONEME_LCDUI_EVENT_ITEM_UPDATED, node);
     }
+    pthread_mutex_unlock(&nodeMutex);
     return KNI_OK;
 }
 
 MidpError lfpport_form_get_scroll_position(int* position) {
+    IOSNode* screen = MidpCurrentScreen == NULL
+        ? NULL
+        : (IOSNode*)MidpCurrentScreen->widgetPtr;
     if (position != NULL) {
-        *position = formScrollPosition;
+        *position = screen == NULL ? 0 : screen->scrollPosition;
     }
     return KNI_OK;
 }
 
 MidpError lfpport_form_set_scroll_position(int position) {
-    formScrollPosition = position < 0 ? 0 : position;
+    IOSNode* screen = MidpCurrentScreen == NULL
+        ? NULL
+        : (IOSNode*)MidpCurrentScreen->widgetPtr;
+    if (screen != NULL) {
+        screen->scrollPosition = position < 0 ? 0 : position;
+    }
     return KNI_OK;
 }
 
@@ -1717,49 +2141,71 @@ MidpError lfpport_alert_need_scrolling(
     return KNI_OK;
 }
 
-static void emit_commands(MidpCommand* commands, int count) {
+static void update_commands(
+        MidpFrame* owner,
+        MidpCommand* commands,
+        int count) {
+    IOSCommand* replacement = NULL;
+    IOSNode* screen;
     int i;
-    char shortLabel[IOS_LABEL_CAPACITY];
-    char longLabel[IOS_LABEL_CAPACITY];
 
-    emit_event(
-        PHONEME_LCDUI_EVENT_COMMANDS_RESET,
-        0,
-        0,
-        0,
-        -1,
-        count,
-        0,
-        0,
-        0,
-        NULL,
-        NULL
-    );
-    for (i = 0; i < count; i++) {
-        copy_pcsl(shortLabel, sizeof(shortLabel), &commands[i].shortLabel_str);
-        copy_pcsl(longLabel, sizeof(longLabel), &commands[i].longLabel_str);
-        emit_event(
-            PHONEME_LCDUI_EVENT_COMMAND,
-            (int32_t)commands[i].id,
-            0,
-            0,
-            i,
-            (int32_t)commands[i].type,
-            commands[i].priority,
-            commands[i].scope,
-            0,
-            shortLabel,
-            longLabel
-        );
+    if (count < 0 || (count > 0 && commands == NULL)) {
+        return;
     }
+    if (count > 0) {
+        replacement = (IOSCommand*)midpMalloc(
+            (unsigned int)(sizeof(*replacement) * (size_t)count)
+        );
+        if (replacement == NULL) {
+            return;
+        }
+        memset(replacement, 0, sizeof(*replacement) * (size_t)count);
+        for (i = 0; i < count; ++i) {
+            replacement[i].id = (int32_t)commands[i].id;
+            replacement[i].type = (int32_t)commands[i].type;
+            replacement[i].priority = commands[i].priority;
+            replacement[i].scope = commands[i].scope;
+            replacement[i].order = i;
+            copy_pcsl(
+                replacement[i].label,
+                sizeof(replacement[i].label),
+                &commands[i].shortLabel_str
+            );
+            copy_pcsl(
+                replacement[i].longLabel,
+                sizeof(replacement[i].longLabel),
+                &commands[i].longLabel_str
+            );
+        }
+    }
+
+    pthread_mutex_lock(&nodeMutex);
+    screen = owner != NULL && owner->widgetPtr != NULL
+        ? (IOSNode*)owner->widgetPtr
+        : (MidpCurrentScreen == NULL
+            ? NULL
+            : (IOSNode*)MidpCurrentScreen->widgetPtr);
+    if (screen == NULL || screen->displayable == NULL) {
+        pthread_mutex_unlock(&nodeMutex);
+        if (replacement != NULL) {
+            midpFree(replacement);
+        }
+        return;
+    }
+    if (screen->commands != NULL) {
+        midpFree(screen->commands);
+    }
+    screen->commands = replacement;
+    screen->commandCount = count;
+    emit_commands_snapshot(screen);
+    pthread_mutex_unlock(&nodeMutex);
 }
 
 MidpError lfpport_alert_set_commands(
         MidpFrame* alert,
         MidpCommand* commands,
         int count) {
-    (void)alert;
-    emit_commands(commands, count);
+    update_commands(alert, commands, count);
     return KNI_OK;
 }
 
@@ -1797,7 +2243,7 @@ MidpError cmdmanager_set_commands(
         MidpCommand* commands,
         int count) {
     (void)manager;
-    emit_commands(commands, count);
+    update_commands(NULL, commands, count);
     return KNI_OK;
 }
 
@@ -1971,7 +2417,8 @@ MidpError lfpport_gauge_create(
     node->interactive = interactive;
     node->maxValue = maxValue;
     node->value = initialValue;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -1997,7 +2444,8 @@ MidpError lfpport_gauge_set_value(
     }
     node->value = value;
     node->maxValue = maxValue;
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -2038,7 +2486,8 @@ MidpError lfpport_datefield_create(
     node->inputMode = inputMode;
     node->dateValue = time;
     copy_pcsl(node->detail, sizeof(node->detail), timezoneId);
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -2061,7 +2510,8 @@ MidpError lfpport_datefield_set_date(MidpItem* item, long time) {
         return KNI_ENOMEM;
     }
     node->dateValue = time;
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -2093,7 +2543,8 @@ MidpError lfpport_datefield_set_input_mode(MidpItem* item, int mode) {
         return KNI_ENOMEM;
     }
     node->inputMode = mode;
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,
@@ -2153,7 +2604,8 @@ static void emit_choice(IOSNode* node, int index) {
     if (node == NULL || index < 0 || index >= node->choiceCount) {
         return;
     }
-    emit_event_with_value64(
+    emit_event_with_value64_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_CHOICE_ELEMENT,
         node->id,
         node->parentId,
@@ -2267,7 +2719,8 @@ MidpError lfpport_choicegroup_delete(
     if (selectedIndex >= 0 && selectedIndex < node->choiceCount) {
         node->choices[selectedIndex].selected = KNI_TRUE;
     }
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_CHOICE_DELETED,
         node->id,
         node->parentId,
@@ -2292,7 +2745,8 @@ MidpError lfpport_choicegroup_delete_all(MidpItem* item) {
         return KNI_ENOMEM;
     }
     resize_choices(node, 0);
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_CHOICE_DELETED,
         node->id,
         node->parentId,
@@ -2501,7 +2955,8 @@ MidpError lfpport_customitem_refresh(
     if (node == NULL) {
         return KNI_ENOMEM;
     }
-    emit_event(
+    emit_event_for_isolate(
+        node->isolateId,
         PHONEME_LCDUI_EVENT_ITEM_UPDATED,
         node->id,
         node->parentId,

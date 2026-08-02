@@ -192,13 +192,10 @@ void convertJChar2Char(jchar* jchar_buf, char* char_buf, int jchar_buf_size) {
  *         0 = BAD version
  */
 int midpGetVersion(const pcsl_string * ver, int *major, int *minor, int *micro) {
-    int ma = 0;
-    int mi = 0;
-    int mc = 0;
-    int count = 0;
-    int dot_count = 0;
+    int values[3] = {0, 0, 0};
+    int segment = 0;
     int segment_size = 0;
-    const jchar* p = NULL;
+    int count;
     const jchar* ver_data;
     jsize ver_len = pcsl_string_utf16_length(ver);
 
@@ -206,7 +203,11 @@ int midpGetVersion(const pcsl_string * ver, int *major, int *minor, int *micro) 
     *minor = -1;
     *micro = -1;
 
-    if ((ver_len <= 0) || (ver_len > 8)) {
+    /* Some modern J2ME builds use calendar-based versions such as
+     * 2026.7.1. The reference installer limited every component to two
+     * digits and rejected otherwise valid suites. Keep a finite bound while
+     * accepting any 32-bit non-negative version component. */
+    if ((ver_len <= 0) || (ver_len > 32)) {
         return 0;
     }
     printPcslStringWithMessage("ver", ver);
@@ -216,89 +217,37 @@ int midpGetVersion(const pcsl_string * ver, int *major, int *minor, int *micro) 
         return 0;
     }
 
-    /* most checking done here */
-    for (count=0; count < ver_len; count++) {
-        if ((ver_data[count] >= '0') && (ver_data[count] <= '9')) {
-            segment_size++;
-        } else if (ver_data[count] == '.') {
-            if ((segment_size == 0) || (segment_size > 2)) {
-                REPORT_ERROR1(LC_AMS, "segment size wrong %d",
-                              segment_size);
+    for (count = 0; count < ver_len; count++) {
+        const jchar ch = ver_data[count];
+        if (ch >= '0' && ch <= '9') {
+            const int digit = ch - '0';
+            if (values[segment] > (INT_MAX - digit) / 10) {
                 pcsl_string_release_utf16_data(ver_data, ver);
                 return 0;
             }
-            dot_count++;
+            values[segment] = values[segment] * 10 + digit;
+            segment_size++;
+        } else if (ch == '.') {
+            if (segment_size == 0 || segment >= 2) {
+                pcsl_string_release_utf16_data(ver_data, ver);
+                return 0;
+            }
+            segment++;
             segment_size = 0;
         } else {
             pcsl_string_release_utf16_data(ver_data, ver);
             return 0;
         }
-    } /* end of for */
+    }
 
-    /* can't be more then 2 dots in version */
-    if (dot_count > 2) {
-        REPORT_ERROR1(LC_AMS, "too many dots (%d)", dot_count);
+    if (segment_size == 0) {
         pcsl_string_release_utf16_data(ver_data, ver);
         return 0;
     }
 
-    /*
-     * Get major version
-     */
-    for (p = ver_data, count = 0; (*p != '.') && (count < ver_len); ) {
-        if (*p >= '0' && *p <= '9') {
-            ma *= 10;
-            ma += *p - '0';
-        } else {
-            pcsl_string_release_utf16_data(ver_data, ver);
-            return 0;
-        }
-        count++;
-        p++;
-    } /* end of for */
-
-    if(*p == '.') {
-        p++;
-        count++;
-    }
-
-    /*
-     * Get minor version.
-     */
-    for ( ; (*p != '.') && (count < ver_len); ) {
-        if (*p >= '0' && *p <= '9') {
-            mi *= 10;
-            mi += *p - '0';
-        } else {
-            pcsl_string_release_utf16_data(ver_data, ver);
-            return 0;
-        }
-        count++;
-        p++;
-    }
-
-    if(*p == '.') {
-        p++;
-        count++;
-    }
-
-    /*
-     * Get micro version; if it exists..
-     */
-    for ( ; (*p != '.') && (count < ver_len); ) {
-        if (*p >= '0' && *p <= '9') {
-            mc *= 10;
-            mc += *p - '0';
-        } else {
-            pcsl_string_release_utf16_data(ver_data, ver);
-            return 0;
-        }
-        p++;
-        count++;
-    }
-    *major = ma;
-    *minor = mi;
-    *micro = mc;
+    *major = values[0];
+    *minor = values[1];
+    *micro = values[2];
     pcsl_string_release_utf16_data(ver_data, ver);
     return 1;
 }

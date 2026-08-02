@@ -356,8 +356,14 @@ abstract class CldcMIDletSuiteLoader extends AbstractMIDletSuiteLoader {
      */
     public void handleException(Throwable t) {
         t.printStackTrace();
+        t.printStackTrace();
         int errorCode = getErrorCode(t);
+        String message = t.getMessage();
+        String details = t.getClass().getName();
+        if (message != null && message.length() > 0) {
+            details = details + ": " + message;
+        }
 
-        reportError(errorCode, t.getMessage());
+        reportError(errorCode, details);
     }
 }

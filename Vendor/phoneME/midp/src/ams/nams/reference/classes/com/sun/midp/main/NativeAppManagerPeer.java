@@ -219,8 +219,12 @@ public class NativeAppManagerPeer
      * @param midlet The proxy of the MIDlet being added
      */
     public void midletAdded(MIDletProxy midlet) {
-        notifyMidletCreated(midlet.getExternalAppId(),
-                            midlet.getSuiteId(), midlet.getClassName());
+        notifyMidletCreated(
+            midlet.getExternalAppId(),
+            midlet.getSuiteId(),
+            midlet.getClassName(),
+            midlet.getIsolateId()
+        );
     }
 
     /**
@@ -232,14 +236,22 @@ public class NativeAppManagerPeer
     public void midletUpdated(MIDletProxy midlet, int fieldId) {
         if (fieldId == MIDLET_STATE) {
             if (midlet.getMidletState() == MIDletProxy.MIDLET_ACTIVE) {
-                notifyMidletActive(midlet.getExternalAppId(),
-                                   midlet.getSuiteId(), midlet.getClassName());
+                notifyMidletActive(
+                    midlet.getExternalAppId(),
+                    midlet.getSuiteId(),
+                    midlet.getClassName(),
+                    midlet.getIsolateId()
+                );
                 return;
             }
 
             if (midlet.getMidletState() == MIDletProxy.MIDLET_PAUSED) {
-                notifyMidletPaused(midlet.getExternalAppId(),
-                                   midlet.getSuiteId(), midlet.getClassName());
+                notifyMidletPaused(
+                    midlet.getExternalAppId(),
+                    midlet.getSuiteId(),
+                    midlet.getClassName(),
+                    midlet.getIsolateId()
+                );
                 return;
             }
         }
@@ -251,8 +263,12 @@ public class NativeAppManagerPeer
      * @param midlet The proxy of the removed MIDlet
      */
     public void midletRemoved(MIDletProxy midlet) {
-        notifyMidletDestroyed(midlet.getExternalAppId(),
-                              midlet.getSuiteId(), midlet.getClassName());
+        notifyMidletDestroyed(
+            midlet.getExternalAppId(),
+            midlet.getSuiteId(),
+            midlet.getClassName(),
+            midlet.getIsolateId()
+        );
     }
 
     /**
@@ -267,7 +283,13 @@ public class NativeAppManagerPeer
     public void midletStartError(int externalAppId, int suiteId,
                                  String className, int errorCode,
                                  String errorDetails) {
-        notifyMidletStartError(externalAppId, suiteId, className, errorCode);
+        notifyMidletStartError(
+            externalAppId,
+            suiteId,
+            className,
+            errorCode,
+            errorDetails
+        );
     }
 
     // ------ End implementation of the MIDletProxyListListener interface
@@ -340,12 +362,14 @@ public class NativeAppManagerPeer
                         notifyMidletStartError(nativeEvent.intParam1,
                                                MIDletSuite.UNUSED_SUITE_ID,
                                                nativeEvent.stringParam1,
-                                               Constants.MIDLET_ID_NOT_GIVEN);
+                                               Constants.MIDLET_ID_NOT_GIVEN,
+                                               "MIDlet suite ID was not provided");
                     } else if (nativeEvent.stringParam1 == null) {
                         notifyMidletStartError(nativeEvent.intParam1,
                                                nativeEvent.intParam2,
                                                null,
-                                               Constants.MIDLET_CLASS_NOT_GIVEN);
+                                               Constants.MIDLET_CLASS_NOT_GIVEN,
+                                               "MIDlet class was not provided");
                     } else {
                         MIDletSuiteUtils.executeWithArgs(internalSecurityToken,
                             nativeEvent.intParam1, nativeEvent.intParam2,
@@ -398,17 +422,16 @@ public class NativeAppManagerPeer
                 Isolate task = getIsolateObjById(midlet.getIsolateId());
 
                 if (task != null) {
-                    /* Structure to hold run time information about a midlet. */
-                    RuntimeInfo runtimeInfo = new RuntimeInfo();
-
-                    runtimeInfo.memoryTotal    = task.totalMemory();
-                    runtimeInfo.memoryReserved = task.reservedMemory();
-                    runtimeInfo.usedMemory     = task.usedMemory();
-                    runtimeInfo.priority       = task.getPriority();
-                    // there is no Isolate API now
-                    runtimeInfo.profileName    = null;
-
-                    saveRuntimeInfoInNative(runtimeInfo);
+                    // Keep this path allocation-free. The library may sample
+                    // several background isolates; allocating a RuntimeInfo
+                    // object for every request creates avoidable GC/finalizer
+                    // pressure inside the AMS isolate.
+                    saveRuntimeInfoValuesInNative(
+                        task.reservedMemory(),
+                        task.totalMemory(),
+                        task.usedMemory(),
+                        task.getPriority()
+                    );
                 }
 
                 notifyOperationCompleted(
@@ -428,7 +451,9 @@ public class NativeAppManagerPeer
                         // send the notification even if the midlet already has
                         // the foreground
                         NativeDisplayControllerPeer.notifyMidletHasForeground(
-                            midlet.getExternalAppId());
+                            midlet.getExternalAppId(),
+                            midlet.getIsolateId()
+                        );
                     } else {
                         midletProxyList.setForegroundMIDlet(midlet);
                     }
@@ -564,12 +589,14 @@ public class NativeAppManagerPeer
     }
 
     /**
-     * Saves runtime information from the given structure
-     * into the native buffer.
-     *
-     * @param runtimeInfo structure holding the information to save
+     * Saves runtime information without allocating a temporary Java object.
      */
-    private static native void saveRuntimeInfoInNative(RuntimeInfo runtimeInfo);
+    private static native void saveRuntimeInfoValuesInNative(
+        int memoryReserved,
+        int memoryTotal,
+        int usedMemory,
+        int priority
+    );
 
     /**
      * Notify the native application manager that the system has completed
@@ -610,7 +637,8 @@ public class NativeAppManagerPeer
     private static native void notifyMidletStartError(int externalAppId,
                                                       int suiteId,
                                                       String className,
-                                                      int error);
+                                                      int error,
+                                                      String errorDetails);
 
     /**
      * Notify the native application manager of the MIDlet creation.
@@ -621,7 +649,8 @@ public class NativeAppManagerPeer
      */
     private static native void notifyMidletCreated(int externalAppId,
                                                    int suiteId,
-                                                   String className);
+                                                   String className,
+                                                   int isolateId);
 
     /**
      * Notify the native application manager that the MIDlet is active.
@@ -632,7 +661,8 @@ public class NativeAppManagerPeer
      */
     private static native void notifyMidletActive(int externalAppId,
                                                   int suiteId,
-                                                  String className);
+                                                  String className,
+                                                  int isolateId);
 
     /**
      * Notify the native application manager that the MIDlet is paused.
@@ -643,7 +673,8 @@ public class NativeAppManagerPeer
      */
     private static native void notifyMidletPaused(int externalAppId,
                                                   int suiteId,
-                                                  String className);
+                                                  String className,
+                                                  int isolateId);
 
     /**
      * Notify the native application manager that the MIDlet is destroyed.
@@ -654,7 +685,8 @@ public class NativeAppManagerPeer
      */
     private static native void notifyMidletDestroyed(int externalAppId,
                                                      int suiteId,
-                                                     String className);
+                                                     String className,
+                                                     int isolateId);
 
     /**
      * Notify the native application manager that the suite is terminated.

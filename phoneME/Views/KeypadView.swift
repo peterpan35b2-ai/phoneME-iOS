@@ -9,6 +9,118 @@ enum KeyboardAdjustmentMode: Equatable {
     case size
 }
 
+private enum KeyboardResizeAxis {
+    case horizontal
+    case vertical
+}
+
+private final class KeyboardGroupResizePreview: ObservableObject {
+    struct Snapshot: Equatable {
+        var isActive = false
+        var widthRatio: CGFloat = 1
+        var heightRatio: CGFloat = 1
+    }
+
+    @Published private(set) var snapshot = Snapshot()
+
+    private var axis: KeyboardResizeAxis?
+    private var targetScale: GameProfile.KeyboardGroupScale?
+
+    func update(
+        translation: CGSize,
+        baseScale: GameProfile.KeyboardGroupScale,
+        divisor: CGFloat,
+        matchingScales: [Double]
+    ) {
+        if axis == nil {
+            guard max(abs(translation.width), abs(translation.height)) >= 3 else {
+                return
+            }
+            axis = abs(translation.width) >= abs(translation.height)
+                ? .horizontal
+                : .vertical
+        }
+
+        var result = baseScale
+        switch axis {
+        case .horizontal:
+            result.width = snappedScale(
+                baseScale.width + Double(translation.width / max(divisor, 1)),
+                matchingScales: matchingScales
+            )
+        case .vertical:
+            result.height = snappedScale(
+                baseScale.height + Double(translation.height / max(divisor, 1)),
+                matchingScales: matchingScales
+            )
+        case nil:
+            return
+        }
+
+        targetScale = result
+        let nextSnapshot = Snapshot(
+            isActive: true,
+            widthRatio: CGFloat(result.width / max(baseScale.width, 0.001)),
+            heightRatio: CGFloat(result.height / max(baseScale.height, 0.001))
+        )
+        if snapshot != nextSnapshot {
+            snapshot = nextSnapshot
+        }
+    }
+
+    func finish() -> GameProfile.KeyboardGroupScale? {
+        let result = targetScale
+        reset()
+        return result
+    }
+
+    func reset() {
+        axis = nil
+        targetScale = nil
+        if snapshot != Snapshot() {
+            snapshot = Snapshot()
+        }
+    }
+
+    private func snappedScale(
+        _ scale: Double,
+        matchingScales: [Double]
+    ) -> Double {
+        let gridSize = 0.05
+        let clamped = min(max(scale, 0.5), 1.8)
+        let gridScale = (clamped / gridSize).rounded() * gridSize
+        if abs(gridScale - 1) <= gridSize {
+            return 1
+        }
+        if let match = matchingScales.first(where: {
+            abs($0 - gridScale) <= gridSize / 2
+        }) {
+            return match
+        }
+        return gridScale
+    }
+}
+
+private final class KeyboardEditPreviewStore: ObservableObject {
+    let softKeys = KeyboardGroupResizePreview()
+    let numbers = KeyboardGroupResizePreview()
+    let directions = KeyboardGroupResizePreview()
+
+    func preview(for groupID: String) -> KeyboardGroupResizePreview {
+        switch groupID {
+        case "soft-keys": return softKeys
+        case "numbers": return numbers
+        default: return directions
+        }
+    }
+
+    func resetAll() {
+        softKeys.reset()
+        numbers.reset()
+        directions.reset()
+    }
+}
+
 struct KeyboardControlDescriptor: Identifiable, Equatable {
     let id: String
     let label: String
@@ -82,7 +194,7 @@ enum KeyboardLayoutCatalog {
             metricColumns: 6,
             contentColumns: 6,
             rows: 4,
-            keyHeightFactor: 1,
+            keyHeightFactor: 0.75,
             controls: numberControls(startColumn: numberStart)
                 + directionControls(startColumn: directionStart)
         )
@@ -148,7 +260,7 @@ enum KeyboardLayoutCatalog {
             metricColumns: 3,
             contentColumns: 3,
             rows: 5,
-            keyHeightFactor: 0.75,
+            keyHeightFactor: 0.5625,
             controls: controls
         )
     }
@@ -180,7 +292,7 @@ enum KeyboardLayoutCatalog {
             metricColumns: 6,
             contentColumns: 5,
             rows: 4,
-            keyHeightFactor: 1,
+            keyHeightFactor: 0.75,
             controls: controls
         )
     }
@@ -203,7 +315,7 @@ enum KeyboardLayoutCatalog {
             metricColumns: 6,
             contentColumns: 5,
             rows: 3,
-            keyHeightFactor: 1,
+            keyHeightFactor: 0.75,
             controls: controls
         )
     }
@@ -327,26 +439,19 @@ struct KeypadView: View {
     let onKeyActivity: (Bool) -> Void
     let onObscuresDisplayChange: (Bool) -> Void
 
-    @State private var positionDragOrigins: [String: GameProfile.KeyboardControlOffset] = [:]
-    @State private var resizeDragOrigins: [String: GameProfile.KeyboardGroupScale] = [:]
-    @State private var resizeDragAxes: [String: ResizeAxis] = [:]
-    @State private var selectedGroupID: String?
-    @State private var draftCustomization = GameProfile.KeyboardLayoutCustomization()
+    // Keep live drag data outside the parent layout state. On iOS 16,
+    // rebuilding the moving key hierarchy for every touch event can cancel
+    // the active high-priority gesture and stall the main thread.
+    @StateObject private var resizePreviews = KeyboardEditPreviewStore()
 
     private let movementGridSize: CGFloat = 4
-    private let scaleGridSize = 0.05
-
-    private enum ResizeAxis {
-        case horizontal
-        case vertical
-    }
 
     var body: some View {
         GeometryReader { geometry in
             let definition = KeyboardLayoutCatalog.definition(for: profile)
-            let customization = editMode == .none
-                ? profile.effectiveKeyboardLayoutCustomization
-                : draftCustomization
+            let customization = profile.effectiveKeyboardLayoutCustomization
+            let matchingScales = customization.groupScales.values
+                .flatMap { [$0.width, $0.height] }
             let frames = layoutFrames(
                 definition: definition,
                 size: geometry.size,
@@ -360,31 +465,34 @@ struct KeypadView: View {
             ZStack(alignment: .topLeading) {
                 ForEach(definition.controls.filter { !hidden.contains($0.id) }) { control in
                     if let frame = frames[control.id] {
+                        let groupScale = customization.groupScales[control.groupID]
+                            ?? GameProfile.KeyboardGroupScale()
                         VirtualKeyButton(
                             control: control,
                             profile: profile,
                             editMode: editMode,
-                            isGroupSelected: editMode == .size && selectedGroupID == control.groupID,
                             width: frame.width,
                             height: frame.height,
                             displayRect: displayRect,
                             obscuresDisplay: obscuresDisplay,
+                            containerSize: geometry.size,
+                            baseGroupScale: groupScale,
+                            matchingGroupScales: matchingScales,
+                            resizePreview: resizePreviews.preview(for: control.groupID),
+                            movementGridSize: movementGridSize,
                             onKeyActivity: onKeyActivity,
-                            onPositionDrag: { translation, ended in
-                                updateControlPosition(
+                            onPositionDragEnded: { translation in
+                                commitControlPosition(
                                     control,
                                     translation: translation,
-                                    ended: ended,
                                     definition: definition,
                                     size: geometry.size
                                 )
                             },
-                            onResizeDrag: { translation, ended in
-                                updateGroupScale(
+                            onResizeDragEnded: { scale in
+                                commitGroupScale(
                                     control.groupID,
-                                    translation: translation,
-                                    ended: ended,
-                                    size: geometry.size
+                                    scale: scale
                                 )
                             }
                         )
@@ -395,23 +503,15 @@ struct KeypadView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .onAppear {
-                draftCustomization = profile.effectiveKeyboardLayoutCustomization
                 onObscuresDisplayChange(obscuresDisplay)
             }
-            .onChange(of: editMode) { mode in
-                positionDragOrigins.removeAll(keepingCapacity: true)
-                resizeDragOrigins.removeAll(keepingCapacity: true)
-                resizeDragAxes.removeAll(keepingCapacity: true)
-                selectedGroupID = nil
-                if mode != .none {
-                    draftCustomization = profile.effectiveKeyboardLayoutCustomization
-                }
+            .onChange(of: editMode) { _ in
+                resizePreviews.resetAll()
             }
             .onChange(of: obscuresDisplay) { value in
                 onObscuresDisplayChange(value)
             }
         }
-        .coordinateSpace(name: "keyboardEditor")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Virtual keyboard")
     }
@@ -462,7 +562,7 @@ struct KeypadView: View {
             let centerY = startY + rowOffset + keyHeight / 2
                 + CGFloat(offset.y) * size.height
             let scaledWidth = max(24, keyWidth * CGFloat(groupScale.width))
-            let scaledHeight = max(24, keyHeight * CGFloat(groupScale.height))
+            let scaledHeight = max(18, keyHeight * CGFloat(groupScale.height))
             frames[control.id] = CGRect(
                 x: centerX - scaledWidth / 2,
                 y: centerY - scaledHeight / 2,
@@ -473,24 +573,17 @@ struct KeypadView: View {
         return frames
     }
 
-    private func updateControlPosition(
+    private func commitControlPosition(
         _ control: KeyboardControlDescriptor,
         translation: CGSize,
-        ended: Bool,
         definition: KeyboardLayoutDefinition,
         size: CGSize
     ) {
         guard size.width > 0, size.height > 0 else { return }
-        let currentCustomization = draftCustomization
-        let origin: GameProfile.KeyboardControlOffset
-        if let existing = positionDragOrigins[control.id] {
-            origin = existing
-        } else {
-            origin = currentCustomization.controlOffsets[control.id]
-                ?? GameProfile.KeyboardControlOffset()
-            positionDragOrigins[control.id] = origin
-        }
 
+        let currentCustomization = profile.effectiveKeyboardLayoutCustomization
+        let origin = currentCustomization.controlOffsets[control.id]
+            ?? GameProfile.KeyboardControlOffset()
         let gridTranslation = CGSize(
             width: snapped(translation.width, step: movementGridSize),
             height: snapped(translation.height, step: movementGridSize)
@@ -510,7 +603,10 @@ struct KeypadView: View {
 
         if let candidateFrame = candidateFrames[control.id] {
             let otherFrames = candidateFrames
-                .filter { $0.key != control.id && !candidateCustomization.hiddenControlIDs.contains($0.key) }
+                .filter {
+                    $0.key != control.id
+                        && !candidateCustomization.hiddenControlIDs.contains($0.key)
+                }
                 .map(\.value)
             let alignmentDelta = snapDelta(
                 movingFrame: candidateFrame,
@@ -525,100 +621,28 @@ struct KeypadView: View {
                 for: alignedFrame,
                 in: CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
             )
-            let totalDelta = CGSize(
-                width: alignmentDelta.width + boundsDelta.width,
-                height: alignmentDelta.height + boundsDelta.height
+            candidateOffset.x += Double(
+                (alignmentDelta.width + boundsDelta.width) / size.width
             )
-            candidateOffset.x += Double(totalDelta.width / size.width)
-            candidateOffset.y += Double(totalDelta.height / size.height)
+            candidateOffset.y += Double(
+                (alignmentDelta.height + boundsDelta.height) / size.height
+            )
         }
 
-        let storedOffset = candidateOffset.isDefault ? nil : candidateOffset
-        if draftCustomization.controlOffsets[control.id] != storedOffset {
-            draftCustomization.controlOffsets[control.id] = storedOffset
-        }
-
-        if ended {
-            positionDragOrigins[control.id] = nil
-            profile.updateKeyboardLayoutCustomization { customization in
-                customization.controlOffsets[control.id] = storedOffset
-            }
-            draftCustomization = profile.effectiveKeyboardLayoutCustomization
+        profile.updateKeyboardLayoutCustomization { customization in
+            customization.controlOffsets[control.id] = candidateOffset.isDefault
+                ? nil
+                : candidateOffset
         }
     }
 
-    private func updateGroupScale(
+    private func commitGroupScale(
         _ groupID: String,
-        translation: CGSize,
-        ended: Bool,
-        size: CGSize
+        scale: GameProfile.KeyboardGroupScale
     ) {
-        let currentCustomization = draftCustomization
-        let origin: GameProfile.KeyboardGroupScale
-        if let existing = resizeDragOrigins[groupID] {
-            origin = existing
-        } else {
-            origin = currentCustomization.groupScales[groupID]
-                ?? GameProfile.KeyboardGroupScale()
-            resizeDragOrigins[groupID] = origin
+        profile.updateKeyboardLayoutCustomization { customization in
+            customization.groupScales[groupID] = scale.isDefault ? nil : scale
         }
-
-        let axis: ResizeAxis
-        if let existing = resizeDragAxes[groupID] {
-            axis = existing
-        } else {
-            axis = abs(translation.width) >= abs(translation.height)
-                ? .horizontal
-                : .vertical
-            resizeDragAxes[groupID] = axis
-        }
-
-        if selectedGroupID != groupID {
-            selectedGroupID = groupID
-        }
-        let divisor = max(min(size.width, size.height), 1)
-        var result = origin
-        switch axis {
-        case .horizontal:
-            result.width = snappedScale(
-                origin.width + Double(translation.width / divisor)
-            )
-        case .vertical:
-            result.height = snappedScale(
-                origin.height + Double(translation.height / divisor)
-            )
-        }
-
-        let storedScale = result.isDefault ? nil : result
-        if draftCustomization.groupScales[groupID] != storedScale {
-            draftCustomization.groupScales[groupID] = storedScale
-        }
-
-        if ended {
-            resizeDragOrigins[groupID] = nil
-            resizeDragAxes[groupID] = nil
-            selectedGroupID = nil
-            profile.updateKeyboardLayoutCustomization { customization in
-                customization.groupScales[groupID] = storedScale
-            }
-            draftCustomization = profile.effectiveKeyboardLayoutCustomization
-        }
-    }
-
-    private func snappedScale(_ scale: Double) -> Double {
-        let clamped = min(max(scale, 0.5), 1.8)
-        let gridScale = (clamped / scaleGridSize).rounded() * scaleGridSize
-        if abs(gridScale - 1) <= scaleGridSize {
-            return 1
-        }
-        let otherScales = draftCustomization.groupScales.values
-            .flatMap { [$0.width, $0.height] }
-        if let match = otherScales.first(where: {
-            abs($0 - gridScale) <= scaleGridSize / 2
-        }) {
-            return match
-        }
-        return gridScale
     }
 
     private func snapped(_ value: CGFloat, step: CGFloat) -> CGFloat {
@@ -697,16 +721,21 @@ private struct VirtualKeyButton: View {
     let control: KeyboardControlDescriptor
     let profile: GameProfile
     let editMode: KeyboardAdjustmentMode
-    let isGroupSelected: Bool
     let width: CGFloat
     let height: CGFloat
     let displayRect: CGRect
     let obscuresDisplay: Bool
+    let containerSize: CGSize
+    let baseGroupScale: GameProfile.KeyboardGroupScale
+    let matchingGroupScales: [Double]
+    @ObservedObject var resizePreview: KeyboardGroupResizePreview
+    let movementGridSize: CGFloat
     let onKeyActivity: (Bool) -> Void
-    let onPositionDrag: (CGSize, Bool) -> Void
-    let onResizeDrag: (CGSize, Bool) -> Void
+    let onPositionDragEnded: (CGSize) -> Void
+    let onResizeDragEnded: (GameProfile.KeyboardGroupScale) -> Void
 
     @State private var isPressed = false
+    @GestureState private var editTranslation = CGSize.zero
 
     var body: some View {
         Group {
@@ -725,6 +754,12 @@ private struct VirtualKeyButton: View {
             }
         }
         .frame(width: width, height: height)
+        .scaleEffect(
+            x: editMode == .size ? resizePreview.snapshot.widthRatio : 1,
+            y: editMode == .size ? resizePreview.snapshot.heightRatio : 1,
+            anchor: .center
+        )
+        .offset(positionPreviewTranslation)
         .onDisappear {
             guard isPressed else { return }
             isPressed = false
@@ -750,10 +785,15 @@ private struct VirtualKeyButton: View {
             .highPriorityGesture(
                 DragGesture(
                     minimumDistance: editMode == .none ? 0 : 3,
-                    coordinateSpace: editMode == .none
-                        ? .local
-                        : .named("keyboardEditor")
+                    // A stable coordinate space prevents the preview transform
+                    // from changing the reported translation on iOS 16.
+                    coordinateSpace: editMode == .none ? .local : .global
                 )
+                    .updating($editTranslation) { value, state, _ in
+                        if editMode == .position {
+                            state = value.translation
+                        }
+                    }
                     .onChanged { value in
                         switch editMode {
                         case .none:
@@ -761,9 +801,14 @@ private struct VirtualKeyButton: View {
                             isPressed = true
                             press()
                         case .position:
-                            onPositionDrag(value.translation, false)
+                            break
                         case .size:
-                            onResizeDrag(value.translation, false)
+                            resizePreview.update(
+                                translation: value.translation,
+                                baseScale: baseGroupScale,
+                                divisor: min(containerSize.width, containerSize.height),
+                                matchingScales: matchingGroupScales
+                            )
                         }
                     }
                     .onEnded { value in
@@ -773,14 +818,33 @@ private struct VirtualKeyButton: View {
                             isPressed = false
                             release()
                         case .position:
-                            onPositionDrag(value.translation, true)
+                            onPositionDragEnded(value.translation)
                         case .size:
-                            onResizeDrag(value.translation, true)
+                            if let scale = resizePreview.finish() {
+                                onResizeDragEnded(scale)
+                            }
                         }
                     }
             )
             .accessibilityLabel(control.accessibilityLabel)
             .accessibilityAddTraits(.isButton)
+    }
+
+    private var positionPreviewTranslation: CGSize {
+        guard editMode == .position else { return .zero }
+        return CGSize(
+            width: snapped(editTranslation.width, step: movementGridSize),
+            height: snapped(editTranslation.height, step: movementGridSize)
+        )
+    }
+
+    private var isGroupSelected: Bool {
+        editMode == .size && resizePreview.snapshot.isActive
+    }
+
+    private func snapped(_ value: CGFloat, step: CGFloat) -> CGFloat {
+        guard step > 0 else { return value }
+        return (value / step).rounded() * step
     }
 
     private var editOutline: some View {

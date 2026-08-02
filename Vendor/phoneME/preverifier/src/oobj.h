@@ -55,12 +55,15 @@
  * verifier uses internally in various string operations.
  */
 #ifndef STRINGBUFFERSIZE
-#define STRINGBUFFERSIZE 512
+/* ZIP central headers are read into this buffer together with the complete
+ * entry name. Obfuscated MIDlets can legally contain class paths well beyond
+ * the original 255/512-byte desktop limits. */
+#define STRINGBUFFERSIZE 8192
 #endif
 
 #define MAXOPTIONS 2048   /* maximum # of parameters */
 
-#define MAXPATHLEN 255
+#define MAXPATHLEN 4096
 
 /* maximum size allowed for package name of a class file */
 #define MAXPACKAGENAME 1024  

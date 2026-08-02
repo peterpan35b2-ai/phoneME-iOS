@@ -47,6 +47,11 @@ typedef struct {
 } PhoneMELCDUIEvent;
 
 void phoneme_ios_lcdui_reset(void);
+/* Starts an atomic host transition. Background peers remain alive and keep
+ * their own state, but no isolate may publish until the target is committed. */
+void phoneme_ios_lcdui_prepare_foreground(int32_t isolate_id);
+/* Publishes a complete snapshot of one isolate's retained current screen. */
+void phoneme_ios_lcdui_commit_foreground(int32_t isolate_id);
 int32_t phoneme_ios_lcdui_poll_event(PhoneMELCDUIEvent* event_out);
 void phoneme_ios_lcdui_select_command(int32_t command_id);
 void phoneme_ios_lcdui_focus_item(int32_t component_id);

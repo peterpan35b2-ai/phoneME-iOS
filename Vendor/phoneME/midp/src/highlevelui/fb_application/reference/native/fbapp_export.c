@@ -60,6 +60,7 @@ static const char pStartOddKeySequence[] = "#1*2";
 static int posInSequence = 0;
 #endif
 
+#if !PHONEME_IOS_NATIVE
 /**
   * Indicates screen orientation state,
   * true for rotated screen, false for normal orientation
@@ -68,6 +69,7 @@ static jboolean reverse_orientation;
 
 /** True if we are in full-screen mode; false otherwise */
 static int isFullScreen;
+#endif
 
 /** Dynamically evaluated type of the frame buffer device */
 static LinuxFbDeviceType linuxFbDeviceType;
@@ -105,8 +107,12 @@ static void checkDeviceType() {
  * Initializes the fbapp_ native resources.
  */
 void fbapp_init() {
+#if PHONEME_IOS_NATIVE
+    phoneme_ios_port_reset_current_display_state();
+#else
     isFullScreen = 0;
     reverse_orientation = 0;
+#endif
     linuxFbDeviceType = LINUX_FB_VERSATILE_INTEGRATOR;
 
     checkDeviceType();
@@ -135,9 +141,18 @@ int fbapp_get_fb_device_type() {
 /** Invert screen orientation flag */
 jboolean fbapp_reverse_orientation(int hardwareId) {
     (void)hardwareId;
+#if PHONEME_IOS_NATIVE
+    {
+        jboolean reversed =
+            phoneme_ios_port_toggle_reverse_orientation() ? KNI_TRUE : KNI_FALSE;
+        reverseScreenOrientation();
+        return reversed;
+    }
+#else
     reverse_orientation = !reverse_orientation;
     reverseScreenOrientation();
     return reverse_orientation;
+#endif
 }
 
 /** Handle clamshell event */
@@ -146,6 +161,15 @@ void fbapp_handle_clamshell_event() {
 
 /**Set full screen mode on/off */
 void fbapp_set_fullscreen_mode(int hardwareId, int mode) {
+#if PHONEME_IOS_NATIVE
+    if (phoneme_ios_port_fullscreen_mode() != (mode != 0)) {
+        phoneme_ios_port_set_fullscreen_mode(mode);
+        resizeScreenBuffer(
+            fbapp_get_screen_width(hardwareId),
+            fbapp_get_screen_height(hardwareId));
+        clearScreen();
+    }
+#else
     if (isFullScreen != mode) {
         isFullScreen = mode;
         resizeScreenBuffer(
@@ -153,13 +177,14 @@ void fbapp_set_fullscreen_mode(int hardwareId, int mode) {
             fbapp_get_screen_height(hardwareId));
         clearScreen();
     }
+#endif
 }
 
 /** Return screen width */
 int fbapp_get_screen_width(int hardwareId) {
     (void)hardwareId;
 #if PHONEME_IOS_NATIVE
-    return reverse_orientation
+    return phoneme_ios_port_reverse_orientation()
         ? (int)phoneme_ios_port_configured_height()
         : (int)phoneme_ios_port_configured_width();
 #else
@@ -177,7 +202,7 @@ int fbapp_get_screen_width(int hardwareId) {
 int fbapp_get_screen_height(int hardwareId) {
     (void)hardwareId;
 #if PHONEME_IOS_NATIVE
-    return reverse_orientation
+    return phoneme_ios_port_reverse_orientation()
         ? (int)phoneme_ios_port_configured_width()
         : (int)phoneme_ios_port_configured_height();
 #else
@@ -194,19 +219,31 @@ int fbapp_get_screen_height(int hardwareId) {
 /** Return screen x */
 int fbapp_get_screen_x(int hardwareId) {
     (void)hardwareId;
+#if PHONEME_IOS_NATIVE
+    return getScreenX((int)phoneme_ios_port_reverse_orientation());
+#else
     return getScreenX(reverse_orientation);
+#endif
 }
 
 /** Return screen x */
 int fbapp_get_screen_y(int hardwareId) {
     (void)hardwareId;
+#if PHONEME_IOS_NATIVE
+    return getScreenY((int)phoneme_ios_port_reverse_orientation());
+#else
     return getScreenY(reverse_orientation);
+#endif
 }
 
 /** Return screen orientation flag */
 jboolean fbapp_get_reverse_orientation(int hardwareId) {
     (void)hardwareId;
+#if PHONEME_IOS_NATIVE
+    return phoneme_ios_port_reverse_orientation() ? KNI_TRUE : KNI_FALSE;
+#else
     return reverse_orientation;
+#endif
 }
 
 /** Clip rectangle requested for refresh according to screen geometry */
@@ -233,11 +270,19 @@ static void clipRect(int hardwareId, int *x1, int *y1, int *x2, int *y2) {
  */
 void fbapp_refresh(int hardwareId, int x1, int y1, int x2, int y2) {
     clipRect(hardwareId, &x1, &y1, &x2, &y2);
+#if PHONEME_IOS_NATIVE
+    if (!phoneme_ios_port_reverse_orientation()) {
+        refreshScreenNormal(x1, y1, x2, y2);
+    } else {
+        refreshScreenRotated(x1, y1, x2, y2);
+    }
+#else
     if (!reverse_orientation) {
         refreshScreenNormal(x1, y1, x2, y2);
     } else {
         refreshScreenRotated(x1, y1, x2, y2);
     }
+#endif
 }
 
 /**

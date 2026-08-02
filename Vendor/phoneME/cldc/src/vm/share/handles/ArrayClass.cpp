@@ -29,6 +29,17 @@
 
 bool ArrayClass::compute_is_subtype_of(JavaClass* other_class) {
   if (Universe::object_class()->equals(other_class)) return true;
+#if ENABLE_ISOLATES
+  /* Arrays are always subtypes of java.lang.Object. In MVM, the Object
+   * class visible through task-local metadata may not be pointer-identical
+   * to the shared Universe class, so reconcile the semantic type by name. */
+  Symbol::Raw other_name = other_class->name();
+  Symbol::Raw object_name = Universe::object_class()->name();
+  if (other_name.equals(&object_name) ||
+      other_name().matches(&object_name)) {
+    return true;
+  }
+#endif
   // ADD THIS IF SERIALIZATION SHOULD BE SUPPORTED 
   // if (Universe::clonable_class()->equals(other_class))) return true;
   // if (Universe::serializable_class()->equals(other_class))) return true;

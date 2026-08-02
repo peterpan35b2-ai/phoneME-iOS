@@ -157,9 +157,7 @@ final class PhoneMECAPI: @unchecked Sendable {
         }
 
         let result = layout.homeURL.path.withCString { homePath in
-            layout.classesURL.path.withCString { classesPath in
-                phoneme_configure(rawRuntime, homePath, classesPath)
-            }
+            phoneme_configure(rawRuntime, homePath, nil)
         }
 
         guard result == 0 else {

@@ -37,8 +37,8 @@ struct PhoneMEApp: App {
                 .environmentObject(session)
                 .environmentObject(backgroundExecution)
                 .onAppear {
-                    backgroundExecution.setHasRunningApplications(
-                        !session.runningApplications.isEmpty
+                    backgroundExecution.setRunningApplicationCount(
+                        session.runningApplications.count
                     )
                     updateLifecycle(for: scenePhase)
 #if DEBUG
@@ -46,7 +46,7 @@ struct PhoneMEApp: App {
 #endif
                 }
                 .onChange(of: session.runningApplications.count) { count in
-                    backgroundExecution.setHasRunningApplications(count > 0)
+                    backgroundExecution.setRunningApplicationCount(count)
                 }
                 .onChange(of: scenePhase) { newPhase in
                     updateLifecycle(for: newPhase)
@@ -109,18 +109,18 @@ struct PhoneMEApp: App {
     private func updateLifecycle(for phase: ScenePhase) {
         switch phase {
         case .active:
-            backgroundExecution.setShouldKeepAlive(false)
+            backgroundExecution.setApplicationInBackground(false)
             session.setApplicationInBackground(false)
             session.resume()
         case .background:
-            backgroundExecution.setShouldKeepAlive(true)
+            backgroundExecution.setApplicationInBackground(true)
             session.setApplicationInBackground(true)
             session.suspend()
         case .inactive:
-            // Start the optional location keeper before iOS finishes locking
-            // or backgrounding the scene. The VM is not suspended here, which
-            // avoids racing transient overlays and Displayable transitions.
-            backgroundExecution.setShouldKeepAlive(true)
+            // Inactive also covers transient system overlays while the app is
+            // still visible. Keep Location fully stopped until the scene has
+            // actually entered the background.
+            backgroundExecution.setApplicationInBackground(false)
             session.setApplicationInBackground(true)
         @unknown default:
             break

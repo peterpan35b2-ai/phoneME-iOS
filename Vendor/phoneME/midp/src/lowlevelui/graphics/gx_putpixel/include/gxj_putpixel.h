@@ -73,10 +73,16 @@ typedef struct _gxj_screen_buffer {
 } gxj_screen_buffer;
 
 /**
- * Each port must define one system screen buffer
- * from where pixels are copied to physical screen.
+ * Each port must define one system screen buffer from where pixels are copied
+ * to physical screen. The iOS MVM port resolves this per isolate so background
+ * MIDlets cannot draw into another application's Canvas.
  */
+#if PHONEME_IOS_NATIVE
+gxj_screen_buffer* phoneme_ios_current_screen_buffer(void);
+#define gxj_system_screen_buffer (*phoneme_ios_current_screen_buffer())
+#else
 extern gxj_screen_buffer gxj_system_screen_buffer;
+#endif
 
 /**
  * @name Accessing pixel colors

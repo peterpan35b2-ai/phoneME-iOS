@@ -47,12 +47,18 @@ extern "C" {
 void MidpDeleteAllComponents();
 
 /**
- * Pointer to the currently visible screen. The screen receives all of
- * the user events. The screen could be either a displayable, or a
- * system dialog (such as a menu). This global variable is defined in
- * midp_lcdui.c.
+ * Pointer to the currently visible screen. In the iOS MVM port this is
+ * isolate-local: a background MIDlet must never replace the screen used by
+ * another isolate's native peer callbacks or input routing.
  */
+#if PHONEME_IOS_NATIVE
+MidpFrame** MidpCurrentScreenRef(void);
+MidpFrame* MidpCurrentScreenForIsolate(int isolateId);
+int MidpComponentIsolateId(const MidpComponent* componentPtr);
+#define MidpCurrentScreen (*MidpCurrentScreenRef())
+#else
 extern MidpFrame* MidpCurrentScreen;
+#endif
 
 #ifdef __cplusplus
 } /* extern C */

@@ -22,11 +22,8 @@
 		A0000000000000000000000E /* GameProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000F /* GameProfileStore.swift */; };
 		A0000000000000000000000F /* GameProfileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* GameProfileEditorView.swift */; };
 		A00000000000000000000010 /* JarMetadataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* JarMetadataReader.swift */; };
-		A00000000000000000000011 /* JarArchive.c in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* JarArchive.c */; };
 		A00000000000000000000012 /* ProfileTemplateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000015 /* ProfileTemplateStore.swift */; };
 		A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000016 /* PhoneMERuntimeResources.swift */; };
-		A00000000000000000000014 /* PhoneMECore.c in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000017 /* PhoneMECore.c */; };
-		A00000000000000000000015 /* PhoneMERuntime in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* PhoneMERuntime */; };
 		A00000000000000000000016 /* LCDUIState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* LCDUIState.swift */; };
 		A00000000000000000000017 /* NativeLCDUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001C /* NativeLCDUIView.swift */; };
 		A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001D /* JarCompatibilityPatcher.swift */; };
@@ -58,15 +55,10 @@
 		B0000000000000000000000F /* GameProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfileStore.swift; sourceTree = "<group>"; };
 		B00000000000000000000010 /* GameProfileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfileEditorView.swift; sourceTree = "<group>"; };
 		B00000000000000000000011 /* JarMetadataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarMetadataReader.swift; sourceTree = "<group>"; };
-		B00000000000000000000012 /* JarArchive.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = JarArchive.c; sourceTree = "<group>"; };
-		B00000000000000000000013 /* JarArchive.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = JarArchive.h; sourceTree = "<group>"; };
 		B00000000000000000000014 /* phoneME-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "phoneME-Bridging-Header.h"; sourceTree = "<group>"; };
 		B00000000000000000000015 /* ProfileTemplateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileTemplateStore.swift; sourceTree = "<group>"; };
 		B00000000000000000000016 /* PhoneMERuntimeResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMERuntimeResources.swift; sourceTree = "<group>"; };
-		B00000000000000000000017 /* PhoneMECore.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PhoneMECore.c; sourceTree = "<group>"; };
-		B00000000000000000000018 /* PhoneMECore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PhoneMECore.h; sourceTree = "<group>"; };
-		B00000000000000000000019 /* libphoneMECore.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libphoneMECore.a; sourceTree = "<group>"; };
-		B0000000000000000000001A /* PhoneMERuntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PhoneMERuntime; sourceTree = "<group>"; };
+		B00000000000000000000019 /* libphoneMECore.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libphoneMECore.a; path = ../../Core/libphoneMECore.a; sourceTree = "<group>"; };
 		B0000000000000000000001B /* LCDUIState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LCDUIState.swift; sourceTree = "<group>"; };
 		B0000000000000000000001C /* NativeLCDUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLCDUIView.swift; sourceTree = "<group>"; };
 		B0000000000000000000001D /* JarCompatibilityPatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarCompatibilityPatcher.swift; sourceTree = "<group>"; };
@@ -181,8 +173,6 @@
 		D0000000000000000000000A /* Core */ = {
 			isa = PBXGroup;
 			children = (
-				B00000000000000000000017 /* PhoneMECore.c */,
-				B00000000000000000000018 /* PhoneMECore.h */,
 				B00000000000000000000019 /* libphoneMECore.a */,
 				B0000000000000000000001F /* PhoneMEMediaBridge.m */,
 				B00000000000000000000023 /* PhoneMEHTTPSBridge.m */,
@@ -198,7 +188,6 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */,
-				B0000000000000000000001A /* PhoneMERuntime */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -206,8 +195,6 @@
 		D00000000000000000000009 /* Support */ = {
 			isa = PBXGroup;
 			children = (
-				B00000000000000000000012 /* JarArchive.c */,
-				B00000000000000000000013 /* JarArchive.h */,
 				B00000000000000000000014 /* phoneME-Bridging-Header.h */,
 			);
 			path = Support;
@@ -262,7 +249,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */,
-				A00000000000000000000015 /* PhoneMERuntime in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -274,8 +260,7 @@
 			buildActionMask = 2147483647;
 			files = ();
 			inputPaths = (
-				"$(SRCROOT)/phoneME/Core/libphoneMECore.a",
-				"$(SRCROOT)/phoneME/Core/libphoneMECoreSimulator.a",
+				"$(SRCROOT)/Core/libphoneMECore.a",
 			);
 			name = "Prepare phoneME Core";
 			outputPaths = (
@@ -283,7 +268,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "case \"$PLATFORM_NAME\" in\n  iphoneos)\n    SOURCE_ARCHIVE=\"$SRCROOT/phoneME/Core/libphoneMECore.a\"\n    ;;\n  iphonesimulator)\n    SOURCE_ARCHIVE=\"$SRCROOT/phoneME/Core/libphoneMECoreSimulator.a\"\n    ;;\n  *)\n    exit 0\n    ;;\nesac\ncp \"$SOURCE_ARCHIVE\" \"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\n";
+			shellScript = "if [ \"$PLATFORM_NAME\" != \"iphoneos\" ]; then\n  echo \"phoneME Core supports iphoneos only.\" >&2\n  exit 1\nfi\ncp \"$SRCROOT/Core/libphoneMECore.a\" \"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -308,10 +293,8 @@
 				A0000000000000000000000E /* GameProfileStore.swift in Sources */,
 				A0000000000000000000000F /* GameProfileEditorView.swift in Sources */,
 				A00000000000000000000010 /* JarMetadataReader.swift in Sources */,
-				A00000000000000000000011 /* JarArchive.c in Sources */,
 				A00000000000000000000012 /* ProfileTemplateStore.swift in Sources */,
 				A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */,
-				A00000000000000000000014 /* PhoneMECore.c in Sources */,
 				A00000000000000000000016 /* LCDUIState.swift in Sources */,
 				A00000000000000000000017 /* NativeLCDUIView.swift in Sources */,
 				A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */,
@@ -329,6 +312,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				COPY_PHASE_STRIP = NO;
@@ -346,6 +331,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				COPY_PHASE_STRIP = YES;
@@ -358,48 +345,31 @@
 		F00000000000000000000005 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				"ARCHS[sdk=iphonesimulator*]" = arm64;
-				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
-				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
-				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
-				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_CXX_LIBRARY = "libc++";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
-				ENABLE_HARDENED_RUNTIME = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
-				MARKETING_VERSION = 0.2.1;
-				OTHER_LDFLAGS = "-lz -liconv";
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
-					"-lz",
-					"-lc++",
-					"-liconv",
-					"-framework",
-					CoreText,
-					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
-				);
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
-					"-lz",
-					"-lc++",
-					"-liconv",
-					"-framework",
-					CoreText,
-					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
-				);
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "J2ME Loader";
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Core/include";
+				INFOPLIST_FILE = "phoneME/Support/Info-iOS.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.2.1;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-lz",
+					"-lc++",
+					"-liconv",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -410,52 +380,36 @@
 		F00000000000000000000006 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				"ARCHS[sdk=iphonesimulator*]" = arm64;
-				"GENERATE_INFOPLIST_FILE[sdk=iphoneos*]" = NO;
-				"GENERATE_INFOPLIST_FILE[sdk=iphonesimulator*]" = NO;
-				"INFOPLIST_FILE[sdk=iphoneos*]" = "phoneME/Support/Info-iOS.plist";
-				"INFOPLIST_FILE[sdk=iphonesimulator*]" = "phoneME/Support/Info-iOS.plist";
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_CXX_LIBRARY = "libc++";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
-				ENABLE_HARDENED_RUNTIME = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/phoneME/Core";
-				MARKETING_VERSION = 0.2.1;
-				OTHER_LDFLAGS = "-lz -liconv";
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
-					"-lz",
-					"-lc++",
-					"-liconv",
-					"-framework",
-					CoreText,
-					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
-				);
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
-					"-lz",
-					"-lc++",
-					"-liconv",
-					"-framework",
-					CoreText,
-					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
-				);
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "J2ME Loader";
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Core/include";
+				INFOPLIST_FILE = "phoneME/Support/Info-iOS.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.2.1;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-lz",
+					"-lc++",
+					"-liconv",
+					"-framework",
+					CoreText,
+					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};

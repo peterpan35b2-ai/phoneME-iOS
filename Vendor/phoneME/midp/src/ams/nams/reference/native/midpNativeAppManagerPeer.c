@@ -43,6 +43,10 @@
 #include <midpString.h>
 #include <midpError.h>
 #include <midpUtilKni.h>
+
+#if defined(__APPLE__)
+#include <os/log.h>
+#endif
 #include <midp_runtime_info.h>
 #include <heap.h>
 
@@ -475,34 +479,13 @@ MIDPError midp_midlet_request_runtime_info(jint appId) {
  * @param runtimeInfo structure holding the information to save
  */
 KNIEXPORT KNI_RETURNTYPE_VOID
-Java_com_sun_midp_main_NativeAppManagerPeer_saveRuntimeInfoInNative(void) {
-    KNI_StartHandles(2);
-    KNI_DeclareHandle(runtimeInfo);
-    KNI_DeclareHandle(clazz);
-    /* KNI_DeclareHandle(string); */
-
-    KNI_GetParameterAsObject(1, runtimeInfo);
-    KNI_GetObjectClass(runtimeInfo, clazz);
-
-    KNI_SAVE_INT_FIELD(runtimeInfo, clazz, "memoryReserved",
-                       g_runtimeInfoBuf.memoryReserved);
-    KNI_SAVE_INT_FIELD(runtimeInfo, clazz, "memoryTotal",
-                       g_runtimeInfoBuf.memoryTotal);
-    KNI_SAVE_INT_FIELD(runtimeInfo, clazz, "usedMemory",
-                       g_runtimeInfoBuf.usedMemory);
-    KNI_SAVE_INT_FIELD(runtimeInfo, clazz, "priority",
-                       g_runtimeInfoBuf.priority);
-
-    g_runtimeInfoBuf.profileName    = NULL;
+Java_com_sun_midp_main_NativeAppManagerPeer_saveRuntimeInfoValuesInNative(void) {
+    g_runtimeInfoBuf.memoryReserved = KNI_GetParameterAsInt(1);
+    g_runtimeInfoBuf.memoryTotal = KNI_GetParameterAsInt(2);
+    g_runtimeInfoBuf.usedMemory = KNI_GetParameterAsInt(3);
+    g_runtimeInfoBuf.priority = KNI_GetParameterAsInt(4);
+    g_runtimeInfoBuf.profileName = NULL;
     g_runtimeInfoBuf.profileNameLen = 0;
-    /*
-    do {
-        KNI_SAVE_PCSL_STRING_FIELD(runtimeInfo, clazz, "profileName",
-                                   &g_runtimeInfoBuf.profileName, string);
-    } while (0);
-    */
-
-    KNI_EndHandles();
     KNI_ReturnVoid();
 }
 
@@ -599,22 +582,43 @@ Java_com_sun_midp_main_NativeAppManagerPeer_notifyMidletStartError(void) {
     NamsEventData eventData;
     MidletSuiteData msd;
     pcsl_string_status res;
+    pcsl_string errorDetails = PCSL_STRING_NULL;
+    pcsl_string_status detailsRes;
 
     memset((char*)&eventData, 0, sizeof(NamsEventData));
     memset((char*)&msd, 0, sizeof(MidletSuiteData));
-    eventData.event = MIDP_NAMS_EVENT_STATE_CHANGED;    
+    eventData.event = MIDP_NAMS_EVENT_STATE_CHANGED;
     eventData.appId = externalAppId;
     eventData.state = MIDP_MIDLET_STATE_ERROR;
     eventData.reason = error;
     msd.suiteId = KNI_GetParameterAsInt(2);
     eventData.pSuiteData = &msd;
 
-    KNI_StartHandles(1);
+    KNI_StartHandles(2);
     KNI_DeclareHandle(handle);
+    KNI_DeclareHandle(detailsHandle);
     KNI_GetParameterAsObject(3, handle);
+    KNI_GetParameterAsObject(5, detailsHandle);
 
     res = midp_jstring_to_pcsl_string(handle,
                                       &msd.varSuiteData.midletClassName);
+    detailsRes = midp_jstring_to_pcsl_string(detailsHandle, &errorDetails);
+
+#if defined(__APPLE__)
+    if (detailsRes == PCSL_STRING_OK) {
+        const jbyte* detailsUtf8 = pcsl_string_get_utf8_data(&errorDetails);
+        if (detailsUtf8 != NULL) {
+            os_log_error(
+                OS_LOG_DEFAULT,
+                "phoneME MIDlet start error app=%{public}d code=%{public}d details=%{public}s",
+                externalAppId,
+                error,
+                (const char*)detailsUtf8
+            );
+            pcsl_string_release_utf8_data(detailsUtf8, &errorDetails);
+        }
+    }
+#endif
 
     /*
      * notify the listeners even failed to get the midlet's class name,
@@ -624,6 +628,9 @@ Java_com_sun_midp_main_NativeAppManagerPeer_notifyMidletStartError(void) {
 
     if (res == PCSL_STRING_OK) {
         pcsl_string_free(&msd.varSuiteData.midletClassName);
+    }
+    if (detailsRes == PCSL_STRING_OK) {
+        pcsl_string_free(&errorDetails);
     }
 
     KNI_EndHandles();
@@ -649,6 +656,7 @@ Java_com_sun_midp_main_NativeAppManagerPeer_notifyMidletCreated(void) {
     eventData.event = MIDP_NAMS_EVENT_STATE_CHANGED;    
     eventData.appId = externalAppId;
     eventData.state = MIDP_MIDLET_STATE_PAUSED;
+    eventData.reason = KNI_GetParameterAsInt(4);
     msd.suiteId = KNI_GetParameterAsInt(2);
     eventData.pSuiteData = &msd;
 
@@ -688,6 +696,7 @@ Java_com_sun_midp_main_NativeAppManagerPeer_notifyMidletActive(void) {
     eventData.event = MIDP_NAMS_EVENT_STATE_CHANGED;    
     eventData.appId = externalAppId;
     eventData.state = MIDP_MIDLET_STATE_ACTIVE;
+    eventData.reason = KNI_GetParameterAsInt(4);
     msd.suiteId = KNI_GetParameterAsInt(2);
     eventData.pSuiteData = &msd;
 
@@ -727,6 +736,7 @@ Java_com_sun_midp_main_NativeAppManagerPeer_notifyMidletPaused(void) {
     eventData.event = MIDP_NAMS_EVENT_STATE_CHANGED;    
     eventData.appId = externalAppId;
     eventData.state = MIDP_MIDLET_STATE_PAUSED;
+    eventData.reason = KNI_GetParameterAsInt(4);
     msd.suiteId = KNI_GetParameterAsInt(2);
     eventData.pSuiteData = &msd;
 

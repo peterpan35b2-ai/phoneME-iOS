@@ -2,7 +2,6 @@ import CryptoKit
 import Foundation
 
 enum JarCompatibilityPatcher {
-    private static let mergedLauncherPathThreshold = 256
     private static let classesRequiringPreverification: [String: Set<String>] = [
         // VQSV1.jar: h.class contains stale CLDC StackMap entries after the
         // game was modified. Re-running this class through the embedded
@@ -136,15 +135,6 @@ enum JarCompatibilityPatcher {
     private static func compatibilityPreverificationClassPaths(
         in archive: CompatibilityZipArchive
     ) throws -> [String]? {
-        if archive.classPaths.contains(where: {
-            $0.utf8.count >= mergedLauncherPathThreshold
-        }) {
-            // Merged/obfuscated launchers can reference one another while the
-            // verifier rebuilds frames, so preserve the existing whole-suite
-            // behavior for that compatibility path.
-            return archive.classPaths
-        }
-
         let matchingPaths = try targetedPreverificationClassPaths(
             in: archive
         )
@@ -165,21 +155,18 @@ enum JarCompatibilityPatcher {
             }
         }
 
-        // CLDC-preverified classes use version 45.3. Java 1.2-1.4 class
-        // files (46-48) are otherwise bytecode-compatible with phoneME, but
-        // they commonly lack the legacy StackMap attribute required by the
-        // CLDC verifier. Re-run only those classes through the embedded
-        // preverifier instead of maintaining game-specific hash lists.
+        // Java 1.2-1.4 class files are bytecode-compatible with phoneME,
+        // but CLDC requires legacy StackMap attributes. Only preverify class
+        // files that have not already been CLDC-preverified. This avoids
+        // rewriting valid mixed-version suites such as Avatar 2.9.3 while
+        // repairing merged launchers whose Java 47 classes have no frames.
         for path in archive.classPaths {
-            guard let classData = try archive.data(forExactPath: path),
-                  classData.count >= 8,
-                  classData.uint32BE(at: 0) == 0xCAFEBABE else {
+            guard let classData = try archive.data(forExactPath: path) else {
                 continue
             }
-            let minorVersion = classData.uint16BE(at: 4)
-            let majorVersion = classData.uint16BE(at: 6)
-            if (majorVersion == 45 && minorVersion != 3)
-                || (46...48).contains(majorVersion) {
+            if try ClassFileVersionNormalizer.requiresCLDCPreverification(
+                classData
+            ) {
                 matchingPaths.insert(path)
             }
         }
@@ -192,7 +179,6 @@ enum JarCompatibilityPatcher {
         classPaths: [String]
     ) throws -> [String: Data] {
         let fileManager = FileManager.default
-        let runtime = try PhoneMERuntimeResources.prepare()
         let workingURL = fileManager.temporaryDirectory.appendingPathComponent(
             "phoneme-preverify-\(UUID().uuidString)",
             isDirectory: true
@@ -212,18 +198,16 @@ enum JarCompatibilityPatcher {
         try classList.write(to: classListURL, atomically: true, encoding: .utf8)
 
         var result = PhoneMEPreverifyResult()
-        let status = runtime.classesURL.path.withCString { runtimePath in
-            sourceURL.path.withCString { jarPath in
-                classListURL.path.withCString { classListPath in
-                    outputURL.path.withCString { outputPath in
-                        phoneme_preverify_jar_classes(
-                            runtimePath,
-                            jarPath,
-                            classListPath,
-                            outputPath,
-                            &result
-                        )
-                    }
+        let status = sourceURL.path.withCString { jarPath in
+            classListURL.path.withCString { classListPath in
+                outputURL.path.withCString { outputPath in
+                    phoneme_preverify_jar_classes(
+                        nil,
+                        jarPath,
+                        classListPath,
+                        outputPath,
+                        &result
+                    )
                 }
             }
         }
@@ -789,6 +773,24 @@ private enum ClassFileVersionNormalizer {
     private static let newestConvertibleMajorVersion = 52
     private static let accStatic: UInt16 = 0x0008
 
+    static func requiresCLDCPreverification(_ original: Data) throws -> Bool {
+        guard original.count >= 10,
+              original.uint32BE(at: 0) == 0xCAFEBABE else {
+            throw PatchError.invalidClassFile
+        }
+
+        let minorVersion = original.uint16BE(at: 4)
+        let majorVersion = original.uint16BE(at: 6)
+        guard (majorVersion == 45 && minorVersion != 3)
+                || (46...48).contains(majorVersion) else {
+            return false
+        }
+
+        let pool = try parseConstantPool(original)
+        let inspection = try inspectClass(original, pool: pool)
+        return !inspection.hasLegacyStackMap
+    }
+
     static func normalize(_ original: Data) throws -> Data? {
         guard original.count >= 10,
               original.uint32BE(at: 0) == 0xCAFEBABE else {
@@ -892,6 +894,7 @@ private enum ClassFileVersionNormalizer {
         let firstMethodOffset = cursor
         var descriptorReferenceNames = Set<String>()
         var needsStackMapConversion = false
+        var hasAnyLegacyStackMap = false
 
         for _ in 0..<methodCount {
             guard cursor + 8 <= data.count else { throw PatchError.invalidClassFile }
@@ -913,6 +916,8 @@ private enum ClassFileVersionNormalizer {
                     )
                     hasStackMapTable = hasStackMapTable || flags.hasStackMapTable
                     hasLegacyStackMap = hasLegacyStackMap || flags.hasLegacyStackMap
+                    hasAnyLegacyStackMap = hasAnyLegacyStackMap
+                        || flags.hasLegacyStackMap
                 }
                 cursor = attribute.end
             }
@@ -931,6 +936,7 @@ private enum ClassFileVersionNormalizer {
             methodCount: methodCount,
             firstMethodOffset: firstMethodOffset,
             needsStackMapConversion: needsStackMapConversion,
+            hasLegacyStackMap: hasAnyLegacyStackMap,
             descriptorReferenceNames: descriptorReferenceNames
         )
     }
@@ -1403,6 +1409,7 @@ private enum ClassFileVersionNormalizer {
         let methodCount: Int
         let firstMethodOffset: Int
         let needsStackMapConversion: Bool
+        let hasLegacyStackMap: Bool
         let descriptorReferenceNames: Set<String>
     }
 

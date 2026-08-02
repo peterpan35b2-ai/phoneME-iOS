@@ -70,19 +70,21 @@ done
 }
 
 if [[ "$REBUILD_CORE" == true ]]; then
-  echo "== Rebuilding phoneME core =="
-  bash "$SCRIPT_DIR/build-phoneME-core-ios.sh"
+  echo "== Rebuilding independent phoneME Core =="
+  bash "$REPO_ROOT/Core/tools/test-host.sh"
+  bash "$REPO_ROOT/Core/tools/build-iphoneos.sh"
 fi
 
-CORE_LIBRARY="$REPO_ROOT/phoneME/Core/libphoneMECore.a"
-RUNTIME_CLASSES="$REPO_ROOT/phoneME/Resources/PhoneMERuntime/classes.zip"
-for required_file in "$CORE_LIBRARY" "$RUNTIME_CLASSES"; do
+CORE_LIBRARY="$REPO_ROOT/Core/libphoneMECore.a"
+for required_file in "$CORE_LIBRARY"; do
   [[ -f "$required_file" ]] || {
     echo "Required packaged core file is missing: $required_file" >&2
     echo "Run with --rebuild-core." >&2
     exit 1
   }
 done
+
+bash "$REPO_ROOT/Core/tools/verify-iphoneos.sh"
 
 BUILD_SETTINGS="$(
   xcodebuild \

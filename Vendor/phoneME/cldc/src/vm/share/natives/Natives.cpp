@@ -621,7 +621,14 @@ void Java_java_lang_System_arraycopy(JVM_SINGLE_ARG_TRAPS) {
     // Check element type, must be done before bounds checks
     TypeArrayClass::Raw src_class = src.blueprint();
     TypeArrayClass::Raw dst_class = dst.blueprint();
-    if (src_class().type() != dst_class().type()) {
+    // Primitive arrays are assignment-compatible only when they have the
+    // same binary array type. MVM can expose task-local class mirrors, so
+    // pointer identity is not stable across isolates; ClassInfo::_type can
+    // also read stale union data on the 64-bit path. The binary names ([B,
+    // [I, and so on) are stable and uniquely identify primitive array types.
+    Symbol::Raw src_name = src_class().name();
+    Symbol::Raw dst_name = dst_class().name();
+    if (!src_name.equals(&dst_name)) {
       Throw::array_store_exception(arraycopy_incompatible_types JVM_THROW);
     }
     // Bounds exception must be throw last

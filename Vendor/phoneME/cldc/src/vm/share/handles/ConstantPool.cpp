@@ -526,7 +526,8 @@ ConstantPool::resolve_invoke_special_at(InstanceClass *sender_class,
     Throw::incompatible_class_change_error(method_changed JVM_THROW_0);
   }
 
-  if (method_name.equals(Symbols::object_initializer_name())) {
+  if (method_name.equals(Symbols::object_initializer_name()) ||
+      method_name().matches(Symbols::object_initializer_name())) {
     holder_class = m().holder();
     if (!static_receiver_class.equals(&holder_class)) {
       trace_no_such_method_error(sender_class, &static_receiver_class, 

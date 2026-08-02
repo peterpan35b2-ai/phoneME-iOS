@@ -31,6 +31,8 @@
  */
 
 #include <kni.h>
+#include <pthread.h>
+#include <string.h>
 
 #include "lfp_intern_registry.h"
 
@@ -39,14 +41,89 @@
 #include <midpError.h>
 #include <midpMalloc.h>
 #include <midpString.h>
+#if PHONEME_IOS_NATIVE
+#include <midpServices.h>
+#endif
 
 /**
- * Global variable pointing to current visible screen. This screen receives
- * all the user events. It could be either a displayable, or a system dialog
- * like menu.
- * Declared in midp_lcdui.h.
+ * Global variable pointing to current visible screen. The legacy ports have
+ * one process-wide display. The iOS MVM host runs several MIDlet isolates in
+ * one process, so each isolate needs its own current-screen slot.
  */
+#if PHONEME_IOS_NATIVE
+#define MIDP_IOS_CURRENT_SCREEN_SLOTS 128
+
+typedef struct {
+    int isolateId;
+    MidpFrame* screen;
+} MidpIOSCurrentScreenSlot;
+
+static MidpIOSCurrentScreenSlot
+    MidpCurrentScreenSlots[MIDP_IOS_CURRENT_SCREEN_SLOTS];
+static pthread_mutex_t MidpCurrentScreenMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static MidpIOSCurrentScreenSlot* currentScreenSlotLocked(
+        int isolateId,
+        int create) {
+    MidpIOSCurrentScreenSlot* empty = NULL;
+    int index;
+
+    for (index = 0; index < MIDP_IOS_CURRENT_SCREEN_SLOTS; ++index) {
+        MidpIOSCurrentScreenSlot* slot = &MidpCurrentScreenSlots[index];
+        if (slot->isolateId == isolateId && isolateId != 0) {
+            return slot;
+        }
+        if (empty == NULL && slot->isolateId == 0) {
+            empty = slot;
+        }
+    }
+    if (create && isolateId > 0 && empty != NULL) {
+        empty->isolateId = isolateId;
+        empty->screen = NULL;
+        return empty;
+    }
+    return NULL;
+}
+
+static MidpFrame** currentScreenRefForIsolate(int isolateId) {
+    static MidpFrame* nullScreen;
+    MidpIOSCurrentScreenSlot* slot;
+
+    pthread_mutex_lock(&MidpCurrentScreenMutex);
+    slot = currentScreenSlotLocked(isolateId, 1);
+    pthread_mutex_unlock(&MidpCurrentScreenMutex);
+    return slot == NULL ? &nullScreen : &slot->screen;
+}
+
+static void releaseCurrentScreenSlot(int isolateId) {
+    MidpIOSCurrentScreenSlot* slot;
+    pthread_mutex_lock(&MidpCurrentScreenMutex);
+    slot = currentScreenSlotLocked(isolateId, 0);
+    if (slot != NULL) {
+        slot->screen = NULL;
+        slot->isolateId = 0;
+    }
+    pthread_mutex_unlock(&MidpCurrentScreenMutex);
+}
+
+MidpFrame** MidpCurrentScreenRef(void) {
+    return currentScreenRefForIsolate(getCurrentIsolateId());
+}
+
+MidpFrame* MidpCurrentScreenForIsolate(int isolateId) {
+    MidpIOSCurrentScreenSlot* slot;
+    MidpFrame* result = NULL;
+    pthread_mutex_lock(&MidpCurrentScreenMutex);
+    slot = currentScreenSlotLocked(isolateId, 0);
+    if (slot != NULL) {
+        result = slot->screen;
+    }
+    pthread_mutex_unlock(&MidpCurrentScreenMutex);
+    return result;
+}
+#else
 MidpFrame* MidpCurrentScreen;
+#endif
 
 /**
  * Beginning of a linked list of all MidpFrame structures.
@@ -61,11 +138,18 @@ static MidpItem* MidpFirstOrphanItem;
 typedef struct _MidpNativeHandleEntry {
     jint id;
     MidpComponent* component;
+#if PHONEME_IOS_NATIVE
+    int isolateId;
+#endif
     struct _MidpNativeHandleEntry* next;
 } MidpNativeHandleEntry;
 
 static MidpNativeHandleEntry* MidpFirstNativeHandle;
 static jint MidpNextNativeHandle = 1;
+#if PHONEME_IOS_NATIVE
+static pthread_mutex_t MidpNativeHandleMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t MidpComponentListMutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 static jint registerComponent(MidpComponent* component) {
     MidpNativeHandleEntry* entry;
@@ -79,62 +163,129 @@ static jint registerComponent(MidpComponent* component) {
         return 0;
     }
 
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_lock(&MidpNativeHandleMutex);
+#endif
     if (MidpNextNativeHandle <= 0) {
         MidpNextNativeHandle = 1;
     }
 
     entry->id = MidpNextNativeHandle++;
     entry->component = component;
+#if PHONEME_IOS_NATIVE
+    entry->isolateId = getCurrentIsolateId();
+#endif
     entry->next = MidpFirstNativeHandle;
     MidpFirstNativeHandle = entry;
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_unlock(&MidpNativeHandleMutex);
+#endif
     return entry->id;
 }
 
 static void unregisterComponent(const MidpComponent* component) {
     MidpNativeHandleEntry* previous = NULL;
-    MidpNativeHandleEntry* entry = MidpFirstNativeHandle;
+    MidpNativeHandleEntry* entry;
+#if PHONEME_IOS_NATIVE
+    int isolateId = 0;
+    int releaseScreenSlot = 0;
+    pthread_mutex_lock(&MidpNativeHandleMutex);
+#endif
+    entry = MidpFirstNativeHandle;
 
     while (entry != NULL) {
         if (entry->component == component) {
+#if PHONEME_IOS_NATIVE
+            MidpNativeHandleEntry* remaining;
+            isolateId = entry->isolateId;
+#endif
             if (previous == NULL) {
                 MidpFirstNativeHandle = entry->next;
             } else {
                 previous->next = entry->next;
             }
             midpFree(entry);
-            return;
+#if PHONEME_IOS_NATIVE
+            remaining = MidpFirstNativeHandle;
+            while (remaining != NULL && remaining->isolateId != isolateId) {
+                remaining = remaining->next;
+            }
+            releaseScreenSlot = remaining == NULL;
+#endif
+            break;
         }
         previous = entry;
         entry = entry->next;
     }
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_unlock(&MidpNativeHandleMutex);
+    if (releaseScreenSlot) {
+        releaseCurrentScreenSlot(isolateId);
+    }
+#endif
 }
 
 jint MidpComponentToId(const MidpComponent* componentPtr) {
-    MidpNativeHandleEntry* entry = MidpFirstNativeHandle;
-
+    MidpNativeHandleEntry* entry;
+    jint result = 0;
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_lock(&MidpNativeHandleMutex);
+#endif
+    entry = MidpFirstNativeHandle;
     while (entry != NULL) {
         if (entry->component == componentPtr) {
-            return entry->id;
+            result = entry->id;
+            break;
         }
         entry = entry->next;
     }
-    return 0;
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_unlock(&MidpNativeHandleMutex);
+#endif
+    return result;
 }
 
+#if PHONEME_IOS_NATIVE
+int MidpComponentIsolateId(const MidpComponent* componentPtr) {
+    MidpNativeHandleEntry* entry;
+    int result = 0;
+    pthread_mutex_lock(&MidpNativeHandleMutex);
+    entry = MidpFirstNativeHandle;
+    while (entry != NULL) {
+        if (entry->component == componentPtr) {
+            result = entry->isolateId;
+            break;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&MidpNativeHandleMutex);
+    return result;
+}
+#endif
+
 static MidpComponent* componentFromId(jint nativeId) {
-    MidpNativeHandleEntry* entry = MidpFirstNativeHandle;
+    MidpNativeHandleEntry* entry;
+    MidpComponent* result = NULL;
 
     if (nativeId <= 0) {
         return NULL;
     }
 
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_lock(&MidpNativeHandleMutex);
+#endif
+    entry = MidpFirstNativeHandle;
     while (entry != NULL) {
         if (entry->id == nativeId) {
-            return entry->component;
+            result = entry->component;
+            break;
         }
         entry = entry->next;
     }
-    return NULL;
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_unlock(&MidpNativeHandleMutex);
+#endif
+    return result;
 }
 
 MidpDisplayable* MidpDisplayableFromId(jint nativeId) {
@@ -177,9 +328,8 @@ MidpDisplayable* MidpNewDisplayable(MidpComponentType type) {
     if (p) {
         p->frame.component.type = type;
         p->frame.component.modelVersion = 0;
-        p->frame.component.next = (MidpComponent *)MidpFirstScreen;
+        p->frame.component.next = NULL;
         p->frame.component.child = NULL;
-        MidpFirstScreen = (MidpFrame *)p;
 
         /*
         * The rest of the structure is not yet initialized.
@@ -190,9 +340,17 @@ MidpDisplayable* MidpNewDisplayable(MidpComponentType type) {
         p->frame.widgetPtr = NULL;
 
         if (registerComponent(&p->frame.component) == 0) {
-            MidpFirstScreen = (MidpFrame*)p->frame.component.next;
             midpFree(p);
             p = NULL;
+        } else {
+#if PHONEME_IOS_NATIVE
+            pthread_mutex_lock(&MidpComponentListMutex);
+#endif
+            p->frame.component.next = (MidpComponent *)MidpFirstScreen;
+            MidpFirstScreen = (MidpFrame *)p;
+#if PHONEME_IOS_NATIVE
+            pthread_mutex_unlock(&MidpComponentListMutex);
+#endif
         }
     }
 
@@ -218,17 +376,31 @@ void MidpDeleteDisplayable(MidpDisplayable *displayablePtr) {
         return;
     }
 
-    /* If this displayable is current screen, clear current screen pointer */
+    /* If this displayable is current screen, clear only its owner's slot. */
+#if PHONEME_IOS_NATIVE
+    {
+        int isolateId = MidpComponentIsolateId(
+            &displayablePtr->frame.component);
+        MidpFrame** currentScreen = currentScreenRefForIsolate(isolateId);
+        if (*currentScreen == &displayablePtr->frame) {
+            *currentScreen = NULL;
+        }
+    }
+#else
     if (MidpCurrentScreen == &displayablePtr->frame) {
         MidpCurrentScreen = NULL;
     }
+#endif
 
     /* First Delete all children */
     while (displayablePtr->frame.component.child != NULL) {
         MidpDeleteItem((MidpItem *)displayablePtr->frame.component.child);
     }
 
-    /* Then detach this displayable from displayable linked list */
+    /* Then detach this displayable from the process registry. */
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_lock(&MidpComponentListMutex);
+#endif
     if (MidpFirstScreen == (MidpFrame *)displayablePtr ||
         MidpFirstScreen == NULL) {
         MidpFirstScreen = (MidpFrame *)displayablePtr->frame.component.next;
@@ -245,6 +417,9 @@ void MidpDeleteDisplayable(MidpDisplayable *displayablePtr) {
             }
         }
     }
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_unlock(&MidpComponentListMutex);
+#endif
 
     /* Next destroy platform dependent resource */
     if (displayablePtr->frame.widgetPtr) {
@@ -282,14 +457,7 @@ MidpItem* MidpNewItem(MidpDisplayable *ownerPtr, MidpComponentType type) {
 	p->component.modelVersion = 0;
 	p->component.child = NULL;
 
-	if (ownerPtr == NULL) {
-	    p->component.next = (MidpComponent *)MidpFirstOrphanItem;
-	    MidpFirstOrphanItem = p;
-	} else {
-	    p->component.next = ownerPtr->frame.component.child;
-	    ownerPtr->frame.component.child = (MidpComponent *)p;
-	}
-
+        p->component.next = NULL;
 	p->ownerPtr = ownerPtr;
 
 	/*
@@ -301,13 +469,20 @@ MidpItem* MidpNewItem(MidpDisplayable *ownerPtr, MidpComponentType type) {
 	p->widgetPtr = NULL;
 
         if (registerComponent(&p->component) == 0) {
-            if (ownerPtr == NULL) {
-                MidpFirstOrphanItem = (MidpItem*)p->component.next;
-            } else {
-                ownerPtr->frame.component.child = p->component.next;
-            }
             midpFree(p);
             p = NULL;
+        } else if (ownerPtr == NULL) {
+#if PHONEME_IOS_NATIVE
+            pthread_mutex_lock(&MidpComponentListMutex);
+#endif
+            p->component.next = (MidpComponent *)MidpFirstOrphanItem;
+            MidpFirstOrphanItem = p;
+#if PHONEME_IOS_NATIVE
+            pthread_mutex_unlock(&MidpComponentListMutex);
+#endif
+        } else {
+            p->component.next = ownerPtr->frame.component.child;
+            ownerPtr->frame.component.child = (MidpComponent *)p;
         }
     }
 
@@ -333,6 +508,9 @@ void MidpDeleteItem(MidpItem *itemPtr) {
 
     /* First detach this item from its owner's children list */
     if (itemPtr->ownerPtr == NULL) {
+#if PHONEME_IOS_NATIVE
+        pthread_mutex_lock(&MidpComponentListMutex);
+#endif
         p = (MidpComponent *)MidpFirstOrphanItem;
         if (p == (MidpComponent *)itemPtr || p == NULL) {
             MidpFirstOrphanItem = (MidpItem *)itemPtr->component.next;
@@ -359,6 +537,11 @@ void MidpDeleteItem(MidpItem *itemPtr) {
             c = c->next;
         }
     }
+#if PHONEME_IOS_NATIVE
+    if (itemPtr->ownerPtr == NULL) {
+        pthread_mutex_unlock(&MidpComponentListMutex);
+    }
+#endif
 
     /* Then free all platform dependent resource */
     if (itemPtr->widgetPtr) {
@@ -384,16 +567,32 @@ MidpItem* MidpFindItem(MidpDisplayable *ownerPtr,
 	return NULL;
     }
 
+#if PHONEME_IOS_NATIVE
+    if (ownerPtr == NULL) {
+        pthread_mutex_lock(&MidpComponentListMutex);
+    }
+#endif
     c = (ownerPtr == NULL) ? (MidpComponent *)MidpFirstOrphanItem
 			   : ownerPtr->frame.component.child;
 
     while (c != NULL) {
 	if (((MidpItem *)c)->widgetPtr == itemWidgetPtr) {
-	    return (MidpItem *)c;
+            MidpItem* result = (MidpItem *)c;
+#if PHONEME_IOS_NATIVE
+            if (ownerPtr == NULL) {
+                pthread_mutex_unlock(&MidpComponentListMutex);
+            }
+#endif
+	    return result;
 	} else {
 	    c = c->next;
 	}
     }
+#if PHONEME_IOS_NATIVE
+    if (ownerPtr == NULL) {
+        pthread_mutex_unlock(&MidpComponentListMutex);
+    }
+#endif
 
     return NULL; /* no match */
 }
@@ -402,7 +601,23 @@ MidpItem* MidpFindItem(MidpDisplayable *ownerPtr,
  * Delete all MIDP components when VM is exiting.
  */
 void MidpDeleteAllComponents() {
-    while (MidpFirstOrphanItem != NULL) {
-        MidpDeleteItem(MidpFirstOrphanItem);
+    for (;;) {
+        MidpItem* orphan;
+#if PHONEME_IOS_NATIVE
+        pthread_mutex_lock(&MidpComponentListMutex);
+#endif
+        orphan = MidpFirstOrphanItem;
+#if PHONEME_IOS_NATIVE
+        pthread_mutex_unlock(&MidpComponentListMutex);
+#endif
+        if (orphan == NULL) {
+            break;
+        }
+        MidpDeleteItem(orphan);
     }
+#if PHONEME_IOS_NATIVE
+    pthread_mutex_lock(&MidpCurrentScreenMutex);
+    memset(MidpCurrentScreenSlots, 0, sizeof(MidpCurrentScreenSlots));
+    pthread_mutex_unlock(&MidpCurrentScreenMutex);
+#endif
 }

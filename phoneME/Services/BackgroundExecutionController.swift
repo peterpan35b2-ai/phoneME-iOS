@@ -68,8 +68,8 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
     @Published private(set) var isKeepingAlive = false
 
     private let locationManager: CLLocationManager
-    private var hasRunningApplications = false
-    private var shouldKeepAlive = false
+    private var runningApplicationCount = 0
+    private var isApplicationInBackground = false
     private var isRequestingAuthorization = false
 
     override init() {
@@ -88,7 +88,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         locationManager.distanceFilter = 3_000
         locationManager.pausesLocationUpdatesAutomatically = false
-        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.allowsBackgroundLocationUpdates = false
         locationManager.showsBackgroundLocationIndicator = false
     }
 
@@ -103,23 +103,22 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         reevaluate()
     }
 
-    func setHasRunningApplications(_ hasRunningApplications: Bool) {
-        guard self.hasRunningApplications != hasRunningApplications else {
-            reevaluate()
+    func setRunningApplicationCount(_ count: Int) {
+        let normalizedCount = max(0, count)
+        guard runningApplicationCount != normalizedCount else {
             return
         }
 
-        self.hasRunningApplications = hasRunningApplications
+        runningApplicationCount = normalizedCount
         reevaluate()
     }
 
-    func setShouldKeepAlive(_ shouldKeepAlive: Bool) {
-        guard self.shouldKeepAlive != shouldKeepAlive else {
-            reevaluate()
+    func setApplicationInBackground(_ isInBackground: Bool) {
+        guard isApplicationInBackground != isInBackground else {
             return
         }
 
-        self.shouldKeepAlive = shouldKeepAlive
+        isApplicationInBackground = isInBackground
         reevaluate()
     }
 
@@ -136,7 +135,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
             return
         }
 
-        guard hasRunningApplications else {
+        guard runningApplicationCount > 0 else {
             stopLocationUpdates(status: .waitingForApplication)
             return
         }
@@ -148,7 +147,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
         switch locationManager.authorizationStatus {
         case .authorizedAlways:
-            guard shouldKeepAlive else {
+            guard isApplicationInBackground else {
                 stopLocationUpdates(status: .readyForBackground)
                 return
             }
@@ -188,19 +187,21 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
             return
         }
 
+        locationManager.allowsBackgroundLocationUpdates = true
         locationManager.showsBackgroundLocationIndicator = false
         locationManager.startUpdatingLocation()
         isKeepingAlive = true
         status = .active
         backgroundExecutionLogger.info(
-            "Background execution keeper started"
+            "Background execution keeper started for \(self.runningApplicationCount) J2ME application(s)"
         )
     }
 
     private func stopLocationUpdates(status: Status) {
         isRequestingAuthorization = false
+        locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
         if isKeepingAlive {
-            locationManager.stopUpdatingLocation()
             isKeepingAlive = false
             backgroundExecutionLogger.info(
                 "Background execution keeper stopped"
@@ -262,8 +263,8 @@ final class BackgroundExecutionController: ObservableObject {
     @Published private(set) var isKeepingAlive = false
 
     func setEnabled(_ enabled: Bool) {}
-    func setHasRunningApplications(_ hasRunningApplications: Bool) {}
-    func setShouldKeepAlive(_ shouldKeepAlive: Bool) {}
+    func setRunningApplicationCount(_ count: Int) {}
+    func setApplicationInBackground(_ isInBackground: Bool) {}
     func openSystemSettings() {}
 }
 

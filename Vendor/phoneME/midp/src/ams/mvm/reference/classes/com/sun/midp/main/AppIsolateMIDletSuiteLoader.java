@@ -181,6 +181,7 @@ public class AppIsolateMIDletSuiteLoader extends CldcMIDletSuiteLoader {
             inUse = true;
             new AppIsolateMIDletSuiteLoader(args).runMIDletSuite();
         } catch (Throwable t) {
+            t.printStackTrace();
             handleFatalError(t);
         }
     }

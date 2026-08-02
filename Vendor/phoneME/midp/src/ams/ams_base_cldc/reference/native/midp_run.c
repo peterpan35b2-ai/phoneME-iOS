@@ -58,6 +58,8 @@
 #include <midp_check_events.h>
 #include <midpMidletSuiteUtils.h>
 #if defined(__APPLE__) && ENABLE_MULTIPLE_ISOLATES
+#include <ios_native_port.h>
+#include <keymap_input.h>
 #include <midpNativeAppManager.h>
 #endif
 #include <midp_constants_data.h>
@@ -362,7 +364,8 @@ typedef enum {
     PHONEME_NAMS_COMMAND_PAUSE = 3,
     PHONEME_NAMS_COMMAND_RESUME = 4,
     PHONEME_NAMS_COMMAND_DESTROY = 5,
-    PHONEME_NAMS_COMMAND_STOP = 6
+    PHONEME_NAMS_COMMAND_STOP = 6,
+    PHONEME_NAMS_COMMAND_RELEASE_INPUT = 7
 } PhoneMENamsCommandType;
 
 typedef struct _PhoneMENamsCommand {
@@ -476,6 +479,14 @@ int phoneme_ios_nams_enqueue_stop(void) {
         PHONEME_NAMS_COMMAND_STOP, 0, 0);
 }
 
+int phoneme_ios_nams_enqueue_release_input(jint isolateId) {
+    if (isolateId <= 0) {
+        return 0;
+    }
+    return phoneme_ios_nams_enqueue_simple(
+        PHONEME_NAMS_COMMAND_RELEASE_INPUT, isolateId, 0);
+}
+
 void phoneme_ios_nams_reset_queue(void) {
     PhoneMENamsCommand* command;
 
@@ -508,6 +519,40 @@ static PhoneMENamsCommand* phoneme_ios_nams_dequeue_command(void) {
     return command;
 }
 
+static void phoneme_ios_release_active_input(jint isolateId) {
+    int32_t keys[32];
+    int32_t keyCount;
+    int32_t pointerX = 0;
+    int32_t pointerY = 0;
+    int32_t index;
+
+    if (isolateId <= 0) {
+        return;
+    }
+
+    keyCount = phoneme_ios_port_take_pressed_keys(keys, 32);
+    for (index = 0; index < keyCount; ++index) {
+        MidpEvent event;
+        MIDP_EVENT_INITIALIZE(event);
+        event.type = MIDP_KEY_EVENT;
+        event.CHR = keys[index];
+        event.ACTION = KEYMAP_STATE_RELEASED;
+        event.DISPLAY = 0;
+        StoreMIDPEventInVmThread(event, isolateId);
+    }
+
+    if (phoneme_ios_port_take_active_pointer(&pointerX, &pointerY)) {
+        MidpEvent event;
+        MIDP_EVENT_INITIALIZE(event);
+        event.type = MIDP_PEN_EVENT;
+        event.X_POS = pointerX;
+        event.Y_POS = pointerY;
+        event.ACTION = KEYMAP_STATE_RELEASED;
+        event.DISPLAY = 0;
+        StoreMIDPEventInVmThread(event, isolateId);
+    }
+}
+
 static void phoneme_ios_nams_drain_commands(void) {
     PhoneMENamsCommand* command;
 
@@ -538,6 +583,10 @@ static void phoneme_ios_nams_drain_commands(void) {
                 break;
             case PHONEME_NAMS_COMMAND_STOP:
                 result = midp_system_stop();
+                break;
+            case PHONEME_NAMS_COMMAND_RELEASE_INPUT:
+                phoneme_ios_release_active_input(command->appId);
+                result = ALL_OK;
                 break;
             default:
                 result = BAD_PARAMS;
@@ -605,6 +654,15 @@ int JVMSPI_HandleUncaughtException(const int isolate_id,
                                    const int flags,
                                    int * exit_code) {
     (void)exit_code;
+
+    fprintf(stderr,
+            "[phoneME uncaught] isolate=%d class=%.*s message=%s flags=%d\n",
+            isolate_id,
+            exception_class_name_length,
+            exception_class_name != NULL ? exception_class_name : "",
+            message != NULL ? message : "",
+            flags);
+    fflush(stderr);
 
     if (midp_ams_uncaught_exception(isolate_id,
                                     exception_class_name,

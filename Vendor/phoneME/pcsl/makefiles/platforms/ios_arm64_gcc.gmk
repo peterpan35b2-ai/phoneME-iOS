@@ -19,8 +19,9 @@ PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/malloc
 include $(PCSL_DIR)/makefiles/share/gcc.gmk
 include $(PCSL_DIR)/makefiles/share/darwin.gmk
 
+IOS_DEPLOYMENT_TARGET ?= 16.0
 IOS_SDKROOT := $(shell xcrun --sdk iphoneos --show-sdk-path)
-IOS_CLANG = xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot $(IOS_SDKROOT) -miphoneos-version-min=16.0
+IOS_CLANG = xcrun --sdk iphoneos clang -target arm64-apple-ios$(IOS_DEPLOYMENT_TARGET) -isysroot $(IOS_SDKROOT) -miphoneos-version-min=$(IOS_DEPLOYMENT_TARGET)
 CC = $(IOS_CLANG)
 CPP = $(IOS_CLANG)
 LD = $(IOS_CLANG)

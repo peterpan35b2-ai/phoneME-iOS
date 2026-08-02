@@ -701,11 +701,44 @@ inline void ObjectHeap::init_finalizers( void ) {
 
 void ObjectHeap::finalizer_oops_do( FinalizerConsDesc** list,
                                     void do_oop(OopDesc**) ) {
-  // Iterate over all elements in the finalization list
+  // Iterate over all elements in the finalization list. Finalizer list heads
+  // live outside of the Java heap, so a stale/corrupted head would otherwise
+  // be dereferenced by mark_root_and_stack and crash the entire MVM process.
   for( int i = 0; i < NUM_OF_FINALIZERS; list++, i++ ) {
     FinalizerConsDesc** pp = list;
+    FinalizerConsDesc* p = *pp;
+
+    if (p != NULL && !contains((OopDesc*)p)) {
+      *pp = NULL;
+      continue;
+    }
+
     do_oop((OopDesc**) pp);
-    for( FinalizerConsDesc* p; (p = *pp) != NULL; ) {
+    while ((p = *pp) != NULL) {
+      FinalizerConsDesc* next;
+      OopDesc* referent;
+
+      if (!contains((OopDesc*)p)) {
+        *pp = NULL;
+        break;
+      }
+
+      next = p->next();
+      if (next != NULL && !contains((OopDesc*)next)) {
+        // GC is active here; update the in-heap link directly, matching the
+        // raw list rewrites in discover_finalizer_reachable_objects().
+        *(p->next_addr()) = NULL;
+        next = NULL;
+      }
+
+      referent = p->referent();
+      if (referent == NULL || !contains(referent)) {
+        // A broken cons cell cannot be finalized safely. Unlink only this
+        // entry and preserve the valid tail instead of poisoning future GCs.
+        *pp = next;
+        continue;
+      }
+
       pp = p->next_addr();
       do_oop((OopDesc**) pp );
       do_oop((OopDesc**) p->referent_addr());
@@ -731,8 +764,11 @@ void ObjectHeap::register_finalizer_reachable_object(Oop* referent JVM_TRAPS) {
   cons->set_referent(referent->obj());
 
 #if ENABLE_ISOLATES
-  const int task_id = TaskContext::current_task_id();
-  GUARANTEE( unsigned(task_id) < MAX_TASKS, "Invalid task id" );
+  int task_id = TaskContext::current_task_id();
+  if (unsigned(task_id) >= unsigned(MAX_TASKS)) {
+    // Product builds must not index the finalizer roots with a stale task id.
+    task_id = 0;
+  }
 #else
   const int task_id = 0;
 #endif
@@ -788,8 +824,7 @@ inline void ObjectHeap::unmark_pending_finalizers( void ) {
 void ObjectHeap::finalize( FinalizerConsDesc** list, const int task_id ) {
   list += task_id;
 
-  FinalizerConsDesc* p = *list;
-  if( p ) {
+  if( *list ) {
 #if ENABLE_ISOLATES
     // We must switch to the context of the task, as the native finalizers
     // may execute things like KNI_GetStaticIntField().
@@ -800,12 +835,27 @@ void ObjectHeap::finalize( FinalizerConsDesc** list, const int task_id ) {
                "cannot run pending finalizers");
     TaskGCContext tmp(task_id);
 #endif
-    do {
+    while (*list != NULL) {
+      FinalizerConsDesc* p = *list;
+
+      if (!contains((OopDesc*)p)) {
+        *list = NULL;
+        break;
+      }
+
+      // Pop the cons cell before invoking native code. A native finalizer may
+      // allocate and trigger a compacting GC. Keeping `p` as the iteration
+      // cursor and reading p->next() afterwards uses a stale pre-compaction
+      // address and corrupts the external finalizer root list on LP64/MVM.
+      *list = p->next();
       AZZERT_ONLY(_is_finalizing = true);
       p->run_finalizer();
       AZZERT_ONLY(_is_finalizing = false);
-    } while( (p = p->next()) != NULL );
-    *list = p;
+
+      // Never touch `p` here. The object may have moved or been collected by
+      // a GC triggered inside the native finalizer. `*list` is an external GC
+      // root and already contains the updated address of the remaining tail.
+    }
   }
 }
 

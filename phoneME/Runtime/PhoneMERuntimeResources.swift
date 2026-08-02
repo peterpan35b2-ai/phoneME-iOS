@@ -1,9 +1,7 @@
-import CryptoKit
 import Foundation
 
 struct PhoneMERuntimeLayout {
     let homeURL: URL
-    let classesURL: URL
 }
 
 enum PhoneMERuntimeResources {
@@ -12,7 +10,6 @@ enum PhoneMERuntimeResources {
         var layout: PhoneMERuntimeLayout?
     }
 
-    private static let runtimeDirectoryName = "PhoneMERuntime"
     private static let cache = LayoutCache()
 
     static func prepare() throws -> PhoneMERuntimeLayout {
@@ -41,38 +38,13 @@ enum PhoneMERuntimeResources {
             sharedRuntimeHome: sharedLayout.homeURL
         )
         let fileManager = FileManager.default
-
         try fileManager.createDirectory(
             at: gameHome,
             withIntermediateDirectories: true
         )
         try createRuntimeDirectories(at: gameHome, fileManager: fileManager)
-
-        // Seed only immutable bundled defaults. Never copy the old shared
-        // runtime/appdb here: it can contain RMS/accounts from unrelated games.
-        if let bundledRuntime = Bundle.main.url(
-            forResource: runtimeDirectoryName,
-            withExtension: nil
-        ) {
-            try mergeInitialAppDatabase(
-                from: bundledRuntime.appendingPathComponent(
-                    "appdb",
-                    isDirectory: true
-                ),
-                to: gameHome.appendingPathComponent("appdb", isDirectory: true),
-                fileManager: fileManager
-            )
-        }
-
-        var resourceValues = URLResourceValues()
-        resourceValues.isExcludedFromBackup = true
-        var mutableGameHome = gameHome
-        try? mutableGameHome.setResourceValues(resourceValues)
-
-        return PhoneMERuntimeLayout(
-            homeURL: gameHome,
-            classesURL: sharedLayout.classesURL
-        )
+        excludeFromBackup(gameHome)
+        return PhoneMERuntimeLayout(homeURL: gameHome)
     }
 
     static func removeStorage(for gameID: UUID) {
@@ -86,13 +58,6 @@ enum PhoneMERuntimeResources {
 
     private static func prepareUncached() throws -> PhoneMERuntimeLayout {
         let fileManager = FileManager.default
-        guard let bundledRuntime = Bundle.main.url(
-            forResource: runtimeDirectoryName,
-            withExtension: nil
-        ) else {
-            throw PhoneMECoreError.runtimeResourcesMissing
-        }
-
         let applicationSupport = try fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -107,63 +72,16 @@ enum PhoneMERuntimeResources {
             at: runtimeHome,
             withIntermediateDirectories: true
         )
-        try refreshReadOnlyRuntimeFiles(
-            from: bundledRuntime,
-            to: runtimeHome,
-            fileManager: fileManager
-        )
-        try mergeInitialAppDatabase(
-            from: bundledRuntime.appendingPathComponent("appdb", isDirectory: true),
-            to: runtimeHome.appendingPathComponent("appdb", isDirectory: true),
-            fileManager: fileManager
-        )
         try createRuntimeDirectories(at: runtimeHome, fileManager: fileManager)
-
-        var resourceValues = URLResourceValues()
-        resourceValues.isExcludedFromBackup = true
-        var mutableRuntimeHome = runtimeHome
-        try? mutableRuntimeHome.setResourceValues(resourceValues)
-
-        return PhoneMERuntimeLayout(
-            homeURL: runtimeHome,
-            classesURL: runtimeHome.appendingPathComponent("classes.zip")
-        )
-    }
-
-    private static func refreshReadOnlyRuntimeFiles(
-        from bundledRuntime: URL,
-        to runtimeHome: URL,
-        fileManager: FileManager
-    ) throws {
-        let sourceClasses = bundledRuntime.appendingPathComponent("classes.zip")
-        let destinationClasses = runtimeHome.appendingPathComponent("classes.zip")
-        let versionMarker = runtimeHome.appendingPathComponent(".classes-version")
-        let fingerprint = try runtimeFingerprint(for: sourceClasses)
-        let installedFingerprint = try? String(
-            contentsOf: versionMarker,
-            encoding: .utf8
-        )
-
-        if !fileManager.fileExists(atPath: destinationClasses.path)
-            || installedFingerprint != fingerprint {
-            try replaceItem(
-                at: destinationClasses,
-                with: sourceClasses,
-                fileManager: fileManager
-            )
-            try fingerprint.write(
-                to: versionMarker,
-                atomically: true,
-                encoding: .utf8
-            )
-        }
+        excludeFromBackup(runtimeHome)
+        return PhoneMERuntimeLayout(homeURL: runtimeHome)
     }
 
     private static func createRuntimeDirectories(
         at runtimeHome: URL,
         fileManager: FileManager
     ) throws {
-        for name in ["appdb", "lib", "memory_card"] {
+        for name in ["appdb", "lib", "memory_card", "games"] {
             try fileManager.createDirectory(
                 at: runtimeHome.appendingPathComponent(name, isDirectory: true),
                 withIntermediateDirectories: true
@@ -183,56 +101,10 @@ enum PhoneMERuntimeResources {
             )
     }
 
-    private static func mergeInitialAppDatabase(
-        from sourceDirectory: URL,
-        to destinationDirectory: URL,
-        fileManager: FileManager
-    ) throws {
-        try fileManager.createDirectory(
-            at: destinationDirectory,
-            withIntermediateDirectories: true
-        )
-
-        guard fileManager.fileExists(atPath: sourceDirectory.path) else {
-            return
-        }
-
-        let bundledFiles = try fileManager.contentsOfDirectory(
-            at: sourceDirectory,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-
-        for sourceURL in bundledFiles {
-            let destinationURL = destinationDirectory
-                .appendingPathComponent(sourceURL.lastPathComponent)
-            guard !fileManager.fileExists(atPath: destinationURL.path) else {
-                continue
-            }
-            try fileManager.copyItem(at: sourceURL, to: destinationURL)
-        }
-    }
-
-    private static func runtimeFingerprint(for classesURL: URL) throws -> String {
-        // Bundle resources may preserve their size and modification timestamp
-        // across incremental builds. Using that metadata allowed an older
-        // cached classes.zip to survive even after APIs such as WMA were added.
-        // Hash the actual archive so every byte-level runtime change refreshes
-        // the installed read-only payload deterministically.
-        let archive = try Data(contentsOf: classesURL, options: .mappedIfSafe)
-        return SHA256.hash(data: archive)
-            .map { String(format: "%02x", $0) }
-            .joined()
-    }
-
-    private static func replaceItem(
-        at destinationURL: URL,
-        with sourceURL: URL,
-        fileManager: FileManager
-    ) throws {
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
-        }
-        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    private static func excludeFromBackup(_ url: URL) {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try? mutableURL.setResourceValues(values)
     }
 }

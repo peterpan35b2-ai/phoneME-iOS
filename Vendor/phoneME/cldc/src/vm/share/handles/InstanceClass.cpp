@@ -779,11 +779,24 @@ void InstanceClass::remove_clinit() {
 bool InstanceClass::itable_contains(InstanceClass* instance_class) {
   ClassInfo::Raw info = class_info();
   const int length = info().itable_length();
+#if ENABLE_ISOLATES
+  Symbol::Raw wanted_name = instance_class->name();
+#endif
   for (int index = 0; index < length; index++) {
     InstanceClass::Raw element = info().itable_interface_at(index);
     if (element.equals(instance_class)) {
       return true;
     }
+#if ENABLE_ISOLATES
+    /* MVM may expose the same interface through task-local class metadata.
+     * Pointer/class-id identity is then different even though the binary
+     * interface type is identical. Reconcile mirrors by semantic name. */
+    Symbol::Raw element_name = element().name();
+    if (element_name.equals(&wanted_name) ||
+        element_name().matches(&wanted_name)) {
+      return true;
+    }
+#endif
   }
   return false;
 }

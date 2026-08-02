@@ -178,6 +178,24 @@ Vendor/phoneME/midp/build/darwin_ios_native_gcc/output/
 Vendor/phoneME/preverifier/build/darwin/*.o
 Vendor/phoneME/preverifier/build/darwin/preverify
 
+# Canonical phoneME Core source is Core/include + Core/src.
+# Build products and obsolete import/snapshot trees are never source of truth.
+Core/Build/
+Core/build/
+Core/libphoneMECore.a
+Core/Source/
+Core/Config/
+Core/Patches/
+Core/Manifests/
+Core/PORTING_STATUS.md
+Core/Tools/build-modern-iphoneos.sh
+Core/Tools/verify-modern-iphoneos.sh
+Core/Tools/test-modern-host.sh
+Core/Tools/sync-source.sh
+Core/Tools/refresh-manifests.sh
+Core/Tests/ModernCoreTests.cpp
+phoneME/Core/libphoneMECoreModern.a
+
 Artifacts/
 .agent-derived*/
 build/

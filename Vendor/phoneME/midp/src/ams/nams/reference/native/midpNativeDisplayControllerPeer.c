@@ -82,7 +82,7 @@ Java_com_sun_midp_main_NativeDisplayControllerPeer_notifyMidletHasForeground
     eventData.event  = MIDP_NAMS_EVENT_STATE_CHANGED;
     eventData.appId  = KNI_GetParameterAsInt(1);
     eventData.state  = MIDP_DISPLAY_STATE_FOREGROUND;
-    eventData.reason = 0;
+    eventData.reason = KNI_GetParameterAsInt(2);
 
     nams_listeners_notify(DISPLAY_EVENT_LISTENER, &eventData);
 }

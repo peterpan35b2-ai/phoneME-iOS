@@ -56,7 +56,10 @@ public class NativeDisplayControllerPeer extends MVMDisplayController {
         MIDletProxy nextForeground = super.foregroundMidletChanging(midlet);
 
         if (nextForeground != null) {
-            notifyMidletHasForeground(nextForeground.getExternalAppId());
+            notifyMidletHasForeground(
+                nextForeground.getExternalAppId(),
+                nextForeground.getIsolateId()
+            );
         }
 
         return nextForeground;
@@ -94,7 +97,10 @@ public class NativeDisplayControllerPeer extends MVMDisplayController {
      *
      * @param externalAppId ID assigned by the external application manager
      */
-    static native void notifyMidletHasForeground(int externalAppId);
+    static native void notifyMidletHasForeground(
+        int externalAppId,
+        int isolateId
+    );
 
     /**
      * Forwards MIDlet background requests to the native layer.
