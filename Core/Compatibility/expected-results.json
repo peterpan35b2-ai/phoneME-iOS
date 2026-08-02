@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "timeout_ms": 15000,
+    "dimensions": {
+      "width": 320,
+      "height": 240
+    },
+    "configuration": "CLDC-1.1",
+    "profile": "MIDP-2.0",
+    "device_profile": {
+      "name": "phoneME iOS compatibility baseline",
+      "platform": "iPhone arm64 / iOS 16+ host with 320x240 J2ME viewport",
+      "resolution": "320x240",
+      "input": ["12-key keypad", "softkeys", "pointer"],
+      "locale": "en-US"
+    },
+    "input_sequence": [
+      {"action": "launch"}
+    ]
+  },
+  "corpus": [
+    {
+      "id": "fixture-canvas-offline",
+      "description": "Project-authored offline Canvas MIDlet with a deterministic painted frame.",
+      "enabled": true,
+      "required": true,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.CanvasOfflineMIDlet",
+      "categories": ["canvas", "offline", "graphics"],
+      "required_apis": [
+        "javax.microedition.midlet.MIDlet",
+        "javax.microedition.lcdui.Display",
+        "javax.microedition.lcdui.Canvas",
+        "javax.microedition.lcdui.Graphics"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/CanvasOfflineMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 10000,
+        "min_frames": 1,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "canvas-created", "frame-produced"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-lcdui",
+      "description": "Project-authored LCDUI Form with native item, command, and screen bridge evidence.",
+      "enabled": true,
+      "required": true,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.LcduiMIDlet",
+      "categories": ["lcdui", "form", "commands"],
+      "required_apis": [
+        "javax.microedition.lcdui.Display",
+        "javax.microedition.lcdui.Form",
+        "javax.microedition.lcdui.StringItem",
+        "javax.microedition.lcdui.Command"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/LcduiMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 10000,
+        "min_frames": 0,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "lcdui-component-created", "lcdui-screen-shown"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-rms",
+      "description": "Project-authored RecordStore create/add/read/close/delete round trip.",
+      "enabled": true,
+      "required": true,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.RmsMIDlet",
+      "categories": ["rms", "persistence"],
+      "required_apis": [
+        "javax.microedition.rms.RecordStore"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/RmsMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 10000,
+        "min_frames": 0,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "lcdui-screen-shown"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-game-api",
+      "description": "Project-authored GameCanvas, Sprite, TiledLayer, and LayerManager scene.",
+      "enabled": false,
+      "required": false,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.GameApiMIDlet",
+      "categories": ["gamecanvas", "sprite", "tiledlayer", "graphics"],
+      "required_apis": [
+        "javax.microedition.lcdui.game.GameCanvas",
+        "javax.microedition.lcdui.game.Sprite",
+        "javax.microedition.lcdui.game.TiledLayer",
+        "javax.microedition.lcdui.game.LayerManager"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/GameApiMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 10000,
+        "min_frames": 1,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "gameapi-paint", "frame-produced"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-threaded-gamecanvas",
+      "description": "Project-authored threaded GameCanvas loop; enable after scheduler item 01 is integrated.",
+      "enabled": false,
+      "required": false,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.ThreadedGameCanvasMIDlet",
+      "categories": ["gamecanvas", "threads", "scheduler"],
+      "required_apis": [
+        "java.lang.Thread",
+        "java.lang.Runnable",
+        "javax.microedition.lcdui.game.GameCanvas"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 10000,
+        "min_frames": 1,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "threaded-gamecanvas-loop", "frame-produced"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-http",
+      "description": "Project-authored HTTP fixture requiring a deterministic local endpoint at 127.0.0.1:18080.",
+      "enabled": false,
+      "required": false,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.NetworkApiMIDlet",
+      "categories": ["http", "https", "network"],
+      "required_apis": [
+        "javax.microedition.io.Connector",
+        "javax.microedition.io.HttpConnection",
+        "javax.microedition.io.SocketConnection",
+        "javax.microedition.io.DatagramConnection"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/NetworkApiMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 12000,
+        "min_frames": 0,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "http-response"],
+        "network_actions": ["http-get"],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "fixture-media",
+      "description": "Project-authored MMAPI tone lifecycle fixture; enable on a host/device with the media adapter available.",
+      "enabled": false,
+      "required": false,
+      "jar": "fixtures/generated/compatibility-fixtures.jar",
+      "sha256": "auto",
+      "main_class": "compat.MediaApiMIDlet",
+      "categories": ["media", "mmapi", "audio"],
+      "required_apis": [
+        "javax.microedition.media.Manager",
+        "javax.microedition.media.Player",
+        "javax.microedition.media.control.VolumeControl"
+      ],
+      "license": {
+        "kind": "project-authored-test-fixture",
+        "source": "Core/Compatibility/fixtures/src/compat/MediaApiMIDlet.java",
+        "provenance": "Authored in this repository; generated JAR is rebuilt from audited Java source.",
+        "redistributable": true
+      },
+      "build": {
+        "manifest": "fixtures/MANIFEST.MF",
+        "sources": [
+          "fixtures/src/compat/CanvasOfflineMIDlet.java",
+          "fixtures/src/compat/LcduiMIDlet.java",
+          "fixtures/src/compat/RmsMIDlet.java",
+          "fixtures/src/compat/GameApiMIDlet.java",
+          "fixtures/src/compat/ThreadedGameCanvasMIDlet.java",
+          "fixtures/src/compat/NetworkApiMIDlet.java",
+          "fixtures/src/compat/MediaApiMIDlet.java"
+        ]
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 12000,
+        "min_frames": 0,
+        "frame_hashes": [],
+        "milestones": ["midlet-started", "app-active", "media-started"],
+        "network_actions": [],
+        "media_actions": ["tone-start"]
+      }
+    },
+    {
+      "id": "local-online-socket-udp",
+      "description": "Locally supplied licensed online game covering socket reconnect and UDP traffic.",
+      "enabled": false,
+      "required": false,
+      "jar": "local/online-socket-udp.jar",
+      "sha256": "REPLACE_WITH_LOCAL_SHA256",
+      "main_class": "replace.with.MainMIDlet",
+      "categories": ["socket", "udp", "online", "reconnect"],
+      "required_apis": [
+        "javax.microedition.io.SocketConnection",
+        "javax.microedition.io.DatagramConnection"
+      ],
+      "input_sequence": [
+        {"action": "launch"},
+        {"action": "wait-for-milestone", "milestone": "login-screen"},
+        {"action": "activate-login"},
+        {"action": "disconnect-network"},
+        {"action": "restore-network"},
+        {"action": "wait-for-milestone", "milestone": "playable"}
+      ],
+      "license": {
+        "kind": "local-user-supplied",
+        "source": "Document the legal source before enabling",
+        "provenance": "User must record acquisition source and right-to-test before enabling this local-only entry.",
+        "redistributable": false
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 15000,
+        "min_frames": 1,
+        "frame_hashes": [],
+        "milestones": ["login-screen", "connected", "playable"],
+        "network_actions": ["socket-connect"],
+        "media_actions": []
+      }
+    },
+    {
+      "id": "local-obfuscated-preverified",
+      "description": "Locally supplied licensed obfuscated/preverified Nokia-era JAR for verifier compatibility.",
+      "enabled": false,
+      "required": false,
+      "jar": "local/obfuscated-preverified.jar",
+      "sha256": "REPLACE_WITH_LOCAL_SHA256",
+      "main_class": "replace.with.MainMIDlet",
+      "categories": ["obfuscated", "preverified", "legacy", "stackmap"],
+      "required_apis": [
+        "java.lang.Object",
+        "javax.microedition.midlet.MIDlet"
+      ],
+      "input_sequence": [
+        {"action": "launch"},
+        {"action": "wait-for-milestone", "milestone": "title-screen"},
+        {"action": "wait-for-milestone", "milestone": "playable"}
+      ],
+      "license": {
+        "kind": "local-user-supplied",
+        "source": "Document the legal source before enabling",
+        "provenance": "User must record acquisition source and right-to-test before enabling this local-only entry.",
+        "redistributable": false
+      },
+      "expected": {
+        "install": "success",
+        "exit": "normal",
+        "app_state": "active",
+        "max_startup_ms": 15000,
+        "min_frames": 1,
+        "frame_hashes": [],
+        "milestones": ["title-screen", "playable"],
+        "network_actions": [],
+        "media_actions": []
+      }
+    }
+  ]
+}

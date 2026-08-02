@@ -1,0 +1,7 @@
+__pycache__/
+fixtures/generated/
+local/
+results/
+*.jar
+*.jad
+*.ppm

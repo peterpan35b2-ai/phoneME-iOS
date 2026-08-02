@@ -1,0 +1,13 @@
+Manifest-Version: 1.0
+MIDlet-Name: phoneME Compatibility Fixtures
+MIDlet-Version: 1.0.0
+MIDlet-Vendor: phoneME-iOS Project
+MicroEdition-Configuration: CLDC-1.1
+MicroEdition-Profile: MIDP-2.0
+MIDlet-1: Canvas Fixture,,compat.CanvasOfflineMIDlet
+MIDlet-2: LCDUI Fixture,,compat.LcduiMIDlet
+MIDlet-3: RMS Fixture,,compat.RmsMIDlet
+MIDlet-4: Game API Fixture,,compat.GameApiMIDlet
+MIDlet-5: Threaded GameCanvas Fixture,,compat.ThreadedGameCanvasMIDlet
+MIDlet-6: Network Fixture,,compat.NetworkApiMIDlet
+MIDlet-7: Media Fixture,,compat.MediaApiMIDlet
