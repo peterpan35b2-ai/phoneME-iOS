@@ -737,9 +737,9 @@ Core/Tools/test-security-integration-host.sh
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 19:31 +07:00`
-- Blocker: `-`
-- Handoff: `66a435f`; đã đọc Review 07 lúc 19:31 và xử lý R07-20260802-01/02/03. Standalone RMS suite, Java-thread concurrency, ASan/UBSan, full Core host regression và iphoneos arm64/iOS 16 verification đều pass. Mục 20 chỉ cần đăng ký `Core/Tools/test-rms-host.sh` vào CI nếu muốn chạy tự động.
+- Cập nhật cuối: `2026-08-02 19:50 +07:00`
+- Blocker: `Full Core regression đang bị chặn trước khi chạy bởi lỗi compile ngoài ownership tại Core/src/runtime/SuiteDatabase.cpp:566.`
+- Handoff: `66a435f`, review fix `a8cd498`; đã đọc Review 07 checkpoint 19:29 và xử lý R07-20260802-04/05. RMS suite và ASan/UBSan pass; delete rollback được xác nhận qua restart; corruption/future-version listing trả lỗi; RecordStoreRegistry compile sạch cho iphoneos arm64/iOS 16.0.
 
 **Loại:** SONG SONG, P1
 
