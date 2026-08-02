@@ -29,7 +29,10 @@ namespace phoneme::vm
     constexpr u16 kAccInterface = 0x0200U;
     constexpr u16 kAccAbstract = 0x0400U;
     constexpr usize kMaximumCallDepth = 1'024;
-    constexpr JavaThreadId kMainJavaThreadId = 1U;
+    constexpr u64 kSchedulerQuantum = 10'000U;
+
+    thread_local Machine* g_execution_machine = nullptr;
+    thread_local u32 g_execution_lock_depth = 0U;
 
     [[nodiscard]] bool value_matches(const Value &value,
                                      const TypeDescriptor &descriptor) noexcept
@@ -863,8 +866,192 @@ namespace phoneme::vm
     initialized_classes_.insert("java/lang/Math");
   }
 
+  Machine::~Machine()
+  {
+    monitors_.clear();
+    scheduler_.shutdown();
+  }
+
+  Result<ObjectRef> Machine::current_java_thread()
+  {
+    auto current = scheduler_.current_thread_object();
+    if (current)
+      return *current;
+    auto allocated = states_.allocate_instance(heap_, "java/lang/Thread");
+    if (!allocated)
+      return std::unexpected(allocated.error());
+    auto bound = scheduler_.bind_current_thread_object(*allocated);
+    if (!bound)
+      return std::unexpected(bound.error());
+    return *allocated;
+  }
+
+  Status Machine::initialize_java_thread(ObjectRef thread, ObjectRef target)
+  {
+    return scheduler_.register_thread(thread, target);
+  }
+
+  Status Machine::start_java_thread(ObjectRef thread)
+  {
+    return scheduler_.start_thread(*this, thread);
+  }
+
+  Result<std::optional<Value>> Machine::run_java_thread_target(ObjectRef thread)
+  {
+    auto target = scheduler_.runnable_target(thread);
+    if (!target)
+      return std::unexpected(target.error());
+    if (target->is_null())
+      return std::optional<Value>{};
+    auto result = invoke_instance(*target,
+                                  "java/lang/Runnable",
+                                  "run",
+                                  "()V");
+    if (!result)
+      return std::unexpected(result.error());
+    if (result->throwable.has_value())
+    {
+      auto class_name = heap_.class_name(*result->throwable);
+      if (!class_name)
+        return std::unexpected(class_name.error());
+      return fail_java(*class_name,
+                       "uncaught throwable from Runnable.run");
+    }
+    return std::optional<Value>{};
+  }
+
+  Result<SchedulerWaitResult> Machine::sleep_current_thread(i64 millis)
+  {
+    if (millis < 0)
+      return fail_java("java/lang/IllegalArgumentException",
+                       "Thread.sleep timeout must not be negative");
+    return scheduler_.sleep_current(*this,
+                                    std::chrono::milliseconds(millis));
+  }
+
+  Result<SchedulerWaitResult> Machine::join_java_thread(
+      ObjectRef thread,
+      std::optional<i64> millis)
+  {
+    if (millis.has_value() && *millis < 0)
+      return fail_java("java/lang/IllegalArgumentException",
+                       "Thread.join timeout must not be negative");
+    std::optional<std::chrono::milliseconds> timeout;
+    if (millis.has_value() && *millis > 0)
+      timeout = std::chrono::milliseconds(*millis);
+    return scheduler_.join_current(*this, thread, timeout);
+  }
+
+  Status Machine::interrupt_java_thread(ObjectRef thread)
+  {
+    auto interrupted = scheduler_.interrupt(thread);
+    if (interrupted)
+      monitors_.wake_all();
+    return interrupted;
+  }
+
+  Result<MonitorWaitResult> Machine::wait_on_object(
+      ObjectRef object,
+      std::optional<i64> millis)
+  {
+    if (millis.has_value() && *millis < 0)
+      return fail_java("java/lang/IllegalArgumentException",
+                       "Object.wait timeout must not be negative");
+    std::optional<std::chrono::milliseconds> timeout;
+    if (millis.has_value() && *millis > 0)
+      timeout = std::chrono::milliseconds(*millis);
+
+    u32 released_depth = 0U;
+    auto result = monitors_.wait(
+        object,
+        scheduler_.current_thread_id(),
+        timeout,
+        [this, &released_depth] {
+          scheduler_.set_current_state(JavaThreadState::waiting);
+          released_depth = suspend_execution_for_blocking();
+        },
+        [this, &released_depth] {
+          resume_execution_after_blocking(released_depth);
+          scheduler_.set_current_state(JavaThreadState::running);
+        },
+        [this] { return scheduler_.current_is_interrupted(); });
+    if (result && *result == MonitorWaitResult::interrupted)
+      (void)scheduler_.consume_current_interrupt();
+    return result;
+  }
+
+  Status Machine::notify_object(ObjectRef object, bool all)
+  {
+    return all ? monitors_.notify_all(object,
+                                      scheduler_.current_thread_id())
+               : monitors_.notify_one(object,
+                                      scheduler_.current_thread_id());
+  }
+
+  void Machine::cooperative_yield()
+  {
+    scheduler_.cooperative_yield(*this);
+  }
+
+  void Machine::request_garbage_collection() noexcept
+  {
+    gc_requested_.store(true, std::memory_order_release);
+  }
+
+  u32 Machine::suspend_execution_for_blocking() noexcept
+  {
+    if (g_execution_machine != this || g_execution_lock_depth == 0U)
+      return 0U;
+    const u32 depth = g_execution_lock_depth;
+    for (u32 index = 0U; index < depth; ++index)
+      execution_mutex_.unlock();
+    return depth;
+  }
+
+  void Machine::resume_execution_after_blocking(u32 depth) noexcept
+  {
+    for (u32 index = 0U; index < depth; ++index)
+      execution_mutex_.lock();
+  }
+
+  void Machine::publish_execution_roots(
+      u32 invocation_depth,
+      const std::vector<ObjectRef>& roots)
+  {
+    scheduler_.publish_current_roots(invocation_depth, roots);
+  }
+
+  void Machine::clear_execution_roots(u32 invocation_depth) noexcept
+  {
+    scheduler_.clear_current_roots(invocation_depth);
+  }
+
+  Status Machine::enter_monitor(ObjectRef monitor)
+  {
+    auto entered = monitors_.enter(monitor,
+                                   scheduler_.current_thread_id());
+    if (!entered)
+      return std::unexpected(entered.error());
+    if (*entered == MonitorEnterResult::acquired)
+      return {};
+
+    u32 released_depth = 0U;
+    return monitors_.enter_blocking(
+        monitor,
+        scheduler_.current_thread_id(),
+        [this, &released_depth] {
+          scheduler_.set_current_state(JavaThreadState::blocked_monitor);
+          released_depth = suspend_execution_for_blocking();
+        },
+        [this, &released_depth] {
+          resume_execution_after_blocking(released_depth);
+          scheduler_.set_current_state(JavaThreadState::running);
+        });
+  }
+
   Status Machine::collect_garbage()
   {
+    std::scoped_lock execution_lock(execution_mutex_);
     std::vector<ObjectRef> roots;
     roots.reserve(interned_strings_.size() + class_mirrors_.size() +
                   ui_components_.size() + 16U);
@@ -890,6 +1077,7 @@ namespace phoneme::vm
     if (canvas_bridge_ != nullptr)
       canvas_bridge_->append_reference_roots(roots);
     monitors_.append_reference_roots(roots);
+    scheduler_.append_reference_roots(roots);
     auto collected = heap_.collect(roots);
     if (collected)
     {
@@ -1708,14 +1896,9 @@ namespace phoneme::vm
       monitor = *receiver;
     }
 
-    auto entered = monitors_.enter(monitor, kMainJavaThreadId);
+    auto entered = enter_monitor(monitor);
     if (!entered)
       return std::unexpected(entered.error());
-    if (*entered == MonitorEnterResult::would_block)
-    {
-      return fail(ErrorCode::unsupported_feature,
-                  "synchronized method contention requires Java scheduler");
-    }
     return std::optional<ObjectRef>(monitor);
   }
 
@@ -1724,7 +1907,7 @@ namespace phoneme::vm
   {
     if (!monitor.has_value())
       return {};
-    return monitors_.exit(*monitor, kMainJavaThreadId);
+    return monitors_.exit(*monitor, scheduler_.current_thread_id());
   }
 
   Result<Machine::LambdaBinding> Machine::resolve_lambda_binding(
@@ -2191,11 +2374,45 @@ namespace phoneme::vm
   Result<ExecutionResult> Machine::execute(Invocation invocation,
                                            u64 instruction_budget)
   {
-    struct MonitorCleanup final
+    if (g_execution_machine != nullptr && g_execution_machine != this)
     {
-      MonitorTable &monitors;
-      ~MonitorCleanup() { monitors.release_all(kMainJavaThreadId); }
-    } monitor_cleanup{monitors_};
+      return fail(ErrorCode::invalid_state,
+                  "a host thread cannot execute two Machine instances recursively");
+    }
+    execution_mutex_.lock();
+    g_execution_machine = this;
+    ++g_execution_lock_depth;
+    scheduler_.set_current_state(JavaThreadState::running);
+    const u32 invocation_depth = g_execution_lock_depth;
+    const JavaThreadId invocation_thread = scheduler_.current_thread_id();
+    u64 accounted_instructions = 0U;
+    auto cleanup = [invocation_depth,
+                    invocation_thread,
+                    &accounted_instructions](Machine* machine) {
+      machine->scheduler_.add_current_executed_instructions(
+          accounted_instructions);
+      machine->clear_execution_roots(invocation_depth);
+      if (g_execution_lock_depth == 1U)
+        machine->monitors_.release_all(invocation_thread);
+      --g_execution_lock_depth;
+      machine->execution_mutex_.unlock();
+      if (g_execution_lock_depth == 0U)
+        g_execution_machine = nullptr;
+    };
+    std::unique_ptr<Machine, decltype(cleanup)> execution_scope(this, cleanup);
+
+    scheduler_.set_current_pending_exception(std::nullopt);
+    std::vector<ObjectRef> invocation_roots;
+    invocation_roots.reserve(invocation.arguments.size());
+    for (const Value argument : invocation.arguments)
+    {
+      if (argument.kind() != ValueKind::reference)
+        continue;
+      auto reference = argument.as_reference();
+      if (reference && !reference->is_null())
+        invocation_roots.push_back(*reference);
+    }
+    publish_execution_roots(invocation_depth, invocation_roots);
 
     if (invocation.method.method == nullptr)
     {
@@ -2209,6 +2426,7 @@ namespace phoneme::vm
       {
         return std::unexpected(throwable.error());
       }
+      scheduler_.set_current_pending_exception(*throwable);
       return ExecutionResult{
           .return_value = std::nullopt,
           .throwable = *throwable,
@@ -2244,6 +2462,7 @@ namespace phoneme::vm
               native_result.error().java_exception_class);
           if (!throwable)
             return std::unexpected(throwable.error());
+          scheduler_.set_current_pending_exception(*throwable);
           return ExecutionResult{
               .return_value = std::nullopt,
               .throwable = *throwable,
@@ -2259,6 +2478,7 @@ namespace phoneme::vm
           {
             return std::unexpected(throwable.error());
           }
+          scheduler_.set_current_pending_exception(*throwable);
           return ExecutionResult{
               .return_value = std::nullopt,
               .throwable = *throwable,
@@ -2302,7 +2522,8 @@ namespace phoneme::vm
     u64 executed = 0;
 
     const auto collect_active_garbage =
-        [this, &frames](std::optional<ObjectRef> extra_root = std::nullopt)
+        [this, &frames, invocation_depth](
+            std::optional<ObjectRef> extra_root = std::nullopt)
         -> Status
     {
       std::vector<ObjectRef> roots;
@@ -2312,6 +2533,7 @@ namespace phoneme::vm
       {
         active_frame.append_reference_roots(roots);
       }
+      publish_execution_roots(invocation_depth, roots);
       states_.append_reference_roots(roots);
       for (const auto &[value, reference] : interned_strings_)
       {
@@ -2334,6 +2556,7 @@ namespace phoneme::vm
       if (canvas_bridge_ != nullptr)
         canvas_bridge_->append_reference_roots(roots);
       monitors_.append_reference_roots(roots);
+      scheduler_.append_reference_roots(roots);
       if (extra_root.has_value() && !extra_root->is_null())
       {
         roots.push_back(*extra_root);
@@ -2437,6 +2660,7 @@ namespace phoneme::vm
         return fail(ErrorCode::internal_error,
                     "cannot dispatch a null Java throwable");
       }
+      scheduler_.set_current_pending_exception(throwable);
       auto throwable_class = heap_.class_name(throwable);
       if (!throwable_class)
       {
@@ -2489,6 +2713,7 @@ namespace phoneme::vm
           {
             return std::unexpected(entered.error());
           }
+          scheduler_.set_current_pending_exception(std::nullopt);
           return std::optional<ExecutionResult>{};
         }
 
@@ -2525,6 +2750,27 @@ namespace phoneme::vm
 
     while (!frames.empty())
     {
+      const bool quantum_boundary =
+          executed != 0U && (executed % kSchedulerQuantum) == 0U;
+      const bool collect_requested =
+          gc_requested_.exchange(false, std::memory_order_acq_rel);
+      if (quantum_boundary || collect_requested)
+      {
+        std::vector<ObjectRef> published_roots;
+        published_roots.reserve(frames.size() * 8U + 8U);
+        for (const ExecutionFrame& active_frame : frames)
+          active_frame.append_reference_roots(published_roots);
+        publish_execution_roots(invocation_depth, published_roots);
+        if (collect_requested)
+        {
+          auto collected = collect_active_garbage();
+          if (!collected)
+            return std::unexpected(collected.error());
+        }
+        if (quantum_boundary)
+          cooperative_yield();
+      }
+
       if (executed >= instruction_budget)
       {
         return fail(ErrorCode::invalid_state,
@@ -2536,6 +2782,7 @@ namespace phoneme::vm
                     "VM call stack exceeded its maximum depth");
       }
       ++executed;
+      accounted_instructions = executed;
 
       ExecutionFrame &frame = frames.back();
       const usize opcode_pc = frame.pc();
@@ -4404,6 +4651,22 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
+        std::vector<ObjectRef> native_safepoint_roots;
+        native_safepoint_roots.reserve(frames.size() * 8U +
+                                       nested->arguments.size());
+        for (const ExecutionFrame& active_frame : frames)
+          active_frame.append_reference_roots(native_safepoint_roots);
+        for (const Value argument : nested->arguments)
+        {
+          if (argument.kind() != ValueKind::reference)
+            continue;
+          auto reference_value = argument.as_reference();
+          if (reference_value && !reference_value->is_null())
+            native_safepoint_roots.push_back(*reference_value);
+        }
+        publish_execution_roots(invocation_depth,
+                                native_safepoint_roots);
+
         auto nested_monitor = acquire_synchronized_monitor(*nested);
         if (!nested_monitor)
         {
@@ -4851,24 +5114,26 @@ namespace phoneme::vm
         }
         if (opcode == 0xC2)
         {
-          auto entered = monitors_.enter(*reference, kMainJavaThreadId);
+          std::vector<ObjectRef> monitor_roots;
+          monitor_roots.reserve(frames.size() * 8U + 1U);
+          for (const ExecutionFrame& active_frame : frames)
+            active_frame.append_reference_roots(monitor_roots);
+          monitor_roots.push_back(*reference);
+          publish_execution_roots(invocation_depth, monitor_roots);
+          auto entered = enter_monitor(*reference);
           if (!entered)
             return std::unexpected(entered.error());
-          if (*entered == MonitorEnterResult::would_block)
-          {
-            return fail(ErrorCode::unsupported_feature,
-                        "monitor contention requires Java scheduler");
-          }
         }
         else
         {
-          auto exited = monitors_.exit(*reference, kMainJavaThreadId);
+          auto exited = monitors_.exit(*reference,
+                                       scheduler_.current_thread_id());
           if (!exited)
           {
-            if (exited.error().code == ErrorCode::invalid_state)
+            if (exited.error().code == ErrorCode::java_exception)
             {
               auto raised = raise_implicit(
-                  "java/lang/IllegalMonitorStateException",
+                  exited.error().java_exception_class,
                   opcode_pc);
               if (!raised)
                 return std::unexpected(raised.error());

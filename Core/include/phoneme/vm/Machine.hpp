@@ -1,8 +1,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -22,6 +25,7 @@
 #include "phoneme/vm/Interpreter.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
+#include "phoneme/vm/Scheduler.hpp"
 
 namespace phoneme::vm
 {
@@ -55,6 +59,7 @@ namespace phoneme::vm
   public:
     explicit Machine(ClassRepository &classes,
                      usize maximum_heap_objects = 1'000'000);
+    ~Machine();
 
     Machine(const Machine &) = delete;
     Machine &operator=(const Machine &) = delete;
@@ -80,6 +85,27 @@ namespace phoneme::vm
     [[nodiscard]] ClassRepository &classes() noexcept { return classes_; }
     [[nodiscard]] NativeMethodRegistry &natives() noexcept { return natives_; }
     [[nodiscard]] MonitorTable &monitors() noexcept { return monitors_; }
+    [[nodiscard]] Scheduler& scheduler() noexcept { return scheduler_; }
+    [[nodiscard]] const Scheduler& scheduler() const noexcept {
+      return scheduler_;
+    }
+    [[nodiscard]] Result<ObjectRef> current_java_thread();
+    [[nodiscard]] Status initialize_java_thread(ObjectRef thread,
+                                                ObjectRef target);
+    [[nodiscard]] Status start_java_thread(ObjectRef thread);
+    [[nodiscard]] Result<std::optional<Value>> run_java_thread_target(
+        ObjectRef thread);
+    [[nodiscard]] Result<SchedulerWaitResult> sleep_current_thread(i64 millis);
+    [[nodiscard]] Result<SchedulerWaitResult> join_java_thread(
+        ObjectRef thread,
+        std::optional<i64> millis);
+    [[nodiscard]] Status interrupt_java_thread(ObjectRef thread);
+    [[nodiscard]] Result<MonitorWaitResult> wait_on_object(
+        ObjectRef object,
+        std::optional<i64> millis);
+    [[nodiscard]] Status notify_object(ObjectRef object, bool all);
+    void cooperative_yield();
+    void request_garbage_collection() noexcept;
     [[nodiscard]] graphics::GraphicsStore& graphics() noexcept {
       return graphics_;
     }
@@ -160,6 +186,8 @@ namespace phoneme::vm
         ObjectRef key) const;
 
   private:
+    friend class Scheduler;
+
     struct Invocation final
     {
       ResolvedMethod method;
@@ -210,6 +238,12 @@ namespace phoneme::vm
         const Invocation &invocation);
     [[nodiscard]] Status release_synchronized_monitor(
         std::optional<ObjectRef> monitor);
+    [[nodiscard]] Status enter_monitor(ObjectRef monitor);
+    [[nodiscard]] u32 suspend_execution_for_blocking() noexcept;
+    void resume_execution_after_blocking(u32 depth) noexcept;
+    void publish_execution_roots(u32 invocation_depth,
+                                 const std::vector<ObjectRef>& roots);
+    void clear_execution_roots(u32 invocation_depth) noexcept;
     [[nodiscard]] Result<LambdaBinding> resolve_lambda_binding(
         const classfile::ClassFile &owner,
         u16 invoke_dynamic_index);
@@ -225,6 +259,7 @@ namespace phoneme::vm
     Heap heap_;
     NativeMethodRegistry natives_;
     MonitorTable monitors_;
+    mutable std::recursive_mutex execution_mutex_;
     graphics::GraphicsStore graphics_;
     runtime::RecordStoreRegistry record_stores_;
     security::SharedPermissionPolicy permission_policy_;
@@ -248,6 +283,8 @@ namespace phoneme::vm
     u64 ui_generation_{0};
     bool system_streams_initialized_{false};
     std::u16string console_output_;
+    std::atomic_bool gc_requested_{false};
+    Scheduler scheduler_;
   };
 
 } // namespace phoneme::vm

@@ -1380,6 +1380,88 @@ void register_core_natives(NativeMethodRegistry& registry) {
         });
 
     add(registry,
+        "java/lang/Object",
+        "wait",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto waited = machine.wait_on_object(*receiver, std::nullopt);
+            if (!waited) {
+                return std::unexpected(waited.error());
+            }
+            if (*waited == MonitorWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Object.wait was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Object",
+        "wait",
+        "(J)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Object.wait(long) expects one timeout");
+            }
+            auto receiver = require_receiver(arguments);
+            auto timeout = arguments[1].as_long();
+            if (!receiver || !timeout) {
+                return fail(ErrorCode::invalid_argument,
+                            "Object.wait(long) arguments are invalid");
+            }
+            auto waited = machine.wait_on_object(*receiver, *timeout);
+            if (!waited) {
+                return std::unexpected(waited.error());
+            }
+            if (*waited == MonitorWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Object.wait was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Object",
+        "notify",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto notified = machine.notify_object(*receiver, false);
+            if (!notified) {
+                return std::unexpected(notified.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Object",
+        "notifyAll",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto notified = machine.notify_object(*receiver, true);
+            if (!notified) {
+                return std::unexpected(notified.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
         "java/lang/String",
         "length",
         "()I",
@@ -1865,15 +1947,285 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/Thread",
+        "<init>",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto initialized = machine.initialize_java_thread(*receiver,
+                                                              ObjectRef {});
+            if (!initialized) {
+                return std::unexpected(initialized.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "<init>",
+        "(Ljava/lang/Runnable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(Runnable) expects one target");
+            }
+            auto receiver = require_receiver(arguments);
+            auto target = arguments[1].as_reference();
+            if (!receiver || !target) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(Runnable) arguments are invalid");
+            }
+            auto initialized = machine.initialize_java_thread(*receiver,
+                                                              *target);
+            if (!initialized) {
+                return std::unexpected(initialized.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "start",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto started = machine.start_java_thread(*receiver);
+            if (!started) {
+                return std::unexpected(started.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "run",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            return machine.run_java_thread_target(*receiver);
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "currentThread",
+        "()Ljava/lang/Thread;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.currentThread expects no arguments");
+            }
+            auto current = machine.current_java_thread();
+            if (!current) {
+                return std::unexpected(current.error());
+            }
+            return std::optional<Value>(Value::from_reference(*current));
+        });
+
+    add(registry,
+        "java/lang/Thread",
         "yield",
         "()V",
-        [](Machine&, std::span<const Value> arguments)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             if (!arguments.empty()) {
                 return fail(ErrorCode::invalid_argument,
                             "Thread.yield expects no arguments");
             }
+            machine.cooperative_yield();
             return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "sleep",
+        "(J)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.sleep expects one timeout");
+            }
+            auto timeout = arguments[0].as_long();
+            if (!timeout) {
+                return std::unexpected(timeout.error());
+            }
+            auto slept = machine.sleep_current_thread(*timeout);
+            if (!slept) {
+                return std::unexpected(slept.error());
+            }
+            if (*slept == SchedulerWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Thread.sleep was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "join",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto joined = machine.join_java_thread(*receiver, std::nullopt);
+            if (!joined) {
+                return std::unexpected(joined.error());
+            }
+            if (*joined == SchedulerWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Thread.join was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "join",
+        "(J)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.join(long) expects one timeout");
+            }
+            auto receiver = require_receiver(arguments);
+            auto timeout = arguments[1].as_long();
+            if (!receiver || !timeout) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.join(long) arguments are invalid");
+            }
+            auto joined = machine.join_java_thread(*receiver, *timeout);
+            if (!joined) {
+                return std::unexpected(joined.error());
+            }
+            if (*joined == SchedulerWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Thread.join was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "isAlive",
+        "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto alive = machine.scheduler().is_alive(*receiver);
+            if (!alive) {
+                return std::unexpected(alive.error());
+            }
+            return std::optional<Value>(Value::from_int(*alive ? 1 : 0));
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "interrupt",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto interrupted = machine.interrupt_java_thread(*receiver);
+            if (!interrupted) {
+                return std::unexpected(interrupted.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "interrupted",
+        "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.interrupted expects no arguments");
+            }
+            return std::optional<Value>(Value::from_int(
+                machine.scheduler().consume_current_interrupt() ? 1 : 0));
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "isInterrupted",
+        "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto interrupted = machine.scheduler().is_interrupted(*receiver);
+            if (!interrupted) {
+                return std::unexpected(interrupted.error());
+            }
+            return std::optional<Value>(Value::from_int(
+                *interrupted ? 1 : 0));
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "setPriority",
+        "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.setPriority expects one value");
+            }
+            auto receiver = require_receiver(arguments);
+            auto priority = arguments[1].as_int();
+            if (!receiver || !priority) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.setPriority arguments are invalid");
+            }
+            auto updated = machine.scheduler().set_priority(*receiver,
+                                                            *priority);
+            if (!updated) {
+                return std::unexpected(updated.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "getPriority",
+        "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto priority = machine.scheduler().priority(*receiver);
+            if (!priority) {
+                return std::unexpected(priority.error());
+            }
+            return std::optional<Value>(Value::from_int(*priority));
         });
 
     const auto add_midlet_signal = [&registry](const char* name,

@@ -19,6 +19,10 @@ using namespace builtin;
             method(kPublic, "getClass", "()Ljava/lang/Class;"),
             method(kProtected, "clone", "()Ljava/lang/Object;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kFinal, "wait", "()V"),
+            method(kPublic | kFinal, "wait", "(J)V"),
+            method(kPublic | kFinal, "notify", "()V"),
+            method(kPublic | kFinal, "notifyAll", "()V"),
         });
     }
     if (name == "java/lang/Class") {
@@ -137,9 +141,26 @@ using namespace builtin;
     }
     if (name == "java/lang/Thread") {
         return make_class("java/lang/Thread", "java/lang/Object", kOrdinary,
-                          {}, {
+                          {
+            field(kPublic | kStatic | kFinal, "MIN_PRIORITY", "I"),
+            field(kPublic | kStatic | kFinal, "NORM_PRIORITY", "I"),
+            field(kPublic | kStatic | kFinal, "MAX_PRIORITY", "I"),
+                          }, {
             method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/Runnable;)V"),
+            method(kPublic, "start", "()V"),
+            method(kPublic, "run", "()V"),
+            method(kPublic | kStatic, "currentThread", "()Ljava/lang/Thread;"),
             method(kPublic | kStatic, "yield", "()V"),
+            method(kPublic | kStatic, "sleep", "(J)V"),
+            method(kPublic | kFinal, "join", "()V"),
+            method(kPublic | kFinal, "join", "(J)V"),
+            method(kPublic | kFinal, "isAlive", "()Z"),
+            method(kPublic, "interrupt", "()V"),
+            method(kPublic | kStatic, "interrupted", "()Z"),
+            method(kPublic, "isInterrupted", "()Z"),
+            method(kPublic | kFinal, "setPriority", "(I)V"),
+            method(kPublic | kFinal, "getPriority", "()I"),
         });
     }
     if (name == "java/lang/Number") {
