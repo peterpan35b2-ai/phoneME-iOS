@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
@@ -229,6 +230,42 @@ void add(NativeMethodRegistry& registry,
                         " threw while servicing Bluetooth native");
     }
     return result->return_value;
+}
+
+[[nodiscard]] Status schedule_listener_callback(
+    Machine& machine,
+    ObjectRef listener,
+    std::string method,
+    std::string descriptor,
+    std::vector<Value> arguments) {
+    auto thread_root = machine.allocate_pinned_instance("java/lang/Thread");
+    if (!thread_root) return std::unexpected(thread_root.error());
+    auto thread = thread_root->get();
+    if (!thread) return std::unexpected(thread.error());
+
+    // Store the listener as the native thread's target. Scheduler GC root
+    // enumeration keeps both the thread object and listener alive until the
+    // callback finishes, without requiring a separate global callback table.
+    auto initialized = machine.initialize_java_thread(*thread, listener);
+    if (!initialized) return initialized;
+
+    return machine.scheduler().start_native_thread(
+        machine, *thread,
+        [&machine,
+         listener,
+         method = std::move(method),
+         descriptor = std::move(descriptor),
+         arguments = std::move(arguments)](std::stop_token stop_token) mutable
+            -> Result<std::optional<ObjectRef>> {
+            if (stop_token.stop_requested()) {
+                return std::optional<ObjectRef> {};
+            }
+            auto callback = invoke_instance_checked(
+                machine, listener, kDiscoveryListener, method, descriptor,
+                arguments);
+            if (!callback) return std::unexpected(callback.error());
+            return std::optional<ObjectRef> {};
+        });
 }
 
 [[nodiscard]] Status initialize_vector(Machine& machine,
@@ -811,11 +848,10 @@ void register_bluetooth_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "Bluetooth inquiry access code is invalid");
             }
-            const Value completion = Value::from_int(kInquiryCompleted);
-            auto callback = invoke_instance_checked(
-                machine, *listener, kDiscoveryListener, "inquiryCompleted",
-                "(I)V", std::span<const Value>(&completion, 1U));
-            if (!callback) return std::unexpected(callback.error());
+            auto scheduled = schedule_listener_callback(
+                machine, *listener, "inquiryCompleted", "(I)V",
+                {Value::from_int(kInquiryCompleted)});
+            if (!scheduled) return std::unexpected(scheduled.error());
             return std::optional<Value>(Value::from_int(1));
         });
     add(registry, kDiscoveryAgent, "cancelInquiry",
@@ -861,14 +897,11 @@ void register_bluetooth_natives(NativeMethodRegistry& registry) {
             auto stored = set_int_field(machine, *object, kDiscoveryAgent,
                                         "nextTransaction", next);
             if (!stored) return std::unexpected(stored.error());
-            const std::array<Value, 2> callback_arguments {
-                Value::from_int(next),
-                Value::from_int(kServiceSearchNoRecords),
-            };
-            auto callback = invoke_instance_checked(
-                machine, *listener, kDiscoveryListener,
-                "serviceSearchCompleted", "(II)V", callback_arguments);
-            if (!callback) return std::unexpected(callback.error());
+            auto scheduled = schedule_listener_callback(
+                machine, *listener, "serviceSearchCompleted", "(II)V",
+                {Value::from_int(next),
+                 Value::from_int(kServiceSearchNoRecords)});
+            if (!scheduled) return std::unexpected(scheduled.error());
             return std::optional<Value>(Value::from_int(next));
         });
     add(registry, kDiscoveryAgent, "cancelServiceSearch", "(I)Z",

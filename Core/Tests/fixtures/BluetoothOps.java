@@ -20,13 +20,44 @@ public final class BluetoothOps {
         public void deviceDiscovered(RemoteDevice device, DeviceClass deviceClass) {}
         public void servicesDiscovered(int transID, ServiceRecord[] records) {}
 
-        public void inquiryCompleted(int discType) {
+        public synchronized void inquiryCompleted(int discType) {
             inquiryCode = discType;
+            notifyAll();
         }
 
-        public void serviceSearchCompleted(int transID, int responseCode) {
+        public synchronized void serviceSearchCompleted(int transID, int responseCode) {
             transaction = transID;
             serviceCode = responseCode;
+            notifyAll();
+        }
+
+        synchronized boolean awaitInquiry(int expected, long timeout)
+                throws InterruptedException {
+            long deadline = System.currentTimeMillis() + timeout;
+            while (inquiryCode != expected) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) return false;
+                wait(remaining);
+            }
+            return true;
+        }
+
+        synchronized void resetService() {
+            transaction = -1;
+            serviceCode = -1;
+        }
+
+        synchronized boolean awaitService(int expectedTransaction,
+                                          int expectedCode,
+                                          long timeout)
+                throws InterruptedException {
+            long deadline = System.currentTimeMillis() + timeout;
+            while (transaction != expectedTransaction || serviceCode != expectedCode) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) return false;
+                wait(remaining);
+            }
+            return true;
         }
     }
 
@@ -106,7 +137,7 @@ public final class BluetoothOps {
         DiscoveryAgent agent = local.getDiscoveryAgent();
         ProbeListener listener = new ProbeListener();
         if (!agent.startInquiry(DiscoveryAgent.GIAC, listener)) return 26;
-        if (listener.inquiryCode != DiscoveryListener.INQUIRY_COMPLETED) return 27;
+        if (!listener.awaitInquiry(DiscoveryListener.INQUIRY_COMPLETED, 2000L)) return 27;
         try {
             agent.startInquiry(1, listener);
             return 28;
@@ -121,11 +152,18 @@ public final class BluetoothOps {
             return 34;
         } catch (IllegalArgumentException expected) {
         }
+        listener.resetService();
         int firstTransaction = agent.searchServices(null, services, remote, listener);
-        if (firstTransaction <= 0 || listener.transaction != firstTransaction ||
-            listener.serviceCode != DiscoveryListener.SERVICE_SEARCH_NO_RECORDS) return 29;
+        if (firstTransaction <= 0 ||
+            !listener.awaitService(firstTransaction,
+                                   DiscoveryListener.SERVICE_SEARCH_NO_RECORDS,
+                                   2000L)) return 29;
+        listener.resetService();
         int secondTransaction = agent.searchServices(null, services, remote, listener);
-        if (secondTransaction <= firstTransaction || listener.transaction != secondTransaction) return 30;
+        if (secondTransaction <= firstTransaction ||
+            !listener.awaitService(secondTransaction,
+                                   DiscoveryListener.SERVICE_SEARCH_NO_RECORDS,
+                                   2000L)) return 30;
         try {
             agent.searchServices(null, new UUID[0], remote, listener);
             return 31;

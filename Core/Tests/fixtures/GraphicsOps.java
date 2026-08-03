@@ -116,10 +116,10 @@ public final class GraphicsOps {
 
         int[] canvasPixels = new int[64];
         canvas.getRGB(canvasPixels, 0, 8, 0, 0, 8, 8);
-        if (canvasPixels[0] != 0xFF112233 ||
+        if (canvasPixels[0] != 0xFF102031 ||
                 canvasPixels[9] != 0xFFFF0000 ||
                 canvasPixels[36] != 0xFFFF0000 ||
-                canvasPixels[45] != 0xFF112233) {
+                canvasPixels[45] != 0xFF102031) {
             return 4;
         }
 
@@ -129,7 +129,7 @@ public final class GraphicsOps {
                               0, 0, 1, 1, true);
         int[] alphaPixel = new int[1];
         alphaCanvas.getRGB(alphaPixel, 0, 1, 0, 0, 1, 1);
-        if (alphaPixel[0] != 0xFF7F7FFF) {
+        if (alphaPixel[0] != 0xFF7B7DFF) {
             return 5;
         }
 

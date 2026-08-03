@@ -20,6 +20,7 @@ thread_local u32 Scheduler::tls_unblocked_quantum_count_ = 0U;
 thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_quantum_resume_time_ {};
 thread_local bool Scheduler::tls_quantum_timing_valid_ = false;
+thread_local u32 Scheduler::tls_unpaced_execution_depth_ = 0U;
 
 namespace {
 
@@ -296,6 +297,13 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
                     throwable = result->throwable;
                 }
             }
+            // Forced MIDlet teardown cancels blocked workers internally. That
+            // cancellation is not an uncaught application exception and must
+            // not poison lifecycle state or emit a misleading Java failure.
+            if (stop_token.stop_requested()) {
+                throwable.reset();
+                failure.reset();
+            }
 
             report_thread_failure(
                 machine, thread->id_, throwable, failure);
@@ -315,6 +323,8 @@ Status Scheduler::start_native_thread(
         return fail(ErrorCode::invalid_argument,
                     "native Java thread requires a task");
     }
+    prune_terminated_native_threads();
+
     std::shared_ptr<JavaThread> thread;
     {
         std::scoped_lock lock(mutex_);
@@ -341,6 +351,7 @@ Status Scheduler::start_native_thread(
                                  "native Java thread was started twice");
             }
             thread->started_ = true;
+            thread->native_task_ = true;
             thread->state_ = JavaThreadState::runnable;
         }
         update_queue_membership_locked(thread->id_,
@@ -363,6 +374,10 @@ Status Scheduler::start_native_thread(
                 } else {
                     throwable = *result;
                 }
+            }
+            if (stop_token.stop_requested()) {
+                throwable.reset();
+                failure.reset();
             }
 
             report_thread_failure(
@@ -397,6 +412,24 @@ void Scheduler::begin_execution_slice() noexcept {
     tls_quantum_timing_valid_ = true;
 }
 
+void Scheduler::begin_unpaced_execution() noexcept {
+    if (tls_unpaced_execution_depth_ != std::numeric_limits<u32>::max()) {
+        ++tls_unpaced_execution_depth_;
+    }
+    tls_unblocked_quantum_count_ = 0U;
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
+}
+
+void Scheduler::end_unpaced_execution() noexcept {
+    if (tls_unpaced_execution_depth_ != 0U) {
+        --tls_unpaced_execution_depth_;
+    }
+    tls_unblocked_quantum_count_ = 0U;
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
+}
+
 void Scheduler::set_host_foreground(bool foreground) noexcept {
     {
         std::scoped_lock lock(mutex_);
@@ -422,7 +455,8 @@ void Scheduler::cooperative_quantum(Machine& machine) {
                   now - tls_quantum_resume_time_),
               std::chrono::microseconds(1))
         : kInitialQuantumBackoff;
-    if (tls_unblocked_quantum_count_ !=
+    const bool unpaced_execution = tls_unpaced_execution_depth_ != 0U;
+    if (!unpaced_execution && tls_unblocked_quantum_count_ !=
         std::numeric_limits<u32>::max()) {
         ++tls_unblocked_quantum_count_;
     }
@@ -454,10 +488,16 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         background_condition_.wait_until(lock, *background_deadline, [this] {
             return host_foreground_ || shutting_down_;
         });
+    } else if (unpaced_execution) {
+        // MIDlet construction and class initialization are finite bootstrap
+        // work. Release the VM gate so Java workers may run, but do not stretch
+        // large obfuscated <clinit> blocks into minute-long launches.
+        std::this_thread::yield();
     } else {
         std::this_thread::sleep_for(backoff);
     }
     machine.resume_execution_after_blocking(depth);
+    if (unpaced_execution) tls_unblocked_quantum_count_ = 0U;
     tls_quantum_resume_time_ = std::chrono::steady_clock::now();
     tls_quantum_timing_valid_ = true;
     set_current_state(JavaThreadState::running);
@@ -657,12 +697,11 @@ bool Scheduler::current_is_interrupted() const noexcept {
 }
 
 bool Scheduler::current_stop_requested() const noexcept {
-    auto current = current_thread_record();
-    if (!current) {
-        return false;
-    }
-    std::scoped_lock lock(current->mutex_);
-    return current->stop_requested_;
+    // Forced shutdown stops MIDlet-owned workers, while the scheduler's main
+    // execution thread remains available for destroyApp(true) and final RMS
+    // cleanup. Keep this check lock-free because it runs once per bytecode.
+    return shutting_down_.load(std::memory_order_acquire) &&
+           tls_scheduler_ == this && tls_thread_id_ > 1U;
 }
 
 bool Scheduler::consume_current_interrupt() noexcept {
@@ -830,6 +869,13 @@ void Scheduler::append_reference_roots(std::vector<ObjectRef>& roots) const {
     }
     for (const auto& thread : threads) {
         std::scoped_lock lock(thread->mutex_);
+        if (thread->state_ == JavaThreadState::terminated) {
+            // A scheduler record may remain so Java references can still query
+            // isAlive()/join(), but it must not make a completed Thread and its
+            // Runnable graph immortal. Native callback records are pruned on
+            // the next native task creation.
+            continue;
+        }
         if (!thread->object_.is_null()) {
             roots.push_back(thread->object_);
         }
@@ -892,6 +938,7 @@ void Scheduler::finish_thread(const std::shared_ptr<JavaThread>& thread,
                               std::optional<Error> failure) noexcept {
     {
         std::scoped_lock lock(thread->mutex_);
+        thread->target_ = {};
         thread->uncaught_throwable_ = throwable;
         thread->native_failure_ = std::move(failure);
         thread->state_ = JavaThreadState::terminated;
@@ -903,8 +950,42 @@ void Scheduler::finish_thread(const std::shared_ptr<JavaThread>& thread,
                                    JavaThreadState::terminated);
 }
 
+void Scheduler::prune_terminated_native_threads() {
+    std::vector<std::shared_ptr<JavaThread>> candidates;
+    {
+        std::scoped_lock lock(mutex_);
+        candidates.reserve(by_id_.size());
+        for (const auto& [id, thread] : by_id_) {
+            if (id != 1U && id != tls_thread_id_) {
+                candidates.push_back(thread);
+            }
+        }
+    }
+
+    std::vector<std::shared_ptr<JavaThread>> retired;
+    for (const auto& thread : candidates) {
+        bool eligible = false;
+        {
+            std::scoped_lock thread_lock(thread->mutex_);
+            eligible = thread->native_task_ &&
+                       thread->state_ == JavaThreadState::terminated;
+        }
+        if (!eligible) continue;
+
+        std::scoped_lock lock(mutex_);
+        const auto found = by_id_.find(thread->id_);
+        if (found == by_id_.end() || found->second != thread) continue;
+        by_object_.erase(thread->object_.bits);
+        by_id_.erase(found);
+        retired.push_back(thread);
+    }
+    // Destroy/join completed std::jthreads only after releasing scheduler locks.
+    retired.clear();
+}
+
 void Scheduler::shutdown(MonitorTable* monitors) noexcept {
     std::vector<std::shared_ptr<JavaThread>> threads;
+    const JavaThreadId caller_thread_id = current_thread_id();
     {
         std::scoped_lock lock(mutex_);
         if (shutting_down_) {
@@ -912,7 +993,11 @@ void Scheduler::shutdown(MonitorTable* monitors) noexcept {
         }
         shutting_down_ = true;
         for (const auto& [id, thread] : by_id_) {
-            if (id != 1U) {
+            // Preserve whichever execution context initiated shutdown. Runtime
+            // may force-destroy from a lifecycle/native host thread rather than
+            // the bootstrap ID 1 thread, and that caller still has to execute
+            // destroyApp(true) after all MIDlet-owned workers have stopped.
+            if (id != caller_thread_id) {
                 threads.push_back(thread);
             }
         }

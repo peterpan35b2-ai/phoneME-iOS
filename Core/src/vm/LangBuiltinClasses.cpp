@@ -160,6 +160,7 @@ using namespace builtin;
             method(kPublic, "start", "()V"),
             method(kPublic, "run", "()V"),
             method(kPublic | kStatic, "currentThread", "()Ljava/lang/Thread;"),
+            method(kPublic | kStatic, "activeCount", "()I"),
             method(kPublic | kStatic, "yield", "()V"),
             method(kPublic | kStatic, "sleep", "(J)V"),
             method(kPublic | kFinal, "join", "()V"),

@@ -30,6 +30,7 @@ public:
                                                  CanvasRect region) = 0;
     [[nodiscard]] virtual Status request_service_repaints(
         ObjectRef canvas) = 0;
+    [[nodiscard]] virtual Status pump_blocking_wait_work() = 0;
     [[nodiscard]] virtual Status set_fullscreen(ObjectRef canvas,
                                                 bool fullscreen) = 0;
     [[nodiscard]] virtual Result<Dimensions> canvas_dimensions(

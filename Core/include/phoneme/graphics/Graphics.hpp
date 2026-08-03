@@ -28,6 +28,7 @@ struct Rect final {
 struct GraphicsContext final {
     u64 target_key {0};
     bool display_target {false};
+    bool rendering_enabled {true};
     Pixel color {0xFF000000U};
     i32 translate_x {0};
     i32 translate_y {0};

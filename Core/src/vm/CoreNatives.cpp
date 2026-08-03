@@ -2740,6 +2740,29 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/Thread",
+        "activeCount",
+        "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread.activeCount expects no arguments");
+            }
+            const auto snapshot = machine.scheduler().snapshot();
+            const usize count = static_cast<usize>(std::count_if(
+                snapshot.threads.begin(),
+                snapshot.threads.end(),
+                [](const JavaThreadSnapshot& thread) {
+                    return thread.alive;
+                }));
+            return std::optional<Value>(Value::from_int(
+                count > static_cast<usize>(std::numeric_limits<i32>::max())
+                    ? std::numeric_limits<i32>::max()
+                    : static_cast<i32>(count)));
+        });
+
+    add(registry,
+        "java/lang/Thread",
         "yield",
         "()V",
         [](Machine& machine, std::span<const Value> arguments)

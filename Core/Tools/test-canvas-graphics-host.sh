@@ -76,6 +76,7 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
   -framework CoreText \
   -framework CoreGraphics \
   -framework CoreFoundation \
+  -framework ImageIO \
   -o "$TEST_BINARY"
 
 phoneme_run_with_timeout "${PHONEME_TEST_TIMEOUT:-300}" \

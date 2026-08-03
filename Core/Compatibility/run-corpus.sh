@@ -163,6 +163,7 @@ if ((STATIC_ONLY == 0)) && [[ -z "$RUNNER" ]]; then
     PLATFORM_LIBS+=(
       -framework CoreText
       -framework CoreGraphics
+      -framework ImageIO
       -framework CoreFoundation
     )
   fi

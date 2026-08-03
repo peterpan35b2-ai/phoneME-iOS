@@ -151,7 +151,9 @@ constexpr std::array<u8, 8> kPngSignature {
         8U,
         row_bytes,
         color_space,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        static_cast<CGBitmapInfo>(
+            static_cast<u32>(kCGImageAlphaPremultipliedLast) |
+            static_cast<u32>(kCGBitmapByteOrder32Big)));
     CGColorSpaceRelease(color_space);
     if (context == nullptr) {
         CGImageRelease(decoded);
@@ -160,9 +162,6 @@ constexpr std::array<u8, 8> kPngSignature {
     }
 
     CGContextSetBlendMode(context, kCGBlendModeCopy);
-    CGContextTranslateCTM(context, 0.0,
-                          static_cast<CGFloat>(*height));
-    CGContextScaleCTM(context, 1.0, -1.0);
     CGContextDrawImage(
         context,
         CGRectMake(0.0, 0.0,

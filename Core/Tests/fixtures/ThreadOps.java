@@ -171,9 +171,23 @@ public final class ThreadOps {
         return spins != 0 ? 1 : 0;
     }
 
+    public static int timedWaitForCanvasPump() {
+        synchronized (WAIT_LOCK) {
+            try {
+                WAIT_LOCK.wait(2L);
+                return 1;
+            } catch (InterruptedException unexpected) {
+                return 0;
+            }
+        }
+    }
+
     public static int run() {
         if (Thread.currentThread() == null) {
             return 1;
+        }
+        if (Thread.activeCount() < 1) {
+            return 40;
         }
 
         counter = 0;

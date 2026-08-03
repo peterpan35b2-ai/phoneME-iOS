@@ -61,6 +61,7 @@ private:
     bool interrupted_ {false};
     bool started_ {false};
     bool stop_requested_ {false};
+    bool native_task_ {false};
     std::optional<ObjectRef> uncaught_throwable_;
     std::optional<Error> native_failure_;
 };

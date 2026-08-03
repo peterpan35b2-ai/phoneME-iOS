@@ -113,22 +113,39 @@ int main(int argc, char** argv) {
             "start Canvas graphics MIDlet");
 
     bool painted = false;
+    bool service_repaints_synchronous = false;
     while (auto event = runtime.poll_ui_event()) {
         if (event->kind == 3 && event->component_type == 22 &&
             event->text == "paint:1") {
             painted = true;
         }
+        if (event->kind == 3 && event->component_type == 22 &&
+            event->text == "service:1") {
+            service_repaints_synchronous = true;
+        }
     }
     require(painted, "Canvas.paint(Graphics) executes once after repaint coalescing");
+    require(service_repaints_synchronous,
+            "Canvas.serviceRepaints blocks until paint completes on the game thread");
 
     const auto frame = runtime.frame_snapshot();
     require(frame.dimensions.width == 320 && frame.dimensions.height == 240,
             "Canvas framebuffer preserves dimensions");
     require(frame.rgba.size() == 320U * 240U * 4U,
             "Canvas framebuffer publishes exact RGBA byte count");
-    require(frame.rgba[0] == 0x12U && frame.rgba[1] == 0x34U &&
-                frame.rgba[2] == 0x56U && frame.rgba[3] == 0xFFU,
-            "Canvas paint uses the C++ Graphics renderer");
+    // phoneME renders opaque LCDUI colors through the target device's
+    // RGB565 display model. 0x123456 therefore expands back to 0x103452.
+    if (frame.rgba[0] != 0x10U || frame.rgba[1] != 0x34U ||
+        frame.rgba[2] != 0x52U || frame.rgba[3] != 0xFFU) {
+        std::cerr << "Canvas first pixel RGBA="
+                  << static_cast<int>(frame.rgba[0]) << ','
+                  << static_cast<int>(frame.rgba[1]) << ','
+                  << static_cast<int>(frame.rgba[2]) << ','
+                  << static_cast<int>(frame.rgba[3]) << '\n';
+    }
+    require(frame.rgba[0] == 0x10U && frame.rgba[1] == 0x34U &&
+                frame.rgba[2] == 0x52U && frame.rgba[3] == 0xFFU,
+            "Canvas paint uses phoneME-compatible RGB565 rendering");
 
     runtime.send_pointer(7, 9, 0);
     runtime.send_pointer(8, 10, 1);
@@ -211,30 +228,43 @@ int main(int argc, char** argv) {
                                  copy_app_id,
                                  phoneme::Dimensions {320, 240}).has_value(),
             "start display copyArea fixture MIDlet");
+    (void)runtime.frame_snapshot();
     bool copy_blocked = false;
+    std::vector<std::string> copy_events;
     while (auto event = runtime.poll_ui_event()) {
-        if (event->kind == 3 && event->component_type == 22 &&
-            event->text == "copyBlocked") {
-            copy_blocked = true;
+        if (event->kind == 3 && event->component_type == 22) {
+            copy_events.push_back(event->text);
+            if (event->text == "copyBlocked") {
+                copy_blocked = true;
+            }
         }
+    }
+    if (!copy_blocked) {
+        std::cerr << "copyArea fixture events:";
+        for (const auto& text : copy_events) std::cerr << ' ' << text;
+        std::cerr << '\n';
     }
     require(copy_blocked,
             "copyArea throws IllegalStateException on display Graphics");
     const auto copy_frame = runtime.frame_snapshot();
     require(copy_frame.rgba.size() == 320U * 240U * 4U &&
                 copy_frame.rgba[0] == 0x00U &&
-                copy_frame.rgba[1] == 0xCCU &&
-                copy_frame.rgba[2] == 0x66U &&
+                copy_frame.rgba[1] == 0xCFU &&
+                copy_frame.rgba[2] == 0x63U &&
                 copy_frame.rgba[3] == 0xFFU,
-            "display Graphics remains usable after rejected copyArea");
+            "display Graphics remains usable after rejected copyArea with RGB565 color");
     require(runtime.destroy_midlet(copy_app_id).has_value(),
             "destroy display copyArea fixture MIDlet");
 
     constexpr phoneme::AppId event_app_id {433};
-    require(runtime.start_midlet(*suite_id,
-                                 "corefixture.CanvasEventOps",
-                                 event_app_id,
-                                 phoneme::Dimensions {320, 240}).has_value(),
+    auto event_started = runtime.start_midlet(
+        *suite_id, "corefixture.CanvasEventOps", event_app_id,
+        phoneme::Dimensions {320, 240});
+    if (!event_started) {
+        std::cerr << "Canvas event start error: "
+                  << event_started.error().message << '\n';
+    }
+    require(event_started.has_value(),
             "start deterministic Canvas event fixture");
     std::vector<std::string> event_titles;
     while (auto event = runtime.poll_ui_event()) {
@@ -410,10 +440,14 @@ int main(int argc, char** argv) {
             "destroy suppressing GameCanvas fixture");
 
     constexpr phoneme::AppId race_app_id {434};
-    require(runtime.start_midlet(*suite_id,
-                                 "corefixture.CanvasRaceOps",
-                                 race_app_id,
-                                 phoneme::Dimensions {320, 240}).has_value(),
+    auto race_started = runtime.start_midlet(
+        *suite_id, "corefixture.CanvasRaceOps", race_app_id,
+        phoneme::Dimensions {320, 240});
+    if (!race_started) {
+        std::cerr << "Canvas race start error: "
+                  << race_started.error().message << '\n';
+    }
+    require(race_started.has_value(),
             "start concurrent Canvas repaint fixture");
     for (int iteration = 0; iteration < 2'000; ++iteration) {
         (void)runtime.frame_snapshot();

@@ -355,6 +355,17 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     result.install = "success";
     add_milestone(result, "jar-installed");
 
+    // The iOS host treats user-imported JARs as trusted compatibility-domain
+    // suites before launch. Mirror that production path here so smoke tests
+    // reach the MIDlet instead of failing on the first declared network API.
+    auto trusted = runtime.set_suite_trust(
+        *suite_id, phoneme::security::SuiteTrust::trusted);
+    if (!trusted.has_value()) {
+        capture_error(result, trusted.error());
+        return finish(15);
+    }
+    add_milestone(result, "suite-trusted");
+
     auto system_started = runtime.start_system();
     if (!system_started.has_value()) {
         capture_error(result, system_started.error());
@@ -378,6 +389,11 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
         if (result.canvas_event_count != 0U) {
             (void)write_ppm(options, runtime.frame_snapshot(), result);
         }
+        const auto console_output = runtime.app_console_output(kAppId);
+        if (!console_output.empty()) {
+            std::cout << console_output;
+            std::cout.flush();
+        }
         return finish(13);
     }
     result.midlet_started = true;
@@ -386,6 +402,9 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     if (result.app_state == "active") add_milestone(result, "app-active");
     if (result.app_state == "paused") add_milestone(result, "app-paused");
     if (result.app_state == "destroyed") add_milestone(result, "app-self-destroyed");
+    // Persist a diagnostic checkpoint so an external timeout can distinguish
+    // a launch hang from teardown or frame-collection deadlock.
+    (void)write_result(options, result);
 
     collect_ui_events(runtime, result);
     if (result.canvas_event_count != 0U) {
@@ -398,6 +417,8 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     }
 
     if (runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
+        add_milestone(result, "destroy-begin");
+        (void)write_result(options, result);
         auto destroyed = runtime.destroy_midlet(kAppId);
         if (!destroyed.has_value()) {
             capture_error(result, destroyed.error());

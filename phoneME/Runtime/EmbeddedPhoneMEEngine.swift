@@ -218,7 +218,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
     private final class PollContext: @unchecked Sendable {
         var visibleScreen: VisibleScreen?
-        var nextFrameDeadline: UInt64 = 0
         var didReportRuntimeExit = false
         var consecutiveIdleNativePolls = 0
         var usesIdleNativeCadence = false
@@ -672,15 +671,22 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     guard install.status == 0, let installedSuiteID = install.suiteID else {
                         throw PhoneMECoreError.launchFailed(install.status)
                     }
-                    let trustResult = loadedAPI.setSuiteTrusted(
-                        createdRuntime,
-                        suiteID: installedSuiteID
-                    )
-                    guard trustResult == 0 else {
-                        throw PhoneMECoreError.launchFailed(trustResult)
-                    }
                     context.suiteIDs[gameID] = installedSuiteID
                     suiteID = installedSuiteID
+                }
+
+                guard let resolvedSuiteID = suiteID else {
+                    throw PhoneMECoreError.launchFailed(-1)
+                }
+                // Trust is persisted with the installed suite, but reassert it
+                // on every launch so prepared/reused suites cannot regress to
+                // the untrusted domain after runtime or suite-store recovery.
+                let trustResult = loadedAPI.setSuiteTrusted(
+                    createdRuntime,
+                    suiteID: resolvedSuiteID
+                )
+                guard trustResult == 0 else {
+                    throw PhoneMECoreError.launchFailed(trustResult)
                 }
 
                 guard !currentLaunchToken.isCancelled else { return }
@@ -725,7 +731,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         context.gameIDsByAppID[replacementAppID] = gameID
                         let result = loadedAPI.startMidlet(
                             createdRuntime,
-                            suiteID: suiteID!,
+                            suiteID: resolvedSuiteID,
                             mainClass: mainClass,
                             appID: replacementAppID,
                             screenWidth: screenWidth,
@@ -765,14 +771,14 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     context.gameIDsByAppID[newAppID] = gameID
                     let result = loadedAPI.startMidlet(
                         createdRuntime,
-                        suiteID: suiteID!,
+                        suiteID: resolvedSuiteID,
                         mainClass: mainClass,
                         appID: newAppID,
                         screenWidth: screenWidth,
                         screenHeight: screenHeight
                     )
                     phoneMEMultitaskingLogger.info(
-                        "Started game \(gameID.uuidString, privacy: .public): app=\(newAppID), suite=\(suiteID!), status=\(result)"
+                        "Started game \(gameID.uuidString, privacy: .public): app=\(newAppID), suite=\(resolvedSuiteID), status=\(result)"
                     )
                     guard result == 0 else {
                         context.removeApplication(gameID: gameID)
@@ -1577,13 +1583,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 }
             }
 
-            let now = DispatchTime.now().uptimeNanoseconds
+            // The DispatchSourceTimer is already scheduled at the requested
+            // Canvas cadence. Do not apply a second deadline based on the
+            // callback's actual arrival time: a late timer callback followed by
+            // an on-time callback would otherwise drop the latter and produce
+            // alternating 16/33 ms presentation gaps. RenderRequestBuffer
+            // already coalesces ticks safely when frame copying is still busy.
             let wantsFrame = resolvedVisibleScreen?.usesNativeLCDUI != true
-                && now >= context.nextFrameDeadline
-            if wantsFrame {
-                context.nextFrameDeadline = now
-                    &+ context.frameIntervalNanoseconds
-            }
 
             guard !imageComponentIDs.isEmpty || wantsFrame else {
                 return

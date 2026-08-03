@@ -201,6 +201,8 @@ using namespace builtin;
             field(kPrivate, "keys", "[Ljava/lang/Object;"),
             field(kPrivate, "values", "[Ljava/lang/Object;"),
             field(kPrivate, "count", "I"),
+            field(kPrivate, "hashes", "[I"),
+            field(kPrivate, "buckets", "[I"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(I)V"),

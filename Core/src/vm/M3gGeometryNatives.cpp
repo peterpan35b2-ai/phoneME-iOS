@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <span>
 #include <string_view>
 
@@ -20,6 +21,88 @@ constexpr const char* kIndexBuffer = "javax/microedition/m3g/IndexBuffer";
 constexpr const char* kTriangleStrip = "javax/microedition/m3g/TriangleStripArray";
 constexpr const char* kMesh = "javax/microedition/m3g/Mesh";
 constexpr const char* kSprite3D = "javax/microedition/m3g/Sprite3D";
+
+[[nodiscard]] Result<usize> image_bytes_per_pixel(i32 format) {
+    switch (format) {
+    case 96: // ALPHA
+    case 97: // LUMINANCE
+        return 1U;
+    case 98: // LUMINANCE_ALPHA
+        return 2U;
+    case 99: // RGB
+        return 3U;
+    case 100: // RGBA
+        return 4U;
+    default:
+        return fail_java("java/lang/IllegalArgumentException",
+                         "unsupported Image2D format");
+    }
+}
+
+[[nodiscard]] Result<ObjectRef> copy_array(Machine& machine,
+                                           ObjectRef source,
+                                           std::string class_name,
+                                           Value initial) {
+    auto length = machine.heap().array_length(source);
+    if (!length) return std::unexpected(length.error());
+    auto destination = allocate_array(machine, std::move(class_name),
+                                      *length, initial);
+    if (!destination) return std::unexpected(destination.error());
+    for (usize index = 0; index < *length; ++index) {
+        auto value = machine.heap().element(source, index);
+        if (!value) return std::unexpected(value.error());
+        auto stored = machine.heap().set_element(*destination, index, *value);
+        if (!stored) return std::unexpected(stored.error());
+    }
+    return *destination;
+}
+
+[[nodiscard]] Result<ObjectRef> append_array_value(
+    Machine& machine,
+    ObjectRef existing,
+    std::string class_name,
+    Value initial,
+    Value appended) {
+    usize old_length = 0U;
+    if (!existing.is_null()) {
+        auto length = machine.heap().array_length(existing);
+        if (!length) return std::unexpected(length.error());
+        old_length = *length;
+    }
+    if (old_length == std::numeric_limits<usize>::max()) {
+        return fail_java("java/lang/OutOfMemoryError",
+                         "M3G state array is too large");
+    }
+    auto result = allocate_array(machine, std::move(class_name),
+                                 old_length + 1U, initial);
+    if (!result) return std::unexpected(result.error());
+    for (usize index = 0; index < old_length; ++index) {
+        auto value = machine.heap().element(existing, index);
+        if (!value) return std::unexpected(value.error());
+        auto stored = machine.heap().set_element(*result, index, *value);
+        if (!stored) return std::unexpected(stored.error());
+    }
+    auto stored = machine.heap().set_element(*result, old_length, appended);
+    if (!stored) return std::unexpected(stored.error());
+    return *result;
+}
+
+[[nodiscard]] Result<usize> checked_image_byte_count(i32 width,
+                                                     i32 height,
+                                                     usize components) {
+    if (width <= 0 || height <= 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "Image2D dimensions must be positive");
+    }
+    const u64 count = static_cast<u64>(width) *
+                      static_cast<u64>(height) *
+                      static_cast<u64>(components);
+    if (count > static_cast<u64>(std::numeric_limits<usize>::max())) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "Image2D dimensions are too large");
+    }
+    return static_cast<usize>(count);
+}
 
 void register_read_only_int(NativeMethodRegistry& registry,
                             const char* owner,
@@ -104,22 +187,84 @@ void register_image2d(NativeMethodRegistry& registry) {
                 if (!format) return std::unexpected(format.error());
                 if (!width) return std::unexpected(width.error());
                 if (!height) return std::unexpected(height.error());
-                if (*width <= 0 || *height <= 0) {
-                    return fail_java("java/lang/IllegalArgumentException",
-                                     "Image2D dimensions must be positive");
+                auto components = image_bytes_per_pixel(*format);
+                if (!components) return std::unexpected(components.error());
+                auto full_size = checked_image_byte_count(*width, *height,
+                                                          *components);
+                if (!full_size) return std::unexpected(full_size.error());
+
+                ObjectRef source {};
+                ObjectRef palette {};
+                if (mutable_image) {
+                    auto allocated = allocate_array(machine, "[B", *full_size,
+                                                    Value::from_int(0));
+                    if (!allocated) return std::unexpected(allocated.error());
+                    source = *allocated;
+                } else {
+                    auto pixels = reference_argument(arguments, 4U,
+                                                     "Image2D.<init>", false);
+                    if (!pixels) return std::unexpected(pixels.error());
+                    auto pixel_length = machine.heap().array_length(*pixels);
+                    if (!pixel_length) {
+                        return std::unexpected(pixel_length.error());
+                    }
+                    const bool indexed = arguments.size() == 6U;
+                    const usize required = indexed
+                        ? static_cast<usize>(*width) * static_cast<usize>(*height)
+                        : *full_size;
+                    if (*pixel_length < required) {
+                        return fail_java("java/lang/IllegalArgumentException",
+                                         "Image2D pixel array is too short");
+                    }
+                    auto copied = copy_array(machine, *pixels, "[B",
+                                             Value::from_int(0));
+                    if (!copied) return std::unexpected(copied.error());
+                    source = *copied;
+                    if (indexed) {
+                        auto palette_argument = reference_argument(
+                            arguments, 5U, "Image2D.<init>", false);
+                        if (!palette_argument) {
+                            return std::unexpected(palette_argument.error());
+                        }
+                        auto palette_length =
+                            machine.heap().array_length(*palette_argument);
+                        if (!palette_length) {
+                            return std::unexpected(palette_length.error());
+                        }
+                        if (*palette_length == 0U ||
+                            (*palette_length % *components) != 0U ||
+                            (*palette_length / *components) > 256U) {
+                            return fail_java(
+                                "java/lang/IllegalArgumentException",
+                                "Image2D palette size is invalid");
+                        }
+                        auto copied_palette = copy_array(
+                            machine, *palette_argument, "[B",
+                            Value::from_int(0));
+                        if (!copied_palette) {
+                            return std::unexpected(copied_palette.error());
+                        }
+                        palette = *copied_palette;
+                    }
                 }
-                auto format_stored = set_int_field(machine, *object, kImage2D,
-                                                   "format", *format);
-                auto width_stored = set_int_field(machine, *object, kImage2D,
-                                                  "width", *width);
-                auto height_stored = set_int_field(machine, *object, kImage2D,
-                                                   "height", *height);
-                auto mutable_stored = set_int_field(machine, *object, kImage2D,
-                    "mutable", mutable_image ? 1 : 0, "Z");
-                if (!format_stored) return std::unexpected(format_stored.error());
-                if (!width_stored) return std::unexpected(width_stored.error());
-                if (!height_stored) return std::unexpected(height_stored.error());
-                if (!mutable_stored) return std::unexpected(mutable_stored.error());
+
+                const std::array<Status, 6> stored {
+                    set_int_field(machine, *object, kImage2D,
+                                  "format", *format),
+                    set_int_field(machine, *object, kImage2D,
+                                  "width", *width),
+                    set_int_field(machine, *object, kImage2D,
+                                  "height", *height),
+                    set_int_field(machine, *object, kImage2D,
+                                  "mutable", mutable_image ? 1 : 0, "Z"),
+                    set_reference_field(machine, *object, kImage2D,
+                                        "source", "Ljava/lang/Object;", source),
+                    set_reference_field(machine, *object, kImage2D,
+                                        "palette", "[B", palette),
+                };
+                for (const Status& status : stored) {
+                    if (!status) return std::unexpected(status.error());
+                }
                 return std::optional<Value> {};
             });
     };
@@ -142,6 +287,92 @@ void register_image2d(NativeMethodRegistry& registry) {
             if (*mutable_value == 0) {
                 return fail_java("java/lang/IllegalStateException",
                                  "Image2D is immutable");
+            }
+            auto x = int_argument(arguments, 1U, "Image2D.set");
+            auto y = int_argument(arguments, 2U, "Image2D.set");
+            auto width = int_argument(arguments, 3U, "Image2D.set");
+            auto height = int_argument(arguments, 4U, "Image2D.set");
+            auto pixels = reference_argument(arguments, 5U,
+                                             "Image2D.set", false);
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            if (!pixels) return std::unexpected(pixels.error());
+
+            auto image_width = int_field(machine, *object, kImage2D, "width");
+            auto image_height = int_field(machine, *object, kImage2D, "height");
+            auto format = int_field(machine, *object, kImage2D, "format");
+            if (!image_width) return std::unexpected(image_width.error());
+            if (!image_height) return std::unexpected(image_height.error());
+            if (!format) return std::unexpected(format.error());
+            if (*x < 0 || *y < 0 || *width <= 0 || *height <= 0 ||
+                static_cast<i64>(*x) + static_cast<i64>(*width) >
+                    static_cast<i64>(*image_width) ||
+                static_cast<i64>(*y) + static_cast<i64>(*height) >
+                    static_cast<i64>(*image_height)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Image2D update region is out of bounds");
+            }
+            auto components = image_bytes_per_pixel(*format);
+            if (!components) return std::unexpected(components.error());
+            auto update_size = checked_image_byte_count(*width, *height,
+                                                        *components);
+            if (!update_size) return std::unexpected(update_size.error());
+            auto pixel_length = machine.heap().array_length(*pixels);
+            if (!pixel_length) return std::unexpected(pixel_length.error());
+            if (*pixel_length < *update_size) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Image2D update array is too short");
+            }
+
+            auto source = reference_field(machine, *object, kImage2D,
+                                           "source", "Ljava/lang/Object;");
+            if (!source) return std::unexpected(source.error());
+            if (source->is_null()) {
+                auto full_size = checked_image_byte_count(
+                    *image_width, *image_height, *components);
+                if (!full_size) return std::unexpected(full_size.error());
+                auto allocated = allocate_array(machine, "[B", *full_size,
+                                                Value::from_int(0));
+                if (!allocated) return std::unexpected(allocated.error());
+                *source = *allocated;
+                auto stored = set_reference_field(
+                    machine, *object, kImage2D, "source",
+                    "Ljava/lang/Object;", *source);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            auto source_length = machine.heap().array_length(*source);
+            if (!source_length) return std::unexpected(source_length.error());
+            auto full_size = checked_image_byte_count(
+                *image_width, *image_height, *components);
+            if (!full_size) return std::unexpected(full_size.error());
+            if (*source_length < *full_size) {
+                return fail(ErrorCode::invalid_state,
+                            "Image2D backing array is truncated");
+            }
+            for (i32 row = 0; row < *height; ++row) {
+                for (i32 column = 0; column < *width; ++column) {
+                    for (usize component = 0; component < *components;
+                         ++component) {
+                        const usize input_index =
+                            (static_cast<usize>(row) *
+                                 static_cast<usize>(*width) +
+                             static_cast<usize>(column)) * *components +
+                            component;
+                        const usize output_index =
+                            ((static_cast<usize>(*y + row) *
+                                  static_cast<usize>(*image_width)) +
+                             static_cast<usize>(*x + column)) * *components +
+                            component;
+                        auto value = machine.heap().element(*pixels,
+                                                            input_index);
+                        if (!value) return std::unexpected(value.error());
+                        auto stored = machine.heap().set_element(
+                            *source, output_index, *value);
+                        if (!stored) return std::unexpected(stored.error());
+                    }
+                }
             }
             return std::optional<Value> {};
         });
@@ -541,6 +772,72 @@ void register_index_buffers(NativeMethodRegistry& registry) {
     register_triangle("([I[I)V", true);
 }
 
+[[nodiscard]] Status initialize_mesh_geometry(
+    Machine& machine,
+    ObjectRef object,
+    ObjectRef vertices,
+    ObjectRef indices,
+    ObjectRef appearances,
+    bool arrays) {
+    auto initialized = initialize_node(machine, object);
+    if (!initialized) return initialized;
+
+    ObjectRef index_array = indices;
+    ObjectRef appearance_array = appearances;
+    if (!arrays) {
+        auto index_wrapper = allocate_array(
+            machine, "[Ljavax/microedition/m3g/IndexBuffer;", 1U,
+            Value::from_reference({}));
+        auto appearance_wrapper = allocate_array(
+            machine, "[Ljavax/microedition/m3g/Appearance;", 1U,
+            Value::from_reference({}));
+        if (!index_wrapper) return std::unexpected(index_wrapper.error());
+        if (!appearance_wrapper) {
+            return std::unexpected(appearance_wrapper.error());
+        }
+        auto index_stored = machine.heap().set_element(
+            *index_wrapper, 0U, Value::from_reference(indices));
+        auto appearance_stored = machine.heap().set_element(
+            *appearance_wrapper, 0U, Value::from_reference(appearances));
+        if (!index_stored) return index_stored;
+        if (!appearance_stored) return appearance_stored;
+        index_array = *index_wrapper;
+        appearance_array = *appearance_wrapper;
+    } else {
+        auto index_count = machine.heap().array_length(indices);
+        if (!index_count) return std::unexpected(index_count.error());
+        if (appearances.is_null()) {
+            auto allocated = allocate_array(
+                machine, "[Ljavax/microedition/m3g/Appearance;", *index_count,
+                Value::from_reference({}));
+            if (!allocated) return std::unexpected(allocated.error());
+            appearance_array = *allocated;
+        } else {
+            auto appearance_count = machine.heap().array_length(appearances);
+            if (!appearance_count) {
+                return std::unexpected(appearance_count.error());
+            }
+            if (*appearance_count != *index_count) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Mesh appearance count does not match submeshes");
+            }
+        }
+    }
+
+    const std::array<Status, 3> stored {
+        set_reference_field(machine, object, kMesh, "vertexBuffer",
+            "Ljavax/microedition/m3g/VertexBuffer;", vertices),
+        set_reference_field(machine, object, kMesh, "indexBuffers",
+            "[Ljavax/microedition/m3g/IndexBuffer;", index_array),
+        set_reference_field(machine, object, kMesh, "appearances",
+            "[Ljavax/microedition/m3g/Appearance;", appearance_array),
+    };
+    for (const Status& status : stored) {
+        if (!status) return status;
+    }
+    return {};
+}
+
 void register_mesh(NativeMethodRegistry& registry) {
     const auto register_constructor = [&registry](const char* descriptor,
                                                   bool arrays) {
@@ -754,20 +1051,114 @@ void register_sprite(NativeMethodRegistry& registry) {
 
 void register_special_meshes(NativeMethodRegistry& registry) {
     constexpr const char* skinned = "javax/microedition/m3g/SkinnedMesh";
-    register_noop_constructor(registry, skinned,
+    const auto register_skinned_constructor =
+        [&registry](const char* descriptor, bool arrays) {
+            add(registry, skinned, "<init>", descriptor,
+                [arrays](Machine& machine,
+                                  std::span<const Value> arguments)
+                    -> Result<std::optional<Value>> {
+                    auto object = receiver(arguments, "SkinnedMesh.<init>");
+                    auto vertices = reference_argument(
+                        arguments, 1U, "SkinnedMesh.<init>", false);
+                    auto indices = reference_argument(
+                        arguments, 2U, "SkinnedMesh.<init>", false);
+                    auto appearances = reference_argument(
+                        arguments, 3U, "SkinnedMesh.<init>");
+                    auto skeleton = reference_argument(
+                        arguments, 4U, "SkinnedMesh.<init>", false);
+                    if (!object) return std::unexpected(object.error());
+                    if (!vertices) return std::unexpected(vertices.error());
+                    if (!indices) return std::unexpected(indices.error());
+                    if (!appearances) return std::unexpected(appearances.error());
+                    if (!skeleton) return std::unexpected(skeleton.error());
+                    auto initialized = initialize_mesh_geometry(
+                        machine, *object, *vertices, *indices, *appearances,
+                        arrays);
+                    if (!initialized) return std::unexpected(initialized.error());
+                    auto stored = set_reference_field(
+                        machine, *object, skinned, "skeleton",
+                        "Ljavax/microedition/m3g/Group;", *skeleton);
+                    if (!stored) return std::unexpected(stored.error());
+                    return std::optional<Value> {};
+                });
+        };
+    register_skinned_constructor(
         "(Ljavax/microedition/m3g/VertexBuffer;"
         "Ljavax/microedition/m3g/IndexBuffer;"
         "Ljavax/microedition/m3g/Appearance;"
-        "Ljavax/microedition/m3g/Group;)V", initialize_node);
-    register_noop_constructor(registry, skinned,
+        "Ljavax/microedition/m3g/Group;)V", false);
+    register_skinned_constructor(
         "(Ljavax/microedition/m3g/VertexBuffer;"
         "[Ljavax/microedition/m3g/IndexBuffer;"
         "[Ljavax/microedition/m3g/Appearance;"
-        "Ljavax/microedition/m3g/Group;)V", initialize_node);
+        "Ljavax/microedition/m3g/Group;)V", true);
     add(registry, skinned, "addTransform",
         "(Ljavax/microedition/m3g/Node;III)V",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "SkinnedMesh.addTransform");
+            auto bone = reference_argument(arguments, 1U,
+                                           "SkinnedMesh.addTransform", false);
+            auto weight = int_argument(arguments, 2U,
+                                       "SkinnedMesh.addTransform");
+            auto first_vertex = int_argument(arguments, 3U,
+                                             "SkinnedMesh.addTransform");
+            auto vertex_count = int_argument(arguments, 4U,
+                                             "SkinnedMesh.addTransform");
+            if (!object) return std::unexpected(object.error());
+            if (!bone) return std::unexpected(bone.error());
+            if (!weight) return std::unexpected(weight.error());
+            if (!first_vertex) return std::unexpected(first_vertex.error());
+            if (!vertex_count) return std::unexpected(vertex_count.error());
+            if (*weight <= 0 || *weight > 255 || *first_vertex < 0 ||
+                *vertex_count <= 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "SkinnedMesh transform range is invalid");
+            }
+
+            auto bones = reference_field(
+                machine, *object, skinned, "bones",
+                "[Ljavax/microedition/m3g/Node;");
+            auto first_vertices = reference_field(
+                machine, *object, skinned, "boneFirstVertices", "[I");
+            auto vertex_counts = reference_field(
+                machine, *object, skinned, "boneVertexCounts", "[I");
+            auto weights = reference_field(
+                machine, *object, skinned, "boneWeights", "[I");
+            if (!bones) return std::unexpected(bones.error());
+            if (!first_vertices) return std::unexpected(first_vertices.error());
+            if (!vertex_counts) return std::unexpected(vertex_counts.error());
+            if (!weights) return std::unexpected(weights.error());
+
+            auto next_bones = append_array_value(
+                machine, *bones, "[Ljavax/microedition/m3g/Node;",
+                Value::from_reference({}), Value::from_reference(*bone));
+            auto next_first = append_array_value(
+                machine, *first_vertices, "[I", Value::from_int(0),
+                Value::from_int(*first_vertex));
+            auto next_counts = append_array_value(
+                machine, *vertex_counts, "[I", Value::from_int(0),
+                Value::from_int(*vertex_count));
+            auto next_weights = append_array_value(
+                machine, *weights, "[I", Value::from_int(0),
+                Value::from_int(*weight));
+            if (!next_bones) return std::unexpected(next_bones.error());
+            if (!next_first) return std::unexpected(next_first.error());
+            if (!next_counts) return std::unexpected(next_counts.error());
+            if (!next_weights) return std::unexpected(next_weights.error());
+            const std::array<Status, 4> stored {
+                set_reference_field(machine, *object, skinned, "bones",
+                    "[Ljavax/microedition/m3g/Node;", *next_bones),
+                set_reference_field(machine, *object, skinned,
+                    "boneFirstVertices", "[I", *next_first),
+                set_reference_field(machine, *object, skinned,
+                    "boneVertexCounts", "[I", *next_counts),
+                set_reference_field(machine, *object, skinned,
+                    "boneWeights", "[I", *next_weights),
+            };
+            for (const Status& status : stored) {
+                if (!status) return std::unexpected(status.error());
+            }
             return std::optional<Value> {};
         });
     add(registry, skinned, "getBoneTransform",
@@ -786,45 +1177,313 @@ void register_special_meshes(NativeMethodRegistry& registry) {
         });
     add(registry, skinned, "getBoneVertices",
         "(Ljavax/microedition/m3g/Node;[I[F)I",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(0));
+            auto object = receiver(arguments, "SkinnedMesh.getBoneVertices");
+            auto bone = reference_argument(arguments, 1U,
+                                           "SkinnedMesh.getBoneVertices", false);
+            auto destination_indices = reference_argument(
+                arguments, 2U, "SkinnedMesh.getBoneVertices");
+            auto destination_weights = reference_argument(
+                arguments, 3U, "SkinnedMesh.getBoneVertices");
+            if (!object) return std::unexpected(object.error());
+            if (!bone) return std::unexpected(bone.error());
+            if (!destination_indices) {
+                return std::unexpected(destination_indices.error());
+            }
+            if (!destination_weights) {
+                return std::unexpected(destination_weights.error());
+            }
+            auto bones = reference_field(
+                machine, *object, skinned, "bones",
+                "[Ljavax/microedition/m3g/Node;");
+            auto first_vertices = reference_field(
+                machine, *object, skinned, "boneFirstVertices", "[I");
+            auto vertex_counts = reference_field(
+                machine, *object, skinned, "boneVertexCounts", "[I");
+            auto weights = reference_field(
+                machine, *object, skinned, "boneWeights", "[I");
+            if (!bones) return std::unexpected(bones.error());
+            if (!first_vertices) return std::unexpected(first_vertices.error());
+            if (!vertex_counts) return std::unexpected(vertex_counts.error());
+            if (!weights) return std::unexpected(weights.error());
+            if (bones->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto transform_count = machine.heap().array_length(*bones);
+            if (!transform_count) {
+                return std::unexpected(transform_count.error());
+            }
+            usize result_count = 0U;
+            for (usize index = 0; index < *transform_count; ++index) {
+                auto stored_bone = machine.heap().element(*bones, index);
+                auto count_value = machine.heap().element(*vertex_counts, index);
+                if (!stored_bone) return std::unexpected(stored_bone.error());
+                if (!count_value) return std::unexpected(count_value.error());
+                auto stored_reference = stored_bone->as_reference();
+                auto count = count_value->as_int();
+                if (!stored_reference) {
+                    return std::unexpected(stored_reference.error());
+                }
+                if (!count) return std::unexpected(count.error());
+                if (*stored_reference == *bone) {
+                    result_count += static_cast<usize>(*count);
+                }
+            }
+            if (!destination_indices->is_null()) {
+                auto length = machine.heap().array_length(*destination_indices);
+                if (!length) return std::unexpected(length.error());
+                if (*length < result_count) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "bone vertex destination is too short");
+                }
+            }
+            if (!destination_weights->is_null()) {
+                auto length = machine.heap().array_length(*destination_weights);
+                if (!length) return std::unexpected(length.error());
+                if (*length < result_count) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "bone weight destination is too short");
+                }
+            }
+            usize output = 0U;
+            for (usize index = 0; index < *transform_count; ++index) {
+                auto stored_bone = machine.heap().element(*bones, index);
+                auto first_value = machine.heap().element(*first_vertices, index);
+                auto count_value = machine.heap().element(*vertex_counts, index);
+                auto weight_value = machine.heap().element(*weights, index);
+                if (!stored_bone) return std::unexpected(stored_bone.error());
+                if (!first_value) return std::unexpected(first_value.error());
+                if (!count_value) return std::unexpected(count_value.error());
+                if (!weight_value) return std::unexpected(weight_value.error());
+                auto stored_reference = stored_bone->as_reference();
+                auto first = first_value->as_int();
+                auto count = count_value->as_int();
+                auto weight = weight_value->as_int();
+                if (!stored_reference) {
+                    return std::unexpected(stored_reference.error());
+                }
+                if (!first) return std::unexpected(first.error());
+                if (!count) return std::unexpected(count.error());
+                if (!weight) return std::unexpected(weight.error());
+                if (*stored_reference != *bone) continue;
+                for (i32 offset = 0; offset < *count; ++offset) {
+                    if (!destination_indices->is_null()) {
+                        auto stored = machine.heap().set_element(
+                            *destination_indices, output,
+                            Value::from_int(*first + offset));
+                        if (!stored) return std::unexpected(stored.error());
+                    }
+                    if (!destination_weights->is_null()) {
+                        auto stored = machine.heap().set_element(
+                            *destination_weights, output,
+                            Value::from_float(static_cast<float>(*weight) /
+                                              255.0F));
+                        if (!stored) return std::unexpected(stored.error());
+                    }
+                    ++output;
+                }
+            }
+            if (result_count > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "bone vertex result is too large");
+            }
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(result_count)));
         });
     add(registry, skinned, "getSkeleton",
         "()Ljavax/microedition/m3g/Group;",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_reference({}));
+            auto object = receiver(arguments, "SkinnedMesh.getSkeleton");
+            if (!object) return std::unexpected(object.error());
+            auto skeleton = reference_field(
+                machine, *object, skinned, "skeleton",
+                "Ljavax/microedition/m3g/Group;");
+            if (!skeleton) return std::unexpected(skeleton.error());
+            return std::optional<Value>(Value::from_reference(*skeleton));
         });
 
     constexpr const char* morphing = "javax/microedition/m3g/MorphingMesh";
-    register_noop_constructor(registry, morphing,
+    const auto register_morphing_constructor =
+        [&registry](const char* descriptor, bool arrays) {
+            add(registry, morphing, "<init>", descriptor,
+                [arrays](Machine& machine,
+                                   std::span<const Value> arguments)
+                    -> Result<std::optional<Value>> {
+                    auto object = receiver(arguments, "MorphingMesh.<init>");
+                    auto vertices = reference_argument(
+                        arguments, 1U, "MorphingMesh.<init>", false);
+                    auto targets = reference_argument(
+                        arguments, 2U, "MorphingMesh.<init>", false);
+                    auto indices = reference_argument(
+                        arguments, 3U, "MorphingMesh.<init>", false);
+                    auto appearances = reference_argument(
+                        arguments, 4U, "MorphingMesh.<init>");
+                    if (!object) return std::unexpected(object.error());
+                    if (!vertices) return std::unexpected(vertices.error());
+                    if (!targets) return std::unexpected(targets.error());
+                    if (!indices) return std::unexpected(indices.error());
+                    if (!appearances) return std::unexpected(appearances.error());
+                    auto target_count = machine.heap().array_length(*targets);
+                    if (!target_count) {
+                        return std::unexpected(target_count.error());
+                    }
+                    if (*target_count == 0U) {
+                        return fail_java("java/lang/IllegalArgumentException",
+                                         "MorphingMesh requires a morph target");
+                    }
+                    auto initialized = initialize_mesh_geometry(
+                        machine, *object, *vertices, *indices, *appearances,
+                        arrays);
+                    if (!initialized) return std::unexpected(initialized.error());
+                    auto copied_targets = copy_array(
+                        machine, *targets,
+                        "[Ljavax/microedition/m3g/VertexBuffer;",
+                        Value::from_reference({}));
+                    auto weights = allocate_array(
+                        machine, "[F", *target_count,
+                        Value::from_float(0.0F));
+                    if (!copied_targets) {
+                        return std::unexpected(copied_targets.error());
+                    }
+                    if (!weights) return std::unexpected(weights.error());
+                    auto targets_stored = set_reference_field(
+                        machine, *object, morphing, "morphTargets",
+                        "[Ljavax/microedition/m3g/VertexBuffer;",
+                        *copied_targets);
+                    auto weights_stored = set_reference_field(
+                        machine, *object, morphing, "weights", "[F", *weights);
+                    if (!targets_stored) {
+                        return std::unexpected(targets_stored.error());
+                    }
+                    if (!weights_stored) {
+                        return std::unexpected(weights_stored.error());
+                    }
+                    return std::optional<Value> {};
+                });
+        };
+    register_morphing_constructor(
         "(Ljavax/microedition/m3g/VertexBuffer;"
         "[Ljavax/microedition/m3g/VertexBuffer;"
         "Ljavax/microedition/m3g/IndexBuffer;"
-        "Ljavax/microedition/m3g/Appearance;)V", initialize_node);
-    register_noop_constructor(registry, morphing,
+        "Ljavax/microedition/m3g/Appearance;)V", false);
+    register_morphing_constructor(
         "(Ljavax/microedition/m3g/VertexBuffer;"
         "[Ljavax/microedition/m3g/VertexBuffer;"
         "[Ljavax/microedition/m3g/IndexBuffer;"
-        "[Ljavax/microedition/m3g/Appearance;)V", initialize_node);
-    for (const char* method : {"setWeights", "getWeights"}) {
-        add(registry, morphing, method, "([F)V",
-            [](Machine&, std::span<const Value>)
-                -> Result<std::optional<Value>> {
-                return std::optional<Value> {};
-            });
-    }
-    add(registry, morphing, "getMorphTargetCount", "()I",
-        [](Machine&, std::span<const Value>)
+        "[Ljavax/microedition/m3g/Appearance;)V", true);
+    add(registry, morphing, "setWeights", "([F)V",
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(0));
+            auto object = receiver(arguments, "MorphingMesh.setWeights");
+            auto source = reference_argument(arguments, 1U,
+                                             "MorphingMesh.setWeights", false);
+            if (!object) return std::unexpected(object.error());
+            if (!source) return std::unexpected(source.error());
+            auto targets = reference_field(
+                machine, *object, morphing, "morphTargets",
+                "[Ljavax/microedition/m3g/VertexBuffer;");
+            auto weights = reference_field(
+                machine, *object, morphing, "weights", "[F");
+            if (!targets) return std::unexpected(targets.error());
+            if (!weights) return std::unexpected(weights.error());
+            auto count = machine.heap().array_length(*targets);
+            auto source_length = machine.heap().array_length(*source);
+            if (!count) return std::unexpected(count.error());
+            if (!source_length) return std::unexpected(source_length.error());
+            if (*source_length < *count) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "MorphingMesh weight array is too short");
+            }
+            if (weights->is_null()) {
+                auto allocated = allocate_array(machine, "[F", *count,
+                                                Value::from_float(0.0F));
+                if (!allocated) return std::unexpected(allocated.error());
+                *weights = *allocated;
+                auto stored = set_reference_field(
+                    machine, *object, morphing, "weights", "[F", *weights);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            for (usize index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(*source, index);
+                if (!value) return std::unexpected(value.error());
+                auto parsed = value->as_float();
+                if (!parsed) return std::unexpected(parsed.error());
+                auto stored = machine.heap().set_element(
+                    *weights, index, Value::from_float(*parsed));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, morphing, "getWeights", "([F)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "MorphingMesh.getWeights");
+            auto destination = reference_argument(
+                arguments, 1U, "MorphingMesh.getWeights", false);
+            if (!object) return std::unexpected(object.error());
+            if (!destination) return std::unexpected(destination.error());
+            auto weights = reference_field(
+                machine, *object, morphing, "weights", "[F");
+            if (!weights) return std::unexpected(weights.error());
+            auto count = machine.heap().array_length(*weights);
+            auto destination_length = machine.heap().array_length(*destination);
+            if (!count) return std::unexpected(count.error());
+            if (!destination_length) {
+                return std::unexpected(destination_length.error());
+            }
+            if (*destination_length < *count) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "MorphingMesh destination is too short");
+            }
+            for (usize index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(*weights, index);
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *destination, index, *value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, morphing, "getMorphTargetCount", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments,
+                                   "MorphingMesh.getMorphTargetCount");
+            if (!object) return std::unexpected(object.error());
+            auto targets = reference_field(
+                machine, *object, morphing, "morphTargets",
+                "[Ljavax/microedition/m3g/VertexBuffer;");
+            if (!targets) return std::unexpected(targets.error());
+            auto count = machine.heap().array_length(*targets);
+            if (!count) return std::unexpected(count.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(*count)));
         });
     add(registry, morphing, "getMorphTarget",
         "(I)Ljavax/microedition/m3g/VertexBuffer;",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_reference({}));
+            auto object = receiver(arguments, "MorphingMesh.getMorphTarget");
+            auto index = int_argument(arguments, 1U,
+                                      "MorphingMesh.getMorphTarget");
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            auto targets = reference_field(
+                machine, *object, morphing, "morphTargets",
+                "[Ljavax/microedition/m3g/VertexBuffer;");
+            if (!targets) return std::unexpected(targets.error());
+            auto count = machine.heap().array_length(*targets);
+            if (!count) return std::unexpected(count.error());
+            if (*index < 0 || static_cast<usize>(*index) >= *count) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "morph target index is out of range");
+            }
+            auto target = machine.heap().element(
+                *targets, static_cast<usize>(*index));
+            if (!target) return std::unexpected(target.error());
+            return std::optional<Value>(*target);
         });
 }
 

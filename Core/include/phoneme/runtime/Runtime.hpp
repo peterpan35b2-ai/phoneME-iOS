@@ -156,6 +156,9 @@ private:
     [[nodiscard]] Status require_running_unlocked() const;
     [[nodiscard]] i32 mapped_key_code_unlocked(i32 host_key_code) const noexcept;
     void dispatch_input();
+    void finalize_deferred_start(
+        AppId app_id,
+        const std::shared_ptr<ApplicationVM>& vm);
     void mark_canvas_failure_unlocked(App& app, const Error& error);
     void push_ui_action(i32 kind, i32 component_id, i32 first, i64 value64,
                         std::string text = {});

@@ -48,60 +48,6 @@ constexpr double kPi = 3.14159265358979323846;
            static_cast<i64>(y) < bottom;
 }
 
-[[nodiscard]] std::optional<std::array<i32, 4>> clip_line(
-    i32 x1,
-    i32 y1,
-    i32 x2,
-    i32 y2,
-    Rect clip) noexcept {
-    if (empty(clip)) return std::nullopt;
-
-    const double minimum_x = static_cast<double>(clip.x);
-    const double minimum_y = static_cast<double>(clip.y);
-    const double maximum_x = static_cast<double>(
-        static_cast<i64>(clip.x) + clip.width - 1);
-    const double maximum_y = static_cast<double>(
-        static_cast<i64>(clip.y) + clip.height - 1);
-    const double start_x = static_cast<double>(x1);
-    const double start_y = static_cast<double>(y1);
-    const double delta_x = static_cast<double>(x2) - start_x;
-    const double delta_y = static_cast<double>(y2) - start_y;
-    const std::array<double, 4> p {-delta_x, delta_x,
-                                   -delta_y, delta_y};
-    const std::array<double, 4> q {start_x - minimum_x,
-                                   maximum_x - start_x,
-                                   start_y - minimum_y,
-                                   maximum_y - start_y};
-    double first = 0.0;
-    double last = 1.0;
-    for (usize index = 0; index < p.size(); ++index) {
-        if (p[index] == 0.0) {
-            if (q[index] < 0.0) return std::nullopt;
-            continue;
-        }
-        const double ratio = q[index] / p[index];
-        if (p[index] < 0.0) {
-            first = std::max(first, ratio);
-        } else {
-            last = std::min(last, ratio);
-        }
-        if (first > last) return std::nullopt;
-    }
-
-    const auto coordinate = [](double value,
-                               double minimum,
-                               double maximum) noexcept {
-        return static_cast<i32>(std::lround(
-            std::clamp(value, minimum, maximum)));
-    };
-    return std::array<i32, 4> {
-        coordinate(start_x + first * delta_x, minimum_x, maximum_x),
-        coordinate(start_y + first * delta_y, minimum_y, maximum_y),
-        coordinate(start_x + last * delta_x, minimum_x, maximum_x),
-        coordinate(start_y + last * delta_y, minimum_y, maximum_y),
-    };
-}
-
 [[nodiscard]] i32 half_magnitude(i32 value, i32 maximum) noexcept {
     const i64 magnitude = value < 0 ? -static_cast<i64>(value)
                                     : static_cast<i64>(value);
@@ -568,6 +514,7 @@ Status draw_line(Image& target,
     if (!mutable_target) {
         return mutable_target;
     }
+    if (!context.rendering_enabled) return {};
     return draw_line_absolute(target,
                               context,
                               saturated_add(x1, context.translate_x),
@@ -589,6 +536,9 @@ Status fill_rect(Image& target,
     if (width <= 0 || height <= 0) {
         return {};
     }
+    if (!context.rendering_enabled) {
+        return {};
+    }
     const Rect fill = intersect(
         Rect {.x = saturated_add(x, context.translate_x),
               .y = saturated_add(y, context.translate_y),
@@ -599,6 +549,7 @@ Status fill_rect(Image& target,
         return {};
     }
     if (alpha(context.color) == 255U) {
+        const Pixel device_color = rgb565_roundtrip(context.color);
         auto pixels = target.mutable_pixels();
         for (i32 row = 0; row < fill.height; ++row) {
             const usize offset =
@@ -607,7 +558,7 @@ Status fill_rect(Image& target,
                 static_cast<usize>(fill.x);
             std::fill_n(pixels.begin() + static_cast<std::ptrdiff_t>(offset),
                         fill.width,
-                        context.color);
+                        device_color);
         }
         target.mark_dirty_region(fill.x, fill.y, fill.width, fill.height);
         return {};
@@ -658,6 +609,7 @@ Status draw_round_rect(Image& target,
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
     if (width <= 0 || height <= 0) return {};
+    if (!context.rendering_enabled) return {};
     const i32 radius_x = half_magnitude(arc_width, width / 2);
     const i32 radius_y = half_magnitude(arc_height, height / 2);
     const i32 absolute_x = saturated_add(x, context.translate_x);
@@ -712,6 +664,7 @@ Status draw_arc(Image& target,
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
     if (width <= 0 || height <= 0 || arc_angle == 0) return {};
+    if (!context.rendering_enabled) return {};
     const i32 absolute_x = saturated_add(x, context.translate_x);
     const i32 absolute_y = saturated_add(y, context.translate_y);
     const double center_x = static_cast<double>(absolute_x) +
@@ -778,6 +731,7 @@ Status fill_triangle(Image& target,
                      i32 y3) {
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
+    if (!context.rendering_enabled) return {};
     x1 = saturated_add(x1, context.translate_x);
     y1 = saturated_add(y1, context.translate_y);
     x2 = saturated_add(x2, context.translate_x);
@@ -874,6 +828,7 @@ Status draw_image(Image& target,
     if (!placement) return std::unexpected(placement.error());
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
+    if (!context.rendering_enabled) return {};
     const Rect visible = intersect(*placement, context.clip);
     if (empty(visible)) {
         return {};
@@ -952,6 +907,7 @@ Status draw_region(Image& target,
     }
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
+    if (!context.rendering_enabled) return {};
     const Size output_size = transformed_size(width,
                                               height,
                                               transform_value);
@@ -1084,6 +1040,7 @@ Status draw_rgb(Image& target,
         return fail(ErrorCode::out_of_range,
                     "drawRGB source slice exceeds int[]");
     }
+    if (!context.rendering_enabled) return {};
     const i32 absolute_x = saturated_add(x, context.translate_x);
     const i32 absolute_y = saturated_add(y, context.translate_y);
     const Rect visible = intersect(
@@ -1132,6 +1089,7 @@ Status draw_text(Image& target,
                                    true,
                                    context.font.baseline());
     if (!placement) return std::unexpected(placement.error());
+    if (!context.rendering_enabled) return {};
     auto platform = draw_platform_text(target,
                                        context.font,
                                        text,

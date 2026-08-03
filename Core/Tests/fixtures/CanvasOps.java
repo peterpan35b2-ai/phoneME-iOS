@@ -16,6 +16,7 @@ public final class CanvasOps extends MIDlet {
             canvas.repaint(1, 2, 20, 20);
             canvas.repaint(10, 12, 30, 25);
             canvas.serviceRepaints();
+            canvas.reportServiceRepaintsResult();
         }
     }
 
@@ -37,6 +38,10 @@ public final class CanvasOps extends MIDlet {
                 graphics.fillRect(0, 0, getWidth(), getHeight());
             }
             setTitle("paint:" + paintCount);
+        }
+
+        void reportServiceRepaintsResult() {
+            setTitle("service:" + paintCount);
         }
 
         protected void showNotify() {

@@ -87,6 +87,9 @@ struct ParsedObject final {
     std::vector<u8> payload;
     u32 user_id {0};
     std::vector<u32> animation_tracks;
+    u32 animation_sequence {0};
+    u32 animation_controller {0};
+    i32 animation_property {0};
     std::vector<u32> references;
     std::vector<u32> children;
     std::vector<std::pair<u32, u32>> submeshes;
@@ -377,10 +380,16 @@ struct ParsedObject final {
         parsed = parse_object3d(cursor, object);
         if (!parsed) break;
         auto sequence = cursor.read_u32("AnimationTrack sequence reference");
+        auto controller = cursor.read_u32("AnimationTrack controller reference");
         auto property = cursor.read_u32("AnimationTrack property");
         if (!sequence) return std::unexpected(sequence.error());
+        if (!controller) return std::unexpected(controller.error());
         if (!property) return std::unexpected(property.error());
+        object.animation_sequence = *sequence;
+        object.animation_controller = *controller;
+        object.animation_property = static_cast<i32>(*property);
         (void)add_reference(object, *sequence);
+        (void)add_reference(object, *controller);
         break;
     }
     case 3U: {
@@ -650,8 +659,15 @@ struct ParsedObject final {
     std::string_view operation) {
     if (index == 0U) return ObjectRef {};
     if (index > objects.size() || objects[index - 1U].java_object.is_null()) {
-        return fail_java("java/io/IOException",
-                         std::string(operation) + " has an invalid object reference");
+        std::string message = std::string(operation) + " references object " +
+            std::to_string(index) + " of " +
+            std::to_string(objects.size());
+        if (index != 0U && index <= objects.size()) {
+            message += " (file type " +
+                std::to_string(objects[index - 1U].type) +
+                " has no runtime object)";
+        }
+        return fail_java("java/io/IOException", std::move(message));
     }
     return objects[index - 1U].java_object;
 }
@@ -681,6 +697,40 @@ struct ParsedObject final {
     ParsedObject& object) {
     if (object.java_object.is_null()) return {};
     const auto all = std::span<const ParsedObject>(objects.data(), objects.size());
+
+    auto animation_tracks = reference_array(
+        machine, "[Ljavax/microedition/m3g/AnimationTrack;", all,
+        object.animation_tracks, "Object3D animation tracks");
+    if (!animation_tracks) return std::unexpected(animation_tracks.error());
+    auto tracks_stored = set_reference_field(
+        machine, object.java_object, kObject3D, "animationTracks",
+        "[Ljavax/microedition/m3g/AnimationTrack;", *animation_tracks);
+    auto track_count_stored = set_int_field(
+        machine, object.java_object, kObject3D, "animationTrackCount",
+        static_cast<i32>(object.animation_tracks.size()));
+    if (!tracks_stored) return tracks_stored;
+    if (!track_count_stored) return track_count_stored;
+
+    if (object.type == 2U) {
+        auto sequence = referenced_object(all, object.animation_sequence,
+                                          "AnimationTrack sequence");
+        auto controller = referenced_object(all, object.animation_controller,
+                                            "AnimationTrack controller");
+        if (!sequence) return std::unexpected(sequence.error());
+        if (!controller) return std::unexpected(controller.error());
+        auto sequence_stored = set_reference_field(
+            machine, object.java_object, kAnimationTrack, "sequence",
+            "Ljavax/microedition/m3g/KeyframeSequence;", *sequence);
+        auto controller_stored = set_reference_field(
+            machine, object.java_object, kAnimationTrack, "controller",
+            "Ljavax/microedition/m3g/AnimationController;", *controller);
+        auto property_stored = set_int_field(
+            machine, object.java_object, kAnimationTrack, "property",
+            object.animation_property);
+        if (!sequence_stored) return sequence_stored;
+        if (!controller_stored) return controller_stored;
+        if (!property_stored) return property_stored;
+    }
 
     if (object.type == 9U || object.type == 22U) {
         auto children = reference_array(

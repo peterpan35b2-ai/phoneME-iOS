@@ -313,10 +313,16 @@ Status ZipArchive::parse_directory() {
                         "JAR entry name exceeds configured size limit");
         }
         const bool harmless_root_directory =
-            stored_name == "./" && compressed_size == 0U &&
-            uncompressed_size == 0U;
-        if (limits_.reject_unsafe_paths && !safe_entry_name(stored_name) &&
-            !harmless_root_directory) {
+            stored_name == "./" && uncompressed_size == 0U &&
+            entry_crc == 0U;
+        if (harmless_root_directory) {
+            // Legacy JAR tools commonly emit a deflated `./` directory entry.
+            // Its empty DEFLATE stream is two compressed bytes, so requiring a
+            // zero compressed size incorrectly rejects otherwise valid suites.
+            cursor = *record_end;
+            continue;
+        }
+        if (limits_.reject_unsafe_paths && !safe_entry_name(stored_name)) {
             return fail(ErrorCode::malformed_archive,
                         "JAR entry contains an unsafe path: " + stored_name);
         }

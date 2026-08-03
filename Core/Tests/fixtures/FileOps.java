@@ -18,6 +18,9 @@ public final class FileOps {
     }
 
     public static int resourceLookup() throws Exception {
+        if (String[].class.getResourceAsStream("") != null) {
+            return 0;
+        }
         InputStream relative = FileOps.class.getResourceAsStream("data.bin");
         InputStream absolute =
             FileOps.class.getResourceAsStream("/corefixture/data.bin");

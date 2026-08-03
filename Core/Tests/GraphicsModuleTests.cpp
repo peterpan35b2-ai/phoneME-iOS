@@ -12,6 +12,7 @@
 
 #include "phoneme/graphics/Graphics.hpp"
 #include "phoneme/graphics/GraphicsStore.hpp"
+#include "phoneme/graphics/ImageDecoder.hpp"
 #include "phoneme/graphics/PngDecoder.hpp"
 #include "phoneme/graphics/TextRasterizer.hpp"
 
@@ -42,6 +43,52 @@ void require_equal(const Left& actual,
                   << " expected=" << expected << '\n';
         std::abort();
     }
+}
+
+std::vector<u8> decode_base64(std::string_view text) {
+    constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<u8> output;
+    output.reserve((text.size() * 3U) / 4U);
+    u32 accumulator = 0U;
+    i32 available_bits = -8;
+    for (const char character : text) {
+        if (character == '=') {
+            break;
+        }
+        const usize index = alphabet.find(character);
+        require(index != std::string_view::npos,
+                "base64 fixture contains only valid characters");
+        accumulator = (accumulator << 6U) | static_cast<u32>(index);
+        available_bits += 6;
+        if (available_bits >= 0) {
+            output.push_back(static_cast<u8>(
+                (accumulator >> static_cast<u32>(available_bits)) & 0xFFU));
+            available_bits -= 8;
+        }
+    }
+    return output;
+}
+
+void require_rgb_near(Pixel actual,
+                      u8 expected_red,
+                      u8 expected_green,
+                      u8 expected_blue,
+                      i32 tolerance,
+                      const char* message) {
+    const auto near = [tolerance](u8 value, u8 expected) {
+        return std::abs(static_cast<i32>(value) -
+                        static_cast<i32>(expected)) <= tolerance;
+    };
+    const u8 alpha = static_cast<u8>(actual >> 24U);
+    const u8 red = static_cast<u8>(actual >> 16U);
+    const u8 green = static_cast<u8>(actual >> 8U);
+    const u8 blue = static_cast<u8>(actual);
+    require(alpha == 0xFFU &&
+                near(red, expected_red) &&
+                near(green, expected_green) &&
+                near(blue, expected_blue),
+            message);
 }
 
 void append_be32(std::vector<u8>& output, u32 value) {
@@ -177,14 +224,14 @@ void test_clip_translate_alpha_and_dirty_region() {
     require(phoneme::graphics::fill_rect(*image, context, 0, 0, 4, 4)
                 .has_value(),
             "fill translated clipped rectangle");
-    require(image->pixel(0, 0).value() == 0xFF112233U,
-            "clip preserves outside pixel");
+    require(image->pixel(0, 0).value() == 0xFF102031U,
+            "clip preserves the RGB565 background pixel");
     require(image->pixel(1, 1).value() == 0xFFFF0000U,
             "translate moves draw origin");
     require(image->pixel(4, 4).value() == 0xFFFF0000U,
             "clip includes final covered pixel");
-    require(image->pixel(5, 5).value() == 0xFF112233U,
-            "clip excludes following pixel");
+    require(image->pixel(5, 5).value() == 0xFF102031U,
+            "clip excludes the following RGB565 pixel");
     const auto dirty = image->dirty_region();
     require(dirty.x == 1 && dirty.y == 1 &&
                 dirty.width == 4 && dirty.height == 4,
@@ -208,8 +255,8 @@ void test_clip_translate_alpha_and_dirty_region() {
                                         true)
                 .has_value(),
             "blend ARGB source pixel");
-    require(alpha_image->pixel(0, 0).value() == 0xFF7F7FFFU,
-            "source-over alpha matches MIDP ARGB expectation");
+    require(alpha_image->pixel(0, 0).value() == 0xFF7B7DFFU,
+            "source-over alpha is stored through the MIDP RGB565 plane");
 
     constexpr std::array<Pixel, 1> transparent_red {0x00FF0000U};
     require(phoneme::graphics::draw_rgb(*alpha_image,
@@ -370,7 +417,7 @@ void test_primitive_golden_and_overflow_clipping() {
                 .has_value(),
             "draw arc golden");
 
-    constexpr u64 kExpectedGoldenHash = 13314032336031811104ULL;
+    constexpr u64 kExpectedGoldenHash = 2819450229388596111ULL;
     const u64 actual_hash = image_hash(*image);
     if (actual_hash != kExpectedGoldenHash) {
         std::cerr << "Primitive golden hash: " << actual_hash << '\n';
@@ -418,9 +465,11 @@ void test_self_overlap_copy_and_region() {
     require(image.has_value(), "create overlap target");
     phoneme::graphics::GraphicsContext context;
     context.clip = phoneme::graphics::target_bounds(*image);
+    // Use distinct values that are exactly representable in RGB565; tiny
+    // 0x01 blue increments collapse to the same device pixel by design.
     constexpr std::array<Pixel, 8> row {
-        0xFF000001U, 0xFF000002U, 0xFF000003U, 0xFF000004U,
-        0xFF000005U, 0xFF000006U, 0xFF000007U, 0xFF000008U,
+        0xFF000008U, 0xFF000010U, 0xFF000018U, 0xFF000021U,
+        0xFF000029U, 0xFF000031U, 0xFF000039U, 0xFF000042U,
     };
     require(phoneme::graphics::draw_rgb(*image,
                                         context,
@@ -634,6 +683,48 @@ void test_png_variants_limits_and_fuzz() {
     }
 }
 
+void test_jpeg_gif_and_format_dispatch() {
+    constexpr std::array<u8, 65> gif {
+        0x47U, 0x49U, 0x46U, 0x38U, 0x39U, 0x61U, 0x06U, 0x00U,
+        0x09U, 0x00U, 0x91U, 0x03U, 0x00U, 0xAFU, 0x00U, 0x00U,
+        0xFFU, 0x76U, 0x76U, 0xF1U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x21U, 0xF9U, 0x04U, 0x01U, 0x00U, 0x00U, 0x03U,
+        0x00U, 0x2CU, 0x00U, 0x00U, 0x00U, 0x00U, 0x06U, 0x00U,
+        0x09U, 0x00U, 0x00U, 0x02U, 0x12U, 0x4CU, 0x86U, 0x03U,
+        0x96U, 0x20U, 0xACU, 0xC4U, 0x3BU, 0x4EU, 0x9AU, 0x0AU,
+        0x40U, 0xCCU, 0x28U, 0xEBU, 0xFEU, 0x21U, 0x05U, 0x00U,
+        0x3BU,
+    };
+    auto decoded_gif = phoneme::graphics::decode_image(gif);
+    require(decoded_gif.has_value(), "decode GIF through format dispatcher");
+    require(decoded_gif->width() == 6 && decoded_gif->height() == 9,
+            "GIF metadata dimensions are preserved");
+    require(decoded_gif->pixel(0, 0).value() == 0xFFFF7676U,
+            "GIF first row is not vertically flipped");
+    require((decoded_gif->pixel(2, 0).value() >> 24U) == 0U,
+            "GIF transparent palette index preserves alpha");
+
+    constexpr std::string_view jpeg_base64 =
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAACAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACv/EABsQAAIDAQEBAAAAAAAAAAAAAAQFAwYHAggJ/8QAFQEBAQAAAAAAAAAAAAAAAAAABgf/xAAbEQACAwEBAQAAAAAAAAAAAAAEBgMFBwIIAf/aAAwDAQACEQMRAD8AWB84MIw+y/PHwZYrFjWUv7A/8YeXHT166zuoNXLpy1w+jHNGzZocnnNZM2Rs85h55k8xRhU0pBEsk0nffSD1D58wOq9MeiaurxDIK2trd01sCurgM0TAwQAQ39gHECCEHpYxxRBR444BxoI44YIY+IouOeOeefkfPxfHX0416esnzR0dnQslscXFsRFZjamxqY5u7hhZmZhuKoy3vmC9tzDLS5ubQwqxtLEok44mcmeWXr//2Q==";
+    const auto jpeg = decode_base64(jpeg_base64);
+    auto decoded_jpeg = phoneme::graphics::decode_image(jpeg);
+    require(decoded_jpeg.has_value(), "decode JPEG through format dispatcher");
+    require(decoded_jpeg->width() == 2 && decoded_jpeg->height() == 2,
+            "JPEG metadata dimensions are preserved");
+    require_rgb_near(decoded_jpeg->pixel(0, 0).value(),
+                     255U, 0U, 0U, 8, "JPEG top-left red orientation");
+    require_rgb_near(decoded_jpeg->pixel(1, 0).value(),
+                     0U, 255U, 0U, 8, "JPEG top-right green orientation");
+    require_rgb_near(decoded_jpeg->pixel(0, 1).value(),
+                     0U, 0U, 255U, 8, "JPEG bottom-left blue orientation");
+    require_rgb_near(decoded_jpeg->pixel(1, 1).value(),
+                     255U, 255U, 255U, 8, "JPEG bottom-right white orientation");
+
+    constexpr std::array<u8, 4> unsupported {'B', 'M', 0U, 0U};
+    require(!phoneme::graphics::decode_image(unsupported).has_value(),
+            "unsupported raster format is rejected cleanly");
+}
+
 void test_font_unicode_and_measurement() {
     auto font = phoneme::graphics::Font::create(
         static_cast<i32>(phoneme::graphics::FontFace::monospace),
@@ -749,9 +840,60 @@ void test_dirty_update_contract() {
     require_equal((*update)->pixels.size(), static_cast<usize>(4),
                   "dirty update excludes unchanged framebuffer pixels");
     for (const Pixel pixel : (*update)->pixels) {
-        require_equal(pixel, static_cast<Pixel>(0xFF123456U),
-                      "dirty update preserves packed ARGB pixels");
+        require_equal(pixel, static_cast<Pixel>(0xFF103452U),
+                      "dirty update preserves packed RGB565-expanded pixels");
     }
+}
+
+void test_hidden_render_suppression() {
+    auto target = Image::create_mutable(16, 16);
+    const std::array<Pixel, 4> source_pixels {
+        0xFFFF0000U, 0xFF00FF00U,
+        0xFF0000FFU, 0xFFFFFFFFU,
+    };
+    auto source = Image::create_immutable(2, 2, source_pixels);
+    require(target.has_value() && source.has_value(),
+            "create hidden-render suppression images");
+    target->clear_dirty_region();
+    const std::vector<Pixel> before(target->pixels().begin(),
+                                    target->pixels().end());
+
+    phoneme::graphics::GraphicsContext context;
+    context.clip = phoneme::graphics::target_bounds(*target);
+    context.color = 0xFF123456U;
+    context.rendering_enabled = false;
+    require(phoneme::graphics::fill_rect(*target, context, 0, 0, 16, 16)
+                .has_value(),
+            "hidden fillRect is accepted as a no-op");
+    require(phoneme::graphics::draw_image(
+                *target, context, *source, 2, 2,
+                phoneme::graphics::anchor_left |
+                    phoneme::graphics::anchor_top)
+                .has_value(),
+            "hidden drawImage is accepted as a no-op");
+    require(phoneme::graphics::draw_rgb(
+                *target, context, source_pixels, 0, 2,
+                4, 4, 2, 2, true)
+                .has_value(),
+            "hidden drawRGB is accepted as a no-op");
+    constexpr std::array<char32_t, 4> text {U's', U'k', U'i', U'p'};
+    require(phoneme::graphics::draw_text(
+                *target, context, text, 0, 0,
+                phoneme::graphics::anchor_left |
+                    phoneme::graphics::anchor_top)
+                .has_value(),
+            "hidden text draw is accepted as a no-op");
+    require(std::equal(before.begin(), before.end(), target->pixels().begin()),
+            "hidden rendering leaves the backbuffer unchanged");
+    require(!target->has_dirty_region(),
+            "hidden rendering does not create dirty image work");
+
+    context.rendering_enabled = true;
+    require(phoneme::graphics::fill_rect(*target, context, 0, 0, 1, 1)
+                .has_value(),
+            "foreground rendering is restored");
+    require(target->has_dirty_region(),
+            "foreground rendering marks the backbuffer dirty again");
 }
 
 void test_sprite_heavy_benchmark() {
@@ -824,8 +966,10 @@ int main() {
     test_primitive_golden_and_overflow_clipping();
     test_self_overlap_copy_and_region();
     test_png_variants_limits_and_fuzz();
+    test_jpeg_gif_and_format_dispatch();
     test_font_unicode_and_measurement();
     test_dirty_update_contract();
+    test_hidden_render_suppression();
     test_sprite_heavy_benchmark();
     std::cout << "Graphics module tests passed\n";
     return 0;

@@ -625,16 +625,10 @@ void add(NativeMethodRegistry& registry,
 [[nodiscard]] graphics::Pixel phone_me_opaque_color(u8 red,
                                                     u8 green,
                                                     u8 blue) noexcept {
-    const u8 red5 = static_cast<u8>(red >> 3U);
-    const u8 green6 = static_cast<u8>(green >> 2U);
-    const u8 blue5 = static_cast<u8>(blue >> 3U);
-    const u8 expanded_red = static_cast<u8>((red5 << 3U) | (red5 >> 2U));
-    const u8 expanded_green = static_cast<u8>(
-        (green6 << 2U) | (green6 >> 4U));
-    const u8 expanded_blue = static_cast<u8>(
-        (blue5 << 3U) | (blue5 >> 2U));
-    return graphics::argb(255U, expanded_red, expanded_green,
-                          expanded_blue);
+    // Preserve the logical Graphics color in RGB888. Lower color-depth
+    // backends may quantize during final scanout, but doing it here corrupts
+    // getColor(), component getters and every mutable off-screen Image.
+    return graphics::argb(255U, red, green, blue);
 }
 
 [[nodiscard]] graphics::Pixel phone_me_opaque_color(u32 rgb) noexcept {
@@ -1753,10 +1747,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!image_object) return std::unexpected(image_object.error());
             auto image = image_payload(machine, *image_object);
             if (!image) return std::unexpected(image.error());
+            const auto device_color = graphics::rgb565_roundtrip(
+                static_cast<graphics::Pixel>(static_cast<u32>(*color)));
             std::fill((*image)->mutable_pixels().begin(),
                       (*image)->mutable_pixels().end(),
-                      static_cast<graphics::Pixel>(
-                          static_cast<u32>(*color)));
+                      device_color);
             (*image)->mark_dirty_region(0, 0, *width, *height);
             return std::optional<Value>(
                 Value::from_reference(*image_object));

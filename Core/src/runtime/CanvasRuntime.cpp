@@ -87,6 +87,14 @@ Status CanvasRuntime::set_dimensions(Dimensions dimensions) {
         return fail(ErrorCode::invalid_argument,
                     "Canvas dimensions must be positive");
     }
+    auto entered = machine_.enter_external_execution();
+    if (!entered) return entered;
+    const auto leave_execution = [](vm::Machine* machine) noexcept {
+        machine->leave_external_execution();
+    };
+    std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
+        &machine_, leave_execution);
+
     if (dimensions.width == dimensions_.width &&
         dimensions.height == dimensions_.height) {
         return {};
@@ -97,7 +105,13 @@ Status CanvasRuntime::set_dimensions(Dimensions dimensions) {
         if (found == canvases_.end()) continue;
         found->second.size_change_pending = true;
         found->second.game_graphics = {};
-        merge_region(found->second.repaint_region, full_region());
+        if (host_foreground_ && found->second.display_visible) {
+            merge_region(found->second.repaint_region, full_region());
+        } else {
+            found->second.repaint_region.reset();
+            found->second.flush_region.reset();
+            found->second.service_requested = false;
+        }
     }
     return {};
 }
@@ -106,21 +120,31 @@ Status CanvasRuntime::set_host_foreground(bool foreground) {
     if (host_foreground_ == foreground) {
         return {};
     }
+    auto entered = machine_.enter_external_execution();
+    if (!entered) return entered;
+    const auto leave_execution = [](vm::Machine* machine) noexcept {
+        machine->leave_external_execution();
+    };
+    std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
+        &machine_, leave_execution);
+
     host_foreground_ = foreground;
+    machine_.set_serial_callback_coalescing(!foreground);
+    // Discard historical Displayable transitions. While detached, only the
+    // final active screen matters; replaying every intermediate show/hide edge
+    // on foregrounding causes repaint storms and stale UI callbacks.
+    visibility_changes_.clear();
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
         if (found == canvases_.end()) continue;
-        if (!foreground) {
-            // A hidden GameCanvas may keep calling flushGraphics from its game
-            // loop. Do not retain or publish those regions while no host surface
-            // can display them.
-            found->second.flush_region.reset();
-        } else if (found->second.game_canvas &&
-                   !found->second.game_graphics.is_null()) {
-            // Publish the latest off-screen GameCanvas contents once when the
-            // MIDlet becomes visible again.
-            merge_region(found->second.flush_region, full_region());
-        }
+        set_game_rendering_enabled(found->second,
+                                   foreground && found->second.display_visible);
+        // Render work is disposable while the host surface is detached. Never
+        // retain dirty regions or serviceRepaints state to replay later; showing
+        // the Canvas will schedule exactly one fresh full repaint instead.
+        found->second.repaint_region.reset();
+        found->second.flush_region.reset();
+        found->second.service_requested = false;
         visibility_changes_.push_back(VisibilityChange {
             .object = found->second.object,
             .visible = found->second.display_visible,
@@ -196,7 +220,26 @@ Status CanvasRuntime::pump() {
     };
     std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
         &machine_, leave_execution);
+    return pump_under_execution();
+}
 
+Status CanvasRuntime::try_pump() {
+    // Frame acquisition is observational and must never delay a Java game
+    // thread. phoneME processes repaint events independently from the native
+    // display scanout; if the VM is busy, publish the latest complete frame and
+    // let the next host tick process asynchronous repaint work.
+    if (!machine_.try_enter_external_execution()) {
+        return {};
+    }
+    const auto leave_execution = [](vm::Machine* machine) noexcept {
+        machine->leave_external_execution();
+    };
+    std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
+        &machine_, leave_execution);
+    return pump_under_execution();
+}
+
+Status CanvasRuntime::pump_under_execution() {
     if (pumping_) {
         return {};
     }
@@ -206,6 +249,7 @@ Status CanvasRuntime::pump() {
         ~PumpGuard() { flag = false; }
     } guard {pumping_};
 
+    const bool dispatched_visibility = !visibility_changes_.empty();
     auto visibility = process_visibility_changes();
     if (!visibility) return visibility;
     auto sizes = process_size_changes();
@@ -216,10 +260,18 @@ Status CanvasRuntime::pump() {
     if (!repeats) return repeats;
     auto serial_callbacks = machine_.pump_serial_callbacks();
     if (!serial_callbacks) return serial_callbacks;
+    const bool dispatched_visibility_after_input =
+        !visibility_changes_.empty();
     auto visibility_after_input = process_visibility_changes();
     if (!visibility_after_input) return visibility_after_input;
     auto flushes = process_flushes();
     if (!flushes) return flushes;
+    if (dispatched_visibility || dispatched_visibility_after_input) {
+        // phoneME posts visibility and expose/paint as separate LCDUI events.
+        // Deferring paint by one pump prevents a Canvas from observing worker-
+        // initialized fields before the constructor/startApp turn completes.
+        return {};
+    }
     return process_repaints();
 }
 
@@ -258,7 +310,9 @@ Status CanvasRuntime::register_canvas(vm::ObjectRef canvas,
         iterator->second.suppress_key_events = suppress_key_events;
     } else {
         canvas_order_.push_back(canvas.bits);
-        iterator->second.size_change_pending = true;
+        // Registration does not itself change the Canvas viewport. phoneME
+        // only calls sizeChanged after an actual host/fullscreen dimension
+        // transition, not merely because a Canvas became visible.
     }
     return {};
 }
@@ -272,10 +326,16 @@ Status CanvasRuntime::set_display_visible(vm::ObjectRef displayable,
     state->display_visible = visible;
     if (visible) {
         active_canvas_ = displayable.bits;
-        state->size_change_pending = true;
     } else if (active_canvas_.has_value() &&
                *active_canvas_ == displayable.bits) {
         active_canvas_.reset();
+    }
+    set_game_rendering_enabled(*state, host_foreground_ && visible);
+    if (!host_foreground_) {
+        state->repaint_region.reset();
+        state->flush_region.reset();
+        state->service_requested = false;
+        return {};
     }
     visibility_changes_.push_back(VisibilityChange {
         .object = displayable,
@@ -292,6 +352,11 @@ Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
                                       vm::CanvasRect region) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
+    if (!host_foreground_ || !(*state)->display_visible) {
+        (*state)->repaint_region.reset();
+        (*state)->service_requested = false;
+        return {};
+    }
     auto clipped = clipped_region(region);
     if (clipped.has_value()) {
         merge_region((*state)->repaint_region, *clipped);
@@ -299,16 +364,47 @@ Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
     return {};
 }
 
+Status CanvasRuntime::pump_blocking_wait_work() {
+    // Some legacy MIDlets run a loading animation synchronously from
+    // startApp(), using repaint() followed by a short Object.wait(timeout).
+    // The host display loop cannot pump while startApp() is still on-stack, so
+    // use that blocking interval as the MIDP event-dispatch opportunity.
+    return pump();
+}
+
 Status CanvasRuntime::request_service_repaints(vm::ObjectRef canvas) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
-    (*state)->service_requested = true;
-    if (pumping_ || machine_.executing_on_current_thread() ||
-        !(*state)->effectively_visible ||
-        !(*state)->repaint_region.has_value()) {
+    if (!host_foreground_ || !(*state)->display_visible) {
+        (*state)->repaint_region.reset();
+        (*state)->service_requested = false;
         return {};
     }
-    return pump();
+    (*state)->service_requested = true;
+    if (pumping_ || !(*state)->repaint_region.has_value()) {
+        return {};
+    }
+
+    // MIDP requires serviceRepaints() to block until the pending paint has
+    // completed. Games such as Nicknso call repaint()/serviceRepaints() from
+    // their own game thread on every tick. Deferring that paint to the host's
+    // framebuffer polling timer coalesces intermediate positions and makes
+    // movement visibly stutter. Machine execution is recursively serialized,
+    // so pumping here is safe; pumping_ still prevents recursion when
+    // serviceRepaints() is called from inside paint/show callbacks.
+    auto pumped = pump();
+    if (!pumped) return pumped;
+
+    // A newly-visible Canvas deliberately receives showNotify and paint on
+    // separate event turns. serviceRepaints() is the explicit synchronous
+    // escape hatch, so complete the deferred paint before returning.
+    state = require_state(canvas);
+    if (!state) return std::unexpected(state.error());
+    if ((*state)->repaint_region.has_value() &&
+        host_foreground_ && (*state)->display_visible) {
+        return pump();
+    }
+    return {};
 }
 
 Status CanvasRuntime::set_fullscreen(vm::ObjectRef canvas, bool fullscreen) {
@@ -318,7 +414,9 @@ Status CanvasRuntime::set_fullscreen(vm::ObjectRef canvas, bool fullscreen) {
         return {};
     }
     (*state)->fullscreen = fullscreen;
-    merge_region((*state)->repaint_region, full_region());
+    if (host_foreground_ && (*state)->display_visible) {
+        merge_region((*state)->repaint_region, full_region());
+    }
 
     auto id_value = machine_.heap().field(canvas, kDisplayableIdField);
     if (!id_value) return std::unexpected(id_value.error());
@@ -405,6 +503,9 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
                          "Canvas is not a GameCanvas");
     }
     if (!(*state)->game_graphics.is_null()) {
+        set_game_rendering_enabled(**state,
+                                   host_foreground_ &&
+                                       (*state)->display_visible);
         return (*state)->game_graphics;
     }
     if (!render_hooks_.acquire_game_graphics) {
@@ -416,6 +517,9 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
     auto graphics = graphics_root->get();
     if (!graphics) return std::unexpected(graphics.error());
     (*state)->game_graphics = *graphics;
+    set_game_rendering_enabled(**state,
+                               host_foreground_ &&
+                                   (*state)->display_visible);
     return *graphics;
 }
 
@@ -427,7 +531,8 @@ Status CanvasRuntime::request_game_flush(vm::ObjectRef canvas,
         return fail_java("java/lang/IllegalStateException",
                          "Canvas is not a GameCanvas");
     }
-    if (!host_foreground_) {
+    if (!host_foreground_ || !(*state)->display_visible) {
+        (*state)->flush_region.reset();
         return {};
     }
     auto clipped = clipped_region(region);
@@ -713,11 +818,20 @@ Status CanvasRuntime::process_key_repeats() {
 }
 
 Status CanvasRuntime::process_flushes() {
+    if (!host_foreground_) {
+        for (auto& [key, state] : canvases_) {
+            (void)key;
+            state.flush_region.reset();
+        }
+        return {};
+    }
+
     std::vector<u64> pending;
     pending.reserve(canvas_order_.size());
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
         if (found != canvases_.end() &&
+            found->second.effectively_visible &&
             found->second.flush_region.has_value()) {
             pending.push_back(key);
         }
@@ -725,6 +839,7 @@ Status CanvasRuntime::process_flushes() {
     for (u64 key : pending) {
         auto found = canvases_.find(key);
         if (found == canvases_.end() ||
+            !found->second.effectively_visible ||
             !found->second.flush_region.has_value()) {
             continue;
         }
@@ -748,6 +863,15 @@ Status CanvasRuntime::process_flushes() {
 }
 
 Status CanvasRuntime::process_repaints() {
+    if (!host_foreground_) {
+        for (auto& [key, state] : canvases_) {
+            (void)key;
+            state.repaint_region.reset();
+            state.service_requested = false;
+        }
+        return {};
+    }
+
     std::vector<u64> pending;
     pending.reserve(canvas_order_.size());
     for (u64 key : canvas_order_) {
@@ -911,6 +1035,10 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     const bool desired = host_foreground_ && state.display_visible;
     if (desired == state.effectively_visible) return {};
     state.effectively_visible = desired;
+    set_game_rendering_enabled(state, desired);
+    state.repaint_region.reset();
+    state.flush_region.reset();
+    state.service_requested = false;
     const vm::ObjectRef canvas = state.object;
     if (desired) {
         active_canvas_ = canvas.bits;
@@ -935,6 +1063,18 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
                        "javax/microedition/lcdui/Canvas",
                        "hideNotify",
                        "()V");
+}
+
+void CanvasRuntime::set_game_rendering_enabled(
+    CanvasState& state,
+    bool enabled) noexcept {
+    if (!state.game_canvas || state.game_graphics.is_null()) return;
+    auto context = machine_.graphics().context(state.game_graphics.bits);
+    if (context) {
+        (*context)->rendering_enabled = enabled;
+    } else {
+        state.game_graphics = {};
+    }
 }
 
 bool CanvasRuntime::suppresses_key_callback(

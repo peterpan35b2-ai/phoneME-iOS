@@ -114,6 +114,7 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
   -pthread -lz \
   -framework CoreText \
   -framework CoreGraphics \
+  -framework ImageIO \
   -framework CoreFoundation \
   -o "$BUILD_ROOT/filesystem-vm-tests"
 

@@ -99,6 +99,9 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         emitLong("calendar-time-reset", new LongCall() {
             public long run() { return calendarTimeReset(); }
         });
+        emitInt("long-cutover-compare", new IntCall() {
+            public int run() { return dynamicCutoverCompare(); }
+        });
         emitInt("spacer-ticker", new IntCall() {
             public int run() { return spacerTickerSemantics(); }
         });
@@ -386,6 +389,11 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         calendar.set(Calendar.MONTH, Calendar.JANUARY);
         calendar.set(Calendar.DATE, 1);
         return calendar.getTime().getTime();
+    }
+
+    public static int dynamicCutoverCompare() {
+        long value = new Date(0L).getTime();
+        return value >= -12219292800000L ? 1 : 0;
     }
 
     public static int spacerTickerSemantics() {

@@ -140,6 +140,7 @@ namespace phoneme::vm
     [[nodiscard]] Status enqueue_serial_callback(ObjectRef runnable);
     [[nodiscard]] Status pump_serial_callbacks(usize maximum_callbacks = 8U);
     [[nodiscard]] usize pending_serial_callbacks() const noexcept;
+    void set_serial_callback_coalescing(bool enabled) noexcept;
     [[nodiscard]] Status register_ui_component(i32 component_id,
                                                ObjectRef object);
     void unregister_ui_component(i32 component_id) noexcept;
@@ -284,6 +285,7 @@ namespace phoneme::vm
         std::optional<ObjectRef> monitor);
     [[nodiscard]] Status enter_monitor(ObjectRef monitor);
     [[nodiscard]] Status enter_external_execution();
+    [[nodiscard]] bool try_enter_external_execution() noexcept;
     void leave_external_execution() noexcept;
     [[nodiscard]] u32 suspend_execution_for_blocking() noexcept;
     void resume_execution_after_blocking(u32 depth) noexcept;
@@ -320,6 +322,7 @@ namespace phoneme::vm
     RootSet native_roots_;
     mutable std::mutex serial_callbacks_mutex_;
     std::deque<NativeRootScope> serial_callbacks_;
+    bool serial_callback_coalescing_ {false};
     ObjectRef emergency_out_of_memory_error_ {};
     std::unordered_set<std::string> initialized_classes_;
     std::unordered_set<std::string> initializing_classes_;

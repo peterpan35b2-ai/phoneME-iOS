@@ -418,6 +418,13 @@ void register_class_natives(NativeMethodRegistry& registry) {
             auto resource = utf8_text(machine, *name);
             if (!class_name) return std::unexpected(class_name.error());
             if (!resource) return std::unexpected(resource.error());
+            if (resource->empty()) {
+                // Class.getResourceAsStream("") denotes no resource. Returning
+                // null is required here; forwarding an empty archive path to
+                // the secure normalizer turns a harmless probe into an
+                // unexpected SecurityException in legacy game engines.
+                return std::optional<Value>(Value::from_reference({}));
+            }
             std::string path;
             if (!resource->empty() && resource->front() == '/') {
                 path.assign(resource->begin() + 1, resource->end());

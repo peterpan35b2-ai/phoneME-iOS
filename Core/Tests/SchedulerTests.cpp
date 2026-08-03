@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -5,6 +6,7 @@
 #include <iostream>
 #include <string_view>
 
+#include "phoneme/vm/CanvasBridge.hpp"
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MediaEventDispatch.hpp"
@@ -57,6 +59,69 @@ void require(bool condition, const char* message) {
     }
 }
 
+class BlockingWaitProbeBridge final : public phoneme::vm::CanvasBridge {
+public:
+    explicit BlockingWaitProbeBridge(phoneme::vm::Machine& machine)
+        : machine_(machine) {}
+
+    bool observed_released_execution {false};
+
+    phoneme::Status register_canvas(phoneme::vm::ObjectRef,
+                                    bool,
+                                    bool) override { return {}; }
+    phoneme::Status set_display_visible(phoneme::vm::ObjectRef,
+                                        bool) override { return {}; }
+    phoneme::Status flush_visibility_callbacks() override { return {}; }
+    phoneme::Status request_repaint(phoneme::vm::ObjectRef,
+                                    phoneme::vm::CanvasRect) override {
+        return {};
+    }
+    phoneme::Status request_service_repaints(
+        phoneme::vm::ObjectRef) override { return {}; }
+    phoneme::Status pump_blocking_wait_work() override {
+        observed_released_execution = !machine_.executing_on_current_thread();
+        if (!observed_released_execution) {
+            return phoneme::fail(
+                phoneme::ErrorCode::invalid_state,
+                "blocking Canvas pump retained stale VM execution ownership");
+        }
+        return {};
+    }
+    phoneme::Status set_fullscreen(phoneme::vm::ObjectRef,
+                                   bool) override { return {}; }
+    phoneme::Result<phoneme::Dimensions> canvas_dimensions(
+        phoneme::vm::ObjectRef) const override {
+        return phoneme::Dimensions {1, 1};
+    }
+    phoneme::Dimensions display_dimensions() const noexcept override {
+        return {1, 1};
+    }
+    bool pointer_events_supported() const noexcept override { return false; }
+    bool pointer_motion_supported() const noexcept override { return false; }
+    bool repeat_events_supported() const noexcept override { return false; }
+    phoneme::i32 game_action_for_key(phoneme::i32) const noexcept override {
+        return 0;
+    }
+    phoneme::Result<phoneme::i32> key_code_for_action(
+        phoneme::i32) const override { return 0; }
+    std::string key_name(phoneme::i32) const override { return {}; }
+    phoneme::i32 game_key_states(
+        phoneme::vm::ObjectRef) const noexcept override { return 0; }
+    phoneme::Result<phoneme::vm::ObjectRef> game_graphics(
+        phoneme::vm::ObjectRef) override {
+        return phoneme::vm::ObjectRef {};
+    }
+    phoneme::Status request_game_flush(phoneme::vm::ObjectRef,
+                                       phoneme::vm::CanvasRect) override {
+        return {};
+    }
+    void append_reference_roots(
+        std::vector<phoneme::vm::ObjectRef>&) const override {}
+
+private:
+    phoneme::vm::Machine& machine_;
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -69,6 +134,133 @@ int main(int argc, char** argv) {
     phoneme::vm::ClassRepository classes;
     require(classes.add_archive(argv[1]).has_value(),
             "add scheduler fixture archive");
+
+    {
+        phoneme::vm::Machine wait_machine(classes);
+        BlockingWaitProbeBridge bridge(wait_machine);
+        wait_machine.configure_canvas_bridge(&bridge);
+        auto waited = wait_machine.invoke_static(
+            "corefixture/ThreadOps",
+            "timedWaitForCanvasPump",
+            "()I",
+            {},
+            10'000'000U);
+        require(waited.has_value() && waited->completed_normally() &&
+                    waited->return_value.has_value() &&
+                    waited->return_value->as_int().value_or(0) == 1,
+                "timed Object.wait completes while Canvas work is pumped");
+        require(bridge.observed_released_execution,
+                "blocking Canvas pump sees the VM execution gate released");
+        wait_machine.configure_canvas_bridge(nullptr);
+    }
+
+    {
+        phoneme::vm::Machine native_lifetime_machine(classes);
+        auto thread_root = native_lifetime_machine.allocate_pinned_instance(
+            "java/lang/Thread");
+        auto target_root = native_lifetime_machine.allocate_pinned_instance(
+            "java/lang/Object");
+        require(thread_root.has_value() && target_root.has_value(),
+                "allocate native scheduler lifetime fixtures");
+        auto thread = thread_root->get();
+        auto target = target_root->get();
+        require(thread.has_value() && target.has_value(),
+                "resolve native scheduler lifetime fixture roots");
+        require(native_lifetime_machine.initialize_java_thread(
+                    *thread, *target).has_value(),
+                "register native scheduler fixture thread");
+        require(native_lifetime_machine.scheduler().start_native_thread(
+                    native_lifetime_machine,
+                    *thread,
+                    [](std::stop_token)
+                        -> phoneme::Result<std::optional<phoneme::vm::ObjectRef>> {
+                        return std::optional<phoneme::vm::ObjectRef> {};
+                    }).has_value(),
+                "start ephemeral native scheduler fixture");
+        require(thread_root->release().has_value() &&
+                    target_root->release().has_value(),
+                "release external native scheduler fixture roots");
+
+        bool terminated = false;
+        for (int attempt = 0; attempt < 200 && !terminated; ++attempt) {
+            const auto snapshot = native_lifetime_machine.scheduler().snapshot();
+            for (const auto& entry : snapshot.threads) {
+                if (entry.object == *thread &&
+                    entry.state == phoneme::vm::JavaThreadState::terminated) {
+                    terminated = true;
+                    break;
+                }
+            }
+            if (!terminated) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        require(terminated, "ephemeral native scheduler fixture terminates");
+
+        std::vector<phoneme::vm::ObjectRef> roots;
+        native_lifetime_machine.scheduler().append_reference_roots(roots);
+        require(std::find(roots.begin(), roots.end(), *thread) == roots.end() &&
+                    std::find(roots.begin(), roots.end(), *target) == roots.end(),
+                "terminated native task releases Thread and Runnable GC roots");
+
+        auto next_thread_root =
+            native_lifetime_machine.allocate_pinned_instance("java/lang/Thread");
+        require(next_thread_root.has_value(),
+                "allocate next native task for pruning");
+        auto next_thread = next_thread_root->get();
+        require(next_thread.has_value(),
+                "resolve next native task thread");
+        require(native_lifetime_machine.initialize_java_thread(
+                    *next_thread, {}).has_value(),
+                "register next native task thread");
+        require(native_lifetime_machine.scheduler().start_native_thread(
+                    native_lifetime_machine,
+                    *next_thread,
+                    [](std::stop_token)
+                        -> phoneme::Result<std::optional<phoneme::vm::ObjectRef>> {
+                        return std::optional<phoneme::vm::ObjectRef> {};
+                    }).has_value(),
+                "start next native task and prune completed record");
+        const auto pruned_snapshot =
+            native_lifetime_machine.scheduler().snapshot();
+        require(std::none_of(
+                    pruned_snapshot.threads.begin(),
+                    pruned_snapshot.threads.end(),
+                    [thread](const phoneme::vm::JavaThreadSnapshot& entry) {
+                        return entry.object == *thread;
+                    }),
+                "next native task prunes prior terminated native record");
+    }
+
+    {
+        phoneme::vm::Machine callback_machine(classes);
+        auto first_root = callback_machine.allocate_pinned_instance(
+            "java/lang/Object");
+        auto second_root = callback_machine.allocate_pinned_instance(
+            "java/lang/Object");
+        require(first_root.has_value() && second_root.has_value(),
+                "allocate serial callback coalescing fixtures");
+        auto first = first_root->get();
+        auto second = second_root->get();
+        require(first.has_value() && second.has_value(),
+                "resolve serial callback fixture roots");
+
+        callback_machine.set_serial_callback_coalescing(true);
+        for (int iteration = 0; iteration < 128; ++iteration) {
+            require(callback_machine.enqueue_serial_callback(*first).has_value(),
+                    "coalesce repeated hidden serial callback");
+        }
+        require(callback_machine.enqueue_serial_callback(*second).has_value(),
+                "retain distinct hidden serial callback");
+        require(callback_machine.pending_serial_callbacks() == 2U,
+                "hidden callSerially queue keeps one entry per Runnable");
+
+        callback_machine.set_serial_callback_coalescing(false);
+        require(callback_machine.enqueue_serial_callback(*first).has_value(),
+                "foreground serial callback preserves repeated scheduling");
+        require(callback_machine.pending_serial_callbacks() == 3U,
+                "foreground callSerially queue restores normal semantics");
+    }
 
     phoneme::vm::Machine machine(classes);
     auto registered_gc = machine.natives().register_method(

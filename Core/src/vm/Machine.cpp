@@ -70,6 +70,78 @@ namespace phoneme::vm
       return false;
     }
 
+    [[nodiscard]] bool matches_long_bit_permutation_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(JII[I[J)J" || !method.code.has_value())
+      {
+        return false;
+      }
+      static constexpr std::array<u8, 139> kPattern {{
+          0x09U, 0x37U, 0x06U, 0x19U, 0x04U, 0xBEU, 0x36U, 0x08U,
+          0x03U, 0x36U, 0x09U, 0xA7U, 0x00U, 0x44U, 0x1EU, 0xB2U,
+          0x00U, 0x0BU, 0x15U, 0x09U, 0x2FU, 0x7FU, 0x37U, 0x0AU,
+          0x19U, 0x04U, 0x15U, 0x09U, 0x2EU, 0x36U, 0x0CU, 0x16U,
+          0x0AU, 0x09U, 0x94U, 0x99U, 0x00U, 0x29U, 0x15U, 0x0CU,
+          0x9EU, 0x00U, 0x0DU, 0x16U, 0x0AU, 0x15U, 0x0CU, 0x7DU,
+          0x37U, 0x0AU, 0xA7U, 0x00U, 0x13U, 0x15U, 0x0CU, 0x9CU,
+          0x00U, 0x0EU, 0x16U, 0x0AU, 0x15U, 0x0CU, 0x02U, 0x82U,
+          0x04U, 0x60U, 0x79U, 0x37U, 0x0AU, 0x16U, 0x06U, 0x16U,
+          0x0AU, 0x81U, 0x37U, 0x06U, 0x84U, 0x09U, 0x01U, 0x15U,
+          0x09U, 0x15U, 0x08U, 0xA1U, 0xFFU, 0xBBU, 0x10U, 0x40U,
+          0x36U, 0x08U, 0x16U, 0x06U, 0x37U, 0x0AU, 0x15U, 0x08U,
+          0x04U, 0x64U, 0x1DU, 0x64U, 0x36U, 0x0CU, 0x15U, 0x0CU,
+          0x9EU, 0x00U, 0x0AU, 0x16U, 0x0AU, 0x15U, 0x0CU, 0x79U,
+          0x37U, 0x0AU, 0x1CU, 0x15U, 0x08U, 0x60U, 0x04U, 0x64U,
+          0x1DU, 0x64U, 0x36U, 0x0DU, 0x15U, 0x0DU, 0x9EU, 0x00U,
+          0x0AU, 0x16U, 0x0AU, 0x15U, 0x0DU, 0x7DU, 0x37U, 0x0AU,
+          0x16U, 0x0AU, 0xADU,
+      }};
+      const auto& bytecode = method.code->bytecode;
+      if (bytecode.size() != kPattern.size()) return false;
+      // Bytes 16-17 are the constant-pool index of the static long[] mask
+      // field and legitimately vary between otherwise identical obfuscator
+      // output.
+      return std::equal(bytecode.begin(), bytecode.begin() + 16U,
+                        kPattern.begin()) &&
+             std::equal(bytecode.begin() + 18U, bytecode.end(),
+                        kPattern.begin() + 18U);
+    }
+
+    [[nodiscard]] bool matches_vector_key_sort_initializer(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "()V" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 58U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0xB2U}, {3U, 0xB6U}, {6U, 0x3BU},
+          {7U, 0xBBU}, {10U, 0x59U}, {11U, 0x1AU},
+          {12U, 0xB7U}, {15U, 0x4CU}, {16U, 0x03U},
+          {17U, 0x3DU}, {18U, 0xA7U}, {19U, 0x00U},
+          {20U, 0x11U}, {21U, 0x2BU}, {22U, 0xB2U},
+          {25U, 0x1CU}, {26U, 0xB6U}, {29U, 0xB6U},
+          {32U, 0x84U}, {33U, 0x02U}, {34U, 0x01U},
+          {35U, 0x1CU}, {36U, 0x1AU}, {37U, 0xA1U},
+          {38U, 0xFFU}, {39U, 0xF0U}, {40U, 0x03U},
+          {41U, 0xB2U}, {44U, 0xB6U}, {47U, 0x04U},
+          {48U, 0x64U}, {49U, 0xB2U}, {52U, 0x2BU},
+          {53U, 0x03U}, {54U, 0xB8U}, {57U, 0xB1U},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return code[1U] == code[23U] && code[2U] == code[24U] &&
+             code[1U] == code[42U] && code[2U] == code[43U] &&
+             code[1U] == code[50U] && code[2U] == code[51U];
+    }
+
     class ExecutionFrame final
     {
     public:
@@ -1043,19 +1115,29 @@ namespace phoneme::vm
       timeout = std::chrono::milliseconds(*millis);
 
     u32 released_depth = 0U;
+    std::optional<Error> blocking_pump_error;
+    const bool pump_timed_wait = timeout.has_value() && canvas_bridge_ != nullptr;
     auto result = monitors_.wait(
         object,
         scheduler_.current_thread_id(),
         timeout,
-        [this, &released_depth] {
+        [this, &released_depth, &blocking_pump_error, pump_timed_wait] {
           scheduler_.set_current_state(JavaThreadState::waiting);
           released_depth = suspend_execution_for_blocking();
+          if (pump_timed_wait)
+          {
+            auto pumped = canvas_bridge_->pump_blocking_wait_work();
+            if (!pumped)
+              blocking_pump_error = pumped.error();
+          }
         },
         [this, &released_depth] {
           resume_execution_after_blocking(released_depth);
           scheduler_.set_current_state(JavaThreadState::running);
         },
         [this] { return scheduler_.current_is_interrupted(); });
+    if (blocking_pump_error.has_value())
+      return std::unexpected(std::move(*blocking_pump_error));
     if (result && *result == MonitorWaitResult::interrupted)
       (void)scheduler_.consume_current_interrupt();
     return result;
@@ -1092,6 +1174,17 @@ namespace phoneme::vm
     return {};
   }
 
+  bool Machine::try_enter_external_execution() noexcept
+  {
+    if (g_execution_machine != nullptr && g_execution_machine != this)
+      return false;
+    if (!execution_mutex_.try_lock())
+      return false;
+    g_execution_machine = this;
+    ++g_execution_lock_depth;
+    return true;
+  }
+
   void Machine::leave_external_execution() noexcept
   {
     if (g_execution_machine != this || g_execution_lock_depth == 0U)
@@ -1114,13 +1207,27 @@ namespace phoneme::vm
     const u32 depth = g_execution_lock_depth;
     for (u32 index = 0U; index < depth; ++index)
       execution_mutex_.unlock();
+
+    // The recursive mutex is now physically unowned by this host thread, so
+    // its TLS execution state must say the same thing. Keeping the old logical
+    // depth here is unsafe when a blocking hook pumps Canvas work: that nested
+    // execution acquires the mutex from depth zero, but a nested sleep/wait
+    // would try to unlock the stale outer depth as well and corrupt the gate.
+    g_execution_lock_depth = 0U;
+    g_execution_machine = nullptr;
     return depth;
   }
 
   void Machine::resume_execution_after_blocking(u32 depth) noexcept
   {
+    if (depth == 0U)
+      return;
+    if (g_execution_machine != nullptr || g_execution_lock_depth != 0U)
+      std::abort();
     for (u32 index = 0U; index < depth; ++index)
       execution_mutex_.lock();
+    g_execution_machine = this;
+    g_execution_lock_depth = depth;
   }
 
   void Machine::publish_execution_roots(
@@ -1359,6 +1466,15 @@ namespace phoneme::vm
 
     constexpr usize kMaximumQueuedCallbacks = 4'096U;
     std::scoped_lock lock(serial_callbacks_mutex_);
+    if (serial_callback_coalescing_)
+    {
+      for (const auto &queued : serial_callbacks_)
+      {
+        auto queued_runnable = queued.get();
+        if (queued_runnable && *queued_runnable == runnable)
+          return {};
+      }
+    }
     if (serial_callbacks_.size() >= kMaximumQueuedCallbacks)
     {
       return fail(ErrorCode::overflow,
@@ -1416,6 +1532,30 @@ namespace phoneme::vm
   {
     std::scoped_lock lock(serial_callbacks_mutex_);
     return serial_callbacks_.size();
+  }
+
+  void Machine::set_serial_callback_coalescing(bool enabled) noexcept
+  {
+    std::scoped_lock lock(serial_callbacks_mutex_);
+    serial_callback_coalescing_ = enabled;
+    if (!enabled || serial_callbacks_.size() < 2U)
+      return;
+
+    std::unordered_set<u64> retained;
+    std::deque<NativeRootScope> compacted;
+    while (!serial_callbacks_.empty())
+    {
+      auto callback = std::move(serial_callbacks_.front());
+      serial_callbacks_.pop_front();
+      auto runnable = callback.get();
+      if (!runnable || runnable->is_null() ||
+          !retained.insert(runnable->bits).second)
+      {
+        continue;
+      }
+      compacted.push_back(std::move(callback));
+    }
+    serial_callbacks_ = std::move(compacted);
   }
 
   Status Machine::register_ui_component(i32 component_id,
@@ -2930,6 +3070,339 @@ namespace phoneme::vm
       return heap_.allocate_array(std::string(class_name),
                                   length,
                                   initial_value);
+    };
+
+    const auto try_vector_key_sort_intrinsic =
+        [this](const Invocation& candidate) -> Result<bool>
+    {
+      if (candidate.method.owner == nullptr ||
+          candidate.method.method == nullptr || candidate.has_receiver ||
+          !candidate.arguments.empty() ||
+          !matches_vector_key_sort_initializer(*candidate.method.method))
+      {
+        return false;
+      }
+
+      const auto& owner = *candidate.method.owner;
+      const auto& sort_code = candidate.method.method->code->bytecode;
+      const u16 vector_field_index = static_cast<u16>(
+          (static_cast<u16>(sort_code[1U]) << 8U) |
+          static_cast<u16>(sort_code[2U]));
+      auto vector_reference = owner.member_reference(vector_field_index);
+      if (!vector_reference ||
+          vector_reference->descriptor != "Ljava/util/Vector;")
+      {
+        return false;
+      }
+
+      const classfile::Method* comparator = nullptr;
+      for (const auto& method : owner.methods())
+      {
+        if ((method.access_flags & kAccStatic) != 0U ||
+            !method.code.has_value() || method.code->bytecode.size() != 69U ||
+            !method.descriptor.ends_with(")Z"))
+        {
+          continue;
+        }
+        const auto& code = method.code->bytecode;
+        const bool shape_matches =
+            code[0U] == 0x2AU && code[1U] == 0x2BU &&
+            code[2U] == 0xA6U && code[5U] == 0x04U &&
+            code[6U] == 0xACU && code[7U] == 0x2BU &&
+            code[8U] == 0xC1U && code[11U] == 0x99U &&
+            code[14U] == 0x2AU && code[15U] == 0xB4U &&
+            code[18U] == 0x10U && code[19U] == 56U &&
+            code[20U] == 0x10U && code[21U] == 63U &&
+            code[22U] == 0x2AU && code[23U] == 0xB4U &&
+            code[26U] == 0x2AU && code[27U] == 0xB4U &&
+            code[30U] == 0xB8U && code[33U] == 0x2BU &&
+            code[34U] == 0xC0U && code[37U] == 0x4DU &&
+            code[38U] == 0x2CU && code[39U] == 0xB4U &&
+            code[42U] == 0x10U && code[43U] == 56U &&
+            code[44U] == 0x10U && code[45U] == 63U &&
+            code[46U] == 0x2CU && code[47U] == 0xB4U &&
+            code[50U] == 0x2CU && code[51U] == 0xB4U &&
+            code[54U] == 0xB8U && code[57U] == 0x65U &&
+            code[58U] == 0x09U && code[59U] == 0x94U &&
+            code[60U] == 0x9EU && code[63U] == 0x03U &&
+            code[64U] == 0xACU && code[65U] == 0x04U &&
+            code[66U] == 0xACU && code[67U] == 0x04U &&
+            code[68U] == 0xACU &&
+            code[9U] == code[35U] && code[10U] == code[36U] &&
+            code[16U] == code[40U] && code[17U] == code[41U] &&
+            code[24U] == code[48U] && code[25U] == code[49U] &&
+            code[31U] == code[55U] && code[32U] == code[56U];
+        if (shape_matches)
+        {
+          comparator = &method;
+          break;
+        }
+      }
+      if (comparator == nullptr) return false;
+
+      const auto& comparator_code = comparator->code->bytecode;
+      const auto member_index = [&comparator_code](usize offset) {
+        return static_cast<u16>(
+            (static_cast<u16>(comparator_code[offset]) << 8U) |
+            static_cast<u16>(comparator_code[offset + 1U]));
+      };
+      auto key_reference = owner.member_reference(member_index(16U));
+      auto shifts_reference = owner.member_reference(member_index(24U));
+      auto permutation_reference = owner.member_reference(member_index(31U));
+      if (!key_reference || !shifts_reference || !permutation_reference ||
+          key_reference->descriptor != "J" ||
+          shifts_reference->descriptor != "[I" ||
+          permutation_reference->descriptor != "(JII[I[J)J")
+      {
+        return false;
+      }
+      auto permutation_method = classes_.resolve_declared_method(
+          permutation_reference->owner,
+          permutation_reference->name,
+          permutation_reference->descriptor);
+      if (!permutation_method ||
+          !matches_long_bit_permutation_intrinsic(
+              *permutation_method->method))
+      {
+        return false;
+      }
+      const auto& permutation_code =
+          permutation_method->method->code->bytecode;
+      const u16 masks_field_index = static_cast<u16>(
+          (static_cast<u16>(permutation_code[16U]) << 8U) |
+          static_cast<u16>(permutation_code[17U]));
+      auto masks_reference =
+          permutation_method->owner->member_reference(masks_field_index);
+      if (!masks_reference || masks_reference->descriptor != "[J")
+      {
+        return false;
+      }
+
+      auto vector_field = states_.resolve_field(vector_reference->owner,
+                                                vector_reference->name,
+                                                vector_reference->descriptor,
+                                                true);
+      auto key_field = states_.resolve_field(key_reference->owner,
+                                             key_reference->name,
+                                             key_reference->descriptor,
+                                             false);
+      auto shifts_field = states_.resolve_field(shifts_reference->owner,
+                                                shifts_reference->name,
+                                                shifts_reference->descriptor,
+                                                false);
+      auto masks_field = states_.resolve_field(masks_reference->owner,
+                                               masks_reference->name,
+                                               masks_reference->descriptor,
+                                               true);
+      if (!vector_field || !key_field || !shifts_field || !masks_field)
+      {
+        return false;
+      }
+      auto vector_value = states_.static_field(*vector_field);
+      auto masks_value = states_.static_field(*masks_field);
+      if (!vector_value || !masks_value) return false;
+      auto vector = vector_value->as_reference();
+      auto masks = masks_value->as_reference();
+      if (!vector || !masks || vector->is_null() || masks->is_null())
+      {
+        return false;
+      }
+      auto vector_class = heap_.class_name(*vector);
+      if (!vector_class || *vector_class != "java/util/Vector")
+      {
+        return false;
+      }
+      auto data_value = heap_.field(*vector, 0U);
+      auto count_value = heap_.field(*vector, 1U);
+      if (!data_value || !count_value) return false;
+      auto data = data_value->as_reference();
+      auto count = count_value->as_int();
+      if (!data || !count || data->is_null() || *count < 0)
+      {
+        return false;
+      }
+      auto data_length = heap_.array_length(*data);
+      auto mask_count = heap_.array_length(*masks);
+      if (!data_length || !mask_count ||
+          static_cast<usize>(*count) > *data_length)
+      {
+        return false;
+      }
+
+      std::vector<u64> mask_values;
+      mask_values.reserve(*mask_count);
+      for (usize index = 0; index < *mask_count; ++index)
+      {
+        auto element = heap_.element(*masks, index);
+        if (!element) return false;
+        auto value = element->as_long();
+        if (!value) return false;
+        mask_values.push_back(static_cast<u64>(*value));
+      }
+
+      struct SortEntry final {
+        u64 key {0U};
+        Value value;
+      };
+      std::vector<SortEntry> entries;
+      entries.reserve(static_cast<usize>(*count));
+      for (i32 index = 0; index < *count; ++index)
+      {
+        auto element = heap_.element(*data, static_cast<usize>(index));
+        if (!element) return false;
+        auto object = element->as_reference();
+        if (!object || object->is_null()) return false;
+        auto object_class = heap_.class_name(*object);
+        if (!object_class || *object_class != owner.name()) return false;
+        auto input_value = heap_.field(*object, key_field->index);
+        auto shift_value = heap_.field(*object, shifts_field->index);
+        if (!input_value || !shift_value) return false;
+        auto input = input_value->as_long();
+        auto shifts = shift_value->as_reference();
+        if (!input || !shifts || shifts->is_null()) return false;
+        auto shift_count = heap_.array_length(*shifts);
+        if (!shift_count || *shift_count > mask_values.size()) return false;
+
+        const u64 source = static_cast<u64>(*input);
+        u64 accumulated = 0U;
+        for (usize shift_index = 0; shift_index < *shift_count;
+             ++shift_index)
+        {
+          auto shift_element = heap_.element(*shifts, shift_index);
+          if (!shift_element) return false;
+          auto shift = shift_element->as_int();
+          if (!shift) return false;
+          u64 selected = source & mask_values[shift_index];
+          if (selected == 0U) continue;
+          if (*shift > 0)
+          {
+            selected >>= static_cast<u32>(*shift) & 63U;
+          }
+          else if (*shift < 0)
+          {
+            selected <<=
+                (0U - static_cast<u32>(*shift)) & 63U;
+          }
+          accumulated |= selected;
+        }
+        entries.push_back(SortEntry {
+            .key = accumulated >> 56U,
+            .value = *element,
+        });
+      }
+
+      std::stable_sort(entries.begin(), entries.end(),
+                       [](const SortEntry& left, const SortEntry& right) {
+                         return left.key < right.key;
+                       });
+      for (usize index = 0; index < entries.size(); ++index)
+      {
+        auto stored = heap_.set_element(*data, index, entries[index].value);
+        if (!stored) return std::unexpected(stored.error());
+      }
+      return true;
+    };
+
+    const auto try_long_bit_permutation_intrinsic =
+        [this](const Invocation& candidate)
+        -> Result<std::optional<Value>>
+    {
+      if (candidate.method.owner == nullptr ||
+          candidate.method.method == nullptr || candidate.has_receiver ||
+          candidate.arguments.size() != 5U ||
+          !matches_long_bit_permutation_intrinsic(*candidate.method.method))
+      {
+        return std::optional<Value>{};
+      }
+
+      const auto& bytecode = candidate.method.method->code->bytecode;
+      const u16 field_index = static_cast<u16>(
+          (static_cast<u16>(bytecode[16U]) << 8U) |
+          static_cast<u16>(bytecode[17U]));
+      auto mask_reference = candidate.method.owner->member_reference(field_index);
+      if (!mask_reference)
+        return std::unexpected(mask_reference.error());
+      if (mask_reference->descriptor != "[J")
+        return std::optional<Value>{};
+      auto mask_field = states_.resolve_field(mask_reference->owner,
+                                              mask_reference->name,
+                                              mask_reference->descriptor,
+                                              true);
+      if (!mask_field)
+        return std::unexpected(mask_field.error());
+      auto mask_value = states_.static_field(*mask_field);
+      if (!mask_value)
+        return std::unexpected(mask_value.error());
+
+      auto input = candidate.arguments[0].as_long();
+      auto first_position = candidate.arguments[1].as_int();
+      auto last_position = candidate.arguments[2].as_int();
+      auto shift_reference = candidate.arguments[3].as_reference();
+      auto masks = mask_value->as_reference();
+      if (!input || !first_position || !last_position ||
+          !shift_reference || !masks || shift_reference->is_null() ||
+          masks->is_null())
+      {
+        // Preserve normal Java exception behavior for malformed/null inputs.
+        return std::optional<Value>{};
+      }
+      auto shift_count = heap_.array_length(*shift_reference);
+      auto mask_count = heap_.array_length(*masks);
+      if (!shift_count || !mask_count)
+      {
+        return std::optional<Value>{};
+      }
+      if (*mask_count < *shift_count)
+      {
+        return std::optional<Value>{};
+      }
+
+      const u64 source = static_cast<u64>(*input);
+      u64 accumulated = 0U;
+      for (usize index = 0; index < *shift_count; ++index)
+      {
+        auto mask_element = heap_.element(*masks, index);
+        auto shift_element = heap_.element(*shift_reference, index);
+        if (!mask_element || !shift_element)
+        {
+          return std::optional<Value>{};
+        }
+        auto mask = mask_element->as_long();
+        auto shift = shift_element->as_int();
+        if (!mask || !shift)
+        {
+          return std::optional<Value>{};
+        }
+        u64 selected = source & static_cast<u64>(*mask);
+        if (selected == 0U) continue;
+        if (*shift > 0)
+        {
+          selected >>= static_cast<u32>(*shift) & 63U;
+        }
+        else if (*shift < 0)
+        {
+          const u32 distance =
+              (0U - static_cast<u32>(*shift)) & 63U;
+          selected <<= distance;
+        }
+        accumulated |= selected;
+      }
+
+      const i32 leading_shift = static_cast<i32>(
+          63U - static_cast<u32>(*last_position));
+      if (leading_shift > 0)
+      {
+        accumulated <<= static_cast<u32>(leading_shift) & 63U;
+      }
+      const i32 trailing_shift = static_cast<i32>(
+          static_cast<u32>(*first_position) + 63U -
+          static_cast<u32>(*last_position));
+      if (trailing_shift > 0)
+      {
+        accumulated >>= static_cast<u32>(trailing_shift) & 63U;
+      }
+      return std::optional<Value>(
+          Value::from_long(std::bit_cast<i64>(accumulated)));
     };
 
     const auto complete_return = [this, &frames, &executed](
@@ -5034,6 +5507,42 @@ namespace phoneme::vm
         if (!nested_monitor)
         {
           return std::unexpected(nested_monitor.error());
+        }
+        if (!nested_is_native)
+        {
+          auto sorted = try_vector_key_sort_intrinsic(*nested);
+          if (!sorted)
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            return std::unexpected(sorted.error());
+          }
+          if (*sorted)
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            break;
+          }
+          auto intrinsic = try_long_bit_permutation_intrinsic(*nested);
+          if (!intrinsic)
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            return std::unexpected(intrinsic.error());
+          }
+          if (intrinsic->has_value())
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            auto pushed = frame.push(**intrinsic);
+            if (!pushed)
+              return std::unexpected(pushed.error());
+            break;
+          }
         }
         if (nested_is_native)
         {

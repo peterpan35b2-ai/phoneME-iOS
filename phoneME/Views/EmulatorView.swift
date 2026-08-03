@@ -827,7 +827,9 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                         Button(action: hideAction) {
                             Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
                         }
-                        Button("Exit", role: .destructive, action: exitAction)
+                        Button(role: .destructive, action: exitAction) {
+                            Label("Exit", systemImage: "power")
+                        }
                         Button(action: toggleRotationLockAction) {
                             Label(
                                 isRotationLocked

@@ -11,7 +11,6 @@ public final class CanvasEventOps extends MIDlet {
     protected void startApp() {
         if (canvas == null) {
             canvas = new EventCanvas();
-            Display.getDisplay(this).setCurrent(canvas);
             canvas.repaint();
         }
     }
@@ -19,8 +18,12 @@ public final class CanvasEventOps extends MIDlet {
     protected void pauseApp() { }
     protected void destroyApp(boolean unconditional) { }
 
-    private static final class EventCanvas extends Canvas {
+    private final class EventCanvas extends Canvas {
         private int paintCount;
+
+        EventCanvas() {
+            Display.getDisplay(CanvasEventOps.this).setCurrent(this);
+        }
 
         protected void paint(Graphics graphics) {
             paintCount++;
@@ -32,6 +35,9 @@ public final class CanvasEventOps extends MIDlet {
         }
 
         protected void showNotify() {
+            if (canvas != this) {
+                throw new NullPointerException("showNotify ran before constructor assignment");
+            }
             setTitle("eventShow");
         }
 

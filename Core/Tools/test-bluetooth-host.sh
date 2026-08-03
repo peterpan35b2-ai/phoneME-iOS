@@ -45,7 +45,7 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
   -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow \
   -Werror=return-type $SANITIZER_FLAGS \
   "$CORE_ROOT/Tests/BluetoothVmTests.cpp" "${SOURCES[@]}" \
-  -lz -framework CoreText -framework CoreGraphics -framework CoreFoundation \
+  -lz -framework CoreText -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
   -o "$TEST_BINARY"
 
 phoneme_run_with_timeout "${PHONEME_TEST_TIMEOUT:-300}" \

@@ -1964,7 +1964,9 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
         if ((event->kind == 7 || event->kind == 9) &&
             event->component_type == 5 && event->text == "Ngày" &&
             event->arguments[1] == 3 && event->arguments[3] == -1003 &&
-            event->value64 == 1'700'000'000 &&
+            // phoneME DateField.DATE_TIME discards seconds and
+            // milliseconds, so 1700000000000 becomes 1699999980000.
+            event->value64 == 1'699'999'980 &&
             event->detail == "GMT+07:00") {
             date_field_shown = true;
             date_field_id = event->component_id;
@@ -2359,9 +2361,9 @@ void test_runtime_canvas(const std::string& fixture_jar) {
     require(frame.dimensions.width == 320 && frame.dimensions.height == 240 &&
                 frame.rgba.size() == 320U * 240U * 4U,
             "Canvas paint publishes a complete framebuffer");
-    require(frame.rgba[0] == 0x12U && frame.rgba[1] == 0x34U &&
-                frame.rgba[2] == 0x56U && frame.rgba[3] == 0xFFU,
-            "Canvas Graphics renders through the agreed render contract");
+    require(frame.rgba[0] == 0x10U && frame.rgba[1] == 0x34U &&
+                frame.rgba[2] == 0x52U && frame.rgba[3] == 0xFFU,
+            "Canvas Graphics publishes phoneME-compatible RGB565 colors");
 
     runtime.send_key(-1, true);
     std::this_thread::sleep_for(std::chrono::milliseconds(450));
@@ -2483,9 +2485,9 @@ void test_runtime_canvas(const std::string& fixture_jar) {
             "budget-exhausted Canvas remains active");
     const auto budget_frame = runtime.frame_snapshot();
     require(budget_frame.rgba.size() == 320U * 240U * 4U &&
-                budget_frame.rgba[0] == 0x22U &&
-                budget_frame.rgba[1] == 0x44U &&
-                budget_frame.rgba[2] == 0x66U &&
+                budget_frame.rgba[0] == 0x21U &&
+                budget_frame.rgba[1] == 0x45U &&
+                budget_frame.rgba[2] == 0x63U &&
                 budget_frame.rgba[3] == 0xFFU,
             "Canvas commits drawing completed before budget exhaustion");
     require(runtime.destroy_midlet(budget_app).has_value(),

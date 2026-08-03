@@ -223,9 +223,8 @@ Status Image::set_pixel(i32 x,
     Pixel& destination =
         pixels_[static_cast<usize>(y) * static_cast<usize>(width_) +
                 static_cast<usize>(x)];
-    const Pixel composited = blend
-        ? source_over(pixel_value, destination)
-        : pixel_value;
+    const Pixel composited = rgb565_roundtrip(
+        blend ? source_over(pixel_value, destination) : pixel_value);
     if (composited != destination) {
         destination = composited;
         mark_dirty_region(x, y, 1, 1);

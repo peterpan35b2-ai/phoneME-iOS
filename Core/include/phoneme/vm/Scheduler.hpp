@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -58,6 +59,8 @@ public:
         ObjectRef thread_object) const;
 
     void begin_execution_slice() noexcept;
+    void begin_unpaced_execution() noexcept;
+    void end_unpaced_execution() noexcept;
     void set_host_foreground(bool foreground) noexcept;
     void cooperative_quantum(Machine& machine);
     void cooperative_yield(Machine& machine);
@@ -101,6 +104,7 @@ private:
     void finish_thread(const std::shared_ptr<JavaThread>& thread,
                        std::optional<ObjectRef> throwable,
                        std::optional<Error> failure) noexcept;
+    void prune_terminated_native_threads();
     void update_queue_membership_locked(JavaThreadId id,
                                         JavaThreadState state);
     static void erase_id(std::deque<JavaThreadId>& queue,
@@ -117,7 +121,7 @@ private:
     bool deterministic_ {false};
     bool host_foreground_ {true};
     std::chrono::steady_clock::time_point background_resume_deadline_ {};
-    bool shutting_down_ {false};
+    std::atomic_bool shutting_down_ {false};
 
     static thread_local Scheduler* tls_scheduler_;
     static thread_local JavaThreadId tls_thread_id_;
@@ -125,6 +129,7 @@ private:
     static thread_local std::chrono::steady_clock::time_point
         tls_quantum_resume_time_;
     static thread_local bool tls_quantum_timing_valid_;
+    static thread_local u32 tls_unpaced_execution_depth_;
 };
 
 } // namespace phoneme::vm

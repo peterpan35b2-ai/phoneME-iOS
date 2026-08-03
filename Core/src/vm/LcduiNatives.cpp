@@ -1479,10 +1479,6 @@ void append_utf8(std::string& output, u32 code_point) {
                                         kDisplayCurrentField, next);
     if (!assigned) return std::unexpected(assigned.error());
     if (next.is_null()) {
-        if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
-            auto flushed = canvas->flush_visibility_callbacks();
-            if (!flushed) return std::unexpected(flushed.error());
-        }
         machine.emit_ui_event(UiBridgeEvent {.kind = kEventCommandsReset});
         return {};
     }
@@ -1492,8 +1488,11 @@ void append_utf8(std::string& output, u32 code_point) {
     if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
         auto visibility = canvas->set_display_visible(next, true);
         if (!visibility) return std::unexpected(visibility.error());
-        auto flushed = canvas->flush_visibility_callbacks();
-        if (!flushed) return std::unexpected(flushed.error());
+        // phoneME schedules Canvas show/hide callbacks on the LCDUI event
+        // thread. Running them synchronously from setCurrent() can observe a
+        // subclass before its constructor or assigning expression completes.
+        // CanvasRuntime::pump() drains the queued visibility edge before input
+        // and repaint work, preserving order without constructor re-entrancy.
     }
     auto custom_shown = notify_custom_items(machine, next, true);
     if (!custom_shown) return custom_shown;

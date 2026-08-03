@@ -43,13 +43,6 @@ constexpr usize kMaximumStoreNameBytes = 128;
     };
 }
 
-[[nodiscard]] uLong update_crc(uLong checksum,
-                               std::span<const u8> bytes) noexcept {
-    return ::crc32(checksum,
-                   bytes.data(),
-                   static_cast<uInt>(bytes.size()));
-}
-
 [[nodiscard]] std::string base64url_encode(std::string_view value) {
     static constexpr std::array<char, 64> alphabet {
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
@@ -979,22 +972,38 @@ Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
         reinterpret_cast<const u8*>(store.name.data()),
         store.name.size());
 
-    uLong checksum = ::crc32(0L, Z_NULL, 0);
-    checksum = update_crc(checksum, name_length);
-    checksum = update_crc(checksum, name_bytes);
-    checksum = update_crc(checksum, version);
-    checksum = update_crc(checksum, next_id);
-    checksum = update_crc(checksum, modified);
-    checksum = update_crc(checksum, feature_flags);
-    checksum = update_crc(checksum, record_count);
+    // Build one immutable payload and checksum those exact bytes. Besides
+    // reducing many tiny write() calls, this prevents the durable header and
+    // payload from ever being produced from different snapshots if another
+    // RMS user becomes active while persistence is being extended later.
+    std::vector<u8> payload;
+    payload.reserve(static_cast<usize>(payload_size));
+    const auto append = [&payload](std::span<const u8> bytes) {
+        payload.insert(payload.end(), bytes.begin(), bytes.end());
+    };
+    append(name_length);
+    append(name_bytes);
+    append(version);
+    append(next_id);
+    append(modified);
+    append(feature_flags);
+    append(record_count);
     for (const auto& [id, bytes] : store.records) {
         const auto encoded_id = encode_u32(static_cast<u32>(id));
         const auto encoded_length = encode_u32(
             static_cast<u32>(bytes.size()));
-        checksum = update_crc(checksum, encoded_id);
-        checksum = update_crc(checksum, encoded_length);
-        checksum = update_crc(checksum, bytes);
+        append(encoded_id);
+        append(encoded_length);
+        append(bytes);
     }
+    if (payload.size() != static_cast<usize>(payload_size)) {
+        return fail(ErrorCode::internal_error,
+                    "RMS serialized payload size is inconsistent");
+    }
+
+    const uLong checksum = ::crc32(
+        ::crc32(0L, Z_NULL, 0), payload.data(),
+        static_cast<uInt>(payload.size()));
 
     std::array<u8, 16> header {};
     std::copy(kMagic.begin(), kMagic.end(), header.begin());
@@ -1032,31 +1041,8 @@ Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
 
     auto written = write_piece(header);
     if (!written) return abort_temporary(std::move(written));
-    written = write_piece(name_length);
+    written = write_piece(payload);
     if (!written) return abort_temporary(std::move(written));
-    written = write_piece(name_bytes);
-    if (!written) return abort_temporary(std::move(written));
-    written = write_piece(version);
-    if (!written) return abort_temporary(std::move(written));
-    written = write_piece(next_id);
-    if (!written) return abort_temporary(std::move(written));
-    written = write_piece(modified);
-    if (!written) return abort_temporary(std::move(written));
-    written = write_piece(feature_flags);
-    if (!written) return abort_temporary(std::move(written));
-    written = write_piece(record_count);
-    if (!written) return abort_temporary(std::move(written));
-    for (const auto& [id, bytes] : store.records) {
-        const auto encoded_id = encode_u32(static_cast<u32>(id));
-        const auto encoded_length = encode_u32(
-            static_cast<u32>(bytes.size()));
-        written = write_piece(encoded_id);
-        if (!written) return abort_temporary(std::move(written));
-        written = write_piece(encoded_length);
-        if (!written) return abort_temporary(std::move(written));
-        written = write_piece(bytes);
-        if (!written) return abort_temporary(std::move(written));
-    }
 
     auto injected = inject_fault_unlocked(RecordStoreFaultPoint::file_sync);
     if (!injected) return abort_temporary(std::move(injected));

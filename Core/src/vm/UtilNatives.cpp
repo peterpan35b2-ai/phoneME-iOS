@@ -22,6 +22,8 @@ constexpr usize kVectorIncrementField = 2;
 constexpr usize kHashtableKeysField = 0;
 constexpr usize kHashtableValuesField = 1;
 constexpr usize kHashtableCountField = 2;
+constexpr usize kHashtableHashesField = 3;
+constexpr usize kHashtableBucketsField = 4;
 constexpr usize kEnumerationArrayField = 0;
 constexpr usize kEnumerationIndexField = 1;
 constexpr usize kEnumerationSizeField = 2;
@@ -337,6 +339,29 @@ struct TokenizerState final {
         state.string.substr(start, end - start));
     if (!token) return std::unexpected(token.error());
     return std::optional<Value>(Value::from_reference(*token));
+}
+
+[[nodiscard]] Result<i32> object_hash(Machine& machine,
+                                      ObjectRef object) {
+    if (object.is_null()) return 0;
+    auto class_name = machine.heap().class_name(object);
+    if (!class_name) return std::unexpected(class_name.error());
+    auto hash = machine.invoke_instance(
+        object, *class_name, "hashCode", "()I", {});
+    if (!hash) return std::unexpected(hash.error());
+    if (hash->throwable.has_value()) {
+        auto throwable_class = machine.heap().class_name(*hash->throwable);
+        if (!throwable_class) return std::unexpected(throwable_class.error());
+        return fail_java(*throwable_class,
+                         "Hashtable key hashCode() threw an exception");
+    }
+    if (!hash->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Object.hashCode returned without an int value");
+    }
+    auto value = hash->return_value->as_int();
+    if (!value) return std::unexpected(value.error());
+    return *value;
 }
 
 [[nodiscard]] Result<bool> values_equal(Machine& machine,
@@ -1325,6 +1350,22 @@ void register_vector(NativeMethodRegistry& registry) {
         });
 }
 
+[[nodiscard]] Result<usize> hashtable_bucket_capacity(
+    usize entry_capacity) {
+    if (entry_capacity >
+        (std::numeric_limits<usize>::max() - 1U) / 2U) {
+        return fail(ErrorCode::overflow,
+                    "Hashtable bucket capacity overflowed");
+    }
+    return std::max<usize>(3U, entry_capacity * 2U + 1U);
+}
+
+[[nodiscard]] Result<ObjectRef> allocate_int_array(Machine& machine,
+                                                   usize length) {
+    return machine.heap().allocate_array(
+        "[I", length, Value::from_int(0));
+}
+
 [[nodiscard]] Status initialize_hashtable(Machine& machine,
                                           ObjectRef object,
                                           i32 capacity) {
@@ -1333,40 +1374,165 @@ void register_vector(NativeMethodRegistry& registry) {
                          "Hashtable capacity is negative");
     }
     const usize actual = capacity == 0 ? 1U : static_cast<usize>(capacity);
+    auto bucket_capacity = hashtable_bucket_capacity(actual);
+    if (!bucket_capacity) return std::unexpected(bucket_capacity.error());
     auto keys = allocate_object_array(machine, actual);
     auto values = allocate_object_array(machine, actual);
+    auto hashes = allocate_int_array(machine, actual);
+    auto buckets = allocate_int_array(machine, *bucket_capacity);
     if (!keys) return std::unexpected(keys.error());
     if (!values) return std::unexpected(values.error());
+    if (!hashes) return std::unexpected(hashes.error());
+    if (!buckets) return std::unexpected(buckets.error());
     auto keys_stored = set_reference_field(machine, object,
                                            kHashtableKeysField, *keys);
     auto values_stored = set_reference_field(machine, object,
                                              kHashtableValuesField, *values);
+    auto hashes_stored = set_reference_field(machine, object,
+                                             kHashtableHashesField, *hashes);
+    auto buckets_stored = set_reference_field(machine, object,
+                                              kHashtableBucketsField, *buckets);
     auto count_stored = set_int_field(machine, object,
                                       kHashtableCountField, 0);
     if (!keys_stored) return keys_stored;
     if (!values_stored) return values_stored;
+    if (!hashes_stored) return hashes_stored;
+    if (!buckets_stored) return buckets_stored;
     return count_stored;
 }
 
-[[nodiscard]] Result<i32> hashtable_find(Machine& machine,
-                                         ObjectRef table,
-                                         ObjectRef key,
-                                         bool search_values) {
+[[nodiscard]] Status hashtable_insert_bucket(Machine& machine,
+                                                ObjectRef buckets,
+                                                i32 hash,
+                                                i32 entry_index) {
+    auto bucket_count = machine.heap().array_length(buckets);
+    if (!bucket_count) return std::unexpected(bucket_count.error());
+    if (*bucket_count == 0U) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable has no hash buckets");
+    }
+    usize bucket = static_cast<usize>(static_cast<u32>(hash)) %
+                   *bucket_count;
+    for (usize probe = 0; probe < *bucket_count; ++probe) {
+        auto marker = machine.heap().element(buckets, bucket);
+        if (!marker) return std::unexpected(marker.error());
+        auto stored_index = marker->as_int();
+        if (!stored_index) return std::unexpected(stored_index.error());
+        if (*stored_index == 0) {
+            return machine.heap().set_element(
+                buckets, bucket, Value::from_int(entry_index + 1));
+        }
+        bucket = (bucket + 1U) % *bucket_count;
+    }
+    return fail(ErrorCode::overflow,
+                "Hashtable hash buckets are full");
+}
+
+[[nodiscard]] Status rebuild_hashtable_buckets(Machine& machine,
+                                                ObjectRef table) {
+    auto keys = reference_field(machine, table, kHashtableKeysField);
+    auto hashes = reference_field(machine, table, kHashtableHashesField);
     auto count = int_field(machine, table, kHashtableCountField);
-    auto array = reference_field(machine, table,
-        search_values ? kHashtableValuesField : kHashtableKeysField);
-    if (!count || !array)
+    if (!keys || !hashes || !count) {
         return fail(ErrorCode::invalid_state,
                     "Hashtable state is invalid");
+    }
+    auto entry_capacity = machine.heap().array_length(*keys);
+    if (!entry_capacity) return std::unexpected(entry_capacity.error());
+    auto bucket_capacity = hashtable_bucket_capacity(*entry_capacity);
+    if (!bucket_capacity) return std::unexpected(bucket_capacity.error());
+    auto buckets = allocate_int_array(machine, *bucket_capacity);
+    if (!buckets) return std::unexpected(buckets.error());
     for (i32 index = 0; index < *count; ++index) {
-        auto value = machine.heap().element(*array,
-                                            static_cast<usize>(index));
+        auto value = machine.heap().element(
+            *hashes, static_cast<usize>(index));
         if (!value) return std::unexpected(value.error());
-        auto reference = value->as_reference();
-        if (!reference) return std::unexpected(reference.error());
-        auto equal = values_equal(machine, *reference, key);
-        if (!equal) return std::unexpected(equal.error());
-        if (*equal) return index;
+        auto hash = value->as_int();
+        if (!hash) return std::unexpected(hash.error());
+        auto inserted = hashtable_insert_bucket(
+            machine, *buckets, *hash, index);
+        if (!inserted) return inserted;
+    }
+    return set_reference_field(machine, table,
+                               kHashtableBucketsField, *buckets);
+}
+
+[[nodiscard]] Result<i32> hashtable_find(
+    Machine& machine,
+    ObjectRef table,
+    ObjectRef key,
+    bool search_values,
+    std::optional<i32> known_hash = std::nullopt) {
+    auto count = int_field(machine, table, kHashtableCountField);
+    if (!count) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable state is invalid");
+    }
+    if (search_values) {
+        auto values = reference_field(machine, table,
+                                      kHashtableValuesField);
+        if (!values) {
+            return fail(ErrorCode::invalid_state,
+                        "Hashtable values are missing");
+        }
+        for (i32 index = 0; index < *count; ++index) {
+            auto value = machine.heap().element(
+                *values, static_cast<usize>(index));
+            if (!value) return std::unexpected(value.error());
+            auto reference = value->as_reference();
+            if (!reference) return std::unexpected(reference.error());
+            auto equal = values_equal(machine, *reference, key);
+            if (!equal) return std::unexpected(equal.error());
+            if (*equal) return index;
+        }
+        return -1;
+    }
+
+    auto keys = reference_field(machine, table, kHashtableKeysField);
+    auto hashes = reference_field(machine, table, kHashtableHashesField);
+    auto buckets = reference_field(machine, table, kHashtableBucketsField);
+    if (!keys || !hashes || !buckets) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable key index is missing");
+    }
+    auto hash = known_hash.has_value()
+        ? Result<i32>(*known_hash)
+        : object_hash(machine, key);
+    if (!hash) return std::unexpected(hash.error());
+    auto bucket_count = machine.heap().array_length(*buckets);
+    if (!bucket_count) return std::unexpected(bucket_count.error());
+    if (*bucket_count == 0U) return -1;
+
+    usize bucket = static_cast<usize>(static_cast<u32>(*hash)) %
+                   *bucket_count;
+    for (usize probe = 0; probe < *bucket_count; ++probe) {
+        auto marker = machine.heap().element(*buckets, bucket);
+        if (!marker) return std::unexpected(marker.error());
+        auto stored_index = marker->as_int();
+        if (!stored_index) return std::unexpected(stored_index.error());
+        if (*stored_index == 0) return -1;
+        const i32 index = *stored_index - 1;
+        if (index < 0 || index >= *count) {
+            return fail(ErrorCode::invalid_state,
+                        "Hashtable bucket references an invalid entry");
+        }
+        auto stored_hash_value = machine.heap().element(
+            *hashes, static_cast<usize>(index));
+        if (!stored_hash_value)
+            return std::unexpected(stored_hash_value.error());
+        auto stored_hash = stored_hash_value->as_int();
+        if (!stored_hash) return std::unexpected(stored_hash.error());
+        if (*stored_hash == *hash) {
+            auto value = machine.heap().element(
+                *keys, static_cast<usize>(index));
+            if (!value) return std::unexpected(value.error());
+            auto reference = value->as_reference();
+            if (!reference) return std::unexpected(reference.error());
+            auto equal = values_equal(machine, *reference, key);
+            if (!equal) return std::unexpected(equal.error());
+            if (*equal) return index;
+        }
+        bucket = (bucket + 1U) % *bucket_count;
     }
     return -1;
 }
@@ -1376,19 +1542,26 @@ void register_vector(NativeMethodRegistry& registry) {
                                                i32 minimum) {
     auto keys = reference_field(machine, table, kHashtableKeysField);
     auto values = reference_field(machine, table, kHashtableValuesField);
-    if (!keys || !values)
+    auto hashes = reference_field(machine, table, kHashtableHashesField);
+    if (!keys || !values || !hashes)
         return fail(ErrorCode::invalid_state,
                     "Hashtable arrays are missing");
     auto capacity = machine.heap().array_length(*keys);
     if (!capacity) return std::unexpected(capacity.error());
     if (minimum <= static_cast<i32>(*capacity)) return {};
+    if (*capacity > (std::numeric_limits<usize>::max() - 1U) / 2U) {
+        return fail(ErrorCode::overflow,
+                    "Hashtable entry capacity overflowed");
+    }
     usize new_capacity = *capacity * 2U + 1U;
     if (new_capacity < static_cast<usize>(minimum))
         new_capacity = static_cast<usize>(minimum);
     auto new_keys = allocate_object_array(machine, new_capacity);
     auto new_values = allocate_object_array(machine, new_capacity);
+    auto new_hashes = allocate_int_array(machine, new_capacity);
     if (!new_keys) return std::unexpected(new_keys.error());
     if (!new_values) return std::unexpected(new_values.error());
+    if (!new_hashes) return std::unexpected(new_hashes.error());
     auto count = int_field(machine, table, kHashtableCountField);
     if (!count) return std::unexpected(count.error());
     for (i32 index = 0; index < *count; ++index) {
@@ -1396,21 +1569,31 @@ void register_vector(NativeMethodRegistry& registry) {
                                          static_cast<usize>(index));
         auto value = machine.heap().element(*values,
                                            static_cast<usize>(index));
-        if (!key || !value)
+        auto hash = machine.heap().element(*hashes,
+                                          static_cast<usize>(index));
+        if (!key || !value || !hash)
             return fail(ErrorCode::invalid_state,
                         "Hashtable entry is invalid");
         auto key_stored = machine.heap().set_element(
             *new_keys, static_cast<usize>(index), *key);
         auto value_stored = machine.heap().set_element(
             *new_values, static_cast<usize>(index), *value);
+        auto hash_stored = machine.heap().set_element(
+            *new_hashes, static_cast<usize>(index), *hash);
         if (!key_stored) return key_stored;
         if (!value_stored) return value_stored;
+        if (!hash_stored) return hash_stored;
     }
     auto keys_stored = set_reference_field(machine, table,
                                            kHashtableKeysField, *new_keys);
+    auto values_stored = set_reference_field(machine, table,
+                                             kHashtableValuesField, *new_values);
+    auto hashes_stored = set_reference_field(machine, table,
+                                             kHashtableHashesField, *new_hashes);
     if (!keys_stored) return keys_stored;
-    return set_reference_field(machine, table,
-                               kHashtableValuesField, *new_values);
+    if (!values_stored) return values_stored;
+    if (!hashes_stored) return hashes_stored;
+    return rebuild_hashtable_buckets(machine, table);
 }
 
 void register_hashtable(NativeMethodRegistry& registry) {
@@ -1526,7 +1709,10 @@ void register_hashtable(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/NullPointerException",
                                  "Hashtable does not accept null keys or values");
             }
-            auto existing = hashtable_find(machine, *object, *key, false);
+            auto hash = object_hash(machine, *key);
+            if (!hash) return std::unexpected(hash.error());
+            auto existing = hashtable_find(
+                machine, *object, *key, false, *hash);
             if (!existing) return std::unexpected(existing.error());
             auto values = reference_field(machine, *object,
                                           kHashtableValuesField);
@@ -1550,7 +1736,11 @@ void register_hashtable(NativeMethodRegistry& registry) {
                                         kHashtableKeysField);
             values = reference_field(machine, *object,
                                      kHashtableValuesField);
-            if (!keys || !values)
+            auto hashes = reference_field(machine, *object,
+                                          kHashtableHashesField);
+            auto buckets = reference_field(machine, *object,
+                                           kHashtableBucketsField);
+            if (!keys || !values || !hashes || !buckets)
                 return fail(ErrorCode::invalid_state,
                             "Hashtable arrays are missing");
             auto key_stored = machine.heap().set_element(
@@ -1559,8 +1749,15 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto value_stored = machine.heap().set_element(
                 *values, static_cast<usize>(*count),
                 Value::from_reference(*value));
+            auto hash_stored = machine.heap().set_element(
+                *hashes, static_cast<usize>(*count),
+                Value::from_int(*hash));
             if (!key_stored) return std::unexpected(key_stored.error());
             if (!value_stored) return std::unexpected(value_stored.error());
+            if (!hash_stored) return std::unexpected(hash_stored.error());
+            auto bucket_stored = hashtable_insert_bucket(
+                machine, *buckets, *hash, *count);
+            if (!bucket_stored) return std::unexpected(bucket_stored.error());
             auto updated = set_int_field(machine, *object,
                                          kHashtableCountField, *count + 1);
             if (!updated) return std::unexpected(updated.error());
@@ -1585,8 +1782,10 @@ void register_hashtable(NativeMethodRegistry& registry) {
                                         kHashtableKeysField);
             auto values = reference_field(machine, *object,
                                           kHashtableValuesField);
+            auto hashes = reference_field(machine, *object,
+                                          kHashtableHashesField);
             auto count = int_field(machine, *object, kHashtableCountField);
-            if (!keys || !values || !count)
+            if (!keys || !values || !hashes || !count)
                 return fail(ErrorCode::invalid_state,
                             "Hashtable state is invalid");
             auto old = machine.heap().element(
@@ -1597,15 +1796,20 @@ void register_hashtable(NativeMethodRegistry& registry) {
                     *keys, static_cast<usize>(current + 1));
                 auto next_value = machine.heap().element(
                     *values, static_cast<usize>(current + 1));
-                if (!next_key || !next_value)
+                auto next_hash = machine.heap().element(
+                    *hashes, static_cast<usize>(current + 1));
+                if (!next_key || !next_value || !next_hash)
                     return fail(ErrorCode::invalid_state,
                                 "Hashtable entry is invalid");
                 auto key_stored = machine.heap().set_element(
                     *keys, static_cast<usize>(current), *next_key);
                 auto value_stored = machine.heap().set_element(
                     *values, static_cast<usize>(current), *next_value);
+                auto hash_stored = machine.heap().set_element(
+                    *hashes, static_cast<usize>(current), *next_hash);
                 if (!key_stored) return std::unexpected(key_stored.error());
                 if (!value_stored) return std::unexpected(value_stored.error());
+                if (!hash_stored) return std::unexpected(hash_stored.error());
             }
             auto key_cleared = machine.heap().set_element(
                 *keys, static_cast<usize>(*count - 1),
@@ -1613,11 +1817,17 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto value_cleared = machine.heap().set_element(
                 *values, static_cast<usize>(*count - 1),
                 Value::from_reference({}));
+            auto hash_cleared = machine.heap().set_element(
+                *hashes, static_cast<usize>(*count - 1),
+                Value::from_int(0));
             auto updated = set_int_field(machine, *object,
                                          kHashtableCountField, *count - 1);
             if (!key_cleared) return std::unexpected(key_cleared.error());
             if (!value_cleared) return std::unexpected(value_cleared.error());
+            if (!hash_cleared) return std::unexpected(hash_cleared.error());
             if (!updated) return std::unexpected(updated.error());
+            auto rebuilt = rebuild_hashtable_buckets(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value>(*old);
         });
     add(registry, "java/util/Hashtable", "clear", "()V",
@@ -1629,8 +1839,10 @@ void register_hashtable(NativeMethodRegistry& registry) {
                                         kHashtableKeysField);
             auto values = reference_field(machine, *object,
                                           kHashtableValuesField);
+            auto hashes = reference_field(machine, *object,
+                                          kHashtableHashesField);
             auto count = int_field(machine, *object, kHashtableCountField);
-            if (!keys || !values || !count)
+            if (!keys || !values || !hashes || !count)
                 return fail(ErrorCode::invalid_state,
                             "Hashtable state is invalid");
             for (i32 index = 0; index < *count; ++index) {
@@ -1640,12 +1852,17 @@ void register_hashtable(NativeMethodRegistry& registry) {
                 auto value_cleared = machine.heap().set_element(
                     *values, static_cast<usize>(index),
                     Value::from_reference({}));
+                auto hash_cleared = machine.heap().set_element(
+                    *hashes, static_cast<usize>(index), Value::from_int(0));
                 if (!key_cleared) return std::unexpected(key_cleared.error());
                 if (!value_cleared) return std::unexpected(value_cleared.error());
+                if (!hash_cleared) return std::unexpected(hash_cleared.error());
             }
             auto updated = set_int_field(machine, *object,
                                          kHashtableCountField, 0);
             if (!updated) return std::unexpected(updated.error());
+            auto rebuilt = rebuild_hashtable_buckets(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value> {};
         });
     const auto enumeration = [&registry](const char* name, bool values) {

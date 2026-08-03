@@ -332,7 +332,6 @@ struct LibraryView: View {
             Menu {
                 Button("Settings") { showSettings = true }
                 Button("Profiles") { showProfiles = true }
-                Button("Exit") { exitApplication() }
             } label: {
                 Image(systemName: "ellipsis")
             }

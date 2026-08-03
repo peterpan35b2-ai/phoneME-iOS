@@ -330,6 +330,7 @@ using namespace builtin;
             field(kPrivate, "format", "I"), field(kPrivate, "width", "I"),
             field(kPrivate, "height", "I"), field(kPrivate, "mutable", "Z"),
             field(kPrivate, "source", "Ljava/lang/Object;"),
+            field(kPrivate, "palette", "[B"),
         }, {
             api_method("<init>", "(ILjava/lang/Object;)V"),
             api_method("<init>", "(III)V"),
@@ -513,7 +514,13 @@ using namespace builtin;
         });
     }
     if (name == "javax/microedition/m3g/SkinnedMesh") {
-        return make_class(std::string(name), "javax/microedition/m3g/Mesh", kOrdinary, {}, {
+        return make_class(std::string(name), "javax/microedition/m3g/Mesh", kOrdinary, {
+            field(kPrivate, "skeleton", "Ljavax/microedition/m3g/Group;"),
+            field(kPrivate, "bones", "[Ljavax/microedition/m3g/Node;"),
+            field(kPrivate, "boneFirstVertices", "[I"),
+            field(kPrivate, "boneVertexCounts", "[I"),
+            field(kPrivate, "boneWeights", "[I"),
+        }, {
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;Ljavax/microedition/m3g/IndexBuffer;Ljavax/microedition/m3g/Appearance;Ljavax/microedition/m3g/Group;)V"),
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;[Ljavax/microedition/m3g/IndexBuffer;[Ljavax/microedition/m3g/Appearance;Ljavax/microedition/m3g/Group;)V"),
             api_method("addTransform", "(Ljavax/microedition/m3g/Node;III)V"),
@@ -523,7 +530,10 @@ using namespace builtin;
         });
     }
     if (name == "javax/microedition/m3g/MorphingMesh") {
-        return make_class(std::string(name), "javax/microedition/m3g/Mesh", kOrdinary, {}, {
+        return make_class(std::string(name), "javax/microedition/m3g/Mesh", kOrdinary, {
+            field(kPrivate, "morphTargets", "[Ljavax/microedition/m3g/VertexBuffer;"),
+            field(kPrivate, "weights", "[F"),
+        }, {
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;[Ljavax/microedition/m3g/VertexBuffer;Ljavax/microedition/m3g/IndexBuffer;Ljavax/microedition/m3g/Appearance;)V"),
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;[Ljavax/microedition/m3g/VertexBuffer;[Ljavax/microedition/m3g/IndexBuffer;[Ljavax/microedition/m3g/Appearance;)V"),
             api_method("setWeights", "([F)V"), api_method("getWeights", "([F)V"),

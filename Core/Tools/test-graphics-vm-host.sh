@@ -111,6 +111,7 @@ done < <(find "$CORE_ROOT/src/graphics" -type f -name '*.cpp' -print | LC_ALL=C 
   -lz \
   -framework CoreText \
   -framework CoreGraphics \
+  -framework ImageIO \
   -framework CoreFoundation \
   -o "$TEST_BINARY"
 

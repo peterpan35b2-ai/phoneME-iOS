@@ -4,9 +4,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,6 +28,13 @@
 
 namespace phoneme::runtime {
 
+struct AsyncLifecycleState final {
+    std::atomic<bool> completed {false};
+    std::mutex mutex;
+    std::optional<Error> failure;
+    vm::MidletSignal signal {vm::MidletSignal::none};
+};
+
 class ApplicationVM final {
 public:
     ApplicationVM(Dimensions dimensions,
@@ -37,6 +48,9 @@ public:
     CanvasRuntime canvas;
     vm::NativeRootScope paint_graphics;
     vm::ObjectRef midlet;
+    std::atomic<u64> ui_event_count {0U};
+    std::mutex lifecycle_state_mutex;
+    std::shared_ptr<AsyncLifecycleState> deferred_start_app;
 };
 
 namespace {
@@ -50,6 +64,37 @@ constexpr usize kGraphicsTargetField = 0;
 // exceeds the generic callback guard used for paint/input handlers.
 constexpr u64 kMidletConstructorInstructionBudget = 200'000'000U;
 constexpr u64 kMidletLifecycleInstructionBudget = 100'000'000U;
+// Forced teardown is best-effort cleanup, not application work. Keep the
+// callback bounded so malformed or intentionally looping destroyApp methods
+// cannot hold the emulator exit path for tens of seconds.
+constexpr u64 kForcedDestroyInstructionBudget = 5'000'000U;
+
+void trace_forced_destroy(std::string_view phase) noexcept {
+    if (std::getenv("PHONEME_TRACE_LIFECYCLE") == nullptr) return;
+    std::fprintf(stderr,
+                 "[LifecycleTrace] forced destroy %.*s\n",
+                 static_cast<int>(phase.size()),
+                 phase.data());
+    std::fflush(stderr);
+}
+
+class ScopedUnpacedExecution final {
+public:
+    explicit ScopedUnpacedExecution(vm::Scheduler& scheduler) noexcept
+        : scheduler_(scheduler) {
+        scheduler_.begin_unpaced_execution();
+    }
+
+    ~ScopedUnpacedExecution() {
+        scheduler_.end_unpaced_execution();
+    }
+
+    ScopedUnpacedExecution(const ScopedUnpacedExecution&) = delete;
+    ScopedUnpacedExecution& operator=(const ScopedUnpacedExecution&) = delete;
+
+private:
+    vm::Scheduler& scheduler_;
+};
 
 [[nodiscard]] bool is_glu_vendor(std::u16string_view vendor) noexcept {
     constexpr std::u16string_view kPrefix = u"glu";
@@ -229,10 +274,12 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     std::vector<u8> rgba((*image)->pixels().size() * 4U);
     usize offset = 0;
     for (graphics::Pixel pixel : (*image)->pixels()) {
-        rgba[offset++] = graphics::red(pixel);
-        rgba[offset++] = graphics::green(pixel);
-        rgba[offset++] = graphics::blue(pixel);
-        rgba[offset++] = graphics::alpha(pixel);
+        const graphics::Pixel display_pixel =
+            graphics::rgb565_roundtrip(pixel);
+        rgba[offset++] = graphics::red(display_pixel);
+        rgba[offset++] = graphics::green(display_pixel);
+        rgba[offset++] = graphics::blue(display_pixel);
+        rgba[offset++] = graphics::alpha(display_pixel);
     }
     return framebuffer.replace(
         Dimensions {(*image)->width(), (*image)->height()}, rgba);
@@ -578,7 +625,11 @@ Status Runtime::start_midlet(SuiteId suite_id,
         std::unique_lock lock(mutex_);
         auto running = require_running_unlocked();
         if (!running) return running;
-        if (apps_.contains(app_id.value)) {
+        if (const auto existing = apps_.find(app_id.value);
+            existing != apps_.end() &&
+            (existing->second.state != AppState::destroyed ||
+             existing->second.vm != nullptr ||
+             existing->second.lifecycle_busy)) {
             return fail(ErrorCode::invalid_state,
                         "application ID is already in use");
         }
@@ -674,9 +725,12 @@ Status Runtime::start_midlet(SuiteId suite_id,
         pointer_motion_supported,
         repeat_events_supported);
     application_vm->machine.set_permission_policy(permission_policy);
+    ApplicationVM* const ui_observer = application_vm.get();
     application_vm->machine.configure_ui_bridge(
         app_id.value,
-        [this](vm::UiBridgeEvent event) {
+        [this, ui_observer](vm::UiBridgeEvent event) {
+            ui_observer->ui_event_count.fetch_add(1U,
+                                                  std::memory_order_release);
             ui_queue_.push(UiEvent {
                 .kind = event.kind,
                 .component_id = event.component_id,
@@ -738,30 +792,115 @@ Status Runtime::start_midlet(SuiteId suite_id,
         app->vm = application_vm;
     }
 
-    std::scoped_lock application_operation(application_vm->operation_mutex);
     application_vm->machine.scheduler().set_host_foreground(true);
     auto launch_foregrounded = application_vm->canvas.set_host_foreground(true);
     if (!launch_foregrounded) return fail_start(launch_foregrounded.error());
-    auto constructor = application_vm->machine.invoke_instance(
-        *receiver, main_class, "<init>", "()V", {},
-        kMidletConstructorInstructionBudget);
-    if (!constructor) return fail_start(constructor.error());
-    auto completion = require_normal_completion(application_vm->machine,
-                                                *constructor,
-                                                "MIDlet constructor");
-    if (!completion) return fail_start(completion.error());
+    {
+        std::scoped_lock application_operation(application_vm->operation_mutex);
+        // Large obfuscated static initializers are finite launch work. Keep
+        // yielding the VM gate to worker threads, but skip foreground CPU
+        // backoff until the MIDlet constructor has completed.
+        ScopedUnpacedExecution unpaced(
+            application_vm->machine.scheduler());
+        auto constructor = application_vm->machine.invoke_instance(
+            *receiver, main_class, "<init>", "()V", {},
+            kMidletConstructorInstructionBudget);
+        if (!constructor) return fail_start(constructor.error());
+        auto completion = require_normal_completion(application_vm->machine,
+                                                    *constructor,
+                                                    "MIDlet constructor");
+        if (!completion) return fail_start(completion.error());
+    }
 
-    auto started = application_vm->machine.invoke_instance(
-        *receiver, main_class, "startApp", "()V", {},
-        kMidletLifecycleInstructionBudget);
-    if (!started) return fail_start(started.error());
-    completion = require_normal_completion(application_vm->machine,
-                                           *started,
-                                           "MIDlet startApp");
-    if (!completion) return fail_start(completion.error());
+    // MIDP lifecycle callbacks and LCDUI event dispatch run on independent
+    // threads in phoneME. A number of legacy games keep startApp() on-stack
+    // while an intro Canvas paints and waits for the first key. Running the
+    // callback inline here deadlocks startup because the host cannot observe a
+    // frame or deliver input until Runtime::start_midlet returns.
+    const u64 initial_frame_generation = framebuffer_.metadata().generation;
+    const u64 initial_ui_events = application_vm->ui_event_count.load(
+        std::memory_order_acquire);
+    auto lifecycle_state = std::make_shared<AsyncLifecycleState>();
+    {
+        std::scoped_lock state_lock(application_vm->lifecycle_state_mutex);
+        application_vm->deferred_start_app = lifecycle_state;
+    }
+    auto lifecycle_thread_root = application_vm->machine.allocate_pinned_instance(
+        "java/lang/Thread");
+    if (!lifecycle_thread_root) {
+        return fail_start(lifecycle_thread_root.error());
+    }
+    auto lifecycle_thread = lifecycle_thread_root->get();
+    if (!lifecycle_thread) return fail_start(lifecycle_thread.error());
+    auto initialized_thread = application_vm->machine.initialize_java_thread(
+        *lifecycle_thread, *receiver);
+    if (!initialized_thread) return fail_start(initialized_thread.error());
+    ApplicationVM* const lifecycle_vm = application_vm.get();
+    auto scheduled_lifecycle = application_vm->machine.scheduler().start_native_thread(
+        application_vm->machine,
+        *lifecycle_thread,
+        [lifecycle_vm, lifecycle_state, receiver = *receiver, main_class](
+            std::stop_token stop_token)
+            -> Result<std::optional<vm::ObjectRef>> {
+            std::optional<Error> failure;
+            vm::MidletSignal signal = vm::MidletSignal::none;
+            if (!stop_token.stop_requested()) {
+                auto started = lifecycle_vm->machine.invoke_instance(
+                    receiver, main_class, "startApp", "()V", {},
+                    kMidletLifecycleInstructionBudget);
+                if (!started) {
+                    failure = started.error();
+                } else {
+                    auto completion = require_normal_completion(
+                        lifecycle_vm->machine, *started, "MIDlet startApp");
+                    if (!completion) failure = completion.error();
+                }
+                signal = lifecycle_vm->machine.consume_midlet_signal();
+            }
+            {
+                std::scoped_lock state_lock(lifecycle_state->mutex);
+                lifecycle_state->failure = std::move(failure);
+                lifecycle_state->signal = signal;
+            }
+            lifecycle_state->completed.store(true, std::memory_order_release);
+            return std::optional<vm::ObjectRef> {};
+        });
+    if (!scheduled_lifecycle) return fail_start(scheduled_lifecycle.error());
 
-    const vm::MidletSignal launch_signal =
-        application_vm->machine.consume_midlet_signal();
+    bool start_app_deferred = false;
+    for (;;) {
+        if (lifecycle_state->completed.load(std::memory_order_acquire)) break;
+        auto pumped = application_vm->canvas.try_pump();
+        if (!pumped) return fail_start(pumped.error());
+        const bool frame_observable =
+            framebuffer_.metadata().generation != initial_frame_generation;
+        const bool ui_observable =
+            application_vm->ui_event_count.load(std::memory_order_acquire) !=
+            initial_ui_events;
+        if ((frame_observable || ui_observable) &&
+            !lifecycle_state->completed.load(std::memory_order_acquire)) {
+            start_app_deferred = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    vm::MidletSignal launch_signal = vm::MidletSignal::none;
+    if (!start_app_deferred) {
+        std::optional<Error> lifecycle_failure;
+        {
+            std::scoped_lock state_lock(lifecycle_state->mutex);
+            lifecycle_failure = std::move(lifecycle_state->failure);
+            launch_signal = lifecycle_state->signal;
+        }
+        {
+            std::scoped_lock state_lock(application_vm->lifecycle_state_mutex);
+            application_vm->deferred_start_app.reset();
+        }
+        if (lifecycle_failure.has_value()) {
+            return fail_start(std::move(*lifecycle_failure));
+        }
+    }
     std::string launch_console;
     if (launch_signal == vm::MidletSignal::destroyed) {
         append_utf8(launch_console,
@@ -843,7 +982,9 @@ Status Runtime::start_midlet(SuiteId suite_id,
             ? "MIDlet notified destruction from startApp"
             : (launch_signal == vm::MidletSignal::paused
                    ? "MIDlet notified pause from startApp"
-                   : "MIDlet constructor and startApp completed in the C++ VM"),
+                   : (start_app_deferred
+                          ? "MIDlet became observable while startApp continues on the lifecycle thread"
+                          : "MIDlet constructor and startApp completed in the C++ VM")),
     });
     return {};
 }
@@ -1247,19 +1388,6 @@ Status Runtime::destroy_midlet(AppId app_id) {
         was_foreground = foreground_app_id_ == app_id;
     }
 
-    const auto fail_lifecycle = [&](Error error) -> Status {
-        std::unique_lock lock(mutex_);
-        App* app = find_app_unlocked(app_id);
-        if (app != nullptr && app->vm == vm &&
-            app->lifecycle_token == lifecycle_token) {
-            app->state = AppState::error;
-            app->lifecycle_busy = false;
-            app->generation = ++sequence_;
-            last_exit_code_ = -1;
-        }
-        return std::unexpected(std::move(error));
-    };
-
     std::scoped_lock vm_operation(vm->operation_mutex);
     if (was_foreground) {
         auto hidden = vm->canvas.set_host_foreground(false);
@@ -1279,27 +1407,44 @@ Status Runtime::destroy_midlet(AppId app_id) {
         vm->machine.scheduler().set_host_foreground(false);
     }
 
+    // Forced termination must not let a MIDlet-owned worker keep the emulator
+    // blocked forever from destroyApp(true), for example by joining a game
+    // thread whose run loop only exits when the VM is stopped. Close blocking
+    // I/O first, then stop and join scheduler/media/timer workers. The scheduler
+    // main thread remains available, so destroyApp(true) can still perform
+    // final RMS/state cleanup; attempts to spawn new work are rejected.
+    trace_forced_destroy("close-connections-begin");
+    vm->machine.close_connections();
+    trace_forced_destroy("machine-shutdown-begin");
+    vm->machine.shutdown();
+    trace_forced_destroy("machine-shutdown-complete");
+
     const vm::Value unconditional = vm::Value::from_int(1);
     auto destroyed = vm->machine.invoke_instance(
         vm->midlet,
         main_class,
         "destroyApp",
         "(Z)V",
-        std::span<const vm::Value>(&unconditional, 1));
-    if (!destroyed) return fail_lifecycle(destroyed.error());
-    if (!destroyed->completed_normally()) {
-        if (!destroyed->throwable.has_value()) {
-            return fail_lifecycle(fail(
-                ErrorCode::internal_error,
-                "MIDlet destroyApp failed without a Java throwable").error());
+        std::span<const vm::Value>(&unconditional, 1),
+        kForcedDestroyInstructionBudget);
+    trace_forced_destroy("destroy-callback-complete");
+    if (!destroyed) {
+        std::string diagnostic =
+            "[Lifecycle] forced destroy ignored callback failure: ";
+        if (!destroyed.error().java_exception_class.empty()) {
+            diagnostic += destroyed.error().java_exception_class + ": ";
         }
-        auto throwable_class = vm->machine.heap().class_name(
-            *destroyed->throwable);
-        if (!throwable_class) {
-            return fail_lifecycle(throwable_class.error());
+        diagnostic += destroyed.error().message;
+        append_ascii_console(vm->machine, diagnostic);
+    } else if (!destroyed->completed_normally()) {
+        std::string throwable_name = "java/lang/Throwable";
+        if (destroyed->throwable.has_value()) {
+            auto throwable_class = vm->machine.heap().class_name(
+                *destroyed->throwable);
+            if (throwable_class) throwable_name = std::move(*throwable_class);
         }
         std::string diagnostic =
-            "[Lifecycle] forced destroy ignored " + *throwable_class;
+            "[Lifecycle] forced destroy ignored " + throwable_name;
         if (!destroyed->exception_context.empty()) {
             diagnostic += " from " + destroyed->exception_context;
         }
@@ -1740,16 +1885,19 @@ FrameMetadata Runtime::frame_metadata() {
         }
     }
     if (vm != nullptr) {
-        std::scoped_lock vm_operation(vm->operation_mutex);
-        auto pumped = vm->canvas.pump();
-        if (!pumped) {
-            std::unique_lock lock(mutex_);
-            App* app = find_app_unlocked(app_id);
-            if (app != nullptr && app->vm == vm &&
-                app->generation == generation) {
-                mark_canvas_failure_unlocked(*app, pumped.error());
+        {
+            std::scoped_lock vm_operation(vm->operation_mutex);
+            auto pumped = vm->canvas.try_pump();
+            if (!pumped) {
+                std::unique_lock lock(mutex_);
+                App* app = find_app_unlocked(app_id);
+                if (app != nullptr && app->vm == vm &&
+                    app->generation == generation) {
+                    mark_canvas_failure_unlocked(*app, pumped.error());
+                }
             }
         }
+        finalize_deferred_start(app_id, vm);
     }
     return framebuffer_.metadata();
 }
@@ -1848,28 +1996,138 @@ void Runtime::dispatch_input() {
             vm = app->vm;
         }
 
-        std::scoped_lock vm_operation(vm->operation_mutex);
-        if (event->kind == InputKind::key) {
-            vm->canvas.enqueue_host_key(event->first,
-                                        event->second != 0,
-                                        event->sequence);
-        } else {
-            vm->canvas.enqueue_pointer(event->first,
-                                       event->second,
-                                       event->third,
-                                       event->sequence);
-        }
-        auto pumped = vm->canvas.pump();
-        if (!pumped) {
-            std::unique_lock lock(mutex_);
-            App* app = find_app_unlocked(event->app_id);
-            if (app != nullptr && app->vm == vm &&
-                app->generation == event->app_generation) {
-                mark_canvas_failure_unlocked(*app, pumped.error());
+        {
+            std::scoped_lock vm_operation(vm->operation_mutex);
+            if (event->kind == InputKind::key) {
+                vm->canvas.enqueue_host_key(event->first,
+                                            event->second != 0,
+                                            event->sequence);
+            } else {
+                vm->canvas.enqueue_pointer(event->first,
+                                           event->second,
+                                           event->third,
+                                           event->sequence);
             }
+            auto pumped = vm->canvas.pump();
+            if (!pumped) {
+                std::unique_lock lock(mutex_);
+                App* app = find_app_unlocked(event->app_id);
+                if (app != nullptr && app->vm == vm &&
+                    app->generation == event->app_generation) {
+                    mark_canvas_failure_unlocked(*app, pumped.error());
+                }
+                return;
+            }
+        }
+        finalize_deferred_start(event->app_id, vm);
+    }
+}
+
+void Runtime::finalize_deferred_start(
+    AppId app_id,
+    const std::shared_ptr<ApplicationVM>& vm) {
+    if (vm == nullptr) return;
+
+    std::shared_ptr<AsyncLifecycleState> state;
+    {
+        std::scoped_lock state_lock(vm->lifecycle_state_mutex);
+        state = vm->deferred_start_app;
+        if (state == nullptr ||
+            !state->completed.load(std::memory_order_acquire)) {
             return;
         }
+        vm->deferred_start_app.reset();
     }
+
+    std::optional<Error> failure;
+    vm::MidletSignal signal = vm::MidletSignal::none;
+    {
+        std::scoped_lock state_lock(state->mutex);
+        failure = std::move(state->failure);
+        signal = state->signal;
+    }
+
+    if (failure.has_value()) {
+        std::unique_lock lock(mutex_);
+        App* app = find_app_unlocked(app_id);
+        if (app == nullptr || app->vm != vm) return;
+        app->state = AppState::error;
+        app->lifecycle_busy = false;
+        app->generation = ++sequence_;
+        last_exit_code_ = -1;
+        ui_queue_.push(UiEvent {
+            .kind = -1,
+            .component_id = app_id.value,
+            .generation = sequence_,
+            .detail = "Deferred MIDlet startApp failed: " +
+                      failure->message,
+        });
+        return;
+    }
+
+    if (signal == vm::MidletSignal::none ||
+        signal == vm::MidletSignal::resume_requested) {
+        std::unique_lock lock(mutex_);
+        App* app = find_app_unlocked(app_id);
+        if (app != nullptr && app->vm == vm) {
+            app->lifecycle_busy = false;
+        }
+        return;
+    }
+
+    bool was_foreground = false;
+    {
+        std::unique_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr || app->vm != vm) return;
+        was_foreground = foreground_app_id_ == app_id;
+    }
+
+    std::optional<Error> transition_error;
+    {
+        std::scoped_lock vm_operation(vm->operation_mutex);
+        if (was_foreground) {
+            auto hidden = vm->canvas.set_host_foreground(false);
+            if (!hidden) {
+                transition_error = hidden.error();
+            } else {
+                auto pumped = vm->canvas.pump();
+                if (!pumped) transition_error = pumped.error();
+            }
+            vm->machine.scheduler().set_host_foreground(false);
+        }
+        vm->machine.media().suspend();
+    }
+
+    std::unique_lock lock(mutex_);
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr || app->vm != vm) return;
+    if (transition_error.has_value()) {
+        mark_canvas_failure_unlocked(*app, *transition_error);
+        app->lifecycle_busy = false;
+        return;
+    }
+
+    app->lifecycle_busy = false;
+    app->generation = ++sequence_;
+    if (signal == vm::MidletSignal::destroyed) {
+        app->state = AppState::destroyed;
+        app->vm.reset();
+        if (foreground_app_id_ == app_id) {
+            foreground_app_id_ = {};
+            framebuffer_.clear();
+        }
+    } else {
+        app->state = AppState::paused;
+    }
+    ui_queue_.push(UiEvent {
+        .kind = 1,
+        .component_id = app_id.value,
+        .generation = sequence_,
+        .detail = signal == vm::MidletSignal::destroyed
+            ? "Deferred MIDlet startApp notified destruction"
+            : "Deferred MIDlet startApp notified pause",
+    });
 }
 
 void Runtime::mark_canvas_failure_unlocked(App& app, const Error& error) {

@@ -68,6 +68,7 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
   -lz \
   -framework CoreText \
   -framework CoreGraphics \
+  -framework ImageIO \
   -framework CoreFoundation \
   -o "$TEST_BINARY"
 

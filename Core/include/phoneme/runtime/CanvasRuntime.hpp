@@ -65,6 +65,7 @@ public:
     void enqueue_host_key(i32 key_code, bool pressed, u64 sequence);
     void enqueue_pointer(i32 x, i32 y, i32 action, u64 sequence);
     [[nodiscard]] Status pump();
+    [[nodiscard]] Status try_pump();
     [[nodiscard]] usize estimated_bytes() const noexcept;
 
     [[nodiscard]] Status register_canvas(vm::ObjectRef canvas,
@@ -76,6 +77,7 @@ public:
     [[nodiscard]] Status request_repaint(vm::ObjectRef canvas,
                                          vm::CanvasRect region) override;
     [[nodiscard]] Status request_service_repaints(vm::ObjectRef canvas) override;
+    [[nodiscard]] Status pump_blocking_wait_work() override;
     [[nodiscard]] Status set_fullscreen(vm::ObjectRef canvas,
                                         bool fullscreen) override;
     [[nodiscard]] Result<Dimensions> canvas_dimensions(
@@ -145,6 +147,7 @@ private:
         vm::CanvasRect region) const noexcept;
     static void merge_region(std::optional<vm::CanvasRect>& destination,
                              vm::CanvasRect region) noexcept;
+    [[nodiscard]] Status pump_under_execution();
     [[nodiscard]] Status process_visibility_changes();
     [[nodiscard]] Status process_size_changes();
     [[nodiscard]] Status process_inputs();
@@ -166,6 +169,8 @@ private:
                                                  i32 x,
                                                  i32 y);
     [[nodiscard]] Status update_effective_visibility(CanvasState& state);
+    void set_game_rendering_enabled(CanvasState& state,
+                                    bool enabled) noexcept;
     [[nodiscard]] bool suppresses_key_callback(
         const CanvasState& state,
         i32 key_code) const noexcept;
