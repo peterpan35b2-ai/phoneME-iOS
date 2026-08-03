@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -63,6 +64,16 @@ public:
                     std::move(completion),
                     fail(ErrorCode::invalid_state,
                          "fake network handle is closed"));
+            }
+            if (defer_reads_) {
+                const network::OperationId operation {next_operation_++};
+                pending_reads_.insert_or_assign(
+                    operation.value,
+                    PendingRead {
+                        .handle = handle,
+                        .completion = std::move(completion),
+                    });
+                return operation;
             }
             const usize count = std::min(maximum_bytes,
                                          found->second.read_buffer.size());
@@ -233,16 +244,34 @@ public:
                             ? 0 : option_value->second);
     }
 
+    [[nodiscard]] Status shutdown_output(
+        network::NativeHandle handle) override {
+        std::scoped_lock lock(mutex_);
+        if (!handles_.contains(handle.value)) {
+            return fail(ErrorCode::invalid_state,
+                        "fake network handle is closed");
+        }
+        ++shutdown_output_count_;
+        return {};
+    }
+
     [[nodiscard]] Status close(network::NativeHandle handle) override {
         std::scoped_lock lock(mutex_);
         if (handles_.erase(handle.value) != 0U) ++close_count_;
         return {};
     }
 
-    [[nodiscard]] Status cancel(network::OperationId) override {
+    [[nodiscard]] Status cancel(network::OperationId operation) override {
         std::scoped_lock lock(mutex_);
+        pending_reads_.erase(operation.value);
         ++cancel_count_;
         return {};
+    }
+
+    void set_defer_reads(bool defer) {
+        std::scoped_lock lock(mutex_);
+        defer_reads_ = defer;
+        if (!defer_reads_) pending_reads_.clear();
     }
 
     [[nodiscard]] usize open_handle_count() const {
@@ -253,6 +282,11 @@ public:
     [[nodiscard]] usize close_count() const {
         std::scoped_lock lock(mutex_);
         return close_count_;
+    }
+
+    [[nodiscard]] usize shutdown_output_count() const {
+        std::scoped_lock lock(mutex_);
+        return shutdown_output_count_;
     }
 
     [[nodiscard]] usize cancel_count() const {
@@ -267,6 +301,11 @@ public:
     }
 
 private:
+    struct PendingRead final {
+        network::NativeHandle handle;
+        network::Completion<std::vector<u8>> completion;
+    };
+
     struct HandleState final {
         std::vector<u8> read_buffer;
         std::vector<u8> written;
@@ -306,12 +345,15 @@ private:
 
     mutable std::mutex mutex_;
     std::unordered_map<u64, HandleState> handles_;
+    std::unordered_map<u64, PendingRead> pending_reads_;
     std::optional<network::DatagramPacket> last_datagram_;
     std::optional<network::HttpRequest> last_http_request_;
     u64 next_handle_ {1};
-    u64 next_operation_ {1};
+    std::atomic<u64> next_operation_ {1};
     usize close_count_ {0};
+    usize shutdown_output_count_ {0};
     usize cancel_count_ {0};
+    bool defer_reads_ {false};
 };
 
 } // namespace phoneme::tests

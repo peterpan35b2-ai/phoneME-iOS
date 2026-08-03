@@ -71,6 +71,8 @@ using namespace builtin;
             method(kPublic | kStatic, "createImage",
                    "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;"),
             method(kPublic | kStatic, "createImage",
+                   "(Ljava/io/InputStream;)Ljavax/microedition/lcdui/Image;"),
+            method(kPublic | kStatic, "createImage",
                    "([BII)Ljavax/microedition/lcdui/Image;"),
             method(kPublic | kStatic, "createImage",
                    "(Ljavax/microedition/lcdui/Image;)"
@@ -86,6 +88,77 @@ using namespace builtin;
             method(kPublic, "getHeight", "()I"),
             method(kPublic, "isMutable", "()Z"),
             method(kPublic, "getRGB", "([IIIIIII)V"),
+        });
+    }
+    if (name == "com/nokia/mid/ui/DirectGraphics") {
+        const u16 api = kPublic | kAbstract;
+        return make_class("com/nokia/mid/ui/DirectGraphics",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(api, "setARGBColor", "(I)V"),
+            method(api, "getAlphaComponent", "()I"),
+            method(api, "getNativePixelFormat", "()I"),
+            method(api, "drawImage",
+                   "(Ljavax/microedition/lcdui/Image;IIII)V"),
+            method(api, "drawTriangle", "(IIIIIII)V"),
+            method(api, "fillTriangle", "(IIIIIII)V"),
+            method(api, "fillPolygon", "([II[IIII)V"),
+            method(api, "drawPolygon", "([II[IIII)V"),
+            method(api, "drawPixels", "([IZIIIIIIII)V"),
+            method(api, "drawPixels", "([SZIIIIIIII)V"),
+            method(api, "getPixels", "([IIIIIIII)V"),
+            method(api, "getPixels", "([SIIIIIII)V"),
+        });
+    }
+    if (name == "com/nokia/mid/ui/DirectGraphicsImpl") {
+        const u16 api = kPublic;
+        return make_class("com/nokia/mid/ui/DirectGraphicsImpl",
+                          "java/lang/Object", kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "graphics",
+                  "Ljavax/microedition/lcdui/Graphics;"),
+        }, {
+            method(kPublic, "<init>",
+                   "(Ljavax/microedition/lcdui/Graphics;)V"),
+            method(api, "setARGBColor", "(I)V"),
+            method(api, "getAlphaComponent", "()I"),
+            method(api, "getNativePixelFormat", "()I"),
+            method(api, "drawImage",
+                   "(Ljavax/microedition/lcdui/Image;IIII)V"),
+            method(api, "drawTriangle", "(IIIIIII)V"),
+            method(api, "fillTriangle", "(IIIIIII)V"),
+            method(api, "fillPolygon", "([II[IIII)V"),
+            method(api, "drawPolygon", "([II[IIII)V"),
+            method(api, "drawPixels", "([IZIIIIIIII)V"),
+            method(api, "drawPixels", "([SZIIIIIIII)V"),
+            method(api, "getPixels", "([IIIIIIII)V"),
+            method(api, "getPixels", "([SIIIIIII)V"),
+        }, {"com/nokia/mid/ui/DirectGraphics"});
+    }
+    if (name == "com/nokia/mid/ui/DirectUtils") {
+        return make_class("com/nokia/mid/ui/DirectUtils",
+                          "java/lang/Object", kOrdinary | kFinal, {}, {
+            method(kPublic | kStatic, "getDirectGraphics",
+                   "(Ljavax/microedition/lcdui/Graphics;)"
+                   "Lcom/nokia/mid/ui/DirectGraphics;"),
+            method(kPublic | kStatic, "createImage",
+                   "(III)Ljavax/microedition/lcdui/Image;"),
+            method(kPublic | kStatic, "createImage",
+                   "([BII)Ljavax/microedition/lcdui/Image;"),
+        });
+    }
+    if (name == "com/nokia/mid/ui/DeviceControl") {
+        return make_class("com/nokia/mid/ui/DeviceControl",
+                          "java/lang/Object", kOrdinary | kFinal, {}, {
+            method(kPublic | kStatic, "setLights", "(II)V"),
+            method(kPublic | kStatic, "startVibra", "(IJ)V"),
+            method(kPublic | kStatic, "stopVibra", "()V"),
+        });
+    }
+    if (name == "com/nokia/mid/ui/FullCanvas") {
+        return make_class("com/nokia/mid/ui/FullCanvas",
+                          "javax/microedition/lcdui/Canvas",
+                          kOrdinary | kAbstract, {}, {
+            method(kProtected, "<init>", "()V"),
         });
     }
     if (name == "javax/microedition/lcdui/Canvas") {
@@ -122,8 +195,10 @@ using namespace builtin;
     if (name == "javax/microedition/lcdui/game/GameCanvas") {
         return make_class("javax/microedition/lcdui/game/GameCanvas",
                           "javax/microedition/lcdui/Canvas",
-                          kOrdinary | kAbstract, {}, {
+                          kOrdinary, {}, {
             method(kProtected, "<init>", "(Z)V"),
+            method(kProtected, "paint",
+                   "(Ljavax/microedition/lcdui/Graphics;)V"),
             method(kPublic, "getKeyStates", "()I"),
             method(kProtected, "getGraphics",
                    "()Ljavax/microedition/lcdui/Graphics;"),
@@ -139,6 +214,7 @@ using namespace builtin;
             method(kPublic, "setColor", "(I)V"),
             method(kPublic, "setColor", "(III)V"),
             method(kPublic, "getColor", "()I"),
+            method(kPublic, "getDisplayColor", "(I)I"),
             method(kPublic, "getRedComponent", "()I"),
             method(kPublic, "getGreenComponent", "()I"),
             method(kPublic, "getBlueComponent", "()I"),
@@ -176,7 +252,20 @@ using namespace builtin;
                    "(Ljava/lang/String;IIIII)V"),
             method(kPublic, "drawChar", "(CIII)V"),
             method(kPublic, "drawChars", "([CIIIII)V"),
-        });
+            method(kPublic, "setARGBColor", "(I)V"),
+            method(kPublic, "getAlphaComponent", "()I"),
+            method(kPublic, "getNativePixelFormat", "()I"),
+            method(kPublic, "drawImage",
+                   "(Ljavax/microedition/lcdui/Image;IIII)V"),
+            method(kPublic, "drawTriangle", "(IIIIIII)V"),
+            method(kPublic, "fillTriangle", "(IIIIIII)V"),
+            method(kPublic, "fillPolygon", "([II[IIII)V"),
+            method(kPublic, "drawPolygon", "([II[IIII)V"),
+            method(kPublic, "drawPixels", "([IZIIIIIIII)V"),
+            method(kPublic, "drawPixels", "([SZIIIIIIII)V"),
+            method(kPublic, "getPixels", "([IIIIIIII)V"),
+            method(kPublic, "getPixels", "([SIIIIIII)V"),
+        }, {"com/nokia/mid/ui/DirectGraphics"});
     }
     if (name == "javax/microedition/lcdui/Font") {
         return make_class("javax/microedition/lcdui/Font", "java/lang/Object",
@@ -212,6 +301,7 @@ using namespace builtin;
             field(kPrivate, "longLabel", "Ljava/lang/String;"),
             field(kPrivate, "commandType", "I"),
             field(kPrivate, "priority", "I"),
+            field(kPrivate, "ownerItemId", "I"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/String;II)V"),
             method(kPublic, "<init>",
@@ -242,6 +332,8 @@ using namespace builtin;
             field(kPrivate, "commands", "[Ljavax/microedition/lcdui/Command;"),
             field(kPrivate, "commandCount", "I"),
             field(kPrivate, "shown", "Z"),
+            field(kPrivate, "ticker", "Ljavax/microedition/lcdui/Ticker;"),
+            field(kPrivate, "scrollPosition", "I"),
         }, {
             method(kProtected, "<init>", "()V"),
             method(kPublic, "getTitle", "()Ljava/lang/String;"),
@@ -250,6 +342,12 @@ using namespace builtin;
             method(kPublic, "removeCommand", "(Ljavax/microedition/lcdui/Command;)V"),
             method(kPublic, "setCommandListener",
                    "(Ljavax/microedition/lcdui/CommandListener;)V"),
+            method(kPublic, "setTicker",
+                   "(Ljavax/microedition/lcdui/Ticker;)V"),
+            method(kPublic, "getTicker",
+                   "()Ljavax/microedition/lcdui/Ticker;"),
+            method(kPublic, "getWidth", "()I"),
+            method(kPublic, "getHeight", "()I"),
             method(kPublic, "isShown", "()Z"),
         });
     }
@@ -267,7 +365,12 @@ using namespace builtin;
                   "Ljavax/microedition/lcdui/Display;"),
             field(kPrivate, "current",
                   "Ljavax/microedition/lcdui/Displayable;"),
+            field(kPublic | kStatic | kFinal, "LIST_ELEMENT", "I"),
+            field(kPublic | kStatic | kFinal, "CHOICE_GROUP_ELEMENT", "I"),
+            field(kPublic | kStatic | kFinal, "ALERT", "I"),
+            field(kPublic | kStatic | kFinal, "TAB", "I"),
         }, {
+            method(kStatic, "<clinit>", "()V"),
             method(kPrivate, "<init>", "()V"),
             method(kPublic | kStatic, "getDisplay",
                    "(Ljavax/microedition/midlet/MIDlet;)"
@@ -276,6 +379,17 @@ using namespace builtin;
                    "()Ljavax/microedition/lcdui/Displayable;"),
             method(kPublic, "setCurrent",
                    "(Ljavax/microedition/lcdui/Displayable;)V"),
+            method(kPublic, "setCurrent",
+                   "(Ljavax/microedition/lcdui/Alert;"
+                   "Ljavax/microedition/lcdui/Displayable;)V"),
+            method(kPublic, "isColor", "()Z"),
+            method(kPublic, "numColors", "()I"),
+            method(kPublic, "numAlphaLevels", "()I"),
+            method(kPublic, "callSerially", "(Ljava/lang/Runnable;)V"),
+            method(kPublic, "flashBacklight", "(I)Z"),
+            method(kPublic, "vibrate", "(I)Z"),
+            method(kPublic, "getBestImageWidth", "(I)I"),
+            method(kPublic, "getBestImageHeight", "(I)I"),
         });
     }
     if (name == "javax/microedition/lcdui/Item") {
@@ -288,14 +402,33 @@ using namespace builtin;
             field(kPrivate, "layout", "I"),
             field(kPrivate, "itemCommandListener",
                   "Ljavax/microedition/lcdui/ItemCommandListener;"),
+            field(kPrivate, "itemCommands",
+                  "[Ljavax/microedition/lcdui/Command;"),
+            field(kPrivate, "itemCommandCount", "I"),
+            field(kPrivate, "defaultCommand",
+                  "Ljavax/microedition/lcdui/Command;"),
+            field(kPrivate, "preferredWidth", "I"),
+            field(kPrivate, "preferredHeight", "I"),
         }, {
             method(kProtected, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "getLabel", "()Ljava/lang/String;"),
             method(kPublic, "setLabel", "(Ljava/lang/String;)V"),
             method(kPublic, "getLayout", "()I"),
             method(kPublic, "setLayout", "(I)V"),
+            method(kPublic, "addCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "removeCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setDefaultCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
             method(kPublic, "setItemCommandListener",
                    "(Ljavax/microedition/lcdui/ItemCommandListener;)V"),
+            method(kPublic, "getPreferredWidth", "()I"),
+            method(kPublic, "getPreferredHeight", "()I"),
+            method(kPublic, "setPreferredSize", "(II)V"),
+            method(kPublic, "getMinimumWidth", "()I"),
+            method(kPublic, "getMinimumHeight", "()I"),
+            method(kPublic, "notifyStateChanged", "()V"),
         });
     }
     if (name == "javax/microedition/lcdui/ItemCommandListener") {
@@ -307,22 +440,35 @@ using namespace builtin;
                    "Ljavax/microedition/lcdui/Item;)V"),
         });
     }
+    if (name == "javax/microedition/lcdui/ItemStateListener") {
+        return make_class("javax/microedition/lcdui/ItemStateListener",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "itemStateChanged",
+                   "(Ljavax/microedition/lcdui/Item;)V"),
+        });
+    }
     if (name == "javax/microedition/lcdui/Form") {
         return make_class("javax/microedition/lcdui/Form",
                           "javax/microedition/lcdui/Screen", kOrdinary, {
             field(kPrivate, "items", "[Ljavax/microedition/lcdui/Item;"),
             field(kPrivate, "itemCount", "I"),
+            field(kPrivate, "itemStateListener",
+                  "Ljavax/microedition/lcdui/ItemStateListener;"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "<init>",
                    "(Ljava/lang/String;[Ljavax/microedition/lcdui/Item;)V"),
             method(kPublic, "append", "(Ljavax/microedition/lcdui/Item;)I"),
             method(kPublic, "append", "(Ljava/lang/String;)I"),
+            method(kPublic, "append", "(Ljavax/microedition/lcdui/Image;)I"),
             method(kPublic, "insert", "(ILjavax/microedition/lcdui/Item;)V"),
             method(kPublic, "set", "(ILjavax/microedition/lcdui/Item;)V"),
             method(kPublic, "delete", "(I)V"),
             method(kPublic, "deleteAll", "()V"),
             method(kPublic, "get", "(I)Ljavax/microedition/lcdui/Item;"),
+            method(kPublic, "setItemStateListener",
+                   "(Ljavax/microedition/lcdui/ItemStateListener;)V"),
             method(kPublic, "size", "()I"),
         });
     }
@@ -443,6 +589,73 @@ using namespace builtin;
             method(kPublic, "getMinimumHeight", "()I"),
         });
     }
+    if (name == "javax/microedition/lcdui/ImageItem") {
+        return make_class("javax/microedition/lcdui/ImageItem",
+                          "javax/microedition/lcdui/Item", kOrdinary, {
+            field(kPrivate, "image", "Ljavax/microedition/lcdui/Image;"),
+            field(kPrivate, "altText", "Ljava/lang/String;"),
+            field(kPrivate, "appearanceMode", "I"),
+            field(kPrivate, "imageGeneration", "I"),
+        }, {
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljavax/microedition/lcdui/Image;"
+                   "ILjava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljavax/microedition/lcdui/Image;"
+                   "ILjava/lang/String;I)V"),
+            method(kPublic, "getImage",
+                   "()Ljavax/microedition/lcdui/Image;"),
+            method(kPublic, "setImage",
+                   "(Ljavax/microedition/lcdui/Image;)V"),
+            method(kPublic, "getAltText", "()Ljava/lang/String;"),
+            method(kPublic, "setAltText", "(Ljava/lang/String;)V"),
+            method(kPublic, "getAppearanceMode", "()I"),
+        });
+    }
+    if (name == "javax/microedition/lcdui/Ticker") {
+        return make_class("javax/microedition/lcdui/Ticker",
+                          "java/lang/Object", kOrdinary | kFinal, {
+            field(kPrivate, "text", "Ljava/lang/String;"),
+            field(kPrivate, "ownerDisplayableId", "I"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "setString", "(Ljava/lang/String;)V"),
+            method(kPublic, "getString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "javax/microedition/lcdui/CustomItem") {
+        return make_class("javax/microedition/lcdui/CustomItem",
+                          "javax/microedition/lcdui/Item",
+                          kOrdinary | kAbstract, {
+            field(kPrivate, "paintImage",
+                  "Ljavax/microedition/lcdui/Image;"),
+            field(kPrivate, "paintGeneration", "I"),
+        }, {
+            method(kProtected, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "getGameAction", "(I)I"),
+            method(kProtected | kFinal, "getInteractionModes", "()I"),
+            method(kProtected | kAbstract, "getMinContentWidth", "()I"),
+            method(kProtected | kAbstract, "getMinContentHeight", "()I"),
+            method(kProtected | kAbstract, "getPrefContentWidth", "(I)I"),
+            method(kProtected | kAbstract, "getPrefContentHeight", "(I)I"),
+            method(kProtected, "sizeChanged", "(II)V"),
+            method(kProtected | kFinal, "invalidate", "()V"),
+            method(kProtected | kAbstract, "paint",
+                   "(Ljavax/microedition/lcdui/Graphics;II)V"),
+            method(kProtected | kFinal, "repaint", "()V"),
+            method(kProtected | kFinal, "repaint", "(IIII)V"),
+            method(kProtected, "traverse", "(III[I)Z"),
+            method(kProtected, "traverseOut", "()V"),
+            method(kProtected, "keyPressed", "(I)V"),
+            method(kProtected, "keyReleased", "(I)V"),
+            method(kProtected, "keyRepeated", "(I)V"),
+            method(kProtected, "pointerPressed", "(II)V"),
+            method(kProtected, "pointerReleased", "(II)V"),
+            method(kProtected, "pointerDragged", "(II)V"),
+            method(kProtected, "showNotify", "()V"),
+            method(kProtected, "hideNotify", "()V"),
+        });
+    }
     if (name == "javax/microedition/lcdui/TextBox") {
         return make_class("javax/microedition/lcdui/TextBox",
                           "javax/microedition/lcdui/Screen", kOrdinary, {
@@ -457,6 +670,11 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;II)V"),
             method(kPublic, "getString", "()Ljava/lang/String;"),
             method(kPublic, "setString", "(Ljava/lang/String;)V"),
+            method(kPublic, "getChars", "([C)I"),
+            method(kPublic, "setChars", "([CII)V"),
+            method(kPublic, "insert", "(Ljava/lang/String;I)V"),
+            method(kPublic, "insert", "([CIII)V"),
+            method(kPublic, "delete", "(II)V"),
             method(kPublic, "getMaxSize", "()I"),
             method(kPublic, "setMaxSize", "(I)I"),
             method(kPublic, "size", "()I"),
@@ -464,6 +682,63 @@ using namespace builtin;
             method(kPublic, "setConstraints", "(I)V"),
             method(kPublic, "getConstraints", "()I"),
             method(kPublic, "setInitialInputMode", "(Ljava/lang/String;)V"),
+        });
+    }
+    if (name == "javax/microedition/lcdui/AlertType") {
+        return make_class("javax/microedition/lcdui/AlertType",
+                          "java/lang/Object", kOrdinary, {
+            field(kPrivate, "nativeKind", "I"),
+            field(kPublic | kStatic | kFinal, "INFO",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+            field(kPublic | kStatic | kFinal, "WARNING",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+            field(kPublic | kStatic | kFinal, "ERROR",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+            field(kPublic | kStatic | kFinal, "ALARM",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+            field(kPublic | kStatic | kFinal, "CONFIRMATION",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+        }, {
+            method(kStatic, "<clinit>", "()V"),
+            method(kProtected, "<init>", "()V"),
+            method(kPublic, "playSound",
+                   "(Ljavax/microedition/lcdui/Display;)Z"),
+        });
+    }
+    if (name == "javax/microedition/lcdui/Alert") {
+        return make_class("javax/microedition/lcdui/Alert",
+                          "javax/microedition/lcdui/Screen", kOrdinary, {
+            field(kPrivate, "alertText", "Ljava/lang/String;"),
+            field(kPrivate, "alertImage", "Ljavax/microedition/lcdui/Image;"),
+            field(kPrivate, "alertType",
+                  "Ljavax/microedition/lcdui/AlertType;"),
+            field(kPrivate, "timeout", "I"),
+            field(kPrivate, "nextDisplayable",
+                  "Ljavax/microedition/lcdui/Displayable;"),
+            field(kPrivate, "imageGeneration", "I"),
+            field(kPublic | kStatic | kFinal, "FOREVER", "I"),
+            field(kPublic | kStatic | kFinal, "DISMISS_COMMAND",
+                  "Ljavax/microedition/lcdui/Command;"),
+        }, {
+            method(kStatic, "<clinit>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/lang/String;"
+                   "Ljavax/microedition/lcdui/Image;"
+                   "Ljavax/microedition/lcdui/AlertType;)V"),
+            method(kPublic, "getString", "()Ljava/lang/String;"),
+            method(kPublic, "setString", "(Ljava/lang/String;)V"),
+            method(kPublic, "getImage",
+                   "()Ljavax/microedition/lcdui/Image;"),
+            method(kPublic, "setImage",
+                   "(Ljavax/microedition/lcdui/Image;)V"),
+            method(kPublic, "getType",
+                   "()Ljavax/microedition/lcdui/AlertType;"),
+            method(kPublic, "setType",
+                   "(Ljavax/microedition/lcdui/AlertType;)V"),
+            method(kPublic, "getTimeout", "()I"),
+            method(kPublic, "setTimeout", "(I)V"),
+            method(kPublic, "getDefaultTimeout", "()I"),
         });
     }
 

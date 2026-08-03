@@ -178,6 +178,28 @@ void add(NativeMethodRegistry& registry,
         return fail(ErrorCode::invalid_state,
                     "PrintStream output chain is too deep");
     }
+    auto runtime_class = machine.heap().class_name(output);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    auto write_method = machine.classes().resolve_method(
+        *runtime_class, "write", "(I)V");
+    if (write_method && write_method->owner != nullptr &&
+        write_method->owner->name() != "java/io/OutputStream" &&
+        write_method->owner->name() != "java/io/FilterOutputStream" &&
+        write_method->owner->name() != "java/io/ByteArrayOutputStream" &&
+        write_method->owner->name() != "java/io/PrintStream" &&
+        write_method->owner->name() != "java/io/DataOutputStream") {
+        const Value argument = Value::from_int(static_cast<i32>(byte));
+        auto invoked = machine.invoke_instance(
+            output, *runtime_class, "write", "(I)V",
+            std::span<const Value>(&argument, 1U));
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "custom OutputStream.write threw");
+        }
+        return {};
+    }
     auto byte_array = is_instance(machine, output,
                                   "java/io/ByteArrayOutputStream");
     if (!byte_array) return std::unexpected(byte_array.error());
@@ -208,7 +230,93 @@ void add(NativeMethodRegistry& registry,
         return write_output_byte(machine, *nested, byte, depth + 1U);
     }
     return fail(ErrorCode::unsupported_feature,
-                "PrintStream cannot call a custom OutputStream without scheduler callbacks");
+                "PrintStream output implementation is not connected");
+}
+
+[[nodiscard]] Status invoke_custom_output_void(Machine& machine,
+                                               ObjectRef output,
+                                               std::string_view method_name) {
+    auto runtime_class = machine.heap().class_name(output);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    auto method = machine.classes().resolve_method(
+        *runtime_class, method_name, "()V");
+    if (!method || method->owner == nullptr ||
+        method->owner->name() == "java/io/OutputStream" ||
+        method->owner->name() == "java/io/FilterOutputStream" ||
+        method->owner->name() == "java/io/ByteArrayOutputStream" ||
+        method->owner->name() == "java/io/PrintStream" ||
+        method->owner->name() == "java/io/DataOutputStream") {
+        return {};
+    }
+    auto invoked = machine.invoke_instance(output, *runtime_class,
+                                           method_name, "()V");
+    if (!invoked) return std::unexpected(invoked.error());
+    if (invoked->throwable.has_value()) {
+        auto thrown = machine.heap().class_name(*invoked->throwable);
+        if (!thrown) return std::unexpected(thrown.error());
+        return fail_java(*thrown,
+                         std::string("custom OutputStream.") +
+                             std::string(method_name) + " threw");
+    }
+    return {};
+}
+
+[[nodiscard]] Status flush_output(Machine& machine,
+                                  ObjectRef output,
+                                  usize depth) {
+    if (output.is_null()) return {};
+    if (depth >= kMaximumOutputDepth) {
+        return fail(ErrorCode::invalid_state,
+                    "PrintStream output chain is too deep");
+    }
+    auto custom = invoke_custom_output_void(machine, output, "flush");
+    if (!custom) return custom;
+    auto print_stream = is_instance(machine, output, "java/io/PrintStream");
+    if (!print_stream) return std::unexpected(print_stream.error());
+    if (*print_stream) {
+        auto nested = reference_field(machine, output,
+                                      kPrintStreamOutputField);
+        if (!nested) return std::unexpected(nested.error());
+        return flush_output(machine, *nested, depth + 1U);
+    }
+    auto filter = is_instance(machine, output,
+                              "java/io/FilterOutputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*filter) {
+        auto nested = reference_field(machine, output, kFilterOutputField);
+        if (!nested) return std::unexpected(nested.error());
+        return flush_output(machine, *nested, depth + 1U);
+    }
+    return {};
+}
+
+[[nodiscard]] Status close_output(Machine& machine,
+                                  ObjectRef output,
+                                  usize depth) {
+    if (output.is_null()) return {};
+    if (depth >= kMaximumOutputDepth) {
+        return fail(ErrorCode::invalid_state,
+                    "PrintStream output chain is too deep");
+    }
+    auto custom = invoke_custom_output_void(machine, output, "close");
+    if (!custom) return custom;
+    auto print_stream = is_instance(machine, output, "java/io/PrintStream");
+    if (!print_stream) return std::unexpected(print_stream.error());
+    if (*print_stream) {
+        auto nested = reference_field(machine, output,
+                                      kPrintStreamOutputField);
+        if (!nested) return std::unexpected(nested.error());
+        return close_output(machine, *nested, depth + 1U);
+    }
+    auto filter = is_instance(machine, output,
+                              "java/io/FilterOutputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*filter) {
+        auto nested = reference_field(machine, output, kFilterOutputField);
+        if (!nested) return std::unexpected(nested.error());
+        return close_output(machine, *nested, depth + 1U);
+    }
+    return {};
 }
 
 [[nodiscard]] Status write_utf8(Machine& machine,
@@ -580,8 +688,18 @@ void register_console_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
     add(registry, "java/io/PrintStream", "flush", "()V",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
+            auto stream = receiver(arguments);
+            if (!stream) return std::unexpected(stream.error());
+            auto output = reference_field(machine, *stream,
+                                          kPrintStreamOutputField);
+            if (!output) return std::unexpected(output.error());
+            auto flushed = flush_output(machine, *output, 0U);
+            if (!flushed) {
+                auto error = set_error(machine, *stream);
+                if (!error) return std::unexpected(error.error());
+            }
             return std::optional<Value> {};
         });
     add(registry, "java/io/PrintStream", "close", "()V",
@@ -589,12 +707,25 @@ void register_console_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto stream = receiver(arguments);
             if (!stream) return std::unexpected(stream.error());
-            auto output = machine.heap().set_field(
+            auto output = reference_field(machine, *stream,
+                                          kPrintStreamOutputField);
+            if (!output) return std::unexpected(output.error());
+            auto flushed = flush_output(machine, *output, 0U);
+            auto closed = flushed
+                ? close_output(machine, *output, 0U)
+                : flushed;
+            if (!closed) {
+                auto error = set_error(machine, *stream);
+                if (!error) return std::unexpected(error.error());
+            }
+            auto output_cleared = machine.heap().set_field(
                 *stream, kPrintStreamOutputField,
                 Value::from_reference({}));
             auto console = machine.heap().set_field(
                 *stream, kPrintStreamConsoleField, Value::from_int(0));
-            if (!output) return std::unexpected(output.error());
+            if (!output_cleared) {
+                return std::unexpected(output_cleared.error());
+            }
             if (!console) return std::unexpected(console.error());
             return std::optional<Value> {};
         });

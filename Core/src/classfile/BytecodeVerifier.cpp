@@ -70,7 +70,8 @@ struct BranchTarget final {
 
 [[nodiscard]] bool has_no_operands(u8 opcode) noexcept {
     return opcode <= 0x0FU ||
-           (opcode >= 0x1AU && opcode <= 0x83U) ||
+           (opcode >= 0x1AU && opcode <= 0x35U) ||
+           (opcode >= 0x3BU && opcode <= 0x83U) ||
            (opcode >= 0x85U && opcode <= 0x98U) ||
            (opcode >= 0xACU && opcode <= 0xB1U) ||
            opcode == 0xBEU || opcode == 0xBFU ||

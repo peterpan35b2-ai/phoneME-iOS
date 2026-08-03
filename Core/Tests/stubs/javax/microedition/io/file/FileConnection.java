@@ -10,9 +10,17 @@ import javax.microedition.io.StreamConnection;
 
 public interface FileConnection extends StreamConnection {
     long fileSize() throws IOException;
+    long directorySize(boolean includeSubDirs) throws IOException;
+    long availableSize();
+    long totalSize();
+    long usedSize();
+    boolean isOpen();
     boolean canRead();
     boolean canWrite();
+    void setReadable(boolean readable) throws IOException;
+    void setWritable(boolean writable) throws IOException;
     boolean isHidden();
+    void setHidden(boolean hidden) throws IOException;
     String getName();
     String getPath();
     String getURL();

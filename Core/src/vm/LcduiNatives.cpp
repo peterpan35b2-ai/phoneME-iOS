@@ -28,27 +28,54 @@ constexpr i32 kEventItemDeleted = 11;
 constexpr i32 kEventCommandsReset = 14;
 constexpr i32 kEventCommand = 15;
 
+constexpr i32 kTypeExclusiveChoice = 1;
+constexpr i32 kTypeMultipleChoice = 3;
+constexpr i32 kTypeCustomItem = 4;
 constexpr i32 kTypeDateField = 5;
 constexpr i32 kTypeProgressGauge = 6;
 constexpr i32 kTypeInteractiveGauge = 7;
+constexpr i32 kTypePlainImage = 8;
+constexpr i32 kTypeHyperlinkImage = 9;
+constexpr i32 kTypeButtonImage = 10;
 constexpr i32 kTypeSpacer = 11;
 constexpr i32 kTypePlainString = 12;
 constexpr i32 kTypeHyperlinkString = 13;
 constexpr i32 kTypeButtonString = 14;
 constexpr i32 kTypeTextField = 15;
+constexpr i32 kTypeNullAlert = 16;
+constexpr i32 kTypeInfoAlert = 17;
+constexpr i32 kTypeWarningAlert = 18;
+constexpr i32 kTypeErrorAlert = 19;
+constexpr i32 kTypeAlarmAlert = 20;
+constexpr i32 kTypeConfirmationAlert = 21;
 constexpr i32 kTypeForm = 23;
 
 constexpr i32 kTextFieldMetadata = -1001;
 constexpr i32 kGaugeMetadata = -1002;
 constexpr i32 kDateFieldMetadata = -1003;
+constexpr i32 kImageMetadata = -1004;
+constexpr i32 kItemStyleMetadata = -1005;
 constexpr i32 kScreenKindMetadata = -1006;
+constexpr i32 kTickerMetadata = -1008;
+constexpr i32 kAlertMetadata = -1009;
 constexpr i32 kScreenKindTextBox = 2;
+constexpr i32 kScreenKindAlert = 3;
+
+constexpr i32 kConstraintMask = 0xFFFF;
+constexpr i32 kConstraintAny = 0;
+constexpr i32 kConstraintEmail = 1;
+constexpr i32 kConstraintNumeric = 2;
+constexpr i32 kConstraintPhone = 3;
+constexpr i32 kConstraintUrl = 4;
+constexpr i32 kConstraintDecimal = 5;
+constexpr i32 kConstraintUneditable = 0x20000;
 
 constexpr usize kCommandIdField = 0;
 constexpr usize kCommandLabelField = 1;
 constexpr usize kCommandLongLabelField = 2;
 constexpr usize kCommandTypeField = 3;
 constexpr usize kCommandPriorityField = 4;
+constexpr usize kCommandOwnerItemField = 5;
 
 constexpr usize kDisplayableIdField = 0;
 constexpr usize kDisplayableTypeField = 1;
@@ -57,6 +84,8 @@ constexpr usize kDisplayableListenerField = 3;
 constexpr usize kDisplayableCommandsField = 4;
 constexpr usize kDisplayableCommandCountField = 5;
 constexpr usize kDisplayableShownField = 6;
+constexpr usize kDisplayableTickerField = 7;
+constexpr usize kDisplayableScrollField = 8;
 
 constexpr usize kDisplayCurrentField = 0;
 
@@ -66,39 +95,68 @@ constexpr usize kItemLabelField = 2;
 constexpr usize kItemParentField = 3;
 constexpr usize kItemLayoutField = 4;
 constexpr usize kItemListenerField = 5;
+constexpr usize kItemCommandsField = 6;
+constexpr usize kItemCommandCountField = 7;
+constexpr usize kItemDefaultCommandField = 8;
+constexpr usize kItemPreferredWidthField = 9;
+constexpr usize kItemPreferredHeightField = 10;
 
-constexpr usize kFormItemsField = 7;
-constexpr usize kFormItemCountField = 8;
+constexpr usize kFormItemsField = 9;
+constexpr usize kFormItemCountField = 10;
+constexpr usize kFormItemStateListenerField = 11;
+constexpr usize kChoiceGroupFitPolicyField = 16;
 
-constexpr usize kStringItemTextField = 6;
-constexpr usize kStringItemAppearanceField = 7;
+constexpr usize kStringItemTextField = 11;
+constexpr usize kStringItemAppearanceField = 12;
 
-constexpr usize kTextFieldTextField = 6;
-constexpr usize kTextFieldMaxSizeField = 7;
-constexpr usize kTextFieldConstraintsField = 8;
-constexpr usize kTextFieldCaretField = 9;
-constexpr usize kTextFieldInputModeField = 10;
+constexpr usize kTextFieldTextField = 11;
+constexpr usize kTextFieldMaxSizeField = 12;
+constexpr usize kTextFieldConstraintsField = 13;
+constexpr usize kTextFieldCaretField = 14;
+constexpr usize kTextFieldInputModeField = 15;
 
-constexpr usize kGaugeInteractiveField = 6;
-constexpr usize kGaugeMaxValueField = 7;
-constexpr usize kGaugeValueField = 8;
+constexpr usize kGaugeInteractiveField = 11;
+constexpr usize kGaugeMaxValueField = 12;
+constexpr usize kGaugeValueField = 13;
 
-constexpr usize kDateFieldDateField = 6;
-constexpr usize kDateFieldInputModeField = 7;
-constexpr usize kDateFieldTimeZoneField = 8;
+constexpr usize kDateFieldDateField = 11;
+constexpr usize kDateFieldInputModeField = 12;
+constexpr usize kDateFieldTimeZoneField = 13;
 
-constexpr usize kSpacerWidthField = 6;
-constexpr usize kSpacerHeightField = 7;
+constexpr usize kSpacerWidthField = 11;
+constexpr usize kSpacerHeightField = 12;
 
-constexpr usize kTextBoxPeerIdField = 7;
-constexpr usize kTextBoxTextField = 8;
-constexpr usize kTextBoxMaxSizeField = 9;
-constexpr usize kTextBoxConstraintsField = 10;
-constexpr usize kTextBoxCaretField = 11;
-constexpr usize kTextBoxInputModeField = 12;
+constexpr usize kImageItemImageField = 11;
+constexpr usize kImageItemAltTextField = 12;
+constexpr usize kImageItemAppearanceField = 13;
+constexpr usize kImageItemGenerationField = 14;
+
+constexpr usize kCustomItemPaintImageField = 11;
+constexpr usize kCustomItemPaintGenerationField = 12;
+
+constexpr usize kTextBoxPeerIdField = 9;
+constexpr usize kTextBoxTextField = 10;
+constexpr usize kTextBoxMaxSizeField = 11;
+constexpr usize kTextBoxConstraintsField = 12;
+constexpr usize kTextBoxCaretField = 13;
+constexpr usize kTextBoxInputModeField = 14;
 
 constexpr usize kDateTimeField = 0;
 constexpr usize kTimeZoneIdField = 0;
+
+constexpr usize kAlertTextField = 9;
+constexpr usize kAlertImageField = 10;
+constexpr usize kAlertTypeField = 11;
+constexpr usize kAlertTimeoutField = 12;
+constexpr usize kAlertNextField = 13;
+constexpr usize kAlertImageGenerationField = 14;
+constexpr usize kAlertTypeKindField = 0;
+constexpr usize kTickerTextField = 0;
+constexpr usize kTickerOwnerField = 1;
+constexpr usize kImageWidthField = 0;
+constexpr usize kImageHeightField = 1;
+constexpr i32 kAlertForever = -2;
+constexpr i32 kDefaultAlertTimeout = 2'000;
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -377,11 +435,17 @@ void append_utf8(std::string& output, u32 code_point) {
                                       kDisplayableCommandCountField, 0);
     auto shown_stored = set_int_field(machine, object,
                                       kDisplayableShownField, 0);
+    auto ticker_stored = set_reference_field(machine, object,
+                                             kDisplayableTickerField, {});
+    auto scroll_stored = set_int_field(machine, object,
+                                       kDisplayableScrollField, 0);
     if (!type_stored) return type_stored;
     if (!title_stored) return title_stored;
     if (!listener_stored) return listener_stored;
     if (!count_stored) return count_stored;
     if (!shown_stored) return shown_stored;
+    if (!ticker_stored) return ticker_stored;
+    if (!scroll_stored) return scroll_stored;
     auto commands = ensure_reference_array(
         machine, object, kDisplayableCommandsField,
         "[Ljavax/microedition/lcdui/Command;", 4U);
@@ -407,11 +471,28 @@ void append_utf8(std::string& output, u32 code_point) {
     auto layout_stored = set_int_field(machine, item, kItemLayoutField, 0);
     auto listener_stored = set_reference_field(machine, item,
                                                kItemListenerField, {});
+    auto command_count_stored = set_int_field(machine, item,
+                                              kItemCommandCountField, 0);
+    auto default_stored = set_reference_field(machine, item,
+                                              kItemDefaultCommandField, {});
+    auto preferred_width_stored = set_int_field(machine, item,
+                                                kItemPreferredWidthField, -1);
+    auto preferred_height_stored = set_int_field(machine, item,
+                                                 kItemPreferredHeightField, -1);
     if (!type_stored) return type_stored;
     if (!label_stored) return label_stored;
     if (!parent_stored) return parent_stored;
     if (!layout_stored) return layout_stored;
-    return listener_stored;
+    if (!listener_stored) return listener_stored;
+    if (!command_count_stored) return command_count_stored;
+    if (!default_stored) return default_stored;
+    if (!preferred_width_stored) return preferred_width_stored;
+    if (!preferred_height_stored) return preferred_height_stored;
+    auto commands = ensure_reference_array(
+        machine, item, kItemCommandsField,
+        "[Ljavax/microedition/lcdui/Command;", 4U);
+    if (!commands) return std::unexpected(commands.error());
+    return {};
 }
 
 [[nodiscard]] Result<UiBridgeEvent> screen_event(Machine& machine,
@@ -425,12 +506,67 @@ void append_utf8(std::string& output, u32 code_point) {
     if (!title) return std::unexpected(title.error());
     auto title_text = utf8_string(machine, *title);
     if (!title_text) return std::unexpected(title_text.error());
-    return UiBridgeEvent {
+    UiBridgeEvent event {
         .kind = kind,
         .component_id = *id,
         .component_type = *type,
         .text = std::move(*title_text),
     };
+    if (*type >= kTypeNullAlert && *type <= kTypeConfirmationAlert) {
+        auto alert_text = reference_field(machine, displayable,
+                                          kAlertTextField);
+        auto timeout = int_field(machine, displayable, kAlertTimeoutField);
+        auto next = reference_field(machine, displayable, kAlertNextField);
+        auto image = reference_field(machine, displayable, kAlertImageField);
+        auto image_generation = int_field(
+            machine, displayable, kAlertImageGenerationField);
+        if (!alert_text) return std::unexpected(alert_text.error());
+        if (!timeout) return std::unexpected(timeout.error());
+        if (!next) return std::unexpected(next.error());
+        if (!image) return std::unexpected(image.error());
+        if (!image_generation)
+            return std::unexpected(image_generation.error());
+        auto encoded = utf8_string(machine, *alert_text);
+        if (!encoded) return std::unexpected(encoded.error());
+        i32 next_id = 0;
+        if (!next->is_null()) {
+            auto resolved = ensure_native_id(machine, *next,
+                                             kDisplayableIdField);
+            if (!resolved) return std::unexpected(resolved.error());
+            next_id = *resolved;
+        }
+        i32 image_width = 0;
+        i32 image_height = 0;
+        if (!image->is_null()) {
+            auto width = int_field(machine, *image, kImageWidthField);
+            auto height = int_field(machine, *image, kImageHeightField);
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            image_width = std::max(*width, 0);
+            image_height = std::max(*height, 0);
+        }
+        event.index = *image_generation;
+        event.arguments = {*timeout, next_id, kScreenKindAlert,
+                           kAlertMetadata};
+        event.value64 =
+            (static_cast<i64>(static_cast<u32>(image_width)) << 32U) |
+            static_cast<i64>(static_cast<u32>(image_height));
+        event.detail = std::move(*encoded);
+    } else {
+        auto ticker = reference_field(machine, displayable,
+                                      kDisplayableTickerField);
+        if (!ticker) return std::unexpected(ticker.error());
+        if (!ticker->is_null()) {
+            auto ticker_text = reference_field(machine, *ticker,
+                                               kTickerTextField);
+            if (!ticker_text) return std::unexpected(ticker_text.error());
+            auto encoded = utf8_string(machine, *ticker_text);
+            if (!encoded) return std::unexpected(encoded.error());
+            event.arguments[3] = kTickerMetadata;
+            event.detail = std::move(*encoded);
+        }
+    }
+    return event;
 }
 
 [[nodiscard]] Result<UiBridgeEvent> item_event(Machine& machine,
@@ -454,15 +590,26 @@ void append_utf8(std::string& output, u32 code_point) {
         .component_type = *type,
         .text = std::move(*label_text),
     };
-    auto class_name = machine.heap().class_name(item);
-    if (!class_name) return std::unexpected(class_name.error());
-    if (*class_name == "javax/microedition/lcdui/StringItem") {
+    auto is_custom = machine.object_is_instance(
+        item, "javax/microedition/lcdui/CustomItem");
+    if (!is_custom) return std::unexpected(is_custom.error());
+    if (*is_custom) {
+        auto width = int_field(machine, item, kItemPreferredWidthField);
+        auto height = int_field(machine, item, kItemPreferredHeightField);
+        auto generation = int_field(machine, item,
+                                    kCustomItemPaintGenerationField);
+        if (!width) return std::unexpected(width.error());
+        if (!height) return std::unexpected(height.error());
+        if (!generation) return std::unexpected(generation.error());
+        event.arguments = {std::max(*width, 0), std::max(*height, 0),
+                           *generation, kImageMetadata};
+    } else if (*type >= kTypePlainString && *type <= kTypeButtonString) {
         auto text = reference_field(machine, item, kStringItemTextField);
         if (!text) return std::unexpected(text.error());
         auto encoded = utf8_string(machine, *text);
         if (!encoded) return std::unexpected(encoded.error());
         event.detail = std::move(*encoded);
-    } else if (*class_name == "javax/microedition/lcdui/TextField") {
+    } else if (*type == kTypeTextField) {
         auto text = reference_field(machine, item, kTextFieldTextField);
         auto maximum = int_field(machine, item, kTextFieldMaxSizeField);
         auto constraints = int_field(machine, item, kTextFieldConstraintsField);
@@ -476,7 +623,8 @@ void append_utf8(std::string& output, u32 code_point) {
         event.arguments = {*maximum, *constraints, *caret,
                            kTextFieldMetadata};
         event.detail = std::move(*encoded);
-    } else if (*class_name == "javax/microedition/lcdui/Gauge") {
+    } else if (*type == kTypeProgressGauge ||
+               *type == kTypeInteractiveGauge) {
         auto interactive = int_field(machine, item, kGaugeInteractiveField);
         auto maximum = int_field(machine, item, kGaugeMaxValueField);
         auto value = int_field(machine, item, kGaugeValueField);
@@ -485,7 +633,7 @@ void append_utf8(std::string& output, u32 code_point) {
         if (!value) return std::unexpected(value.error());
         event.arguments = {*value, *maximum, *interactive,
                            kGaugeMetadata};
-    } else if (*class_name == "javax/microedition/lcdui/DateField") {
+    } else if (*type == kTypeDateField) {
         auto date = reference_field(machine, item, kDateFieldDateField);
         auto mode = int_field(machine, item, kDateFieldInputModeField);
         auto zone = reference_field(machine, item, kDateFieldTimeZoneField);
@@ -506,14 +654,79 @@ void append_utf8(std::string& output, u32 code_point) {
             if (!encoded) return std::unexpected(encoded.error());
             event.detail = std::move(*encoded);
         }
-    } else if (*class_name == "javax/microedition/lcdui/Spacer") {
+    } else if (*type == kTypeSpacer) {
         auto width = int_field(machine, item, kSpacerWidthField);
         auto height = int_field(machine, item, kSpacerHeightField);
         if (!width) return std::unexpected(width.error());
         if (!height) return std::unexpected(height.error());
         event.arguments = {0, 0, *width, *height};
+    } else if (*type >= kTypePlainImage && *type <= kTypeButtonImage) {
+        auto image = reference_field(machine, item, kImageItemImageField);
+        auto alt = reference_field(machine, item, kImageItemAltTextField);
+        auto generation = int_field(machine, item,
+                                    kImageItemGenerationField);
+        if (!image) return std::unexpected(image.error());
+        if (!alt) return std::unexpected(alt.error());
+        if (!generation) return std::unexpected(generation.error());
+        auto alt_text = utf8_string(machine, *alt);
+        if (!alt_text) return std::unexpected(alt_text.error());
+        event.detail = std::move(*alt_text);
+        i32 width = 0;
+        i32 height = 0;
+        if (!image->is_null()) {
+            auto image_width = int_field(machine, *image, kImageWidthField);
+            auto image_height = int_field(machine, *image, kImageHeightField);
+            if (!image_width) return std::unexpected(image_width.error());
+            if (!image_height) return std::unexpected(image_height.error());
+            width = *image_width;
+            height = *image_height;
+        }
+        event.arguments = {width, height, *generation, kImageMetadata};
     }
     return event;
+}
+
+[[nodiscard]] Result<UiBridgeEvent> item_style_event(Machine& machine,
+                                                     ObjectRef item,
+                                                     i32 kind) {
+    auto id = ensure_native_id(machine, item, kItemIdField);
+    auto type = int_field(machine, item, kItemTypeField);
+    auto label = reference_field(machine, item, kItemLabelField);
+    auto parent = int_field(machine, item, kItemParentField);
+    auto layout = int_field(machine, item, kItemLayoutField);
+    if (!id) return std::unexpected(id.error());
+    if (!type) return std::unexpected(type.error());
+    if (!label) return std::unexpected(label.error());
+    if (!parent) return std::unexpected(parent.error());
+    if (!layout) return std::unexpected(layout.error());
+    auto label_text = utf8_string(machine, *label);
+    if (!label_text) return std::unexpected(label_text.error());
+
+    i32 appearance = 0;
+    i32 fit_policy = 0;
+    if (*type >= kTypePlainString && *type <= kTypeButtonString) {
+        auto value = int_field(machine, item, kStringItemAppearanceField);
+        if (!value) return std::unexpected(value.error());
+        appearance = *value;
+    } else if (*type >= kTypePlainImage && *type <= kTypeButtonImage) {
+        auto value = int_field(machine, item, kImageItemAppearanceField);
+        if (!value) return std::unexpected(value.error());
+        appearance = *value;
+    } else if (*type >= kTypeExclusiveChoice &&
+               *type <= kTypeMultipleChoice) {
+        auto value = int_field(machine, item, kChoiceGroupFitPolicyField);
+        if (!value) return std::unexpected(value.error());
+        fit_policy = *value;
+    }
+    return UiBridgeEvent {
+        .kind = kind,
+        .component_id = *id,
+        .parent_id = *parent,
+        .component_type = *type,
+        .arguments = {*layout, appearance, fit_policy,
+                      kItemStyleMetadata},
+        .text = std::move(*label_text),
+    };
 }
 
 [[nodiscard]] Result<UiBridgeEvent> text_box_event(Machine& machine,
@@ -561,7 +774,18 @@ void append_utf8(std::string& output, u32 code_point) {
     auto event = item_event(machine, item, kind);
     if (!event) return std::unexpected(event.error());
     machine.emit_ui_event(std::move(*event));
+    auto style = item_style_event(machine, item, kind);
+    if (!style) return std::unexpected(style.error());
+    machine.emit_ui_event(std::move(*style));
     return {};
+}
+
+[[nodiscard]] i32 command_weight(i32 type) noexcept {
+    constexpr std::array<i32, 9> weights {
+        127, 2, 5, 7, 3, 4, 8, 6, 1,
+    };
+    if (type < 1 || type >= static_cast<i32>(weights.size())) return 127;
+    return weights[static_cast<usize>(type)];
 }
 
 [[nodiscard]] Result<UiBridgeEvent> command_event(Machine& machine,
@@ -573,11 +797,13 @@ void append_utf8(std::string& output, u32 code_point) {
                                       kCommandLongLabelField);
     auto type = int_field(machine, command, kCommandTypeField);
     auto priority = int_field(machine, command, kCommandPriorityField);
+    auto owner = int_field(machine, command, kCommandOwnerItemField);
     if (!id) return std::unexpected(id.error());
     if (!label) return std::unexpected(label.error());
     if (!long_label) return std::unexpected(long_label.error());
     if (!type) return std::unexpected(type.error());
     if (!priority) return std::unexpected(priority.error());
+    if (!owner) return std::unexpected(owner.error());
     auto label_text = utf8_string(machine, *label);
     auto long_text = utf8_string(machine, *long_label);
     if (!label_text) return std::unexpected(label_text.error());
@@ -586,14 +812,48 @@ void append_utf8(std::string& output, u32 code_point) {
         .kind = kEventCommand,
         .component_id = *id,
         .index = order,
-        .arguments = {*type, *priority, 0, 0},
+        .arguments = {*type, *priority, *owner == 0 ? 0 : 1, *owner},
         .text = std::move(*label_text),
         .detail = std::move(*long_text),
     };
 }
 
+[[nodiscard]] Result<bool> reference_array_contains(
+    Machine& machine,
+    ObjectRef array,
+    i32 count,
+    ObjectRef target) {
+    if (array.is_null()) return false;
+    for (i32 index = 0; index < count; ++index) {
+        auto value = machine.heap().element(array,
+                                            static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto reference = value->as_reference();
+        if (!reference) return std::unexpected(reference.error());
+        if (*reference == target) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] Status emit_command_array(Machine& machine,
+                                        ObjectRef commands,
+                                        i32 count,
+                                        std::vector<ObjectRef>& output) {
+    if (commands.is_null()) return {};
+    for (i32 index = 0; index < count; ++index) {
+        auto value = machine.heap().element(commands,
+                                            static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto command = value->as_reference();
+        if (!command) return std::unexpected(command.error());
+        if (!command->is_null()) output.push_back(*command);
+    }
+    return {};
+}
+
 [[nodiscard]] Status emit_commands(Machine& machine,
-                                   ObjectRef displayable) {
+                                   ObjectRef displayable,
+                                   ObjectRef focused_item = {}) {
     machine.emit_ui_event(UiBridgeEvent {.kind = kEventCommandsReset});
     auto commands = reference_field(machine, displayable,
                                     kDisplayableCommandsField);
@@ -601,20 +861,54 @@ void append_utf8(std::string& output, u32 code_point) {
                            kDisplayableCommandCountField);
     if (!commands) return std::unexpected(commands.error());
     if (!count) return std::unexpected(count.error());
-    if (commands->is_null()) return {};
-    for (i32 index = 0; index < *count; ++index) {
-        auto value = machine.heap().element(*commands,
-                                            static_cast<usize>(index));
-        if (!value) return std::unexpected(value.error());
-        auto command = value->as_reference();
-        if (!command) return std::unexpected(command.error());
-        if (command->is_null()) continue;
-        auto event = command_event(machine, *command, index);
+
+    std::vector<ObjectRef> ordered;
+    ordered.reserve(static_cast<usize>(std::max(*count, 0)) + 4U);
+    auto screen_added = emit_command_array(machine, *commands, *count, ordered);
+    if (!screen_added) return screen_added;
+    if (!focused_item.is_null()) {
+        auto item_commands = reference_field(machine, focused_item,
+                                             kItemCommandsField);
+        auto item_count = int_field(machine, focused_item,
+                                    kItemCommandCountField);
+        if (!item_commands) return std::unexpected(item_commands.error());
+        if (!item_count) return std::unexpected(item_count.error());
+        auto item_added = emit_command_array(machine, *item_commands,
+                                             *item_count, ordered);
+        if (!item_added) return item_added;
+    }
+    std::stable_sort(ordered.begin(), ordered.end(),
+        [&machine](ObjectRef left, ObjectRef right) {
+            auto left_type = int_field(machine, left, kCommandTypeField);
+            auto right_type = int_field(machine, right, kCommandTypeField);
+            auto left_priority = int_field(machine, left, kCommandPriorityField);
+            auto right_priority = int_field(machine, right, kCommandPriorityField);
+            if (!left_type || !right_type || !left_priority || !right_priority) {
+                return left.bits < right.bits;
+            }
+            const i32 left_weight = command_weight(*left_type);
+            const i32 right_weight = command_weight(*right_type);
+            if (left_weight != right_weight) return left_weight < right_weight;
+            if (*left_priority != *right_priority) {
+                return *left_priority < *right_priority;
+            }
+            return left.bits < right.bits;
+        });
+    for (usize index = 0; index < ordered.size(); ++index) {
+        auto event = command_event(machine, ordered[index],
+                                   static_cast<i32>(index));
         if (!event) return std::unexpected(event.error());
         machine.emit_ui_event(std::move(*event));
     }
     return {};
 }
+
+[[nodiscard]] Status layout_custom_item(Machine& machine,
+                                        ObjectRef item,
+                                        bool notify_show);
+[[nodiscard]] Status notify_custom_items(Machine& machine,
+                                         ObjectRef displayable,
+                                         bool visible);
 
 [[nodiscard]] Status attach_item(Machine& machine,
                                  ObjectRef form,
@@ -644,6 +938,17 @@ void append_utf8(std::string& output, u32 code_point) {
     if (*is_choice_group) {
         auto choices = emit_choice_elements(machine, item);
         if (!choices) return choices;
+    }
+    auto is_custom = machine.object_is_instance(
+        item, "javax/microedition/lcdui/CustomItem");
+    if (!is_custom) return std::unexpected(is_custom.error());
+    if (*is_custom) {
+        auto form_shown = is_shown(machine, form);
+        if (!form_shown) return std::unexpected(form_shown.error());
+        auto lifecycle = layout_custom_item(machine, item, *form_shown);
+        if (!lifecycle) return lifecycle;
+        auto updated = emit_item(machine, item, kEventItemUpdated);
+        if (!updated) return updated;
     }
     (void)index;
     return {};
@@ -711,6 +1016,81 @@ void append_utf8(std::string& output, u32 code_point) {
     return emit_item(machine, item, kEventItemUpdated);
 }
 
+[[nodiscard]] Status add_item_command(Machine& machine,
+                                      ObjectRef item,
+                                      ObjectRef command) {
+    auto count = int_field(machine, item, kItemCommandCountField);
+    if (!count) return std::unexpected(count.error());
+    auto commands = ensure_reference_array(
+        machine, item, kItemCommandsField,
+        "[Ljavax/microedition/lcdui/Command;",
+        static_cast<usize>(*count) + 1U);
+    if (!commands) return std::unexpected(commands.error());
+    for (i32 index = 0; index < *count; ++index) {
+        auto value = machine.heap().element(*commands,
+                                            static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto existing = value->as_reference();
+        if (!existing) return std::unexpected(existing.error());
+        if (*existing == command) return {};
+    }
+    auto item_id = ensure_native_id(machine, item, kItemIdField);
+    if (!item_id) return std::unexpected(item_id.error());
+    auto owner = set_int_field(machine, command,
+                               kCommandOwnerItemField, *item_id);
+    if (!owner) return owner;
+    auto stored = machine.heap().set_element(
+        *commands, static_cast<usize>(*count), Value::from_reference(command));
+    if (!stored) return stored;
+    return set_int_field(machine, item, kItemCommandCountField, *count + 1);
+}
+
+[[nodiscard]] Status remove_item_command(Machine& machine,
+                                         ObjectRef item,
+                                         ObjectRef command) {
+    auto count = int_field(machine, item, kItemCommandCountField);
+    auto commands = reference_field(machine, item, kItemCommandsField);
+    if (!count) return std::unexpected(count.error());
+    if (!commands) return std::unexpected(commands.error());
+    if (commands->is_null()) return {};
+    i32 found = -1;
+    for (i32 index = 0; index < *count; ++index) {
+        auto value = machine.heap().element(*commands,
+                                            static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto existing = value->as_reference();
+        if (!existing) return std::unexpected(existing.error());
+        if (*existing == command) {
+            found = index;
+            break;
+        }
+    }
+    if (found < 0) return {};
+    for (i32 index = found; index + 1 < *count; ++index) {
+        auto next = machine.heap().element(*commands,
+                                           static_cast<usize>(index + 1));
+        if (!next) return std::unexpected(next.error());
+        auto moved = machine.heap().set_element(
+            *commands, static_cast<usize>(index), *next);
+        if (!moved) return moved;
+    }
+    auto cleared = machine.heap().set_element(
+        *commands, static_cast<usize>(*count - 1),
+        Value::from_reference({}));
+    if (!cleared) return cleared;
+    auto owner = set_int_field(machine, command, kCommandOwnerItemField, 0);
+    if (!owner) return owner;
+    auto default_command = reference_field(machine, item,
+                                           kItemDefaultCommandField);
+    if (!default_command) return std::unexpected(default_command.error());
+    if (*default_command == command) {
+        auto cleared_default = set_reference_field(
+            machine, item, kItemDefaultCommandField, {});
+        if (!cleared_default) return cleared_default;
+    }
+    return set_int_field(machine, item, kItemCommandCountField, *count - 1);
+}
+
 [[nodiscard]] Result<ObjectRef> normalized_string(Machine& machine,
                                                   ObjectRef value) {
     if (!value.is_null()) return value;
@@ -726,6 +1106,142 @@ void append_utf8(std::string& output, u32 code_point) {
                     "LCDUI String length exceeds Java int range");
     }
     return static_cast<i32>(text->size());
+}
+
+[[nodiscard]] Status validate_text_constraints(
+    std::u16string_view text,
+    i32 constraints) {
+    const i32 base = constraints & kConstraintMask;
+    if (base < kConstraintAny || base > kConstraintDecimal) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "LCDUI text constraints are invalid");
+    }
+    if (text.empty() || base == kConstraintAny ||
+        base == kConstraintEmail || base == kConstraintUrl) {
+        return {};
+    }
+    if (base == kConstraintNumeric) {
+        usize offset = 0;
+        if (text.front() == u'-') {
+            if (text.size() == 1U) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "NUMERIC text cannot be only a minus sign");
+            }
+            offset = 1U;
+        }
+        for (; offset < text.size(); ++offset) {
+            if (text[offset] < u'0' || text[offset] > u'9') {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "NUMERIC text contains a non-digit");
+            }
+        }
+        return {};
+    }
+    if (base == kConstraintPhone) {
+        for (const char16_t character : text) {
+            const bool digit = character >= u'0' && character <= u'9';
+            if (!digit && character != u'#' && character != u'*' &&
+                character != u'+') {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "PHONENUMBER text contains an invalid character");
+            }
+        }
+        return {};
+    }
+    if (base == kConstraintDecimal) {
+        if (text == u"-" || text == u"." || text == u"-.") {
+            return fail_java("java/lang/IllegalArgumentException",
+                             "DECIMAL text is incomplete");
+        }
+        bool separator = false;
+        for (usize index = 0; index < text.size(); ++index) {
+            const char16_t character = text[index];
+            if (character == u'.') {
+                if (separator) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "DECIMAL text has multiple separators");
+                }
+                separator = true;
+                continue;
+            }
+            const bool digit = character >= u'0' && character <= u'9';
+            if (!digit && !(character == u'-' && index == 0U)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DECIMAL text contains an invalid character");
+            }
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] Status validate_text_reference(Machine& machine,
+                                             ObjectRef text,
+                                             i32 constraints) {
+    auto value = machine.heap().string_value(text);
+    if (!value) return std::unexpected(value.error());
+    return validate_text_constraints(*value, constraints);
+}
+
+[[nodiscard]] Result<std::u16string> char_array_slice(
+    Machine& machine,
+    ObjectRef array,
+    i32 offset,
+    i32 length) {
+    auto class_name = machine.heap().class_name(array);
+    if (!class_name) return std::unexpected(class_name.error());
+    if (*class_name != "[C") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "LCDUI character buffer is not char[]");
+    }
+    auto array_length = machine.heap().array_length(array);
+    if (!array_length) return std::unexpected(array_length.error());
+    if (offset < 0 || length < 0 ||
+        static_cast<usize>(offset) > *array_length ||
+        static_cast<usize>(length) > *array_length -
+            static_cast<usize>(offset)) {
+        return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                         "LCDUI character range is outside buffer");
+    }
+    std::u16string value;
+    value.reserve(static_cast<usize>(length));
+    for (i32 index = 0; index < length; ++index) {
+        auto element = machine.heap().element(
+            array, static_cast<usize>(offset + index));
+        if (!element) return std::unexpected(element.error());
+        auto character = element->as_int();
+        if (!character) return std::unexpected(character.error());
+        value.push_back(static_cast<char16_t>(
+            static_cast<u32>(*character) & 0xFFFFU));
+    }
+    return value;
+}
+
+[[nodiscard]] Status set_text_box_value(Machine& machine,
+                                        ObjectRef text_box,
+                                        std::u16string value,
+                                        i32 caret) {
+    auto maximum = int_field(machine, text_box, kTextBoxMaxSizeField);
+    auto constraints = int_field(machine, text_box,
+                                 kTextBoxConstraintsField);
+    if (!maximum) return std::unexpected(maximum.error());
+    if (!constraints) return std::unexpected(constraints.error());
+    if (value.size() > static_cast<usize>(*maximum)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "TextBox text exceeds maxSize");
+    }
+    auto valid = validate_text_constraints(value, *constraints);
+    if (!valid) return valid;
+    auto string = create_string(machine, std::move(value));
+    if (!string) return std::unexpected(string.error());
+    auto length = text_length(machine, *string);
+    if (!length) return std::unexpected(length.error());
+    auto first = set_reference_field(machine, text_box,
+                                     kTextBoxTextField, *string);
+    auto second = set_int_field(machine, text_box, kTextBoxCaretField,
+                                std::clamp(caret, 0, *length));
+    if (!first) return first;
+    if (!second) return second;
+    return emit_text_box(machine, text_box, kEventItemUpdated);
 }
 
 [[nodiscard]] Result<std::u16string> decode_ui_utf8(
@@ -803,6 +1319,57 @@ void append_utf8(std::string& output, u32 code_point) {
     return reference_field(machine, *display, kDisplayCurrentField);
 }
 
+[[nodiscard]] Status set_current_displayable(Machine& machine,
+                                             ObjectRef display,
+                                             ObjectRef next) {
+    if (!next.is_null()) {
+        auto valid = machine.object_is_instance(
+            next, "javax/microedition/lcdui/Displayable");
+        if (!valid) return std::unexpected(valid.error());
+        if (!*valid) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             "Display.setCurrent target is not Displayable");
+        }
+    }
+    auto current = reference_field(machine, display, kDisplayCurrentField);
+    if (!current) return std::unexpected(current.error());
+    if (*current == next) return {};
+    if (!current->is_null()) {
+        auto custom_hidden = notify_custom_items(machine, *current, false);
+        if (!custom_hidden) return custom_hidden;
+        auto hidden = screen_event(machine, *current, kEventScreenHidden);
+        if (!hidden) return std::unexpected(hidden.error());
+        machine.emit_ui_event(std::move(*hidden));
+        auto stored = set_int_field(machine, *current,
+                                    kDisplayableShownField, 0);
+        if (!stored) return std::unexpected(stored.error());
+        if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
+            auto visibility = canvas->set_display_visible(*current, false);
+            if (!visibility) return std::unexpected(visibility.error());
+        }
+    }
+    auto assigned = set_reference_field(machine, display,
+                                        kDisplayCurrentField, next);
+    if (!assigned) return std::unexpected(assigned.error());
+    if (next.is_null()) {
+        machine.emit_ui_event(UiBridgeEvent {.kind = kEventCommandsReset});
+        return {};
+    }
+    auto shown_stored = set_int_field(machine, next,
+                                      kDisplayableShownField, 1);
+    if (!shown_stored) return std::unexpected(shown_stored.error());
+    if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
+        auto visibility = canvas->set_display_visible(next, true);
+        if (!visibility) return std::unexpected(visibility.error());
+    }
+    auto custom_shown = notify_custom_items(machine, next, true);
+    if (!custom_shown) return custom_shown;
+    auto shown = screen_event(machine, next, kEventScreenShown);
+    if (!shown) return std::unexpected(shown.error());
+    machine.emit_ui_event(std::move(*shown));
+    return emit_commands(machine, next);
+}
+
 [[nodiscard]] Status dispatch_command_listener(Machine& machine,
                                                ObjectRef command,
                                                ObjectRef displayable) {
@@ -831,6 +1398,349 @@ void append_utf8(std::string& output, u32 code_point) {
     if (!throwable) return std::unexpected(throwable.error());
     return fail(ErrorCode::java_exception,
                 "LCDUI command callback threw " + *throwable);
+}
+
+[[nodiscard]] Status callback_status(Machine& machine,
+                                     const ExecutionResult& result,
+                                     std::string_view callback_name) {
+    if (result.completed_normally()) return {};
+    if (!result.throwable.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    std::string(callback_name) +
+                        " failed without throwable");
+    }
+    auto throwable = machine.heap().class_name(*result.throwable);
+    if (!throwable) return std::unexpected(throwable.error());
+    return fail(ErrorCode::java_exception,
+                std::string(callback_name) + " threw " + *throwable);
+}
+
+[[nodiscard]] Status dispatch_item_command_listener(Machine& machine,
+                                                    ObjectRef command,
+                                                    ObjectRef item) {
+    auto listener = reference_field(machine, item, kItemListenerField);
+    if (!listener) return std::unexpected(listener.error());
+    if (listener->is_null()) return {};
+    const Value callback_arguments[] {
+        Value::from_reference(command),
+        Value::from_reference(item),
+    };
+    auto result = machine.invoke_instance(
+        *listener,
+        "javax/microedition/lcdui/ItemCommandListener",
+        "commandAction",
+        "(Ljavax/microedition/lcdui/Command;Ljavax/microedition/lcdui/Item;)V",
+        callback_arguments);
+    if (!result) return std::unexpected(result.error());
+    return callback_status(machine, *result, "LCDUI item command callback");
+}
+
+[[nodiscard]] Status dispatch_item_state_listener(Machine& machine,
+                                                  ObjectRef item) {
+    auto parent_id = int_field(machine, item, kItemParentField);
+    if (!parent_id) return std::unexpected(parent_id.error());
+    if (*parent_id == 0) return {};
+    auto form = machine.ui_component(*parent_id);
+    if (!form) return std::unexpected(form.error());
+    auto valid = machine.object_is_instance(
+        *form, "javax/microedition/lcdui/Form");
+    if (!valid) return std::unexpected(valid.error());
+    if (!*valid) return {};
+    auto listener = reference_field(machine, *form,
+                                    kFormItemStateListenerField);
+    if (!listener) return std::unexpected(listener.error());
+    if (listener->is_null()) return {};
+    const Value callback_arguments[] {Value::from_reference(item)};
+    auto result = machine.invoke_instance(
+        *listener,
+        "javax/microedition/lcdui/ItemStateListener",
+        "itemStateChanged",
+        "(Ljavax/microedition/lcdui/Item;)V",
+        callback_arguments);
+    if (!result) return std::unexpected(result.error());
+    return callback_status(machine, *result, "LCDUI item state callback");
+}
+
+[[nodiscard]] Result<ObjectRef> display_singleton(Machine& machine) {
+    auto field = machine.class_states().resolve_field(
+        "javax/microedition/lcdui/Display", "singleton",
+        "Ljavax/microedition/lcdui/Display;", true);
+    if (!field) return std::unexpected(field.error());
+    auto value = machine.class_states().static_field(*field);
+    if (!value) return std::unexpected(value.error());
+    return value->as_reference();
+}
+
+[[nodiscard]] Result<std::optional<Value>> invoke_custom(
+    Machine& machine,
+    ObjectRef item,
+    std::string_view name,
+    std::string_view descriptor,
+    std::span<const Value> arguments = {}) {
+    auto result = machine.invoke_instance(
+        item, "javax/microedition/lcdui/CustomItem",
+        name, descriptor, arguments);
+    if (!result) return std::unexpected(result.error());
+    auto status = callback_status(machine, *result,
+                                  "LCDUI CustomItem callback");
+    if (!status) return std::unexpected(status.error());
+    return result->return_value;
+}
+
+[[nodiscard]] Result<i32> invoke_custom_int(
+    Machine& machine,
+    ObjectRef item,
+    std::string_view name,
+    std::string_view descriptor,
+    std::span<const Value> arguments = {}) {
+    auto value = invoke_custom(machine, item, name, descriptor, arguments);
+    if (!value) return std::unexpected(value.error());
+    if (!value->has_value()) {
+        return fail(ErrorCode::invalid_state,
+                    "CustomItem callback returned no int value");
+    }
+    return (*value)->as_int();
+}
+
+[[nodiscard]] Status paint_custom_item(Machine& machine,
+                                       ObjectRef item,
+                                       i32 width,
+                                       i32 height) {
+    const Value image_arguments[] {
+        Value::from_int(std::max(width, 1)),
+        Value::from_int(std::max(height, 1)),
+    };
+    auto image_result = machine.invoke_static(
+        "javax/microedition/lcdui/Image", "createImage",
+        "(II)Ljavax/microedition/lcdui/Image;", image_arguments);
+    if (!image_result) return std::unexpected(image_result.error());
+    auto image_status = callback_status(machine, *image_result,
+                                        "CustomItem image allocation");
+    if (!image_status) return image_status;
+    if (!image_result->return_value.has_value()) {
+        return fail(ErrorCode::invalid_state,
+                    "CustomItem image allocation returned no image");
+    }
+    auto image = image_result->return_value->as_reference();
+    if (!image) return std::unexpected(image.error());
+    auto graphics_result = machine.invoke_instance(
+        *image, "javax/microedition/lcdui/Image", "getGraphics",
+        "()Ljavax/microedition/lcdui/Graphics;");
+    if (!graphics_result) return std::unexpected(graphics_result.error());
+    auto graphics_status = callback_status(machine, *graphics_result,
+                                           "CustomItem graphics allocation");
+    if (!graphics_status) return graphics_status;
+    if (!graphics_result->return_value.has_value()) {
+        return fail(ErrorCode::invalid_state,
+                    "CustomItem graphics allocation returned no Graphics");
+    }
+    auto graphics = graphics_result->return_value->as_reference();
+    if (!graphics) return std::unexpected(graphics.error());
+    const Value paint_arguments[] {
+        Value::from_reference(*graphics),
+        Value::from_int(width),
+        Value::from_int(height),
+    };
+    auto painted = invoke_custom(
+        machine, item, "paint",
+        "(Ljavax/microedition/lcdui/Graphics;II)V", paint_arguments);
+    if (!painted) return std::unexpected(painted.error());
+    auto generation = int_field(machine, item,
+                                kCustomItemPaintGenerationField);
+    if (!generation) return std::unexpected(generation.error());
+    const i32 next_generation = *generation >= 2'000'000'000
+        ? 1 : *generation + 1;
+    auto image_stored = set_reference_field(
+        machine, item, kCustomItemPaintImageField, *image);
+    auto generation_stored = set_int_field(
+        machine, item, kCustomItemPaintGenerationField, next_generation);
+    if (!image_stored) return image_stored;
+    if (!generation_stored) return generation_stored;
+    return {};
+}
+
+[[nodiscard]] Status layout_custom_item(Machine& machine,
+                                        ObjectRef item,
+                                        bool notify_show) {
+    if (notify_show) {
+        auto shown = invoke_custom(machine, item, "showNotify", "()V");
+        if (!shown) return std::unexpected(shown.error());
+    }
+    auto min_width = invoke_custom_int(machine, item,
+                                       "getMinContentWidth", "()I");
+    auto min_height = invoke_custom_int(machine, item,
+                                        "getMinContentHeight", "()I");
+    if (!min_width) return std::unexpected(min_width.error());
+    if (!min_height) return std::unexpected(min_height.error());
+    const Value pref_width_arguments[] {Value::from_int(-1)};
+    auto pref_width = invoke_custom_int(machine, item,
+                                        "getPrefContentWidth", "(I)I",
+                                        pref_width_arguments);
+    if (!pref_width) return std::unexpected(pref_width.error());
+    const i32 width = std::max({*min_width, *pref_width, 1});
+    const Value pref_height_arguments[] {Value::from_int(width)};
+    auto pref_height = invoke_custom_int(machine, item,
+                                         "getPrefContentHeight", "(I)I",
+                                         pref_height_arguments);
+    if (!pref_height) return std::unexpected(pref_height.error());
+    const i32 height = std::max({*min_height, *pref_height, 1});
+    auto width_stored = set_int_field(machine, item,
+                                      kItemPreferredWidthField, width);
+    auto height_stored = set_int_field(machine, item,
+                                       kItemPreferredHeightField, height);
+    if (!width_stored) return width_stored;
+    if (!height_stored) return height_stored;
+    const Value size_arguments[] {
+        Value::from_int(width), Value::from_int(height),
+    };
+    auto sized = invoke_custom(machine, item, "sizeChanged", "(II)V",
+                               size_arguments);
+    if (!sized) return std::unexpected(sized.error());
+    return paint_custom_item(machine, item, width, height);
+}
+
+[[nodiscard]] Status notify_custom_items(Machine& machine,
+                                         ObjectRef displayable,
+                                         bool visible) {
+    auto is_form = machine.object_is_instance(
+        displayable, "javax/microedition/lcdui/Form");
+    if (!is_form) return std::unexpected(is_form.error());
+    if (!*is_form) return {};
+    auto count = int_field(machine, displayable, kFormItemCountField);
+    auto items = reference_field(machine, displayable, kFormItemsField);
+    if (!count) return std::unexpected(count.error());
+    if (!items) return std::unexpected(items.error());
+    if (items->is_null()) return {};
+    for (i32 index = 0; index < *count; ++index) {
+        auto value = machine.heap().element(*items,
+                                            static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto item = value->as_reference();
+        if (!item) return std::unexpected(item.error());
+        if (item->is_null()) continue;
+        auto is_custom = machine.object_is_instance(
+            *item, "javax/microedition/lcdui/CustomItem");
+        if (!is_custom) return std::unexpected(is_custom.error());
+        if (!*is_custom) continue;
+        if (visible) {
+            auto shown = layout_custom_item(machine, *item, true);
+            if (!shown) return shown;
+            auto updated = emit_item(machine, *item, kEventItemUpdated);
+            if (!updated) return updated;
+        } else {
+            auto hidden = invoke_custom(machine, *item,
+                                        "hideNotify", "()V");
+            if (!hidden) return std::unexpected(hidden.error());
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] Result<i32> alert_component_type(Machine& machine,
+                                                ObjectRef alert_type) {
+    if (alert_type.is_null()) return kTypeNullAlert;
+    auto valid = machine.object_is_instance(
+        alert_type, "javax/microedition/lcdui/AlertType");
+    if (!valid) return std::unexpected(valid.error());
+    if (!*valid) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "Alert type is invalid");
+    }
+    auto kind = int_field(machine, alert_type, kAlertTypeKindField);
+    if (!kind) return std::unexpected(kind.error());
+    switch (*kind) {
+    case 1: return kTypeInfoAlert;
+    case 2: return kTypeWarningAlert;
+    case 3: return kTypeErrorAlert;
+    case 4: return kTypeAlarmAlert;
+    case 5: return kTypeConfirmationAlert;
+    default:
+        return fail(ErrorCode::invalid_state,
+                    "AlertType singleton has an invalid native kind");
+    }
+}
+
+[[nodiscard]] Status initialize_alert(Machine& machine,
+                                      ObjectRef alert,
+                                      ObjectRef title,
+                                      ObjectRef text,
+                                      ObjectRef image,
+                                      ObjectRef type) {
+    auto component_type = alert_component_type(machine, type);
+    if (!component_type) return std::unexpected(component_type.error());
+    auto normalized_text = normalized_string(machine, text);
+    if (!normalized_text) return std::unexpected(normalized_text.error());
+    if (!image.is_null()) {
+        auto valid_image = machine.object_is_instance(
+            image, "javax/microedition/lcdui/Image");
+        if (!valid_image) return std::unexpected(valid_image.error());
+        if (!*valid_image) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             "Alert image is invalid");
+        }
+    }
+    auto initialized = initialize_displayable(machine, alert,
+                                               *component_type, title);
+    if (!initialized) return initialized;
+    auto first = set_reference_field(machine, alert, kAlertTextField,
+                                     *normalized_text);
+    auto second = set_reference_field(machine, alert, kAlertImageField, image);
+    auto third = set_reference_field(machine, alert, kAlertTypeField, type);
+    auto fourth = set_int_field(machine, alert, kAlertTimeoutField,
+                                kDefaultAlertTimeout);
+    auto fifth = set_reference_field(machine, alert, kAlertNextField, {});
+    auto sixth = set_int_field(machine, alert,
+                               kAlertImageGenerationField, 1);
+    if (!first) return first;
+    if (!second) return second;
+    if (!third) return third;
+    if (!fourth) return fourth;
+    if (!fifth) return fifth;
+    if (!sixth) return sixth;
+
+    auto dismiss_field = machine.class_states().resolve_field(
+        "javax/microedition/lcdui/Alert", "DISMISS_COMMAND",
+        "Ljavax/microedition/lcdui/Command;", true);
+    if (!dismiss_field) return std::unexpected(dismiss_field.error());
+    auto dismiss_value = machine.class_states().static_field(*dismiss_field);
+    if (!dismiss_value) return std::unexpected(dismiss_value.error());
+    auto dismiss = dismiss_value->as_reference();
+    if (!dismiss) return std::unexpected(dismiss.error());
+    if (!dismiss->is_null()) {
+        auto commands = ensure_reference_array(
+            machine, alert, kDisplayableCommandsField,
+            "[Ljavax/microedition/lcdui/Command;", 1U);
+        if (!commands) return std::unexpected(commands.error());
+        auto stored = machine.heap().set_element(
+            *commands, 0U, Value::from_reference(*dismiss));
+        if (!stored) return std::unexpected(stored.error());
+        auto count = set_int_field(machine, alert,
+                                   kDisplayableCommandCountField, 1);
+        if (!count) return count;
+    }
+    auto created = screen_event(machine, alert, kEventScreenCreated);
+    if (!created) return std::unexpected(created.error());
+    machine.emit_ui_event(std::move(*created));
+    return {};
+}
+
+[[nodiscard]] Status emit_screen_update(Machine& machine,
+                                        ObjectRef displayable) {
+    auto event = screen_event(machine, displayable, kEventScreenUpdated);
+    if (!event) return std::unexpected(event.error());
+    machine.emit_ui_event(std::move(*event));
+    return {};
+}
+
+[[nodiscard]] Result<i32> image_component_type(i32 appearance) {
+    switch (appearance) {
+    case 0: return kTypePlainImage;
+    case 1: return kTypeHyperlinkImage;
+    case 2: return kTypeButtonImage;
+    default:
+        return fail_java("java/lang/IllegalArgumentException",
+                         "ImageItem appearance mode is invalid");
+    }
 }
 
 [[nodiscard]] Result<i32> normalized_gauge_value(bool interactive,
@@ -880,11 +1790,14 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto priority_stored = set_int_field(machine, *command,
                                                  kCommandPriorityField,
                                                  *priority);
+            auto owner_stored = set_int_field(machine, *command,
+                                              kCommandOwnerItemField, 0);
             if (!label_stored) return std::unexpected(label_stored.error());
             if (!long_stored) return std::unexpected(long_stored.error());
             if (!type_stored) return std::unexpected(type_stored.error());
             if (!priority_stored)
                 return std::unexpected(priority_stored.error());
+            if (!owner_stored) return std::unexpected(owner_stored.error());
             return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Command", "<init>",
@@ -916,10 +1829,13 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                                        kCommandTypeField, *type);
             auto fourth = set_int_field(machine, *command,
                                         kCommandPriorityField, *priority);
+            auto fifth = set_int_field(machine, *command,
+                                       kCommandOwnerItemField, 0);
             if (!first) return std::unexpected(first.error());
             if (!second) return std::unexpected(second.error());
             if (!third) return std::unexpected(third.error());
             if (!fourth) return std::unexpected(fourth.error());
+            if (!fifth) return std::unexpected(fifth.error());
             return std::optional<Value> {};
         });
 
@@ -1019,6 +1935,88 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto shown = is_shown(machine, *object);
             if (!shown) return std::unexpected(shown.error());
             return std::optional<Value>(Value::from_int(*shown ? 1 : 0));
+        });
+    add(registry, "javax/microedition/lcdui/Displayable", "getTicker",
+        "()Ljavax/microedition/lcdui/Ticker;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto ticker = reference_field(machine, *object,
+                                          kDisplayableTickerField);
+            if (!ticker) return std::unexpected(ticker.error());
+            return std::optional<Value>(Value::from_reference(*ticker));
+        });
+    const auto add_displayable_dimension = [&registry](
+        const char* name,
+        bool width) {
+        add(registry, "javax/microedition/lcdui/Displayable", name, "()I",
+            [width](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto* bridge = machine.canvas_bridge();
+                if (bridge == nullptr) {
+                    return fail(ErrorCode::not_configured,
+                                "Displayable dimensions require a display bridge");
+                }
+                const Dimensions dimensions = bridge->display_dimensions();
+                if (!dimensions.valid()) {
+                    return fail(ErrorCode::invalid_state,
+                                "Displayable dimensions are invalid");
+                }
+                return std::optional<Value>(Value::from_int(
+                    width ? dimensions.width : dimensions.height));
+            });
+    };
+    add_displayable_dimension("getWidth", true);
+    add_displayable_dimension("getHeight", false);
+    add(registry, "javax/microedition/lcdui/Displayable", "setTicker",
+        "(Ljavax/microedition/lcdui/Ticker;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto ticker = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!ticker) return std::unexpected(ticker.error());
+            auto display_id = ensure_native_id(machine, *object,
+                                               kDisplayableIdField);
+            if (!display_id) return std::unexpected(display_id.error());
+            auto previous = reference_field(machine, *object,
+                                            kDisplayableTickerField);
+            if (!previous) return std::unexpected(previous.error());
+            if (!previous->is_null()) {
+                auto owner = int_field(machine, *previous, kTickerOwnerField);
+                if (!owner) return std::unexpected(owner.error());
+                if (*owner == *display_id) {
+                    auto cleared = set_int_field(machine, *previous,
+                                                 kTickerOwnerField, 0);
+                    if (!cleared) return std::unexpected(cleared.error());
+                }
+            }
+            if (!ticker->is_null()) {
+                auto valid = machine.object_is_instance(
+                    *ticker, "javax/microedition/lcdui/Ticker");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Displayable ticker is invalid");
+                }
+                auto owner = set_int_field(machine, *ticker,
+                                           kTickerOwnerField, *display_id);
+                if (!owner) return std::unexpected(owner.error());
+            }
+            auto stored = set_reference_field(machine, *object,
+                                              kDisplayableTickerField,
+                                              *ticker);
+            if (!stored) return std::unexpected(stored.error());
+            auto shown = is_shown(machine, *object);
+            if (!shown) return std::unexpected(shown.error());
+            if (*shown) {
+                auto updated = emit_screen_update(machine, *object);
+                if (!updated) return std::unexpected(updated.error());
+            }
+            return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Displayable",
         "setCommandListener",
@@ -1128,6 +2126,30 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    add(registry, "javax/microedition/lcdui/Display", "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            struct DisplayConstant final {
+                const char* name;
+                i32 value;
+            };
+            constexpr std::array<DisplayConstant, 4> constants {{
+                {"LIST_ELEMENT", 1},
+                {"CHOICE_GROUP_ELEMENT", 2},
+                {"ALERT", 3},
+                {"TAB", 4},
+            }};
+            for (const DisplayConstant& constant : constants) {
+                auto field = machine.class_states().resolve_field(
+                    "javax/microedition/lcdui/Display", constant.name,
+                    "I", true);
+                if (!field) return std::unexpected(field.error());
+                auto stored = machine.class_states().set_static_field(
+                    *field, Value::from_int(constant.value));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
     add(registry, "javax/microedition/lcdui/Display", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1190,57 +2212,123 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto next = reference_argument(arguments, 1U);
             if (!display) return std::unexpected(display.error());
             if (!next) return std::unexpected(next.error());
-            if (!next->is_null()) {
-                auto valid = machine.object_is_instance(
-                    *next, "javax/microedition/lcdui/Displayable");
-                if (!valid) return std::unexpected(valid.error());
-                if (!*valid) {
-                    return fail_java("java/lang/IllegalArgumentException",
-                                     "Display.setCurrent target is not Displayable");
-                }
-            }
-            auto current = reference_field(machine, *display,
-                                           kDisplayCurrentField);
-            if (!current) return std::unexpected(current.error());
-            if (*current == *next) return std::optional<Value> {};
-            if (!current->is_null()) {
-                auto hidden = screen_event(machine, *current,
-                                           kEventScreenHidden);
-                if (!hidden) return std::unexpected(hidden.error());
-                machine.emit_ui_event(std::move(*hidden));
-                auto stored = set_int_field(machine, *current,
-                                            kDisplayableShownField, 0);
-                if (!stored) return std::unexpected(stored.error());
-                if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
-                    auto visibility = canvas->set_display_visible(
-                        *current, false);
-                    if (!visibility)
-                        return std::unexpected(visibility.error());
-                }
-            }
-            auto assigned = set_reference_field(machine, *display,
-                                                kDisplayCurrentField, *next);
-            if (!assigned) return std::unexpected(assigned.error());
-            if (next->is_null()) {
-                machine.emit_ui_event(
-                    UiBridgeEvent {.kind = kEventCommandsReset});
-                return std::optional<Value> {};
-            }
-            auto shown_stored = set_int_field(machine, *next,
-                                              kDisplayableShownField, 1);
-            if (!shown_stored) return std::unexpected(shown_stored.error());
-            if (auto* canvas = machine.canvas_bridge(); canvas != nullptr) {
-                auto visibility = canvas->set_display_visible(*next, true);
-                if (!visibility)
-                    return std::unexpected(visibility.error());
-            }
-            auto shown = screen_event(machine, *next, kEventScreenShown);
-            if (!shown) return std::unexpected(shown.error());
-            machine.emit_ui_event(std::move(*shown));
-            auto commands = emit_commands(machine, *next);
-            if (!commands) return std::unexpected(commands.error());
+            auto switched = set_current_displayable(machine, *display, *next);
+            if (!switched) return std::unexpected(switched.error());
             return std::optional<Value> {};
         });
+    add(registry, "javax/microedition/lcdui/Display", "setCurrent",
+        "(Ljavax/microedition/lcdui/Alert;"
+        "Ljavax/microedition/lcdui/Displayable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto display = receiver(arguments);
+            auto alert = reference_argument(arguments, 1U, false);
+            auto next = reference_argument(arguments, 2U);
+            if (!display) return std::unexpected(display.error());
+            if (!alert) return std::unexpected(alert.error());
+            if (!next) return std::unexpected(next.error());
+            auto valid_alert = machine.object_is_instance(
+                *alert, "javax/microedition/lcdui/Alert");
+            if (!valid_alert) return std::unexpected(valid_alert.error());
+            if (!*valid_alert) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Display.setCurrent alert is invalid");
+            }
+            if (!next->is_null()) {
+                auto valid_next = machine.object_is_instance(
+                    *next, "javax/microedition/lcdui/Displayable");
+                if (!valid_next)
+                    return std::unexpected(valid_next.error());
+                if (!*valid_next || *next == *alert) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Alert next displayable is invalid");
+                }
+            }
+            auto stored = set_reference_field(machine, *alert,
+                                              kAlertNextField, *next);
+            if (!stored) return std::unexpected(stored.error());
+            auto switched = set_current_displayable(machine, *display, *alert);
+            if (!switched) return std::unexpected(switched.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Display", "isColor", "()Z",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto display = receiver(arguments);
+            if (!display) return std::unexpected(display.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+    add(registry, "javax/microedition/lcdui/Display", "numColors", "()I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto display = receiver(arguments);
+            if (!display) return std::unexpected(display.error());
+            return std::optional<Value>(Value::from_int(16'777'216));
+        });
+    add(registry, "javax/microedition/lcdui/Display", "numAlphaLevels",
+        "()I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto display = receiver(arguments);
+            if (!display) return std::unexpected(display.error());
+            return std::optional<Value>(Value::from_int(256));
+        });
+    add(registry, "javax/microedition/lcdui/Display", "callSerially",
+        "(Ljava/lang/Runnable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto display = receiver(arguments);
+            auto runnable = reference_argument(arguments, 1U, false);
+            if (!display) return std::unexpected(display.error());
+            if (!runnable) return std::unexpected(runnable.error());
+            auto valid = machine.object_is_instance(*runnable,
+                                                    "java/lang/Runnable");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Display.callSerially target is not Runnable");
+            }
+            auto queued = machine.enqueue_serial_callback(*runnable);
+            if (!queued) return std::unexpected(queued.error());
+            return std::optional<Value> {};
+        });
+    const auto display_timed_capability = [&registry](const char* name) {
+        add(registry, "javax/microedition/lcdui/Display", name, "(I)Z",
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto display = receiver(arguments);
+                auto duration = integer_argument(arguments, 1U);
+                if (!display) return std::unexpected(display.error());
+                if (!duration) return std::unexpected(duration.error());
+                if (*duration < 0) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Display duration must not be negative");
+                }
+                return std::optional<Value>(Value::from_int(0));
+            });
+    };
+    display_timed_capability("flashBacklight");
+    display_timed_capability("vibrate");
+    const auto display_best_image_size = [&registry](const char* name) {
+        add(registry, "javax/microedition/lcdui/Display", name, "(I)I",
+            [name](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto display = receiver(arguments);
+                auto image_type = integer_argument(arguments, 1U);
+                if (!display) return std::unexpected(display.error());
+                if (!image_type) return std::unexpected(image_type.error());
+                if (*image_type < 1 || *image_type > 4) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Display image type is invalid");
+                }
+                const bool alert = *image_type == 3;
+                const i32 dimension = alert ? 64 : 32;
+                (void)name;
+                return std::optional<Value>(Value::from_int(dimension));
+            });
+    };
+    display_best_image_size("getBestImageWidth");
+    display_best_image_size("getBestImageHeight");
 
     add(registry, "javax/microedition/lcdui/Item", "<init>",
         "(Ljava/lang/String;)V",
@@ -1303,6 +2391,102 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
+    const auto item_command_mutation = [&registry](const char* name,
+                                                   bool adding) {
+        add(registry, "javax/microedition/lcdui/Item", name,
+            "(Ljavax/microedition/lcdui/Command;)V",
+            [adding](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto item = receiver(arguments);
+                auto command = reference_argument(arguments, 1U, false);
+                if (!item) return std::unexpected(item.error());
+                if (!command) return std::unexpected(command.error());
+                auto valid = machine.object_is_instance(
+                    *command, "javax/microedition/lcdui/Command");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Item command is invalid");
+                }
+                auto changed = adding
+                    ? add_item_command(machine, *item, *command)
+                    : remove_item_command(machine, *item, *command);
+                if (!changed) return std::unexpected(changed.error());
+                return std::optional<Value> {};
+            });
+    };
+    item_command_mutation("addCommand", true);
+    item_command_mutation("removeCommand", false);
+    add(registry, "javax/microedition/lcdui/Item", "setDefaultCommand",
+        "(Ljavax/microedition/lcdui/Command;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto command = reference_argument(arguments, 1U);
+            if (!item) return std::unexpected(item.error());
+            if (!command) return std::unexpected(command.error());
+            if (!command->is_null()) {
+                auto added = add_item_command(machine, *item, *command);
+                if (!added) return std::unexpected(added.error());
+            }
+            auto stored = set_reference_field(machine, *item,
+                                              kItemDefaultCommandField,
+                                              *command);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Item", "setPreferredSize",
+        "(II)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto width = integer_argument(arguments, 1U);
+            auto height = integer_argument(arguments, 2U);
+            if (!item) return std::unexpected(item.error());
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            if (*width < -1 || *height < -1) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Item preferred size is invalid");
+            }
+            auto first = set_int_field(machine, *item,
+                                       kItemPreferredWidthField, *width);
+            auto second = set_int_field(machine, *item,
+                                        kItemPreferredHeightField, *height);
+            if (!first) return std::unexpected(first.error());
+            if (!second) return std::unexpected(second.error());
+            auto updated = update_item_if_attached(machine, *item);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    const auto item_size_getter = [&registry](const char* name,
+                                              usize field_index) {
+        add(registry, "javax/microedition/lcdui/Item", name, "()I",
+            [field_index](Machine& machine,
+                          std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto item = receiver(arguments);
+                if (!item) return std::unexpected(item.error());
+                auto value = int_field(machine, *item, field_index);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_int(
+                    std::max(*value, 0)));
+            });
+    };
+    item_size_getter("getPreferredWidth", kItemPreferredWidthField);
+    item_size_getter("getPreferredHeight", kItemPreferredHeightField);
+    item_size_getter("getMinimumWidth", kItemPreferredWidthField);
+    item_size_getter("getMinimumHeight", kItemPreferredHeightField);
+    add(registry, "javax/microedition/lcdui/Item", "notifyStateChanged",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            if (!item) return std::unexpected(item.error());
+            auto callback = dispatch_item_state_listener(machine, *item);
+            if (!callback) return std::unexpected(callback.error());
+            return std::optional<Value> {};
+        });
     add(registry, "javax/microedition/lcdui/Item",
         "setItemCommandListener",
         "(Ljavax/microedition/lcdui/ItemCommandListener;)V",
@@ -1333,8 +2517,12 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 if (!initialized) return std::unexpected(initialized.error());
                 auto count_stored = set_int_field(machine, *form,
                                                   kFormItemCountField, 0);
+                auto listener_stored = set_reference_field(
+                    machine, *form, kFormItemStateListenerField, {});
                 if (!count_stored)
                     return std::unexpected(count_stored.error());
+                if (!listener_stored)
+                    return std::unexpected(listener_stored.error());
                 auto items = ensure_reference_array(
                     machine, *form, kFormItemsField,
                     "[Ljavax/microedition/lcdui/Item;", 4U);
@@ -1404,6 +2592,61 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto index = append_item(machine, *form, *item);
             if (!index) return std::unexpected(index.error());
             return std::optional<Value>(Value::from_int(*index));
+        });
+    add(registry, "javax/microedition/lcdui/Form", "append",
+        "(Ljavax/microedition/lcdui/Image;)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto form = receiver(arguments);
+            auto image = reference_argument(arguments, 1U, false);
+            if (!form) return std::unexpected(form.error());
+            if (!image) return std::unexpected(image.error());
+            auto valid = machine.object_is_instance(
+                *image, "javax/microedition/lcdui/Image");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Form image is invalid");
+            }
+            auto item = machine.class_states().allocate_instance(
+                machine.heap(), "javax/microedition/lcdui/ImageItem");
+            if (!item) return std::unexpected(item.error());
+            auto empty = empty_string(machine);
+            if (!empty) return std::unexpected(empty.error());
+            auto initialized = initialize_item(machine, *item,
+                                               kTypePlainImage, *empty);
+            if (!initialized) return std::unexpected(initialized.error());
+            auto image_stored = set_reference_field(
+                machine, *item, kImageItemImageField, *image);
+            auto alt_stored = set_reference_field(
+                machine, *item, kImageItemAltTextField, *empty);
+            auto appearance_stored = set_int_field(
+                machine, *item, kImageItemAppearanceField, 0);
+            auto generation_stored = set_int_field(
+                machine, *item, kImageItemGenerationField, 1);
+            if (!image_stored) return std::unexpected(image_stored.error());
+            if (!alt_stored) return std::unexpected(alt_stored.error());
+            if (!appearance_stored)
+                return std::unexpected(appearance_stored.error());
+            if (!generation_stored)
+                return std::unexpected(generation_stored.error());
+            auto index = append_item(machine, *form, *item);
+            if (!index) return std::unexpected(index.error());
+            return std::optional<Value>(Value::from_int(*index));
+        });
+    add(registry, "javax/microedition/lcdui/Form", "setItemStateListener",
+        "(Ljavax/microedition/lcdui/ItemStateListener;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto form = receiver(arguments);
+            auto listener = reference_argument(arguments, 1U);
+            if (!form) return std::unexpected(form.error());
+            if (!listener) return std::unexpected(listener.error());
+            auto stored = set_reference_field(machine, *form,
+                                              kFormItemStateListenerField,
+                                              *listener);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Form", "size", "()I",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1497,6 +2740,7 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                                                 kItemParentField, 0);
             if (!parent_cleared)
                 return std::unexpected(parent_cleared.error());
+            machine.unregister_ui_component(*removed_id);
             for (i32 cursor = *index; cursor + 1 < *count; ++cursor) {
                 auto next = machine.heap().element(
                     *items, static_cast<usize>(cursor + 1));
@@ -1535,6 +2779,7 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 auto cleared = set_int_field(machine, *item,
                                              kItemParentField, 0);
                 if (!cleared) return std::unexpected(cleared.error());
+                machine.unregister_ui_component(*id);
             }
             auto items = ensure_reference_array(
                 machine, *form, kFormItemsField,
@@ -1577,6 +2822,7 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             });
             auto old_parent = set_int_field(machine, *old, kItemParentField, 0);
             if (!old_parent) return std::unexpected(old_parent.error());
+            machine.unregister_ui_component(*old_id);
             auto stored = machine.heap().set_element(
                 *items, static_cast<usize>(*index),
                 Value::from_reference(*replacement));
@@ -1697,6 +2943,9 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "TextField initial text exceeds maxSize");
             }
+            auto valid_text = validate_text_reference(
+                machine, *normalized, *constraints);
+            if (!valid_text) return std::unexpected(valid_text.error());
             auto initialized = initialize_item(machine, *item,
                                                kTypeTextField, *label);
             if (!initialized) return std::unexpected(initialized.error());
@@ -1740,13 +2989,19 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto normalized = normalized_string(machine, *text);
             if (!normalized) return std::unexpected(normalized.error());
             auto maximum = int_field(machine, *item, kTextFieldMaxSizeField);
+            auto constraints = int_field(machine, *item,
+                                         kTextFieldConstraintsField);
             auto length = text_length(machine, *normalized);
             if (!maximum) return std::unexpected(maximum.error());
+            if (!constraints) return std::unexpected(constraints.error());
             if (!length) return std::unexpected(length.error());
             if (*length > *maximum) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "TextField text exceeds maxSize");
             }
+            auto valid_text = validate_text_reference(
+                machine, *normalized, *constraints);
+            if (!valid_text) return std::unexpected(valid_text.error());
             auto first = set_reference_field(machine, *item,
                                              kTextFieldTextField,
                                              *normalized);
@@ -1831,6 +3086,24 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto constraints = integer_argument(arguments, 1U);
             if (!item) return std::unexpected(item.error());
             if (!constraints) return std::unexpected(constraints.error());
+            auto constraint_valid = validate_text_constraints({}, *constraints);
+            if (!constraint_valid)
+                return std::unexpected(constraint_valid.error());
+            auto text = reference_field(machine, *item, kTextFieldTextField);
+            if (!text) return std::unexpected(text.error());
+            auto value = machine.heap().string_value(*text);
+            if (!value) return std::unexpected(value.error());
+            auto content_valid = validate_text_constraints(*value, *constraints);
+            if (!content_valid && !value->empty()) {
+                auto empty = empty_string(machine);
+                if (!empty) return std::unexpected(empty.error());
+                auto cleared = set_reference_field(machine, *item,
+                                                   kTextFieldTextField, *empty);
+                auto caret = set_int_field(machine, *item,
+                                           kTextFieldCaretField, 0);
+                if (!cleared) return std::unexpected(cleared.error());
+                if (!caret) return std::unexpected(caret.error());
+            }
             auto stored = set_int_field(machine, *item,
                                         kTextFieldConstraintsField,
                                         *constraints);
@@ -1961,6 +3234,568 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    const auto image_item_constructor = [&registry](const char* descriptor,
+                                                     bool has_appearance) {
+        add(registry, "javax/microedition/lcdui/ImageItem", "<init>",
+            descriptor,
+            [has_appearance](Machine& machine,
+                             std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto item = receiver(arguments);
+                auto label = reference_argument(arguments, 1U);
+                auto image = reference_argument(arguments, 2U);
+                auto layout = integer_argument(arguments, 3U);
+                auto alt = reference_argument(arguments, 4U);
+                if (!item) return std::unexpected(item.error());
+                if (!label) return std::unexpected(label.error());
+                if (!image) return std::unexpected(image.error());
+                if (!layout) return std::unexpected(layout.error());
+                if (!alt) return std::unexpected(alt.error());
+                i32 appearance = 0;
+                if (has_appearance) {
+                    auto parsed = integer_argument(arguments, 5U);
+                    if (!parsed) return std::unexpected(parsed.error());
+                    appearance = *parsed;
+                }
+                auto component_type = image_component_type(appearance);
+                if (!component_type)
+                    return std::unexpected(component_type.error());
+                if (!image->is_null()) {
+                    auto valid = machine.object_is_instance(
+                        *image, "javax/microedition/lcdui/Image");
+                    if (!valid) return std::unexpected(valid.error());
+                    if (!*valid) {
+                        return fail_java("java/lang/IllegalArgumentException",
+                                         "ImageItem image is invalid");
+                    }
+                }
+                auto normalized_alt = normalized_string(machine, *alt);
+                if (!normalized_alt)
+                    return std::unexpected(normalized_alt.error());
+                auto initialized = initialize_item(machine, *item,
+                                                   *component_type, *label);
+                if (!initialized)
+                    return std::unexpected(initialized.error());
+                auto layout_stored = set_int_field(machine, *item,
+                                                   kItemLayoutField, *layout);
+                auto image_stored = set_reference_field(
+                    machine, *item, kImageItemImageField, *image);
+                auto alt_stored = set_reference_field(
+                    machine, *item, kImageItemAltTextField, *normalized_alt);
+                auto appearance_stored = set_int_field(
+                    machine, *item, kImageItemAppearanceField, appearance);
+                auto generation_stored = set_int_field(
+                    machine, *item, kImageItemGenerationField, 1);
+                if (!layout_stored)
+                    return std::unexpected(layout_stored.error());
+                if (!image_stored)
+                    return std::unexpected(image_stored.error());
+                if (!alt_stored) return std::unexpected(alt_stored.error());
+                if (!appearance_stored)
+                    return std::unexpected(appearance_stored.error());
+                if (!generation_stored)
+                    return std::unexpected(generation_stored.error());
+                return std::optional<Value> {};
+            });
+    };
+    image_item_constructor(
+        "(Ljava/lang/String;Ljavax/microedition/lcdui/Image;"
+        "ILjava/lang/String;)V", false);
+    image_item_constructor(
+        "(Ljava/lang/String;Ljavax/microedition/lcdui/Image;"
+        "ILjava/lang/String;I)V", true);
+    add(registry, "javax/microedition/lcdui/ImageItem", "getImage",
+        "()Ljavax/microedition/lcdui/Image;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            if (!item) return std::unexpected(item.error());
+            auto image = reference_field(machine, *item,
+                                         kImageItemImageField);
+            if (!image) return std::unexpected(image.error());
+            return std::optional<Value>(Value::from_reference(*image));
+        });
+    add(registry, "javax/microedition/lcdui/ImageItem", "setImage",
+        "(Ljavax/microedition/lcdui/Image;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto image = reference_argument(arguments, 1U);
+            if (!item) return std::unexpected(item.error());
+            if (!image) return std::unexpected(image.error());
+            if (!image->is_null()) {
+                auto valid = machine.object_is_instance(
+                    *image, "javax/microedition/lcdui/Image");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "ImageItem image is invalid");
+                }
+            }
+            auto generation = int_field(machine, *item,
+                                        kImageItemGenerationField);
+            if (!generation) return std::unexpected(generation.error());
+            const i32 next_generation = *generation >= 2'000'000'000
+                ? 1 : *generation + 1;
+            auto stored = set_reference_field(machine, *item,
+                                              kImageItemImageField, *image);
+            auto generation_stored = set_int_field(
+                machine, *item, kImageItemGenerationField, next_generation);
+            if (!stored) return std::unexpected(stored.error());
+            if (!generation_stored)
+                return std::unexpected(generation_stored.error());
+            auto updated = update_item_if_attached(machine, *item);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/ImageItem", "getAltText",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            if (!item) return std::unexpected(item.error());
+            auto alt = reference_field(machine, *item,
+                                       kImageItemAltTextField);
+            if (!alt) return std::unexpected(alt.error());
+            return std::optional<Value>(Value::from_reference(*alt));
+        });
+    add(registry, "javax/microedition/lcdui/ImageItem", "setAltText",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto alt = reference_argument(arguments, 1U);
+            if (!item) return std::unexpected(item.error());
+            if (!alt) return std::unexpected(alt.error());
+            auto normalized = normalized_string(machine, *alt);
+            if (!normalized) return std::unexpected(normalized.error());
+            auto stored = set_reference_field(machine, *item,
+                                              kImageItemAltTextField,
+                                              *normalized);
+            if (!stored) return std::unexpected(stored.error());
+            auto updated = update_item_if_attached(machine, *item);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/ImageItem", "getAppearanceMode",
+        "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            if (!item) return std::unexpected(item.error());
+            auto appearance = int_field(machine, *item,
+                                        kImageItemAppearanceField);
+            if (!appearance) return std::unexpected(appearance.error());
+            return std::optional<Value>(Value::from_int(*appearance));
+        });
+
+    add(registry, "javax/microedition/lcdui/Ticker", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto ticker = receiver(arguments);
+            auto text = reference_argument(arguments, 1U, false);
+            if (!ticker) return std::unexpected(ticker.error());
+            if (!text) return std::unexpected(text.error());
+            auto first = set_reference_field(machine, *ticker,
+                                             kTickerTextField, *text);
+            auto second = set_int_field(machine, *ticker,
+                                        kTickerOwnerField, 0);
+            if (!first) return std::unexpected(first.error());
+            if (!second) return std::unexpected(second.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Ticker", "getString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto ticker = receiver(arguments);
+            if (!ticker) return std::unexpected(ticker.error());
+            auto text = reference_field(machine, *ticker, kTickerTextField);
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
+    add(registry, "javax/microedition/lcdui/Ticker", "setString",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto ticker = receiver(arguments);
+            auto text = reference_argument(arguments, 1U, false);
+            if (!ticker) return std::unexpected(ticker.error());
+            if (!text) return std::unexpected(text.error());
+            auto stored = set_reference_field(machine, *ticker,
+                                              kTickerTextField, *text);
+            if (!stored) return std::unexpected(stored.error());
+            auto owner = int_field(machine, *ticker, kTickerOwnerField);
+            if (!owner) return std::unexpected(owner.error());
+            if (*owner != 0) {
+                auto displayable = machine.ui_component(*owner);
+                if (!displayable)
+                    return std::unexpected(displayable.error());
+                auto shown = is_shown(machine, *displayable);
+                if (!shown) return std::unexpected(shown.error());
+                if (*shown) {
+                    auto updated = emit_screen_update(machine, *displayable);
+                    if (!updated) return std::unexpected(updated.error());
+                }
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, "javax/microedition/lcdui/CustomItem", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto label = reference_argument(arguments, 1U);
+            if (!item) return std::unexpected(item.error());
+            if (!label) return std::unexpected(label.error());
+            auto initialized = initialize_item(machine, *item,
+                                               kTypeCustomItem, *label);
+            if (!initialized) return std::unexpected(initialized.error());
+            auto image_stored = set_reference_field(
+                machine, *item, kCustomItemPaintImageField, {});
+            auto generation_stored = set_int_field(
+                machine, *item, kCustomItemPaintGenerationField, 0);
+            if (!image_stored) return std::unexpected(image_stored.error());
+            if (!generation_stored)
+                return std::unexpected(generation_stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/CustomItem", "getGameAction",
+        "(I)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            auto key = integer_argument(arguments, 1U);
+            if (!item) return std::unexpected(item.error());
+            if (!key) return std::unexpected(key.error());
+            auto* bridge = machine.canvas_bridge();
+            return std::optional<Value>(Value::from_int(
+                bridge == nullptr ? 0 : bridge->game_action_for_key(*key)));
+        });
+    add(registry, "javax/microedition/lcdui/CustomItem",
+        "getInteractionModes", "()I",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(Value::from_int(0xFF));
+        });
+    const auto custom_noop = [&registry](const char* name,
+                                         const char* descriptor) {
+        add(registry, "javax/microedition/lcdui/CustomItem", name,
+            descriptor,
+            [](Machine&, std::span<const Value>)
+                -> Result<std::optional<Value>> {
+                return std::optional<Value> {};
+            });
+    };
+    custom_noop("sizeChanged", "(II)V");
+    custom_noop("traverseOut", "()V");
+    custom_noop("keyPressed", "(I)V");
+    custom_noop("keyReleased", "(I)V");
+    custom_noop("keyRepeated", "(I)V");
+    custom_noop("pointerPressed", "(II)V");
+    custom_noop("pointerReleased", "(II)V");
+    custom_noop("pointerDragged", "(II)V");
+    custom_noop("showNotify", "()V");
+    custom_noop("hideNotify", "()V");
+    add(registry, "javax/microedition/lcdui/CustomItem", "traverse",
+        "(III[I)Z",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(Value::from_int(0));
+        });
+    const auto custom_repaint = [&registry](const char* descriptor) {
+        add(registry, "javax/microedition/lcdui/CustomItem", "repaint",
+            descriptor,
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto item = receiver(arguments);
+                if (!item) return std::unexpected(item.error());
+                auto layout = layout_custom_item(machine, *item, false);
+                if (!layout) return std::unexpected(layout.error());
+                auto updated = update_item_if_attached(machine, *item);
+                if (!updated) return std::unexpected(updated.error());
+                return std::optional<Value> {};
+            });
+    };
+    custom_repaint("()V");
+    custom_repaint("(IIII)V");
+    add(registry, "javax/microedition/lcdui/CustomItem", "invalidate",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto item = receiver(arguments);
+            if (!item) return std::unexpected(item.error());
+            auto layout = layout_custom_item(machine, *item, false);
+            if (!layout) return std::unexpected(layout.error());
+            auto updated = update_item_if_attached(machine, *item);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, "javax/microedition/lcdui/AlertType", "<clinit>",
+        "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            struct Entry final {
+                const char* field_name;
+                i32 kind;
+            };
+            constexpr std::array<Entry, 5> entries {{
+                {"INFO", 1},
+                {"WARNING", 2},
+                {"ERROR", 3},
+                {"ALARM", 4},
+                {"CONFIRMATION", 5},
+            }};
+            for (const Entry& entry : entries) {
+                auto object = machine.class_states().allocate_instance(
+                    machine.heap(), "javax/microedition/lcdui/AlertType");
+                if (!object) return std::unexpected(object.error());
+                auto kind_stored = set_int_field(machine, *object,
+                                                 kAlertTypeKindField,
+                                                 entry.kind);
+                if (!kind_stored)
+                    return std::unexpected(kind_stored.error());
+                auto field = machine.class_states().resolve_field(
+                    "javax/microedition/lcdui/AlertType",
+                    entry.field_name,
+                    "Ljavax/microedition/lcdui/AlertType;", true);
+                if (!field) return std::unexpected(field.error());
+                auto stored = machine.class_states().set_static_field(
+                    *field, Value::from_reference(*object));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/AlertType", "<init>",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto type = receiver(arguments);
+            if (!type) return std::unexpected(type.error());
+            auto stored = set_int_field(machine, *type,
+                                        kAlertTypeKindField, 0);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/AlertType", "playSound",
+        "(Ljavax/microedition/lcdui/Display;)Z",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto type = receiver(arguments);
+            auto display = reference_argument(arguments, 1U, false);
+            if (!type) return std::unexpected(type.error());
+            if (!display) return std::unexpected(display.error());
+            // The iOS bridge intentionally does not synthesize MIDP alert
+            // beeps. Games may provide their own MMAPI sound instead.
+            return std::optional<Value>(Value::from_int(0));
+        });
+
+    add(registry, "javax/microedition/lcdui/Alert", "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto command = machine.class_states().allocate_instance(
+                machine.heap(), "javax/microedition/lcdui/Command");
+            if (!command) return std::unexpected(command.error());
+            auto label = create_string(machine, {});
+            if (!label) return std::unexpected(label.error());
+            auto id = ensure_native_id(machine, *command, kCommandIdField);
+            if (!id) return std::unexpected(id.error());
+            auto first = set_reference_field(machine, *command,
+                                             kCommandLabelField, *label);
+            auto second = set_reference_field(machine, *command,
+                                              kCommandLongLabelField, *label);
+            auto third = set_int_field(machine, *command,
+                                       kCommandTypeField, 4);
+            auto fourth = set_int_field(machine, *command,
+                                        kCommandPriorityField, 0);
+            auto fifth = set_int_field(machine, *command,
+                                       kCommandOwnerItemField, 0);
+            if (!first) return std::unexpected(first.error());
+            if (!second) return std::unexpected(second.error());
+            if (!third) return std::unexpected(third.error());
+            if (!fourth) return std::unexpected(fourth.error());
+            if (!fifth) return std::unexpected(fifth.error());
+            auto field = machine.class_states().resolve_field(
+                "javax/microedition/lcdui/Alert", "DISMISS_COMMAND",
+                "Ljavax/microedition/lcdui/Command;", true);
+            if (!field) return std::unexpected(field.error());
+            auto stored = machine.class_states().set_static_field(
+                *field, Value::from_reference(*command));
+            if (!stored) return std::unexpected(stored.error());
+            auto forever_field = machine.class_states().resolve_field(
+                "javax/microedition/lcdui/Alert", "FOREVER", "I", true);
+            if (!forever_field) return std::unexpected(forever_field.error());
+            auto forever_stored = machine.class_states().set_static_field(
+                *forever_field, Value::from_int(kAlertForever));
+            if (!forever_stored)
+                return std::unexpected(forever_stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto title = reference_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!title) return std::unexpected(title.error());
+            auto initialized = initialize_alert(machine, *alert, *title,
+                                                {}, {}, {});
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;"
+        "Ljavax/microedition/lcdui/Image;"
+        "Ljavax/microedition/lcdui/AlertType;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto title = reference_argument(arguments, 1U);
+            auto text = reference_argument(arguments, 2U);
+            auto image = reference_argument(arguments, 3U);
+            auto type = reference_argument(arguments, 4U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!title) return std::unexpected(title.error());
+            if (!text) return std::unexpected(text.error());
+            if (!image) return std::unexpected(image.error());
+            if (!type) return std::unexpected(type.error());
+            auto initialized = initialize_alert(machine, *alert, *title,
+                                                *text, *image, *type);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    const auto alert_reference_getter = [&registry](const char* name,
+                                                     const char* descriptor,
+                                                     usize field_index) {
+        add(registry, "javax/microedition/lcdui/Alert", name, descriptor,
+            [field_index](Machine& machine,
+                          std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto alert = receiver(arguments);
+                if (!alert) return std::unexpected(alert.error());
+                auto value = reference_field(machine, *alert, field_index);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            });
+    };
+    alert_reference_getter("getString", "()Ljava/lang/String;",
+                           kAlertTextField);
+    alert_reference_getter("getImage",
+                           "()Ljavax/microedition/lcdui/Image;",
+                           kAlertImageField);
+    alert_reference_getter("getType",
+                           "()Ljavax/microedition/lcdui/AlertType;",
+                           kAlertTypeField);
+    add(registry, "javax/microedition/lcdui/Alert", "setString",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto text = reference_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!text) return std::unexpected(text.error());
+            auto normalized = normalized_string(machine, *text);
+            if (!normalized) return std::unexpected(normalized.error());
+            auto stored = set_reference_field(machine, *alert,
+                                              kAlertTextField, *normalized);
+            if (!stored) return std::unexpected(stored.error());
+            auto updated = emit_screen_update(machine, *alert);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "setImage",
+        "(Ljavax/microedition/lcdui/Image;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto image = reference_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!image) return std::unexpected(image.error());
+            if (!image->is_null()) {
+                auto valid = machine.object_is_instance(
+                    *image, "javax/microedition/lcdui/Image");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Alert image is invalid");
+                }
+            }
+            auto generation = int_field(machine, *alert,
+                                        kAlertImageGenerationField);
+            if (!generation) return std::unexpected(generation.error());
+            const i32 next_generation = *generation >= 2'000'000'000
+                ? 1 : *generation + 1;
+            auto stored = set_reference_field(machine, *alert,
+                                              kAlertImageField, *image);
+            auto generation_stored = set_int_field(
+                machine, *alert, kAlertImageGenerationField,
+                next_generation);
+            if (!stored) return std::unexpected(stored.error());
+            if (!generation_stored)
+                return std::unexpected(generation_stored.error());
+            auto updated = emit_screen_update(machine, *alert);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "setType",
+        "(Ljavax/microedition/lcdui/AlertType;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto type = reference_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!type) return std::unexpected(type.error());
+            auto component_type = alert_component_type(machine, *type);
+            if (!component_type)
+                return std::unexpected(component_type.error());
+            auto first = set_reference_field(machine, *alert,
+                                             kAlertTypeField, *type);
+            auto second = set_int_field(machine, *alert,
+                                        kDisplayableTypeField,
+                                        *component_type);
+            if (!first) return std::unexpected(first.error());
+            if (!second) return std::unexpected(second.error());
+            auto updated = emit_screen_update(machine, *alert);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "getTimeout", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            if (!alert) return std::unexpected(alert.error());
+            auto timeout = int_field(machine, *alert, kAlertTimeoutField);
+            if (!timeout) return std::unexpected(timeout.error());
+            return std::optional<Value>(Value::from_int(*timeout));
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "setTimeout", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto timeout = integer_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!timeout) return std::unexpected(timeout.error());
+            if (*timeout != kAlertForever && *timeout <= 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Alert timeout must be positive or FOREVER");
+            }
+            auto stored = set_int_field(machine, *alert,
+                                        kAlertTimeoutField, *timeout);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "getDefaultTimeout",
+        "()I",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(
+                Value::from_int(kDefaultAlertTimeout));
+        });
+
     add(registry, "javax/microedition/lcdui/TextBox", "<init>",
         "(Ljava/lang/String;Ljava/lang/String;II)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1987,6 +3822,9 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "TextBox initial text exceeds maxSize");
             }
+            auto valid_text = validate_text_reference(
+                machine, *normalized, *constraints);
+            if (!valid_text) return std::unexpected(valid_text.error());
             auto initialized = initialize_displayable(
                 machine, *text_box, kTypeForm, *title);
             if (!initialized) return std::unexpected(initialized.error());
@@ -2063,13 +3901,19 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             if (!normalized) return std::unexpected(normalized.error());
             auto maximum = int_field(machine, *text_box,
                                      kTextBoxMaxSizeField);
+            auto constraints = int_field(machine, *text_box,
+                                         kTextBoxConstraintsField);
             auto length = text_length(machine, *normalized);
             if (!maximum) return std::unexpected(maximum.error());
+            if (!constraints) return std::unexpected(constraints.error());
             if (!length) return std::unexpected(length.error());
             if (*length > *maximum) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "TextBox text exceeds maxSize");
             }
+            auto valid_text = validate_text_reference(
+                machine, *normalized, *constraints);
+            if (!valid_text) return std::unexpected(valid_text.error());
             auto first = set_reference_field(machine, *text_box,
                                              kTextBoxTextField, *normalized);
             auto second = set_int_field(machine, *text_box,
@@ -2079,6 +3923,145 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto updated = emit_text_box(machine, *text_box,
                                          kEventItemUpdated);
             if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/TextBox", "getChars",
+        "([C)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto text_box = receiver(arguments);
+            auto destination = reference_argument(arguments, 1U, false);
+            if (!text_box) return std::unexpected(text_box.error());
+            if (!destination) return std::unexpected(destination.error());
+            auto text = reference_field(machine, *text_box,
+                                        kTextBoxTextField);
+            if (!text) return std::unexpected(text.error());
+            auto value = machine.heap().string_value(*text);
+            if (!value) return std::unexpected(value.error());
+            auto length = machine.heap().array_length(*destination);
+            if (!length) return std::unexpected(length.error());
+            if (*length < value->size()) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "TextBox destination char[] is too small");
+            }
+            for (usize index = 0; index < value->size(); ++index) {
+                auto stored = machine.heap().set_element(
+                    *destination, index,
+                    Value::from_int(static_cast<i32>((*value)[index])));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(value->size())));
+        });
+    add(registry, "javax/microedition/lcdui/TextBox", "setChars",
+        "([CII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto text_box = receiver(arguments);
+            auto data = reference_argument(arguments, 1U, false);
+            auto offset = integer_argument(arguments, 2U);
+            auto length = integer_argument(arguments, 3U);
+            if (!text_box) return std::unexpected(text_box.error());
+            if (!data) return std::unexpected(data.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            auto value = char_array_slice(machine, *data, *offset, *length);
+            if (!value) return std::unexpected(value.error());
+            auto stored = set_text_box_value(machine, *text_box,
+                                             std::move(*value), *length);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/TextBox", "insert",
+        "(Ljava/lang/String;I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto text_box = receiver(arguments);
+            auto source = reference_argument(arguments, 1U, false);
+            auto position = integer_argument(arguments, 2U);
+            if (!text_box) return std::unexpected(text_box.error());
+            if (!source) return std::unexpected(source.error());
+            if (!position) return std::unexpected(position.error());
+            auto current_ref = reference_field(machine, *text_box,
+                                               kTextBoxTextField);
+            if (!current_ref) return std::unexpected(current_ref.error());
+            auto current = machine.heap().string_value(*current_ref);
+            auto inserted = machine.heap().string_value(*source);
+            if (!current) return std::unexpected(current.error());
+            if (!inserted) return std::unexpected(inserted.error());
+            if (*position < 0 ||
+                static_cast<usize>(*position) > current->size()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "TextBox insertion position is invalid");
+            }
+            current->insert(static_cast<usize>(*position), *inserted);
+            auto stored = set_text_box_value(
+                machine, *text_box, std::move(*current),
+                *position + static_cast<i32>(inserted->size()));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/TextBox", "insert",
+        "([CIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto text_box = receiver(arguments);
+            auto data = reference_argument(arguments, 1U, false);
+            auto offset = integer_argument(arguments, 2U);
+            auto length = integer_argument(arguments, 3U);
+            auto position = integer_argument(arguments, 4U);
+            if (!text_box) return std::unexpected(text_box.error());
+            if (!data) return std::unexpected(data.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            if (!position) return std::unexpected(position.error());
+            auto inserted = char_array_slice(machine, *data,
+                                             *offset, *length);
+            if (!inserted) return std::unexpected(inserted.error());
+            auto current_ref = reference_field(machine, *text_box,
+                                               kTextBoxTextField);
+            if (!current_ref) return std::unexpected(current_ref.error());
+            auto current = machine.heap().string_value(*current_ref);
+            if (!current) return std::unexpected(current.error());
+            if (*position < 0 ||
+                static_cast<usize>(*position) > current->size()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "TextBox insertion position is invalid");
+            }
+            current->insert(static_cast<usize>(*position), *inserted);
+            auto stored = set_text_box_value(
+                machine, *text_box, std::move(*current),
+                *position + *length);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/TextBox", "delete",
+        "(II)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto text_box = receiver(arguments);
+            auto offset = integer_argument(arguments, 1U);
+            auto length = integer_argument(arguments, 2U);
+            if (!text_box) return std::unexpected(text_box.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            auto current_ref = reference_field(machine, *text_box,
+                                               kTextBoxTextField);
+            if (!current_ref) return std::unexpected(current_ref.error());
+            auto current = machine.heap().string_value(*current_ref);
+            if (!current) return std::unexpected(current.error());
+            if (*offset < 0 || *length < 0 ||
+                static_cast<usize>(*offset) > current->size() ||
+                static_cast<usize>(*length) > current->size() -
+                    static_cast<usize>(*offset)) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "TextBox deletion range is invalid");
+            }
+            current->erase(static_cast<usize>(*offset),
+                           static_cast<usize>(*length));
+            auto stored = set_text_box_value(machine, *text_box,
+                                             std::move(*current), *offset);
+            if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
     const auto text_box_int_getter = [&registry](const char* name,
@@ -2156,6 +4139,25 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto constraints = integer_argument(arguments, 1U);
             if (!text_box) return std::unexpected(text_box.error());
             if (!constraints) return std::unexpected(constraints.error());
+            auto constraint_valid = validate_text_constraints({}, *constraints);
+            if (!constraint_valid)
+                return std::unexpected(constraint_valid.error());
+            auto text = reference_field(machine, *text_box,
+                                        kTextBoxTextField);
+            if (!text) return std::unexpected(text.error());
+            auto value = machine.heap().string_value(*text);
+            if (!value) return std::unexpected(value.error());
+            auto content_valid = validate_text_constraints(*value, *constraints);
+            if (!content_valid && !value->empty()) {
+                auto empty = empty_string(machine);
+                if (!empty) return std::unexpected(empty.error());
+                auto cleared = set_reference_field(
+                    machine, *text_box, kTextBoxTextField, *empty);
+                auto caret = set_int_field(machine, *text_box,
+                                           kTextBoxCaretField, 0);
+                if (!cleared) return std::unexpected(cleared.error());
+                if (!caret) return std::unexpected(caret.error());
+            }
             auto stored = set_int_field(machine, *text_box,
                                         kTextBoxConstraintsField,
                                         *constraints);
@@ -2206,6 +4208,27 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                     if (!*valid) {
                         return fail_java("java/lang/IllegalArgumentException",
                                          "DateField timezone is invalid");
+                    }
+                    zone = *parsed;
+                } else {
+                    auto default_zone = machine.invoke_static(
+                        "java/util/TimeZone", "getDefault",
+                        "()Ljava/util/TimeZone;");
+                    if (!default_zone)
+                        return std::unexpected(default_zone.error());
+                    auto status = callback_status(
+                        machine, *default_zone,
+                        "DateField default timezone lookup");
+                    if (!status) return std::unexpected(status.error());
+                    if (!default_zone->return_value.has_value()) {
+                        return fail(ErrorCode::invalid_state,
+                                    "TimeZone.getDefault returned no value");
+                    }
+                    auto parsed = default_zone->return_value->as_reference();
+                    if (!parsed) return std::unexpected(parsed.error());
+                    if (parsed->is_null()) {
+                        return fail(ErrorCode::invalid_state,
+                                    "TimeZone.getDefault returned null");
                     }
                     zone = *parsed;
                 }
@@ -2367,16 +4390,108 @@ Status handle_lcdui_action(Machine& machine,
                            i32 first,
                            i64 value64,
                            std::string text) {
-    if (kind == 107) return {};
+    if (kind == 107) {
+        auto current = current_displayable(machine);
+        if (!current) return std::unexpected(current.error());
+        if (current->is_null()) return {};
+        const i32 position = std::max(first, 0);
+        auto stored = set_int_field(machine, *current,
+                                    kDisplayableScrollField, position);
+        if (!stored) return stored;
+        auto event = screen_event(machine, *current, kEventScreenUpdated);
+        if (!event) return std::unexpected(event.error());
+        event->arguments = {0, 0, position, 0};
+        machine.emit_ui_event(std::move(*event));
+        return {};
+    }
     auto component = machine.ui_component(component_id);
     if (!component) return std::unexpected(component.error());
 
-    if (kind == 101 || kind == 102) {
+    if (kind == static_cast<i32>(LcduiActionKind::custom_item_key)) {
+        auto valid = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/CustomItem");
+        if (!valid) return std::unexpected(valid.error());
+        if (!*valid) {
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI custom key target is not a CustomItem");
+        }
+        std::string_view callback;
+        switch (static_cast<CustomItemKeyPhase>(value64)) {
+        case CustomItemKeyPhase::pressed: callback = "keyPressed"; break;
+        case CustomItemKeyPhase::released: callback = "keyReleased"; break;
+        case CustomItemKeyPhase::repeated: callback = "keyRepeated"; break;
+        default:
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI CustomItem key phase is invalid");
+        }
+        const Value key_arguments[] {Value::from_int(first)};
+        auto invoked = invoke_custom(machine, *component, callback,
+                                     "(I)V", key_arguments);
+        if (!invoked) return std::unexpected(invoked.error());
+        return {};
+    }
+
+    if (kind == 101) {
+        auto valid = validate_item(machine, *component);
+        if (!valid) return valid;
+        auto is_custom = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/CustomItem");
+        if (!is_custom) return std::unexpected(is_custom.error());
+        if (*is_custom) {
+            auto width = int_field(machine, *component,
+                                   kItemPreferredWidthField);
+            auto height = int_field(machine, *component,
+                                    kItemPreferredHeightField);
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            auto visible = machine.heap().allocate_array(
+                "[I", 4U, Value::from_int(0));
+            if (!visible) return std::unexpected(visible.error());
+            const Value traverse_arguments[] {
+                Value::from_int(0),
+                Value::from_int(std::max(*width, 0)),
+                Value::from_int(std::max(*height, 0)),
+                Value::from_reference(*visible),
+            };
+            auto traversed = invoke_custom(
+                machine, *component, "traverse", "(III[I)Z",
+                traverse_arguments);
+            if (!traversed) return std::unexpected(traversed.error());
+        }
         machine.emit_ui_event(UiBridgeEvent {
             .kind = 16,
             .component_id = component_id,
         });
-        return {};
+        auto current = current_displayable(machine);
+        if (!current) return std::unexpected(current.error());
+        if (current->is_null()) return {};
+        return emit_commands(machine, *current, *component);
+    }
+
+    if (kind == 102) {
+        auto valid = validate_item(machine, *component);
+        if (!valid) return valid;
+        auto is_custom = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/CustomItem");
+        if (!is_custom) return std::unexpected(is_custom.error());
+        if (*is_custom) {
+            const Value pointer_arguments[] {
+                Value::from_int(0), Value::from_int(0),
+            };
+            auto pressed = invoke_custom(
+                machine, *component, "pointerPressed", "(II)V",
+                pointer_arguments);
+            if (!pressed) return std::unexpected(pressed.error());
+            auto released = invoke_custom(
+                machine, *component, "pointerReleased", "(II)V",
+                pointer_arguments);
+            if (!released) return std::unexpected(released.error());
+        }
+        auto command = reference_field(machine, *component,
+                                       kItemDefaultCommandField);
+        if (!command) return std::unexpected(command.error());
+        if (command->is_null()) return {};
+        return dispatch_item_command_listener(machine, *command, *component);
     }
 
     if (kind == 103) {
@@ -2396,13 +4511,20 @@ Status handle_lcdui_action(Machine& machine,
             ? kTextBoxMaxSizeField : kTextFieldMaxSizeField;
         const usize caret_field = *is_text_box
             ? kTextBoxCaretField : kTextFieldCaretField;
+        const usize constraints_field = *is_text_box
+            ? kTextBoxConstraintsField : kTextFieldConstraintsField;
         auto decoded = decode_ui_utf8(text);
         if (!decoded) return std::unexpected(decoded.error());
         auto maximum = int_field(machine, *component, maximum_field);
+        auto constraints = int_field(machine, *component, constraints_field);
         if (!maximum) return std::unexpected(maximum.error());
+        if (!constraints) return std::unexpected(constraints.error());
+        if ((*constraints & kConstraintUneditable) != 0) return {};
         if (decoded->size() > static_cast<usize>(*maximum)) {
             decoded->resize(static_cast<usize>(*maximum));
         }
+        auto valid_text = validate_text_constraints(*decoded, *constraints);
+        if (!valid_text) return valid_text;
         auto string = create_string(machine, std::move(*decoded));
         if (!string) return std::unexpected(string.error());
         auto stored = set_reference_field(machine, *component,
@@ -2414,9 +4536,14 @@ Status handle_lcdui_action(Machine& machine,
         auto caret_stored = set_int_field(machine, *component,
                                           caret_field, caret);
         if (!caret_stored) return caret_stored;
-        return *is_text_box
+        auto emitted = *is_text_box
             ? emit_text_box(machine, *component, kEventItemUpdated)
             : emit_item(machine, *component, kEventItemUpdated);
+        if (!emitted) return emitted;
+        if (*is_text_field) {
+            return dispatch_item_state_listener(machine, *component);
+        }
+        return {};
     }
 
     if (kind == 104) {
@@ -2424,6 +4551,13 @@ Status handle_lcdui_action(Machine& machine,
         auto changed = handle_choice_action(machine, *component,
                                             first, selected);
         if (!changed) return changed;
+        auto is_group = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/ChoiceGroup");
+        if (!is_group) return std::unexpected(is_group.error());
+        if (*is_group) {
+            auto callback = dispatch_item_state_listener(machine, *component);
+            if (!callback) return callback;
+        }
         if (!selected) return {};
 
         auto command = implicit_choice_command(machine, *component);
@@ -2454,7 +4588,9 @@ Status handle_lcdui_action(Machine& machine,
         auto stored = set_int_field(machine, *component,
                                     kGaugeValueField, *normalized);
         if (!stored) return stored;
-        return emit_item(machine, *component, kEventItemUpdated);
+        auto emitted = emit_item(machine, *component, kEventItemUpdated);
+        if (!emitted) return emitted;
+        return dispatch_item_state_listener(machine, *component);
     }
 
     if (kind == 106) {
@@ -2479,7 +4615,9 @@ Status handle_lcdui_action(Machine& machine,
         auto date_stored = set_reference_field(machine, *component,
                                                kDateFieldDateField, *date);
         if (!date_stored) return std::unexpected(date_stored.error());
-        return emit_item(machine, *component, kEventItemUpdated);
+        auto emitted = emit_item(machine, *component, kEventItemUpdated);
+        if (!emitted) return emitted;
+        return dispatch_item_state_listener(machine, *component);
     }
 
     if (kind == 100) {
@@ -2490,9 +4628,76 @@ Status handle_lcdui_action(Machine& machine,
             return fail(ErrorCode::invalid_argument,
                         "LCDUI command action target is not a Command");
         }
+        auto owner_id = int_field(machine, *component,
+                                  kCommandOwnerItemField);
+        if (!owner_id) return std::unexpected(owner_id.error());
+        if (*owner_id != 0) {
+            auto item = machine.ui_component(*owner_id);
+            if (!item) return std::unexpected(item.error());
+            auto commands = reference_field(machine, *item,
+                                            kItemCommandsField);
+            auto count = int_field(machine, *item,
+                                   kItemCommandCountField);
+            if (!commands) return std::unexpected(commands.error());
+            if (!count) return std::unexpected(count.error());
+            auto attached = reference_array_contains(
+                machine, *commands, *count, *component);
+            if (!attached) return std::unexpected(attached.error());
+            if (!*attached) {
+                return fail(ErrorCode::out_of_range,
+                            "LCDUI item command action is stale");
+            }
+            return dispatch_item_command_listener(machine, *component, *item);
+        }
         auto current = current_displayable(machine);
         if (!current) return std::unexpected(current.error());
         if (current->is_null()) return {};
+        auto commands = reference_field(machine, *current,
+                                        kDisplayableCommandsField);
+        auto count = int_field(machine, *current,
+                               kDisplayableCommandCountField);
+        if (!commands) return std::unexpected(commands.error());
+        if (!count) return std::unexpected(count.error());
+        auto attached = reference_array_contains(
+            machine, *commands, *count, *component);
+        if (!attached) return std::unexpected(attached.error());
+        if (!*attached) {
+            return fail(ErrorCode::out_of_range,
+                        "LCDUI screen command action is stale");
+        }
+
+        auto is_alert = machine.object_is_instance(
+            *current, "javax/microedition/lcdui/Alert");
+        if (!is_alert) return std::unexpected(is_alert.error());
+        if (*is_alert) {
+            auto dismiss_field = machine.class_states().resolve_field(
+                "javax/microedition/lcdui/Alert", "DISMISS_COMMAND",
+                "Ljavax/microedition/lcdui/Command;", true);
+            if (!dismiss_field)
+                return std::unexpected(dismiss_field.error());
+            auto dismiss_value = machine.class_states().static_field(
+                *dismiss_field);
+            if (!dismiss_value)
+                return std::unexpected(dismiss_value.error());
+            auto dismiss = dismiss_value->as_reference();
+            if (!dismiss) return std::unexpected(dismiss.error());
+            if (*component == *dismiss) {
+                auto callback = dispatch_command_listener(
+                    machine, *component, *current);
+                if (!callback) return callback;
+                auto still_current = current_displayable(machine);
+                if (!still_current)
+                    return std::unexpected(still_current.error());
+                if (*still_current != *current) return {};
+                auto next = reference_field(machine, *current,
+                                            kAlertNextField);
+                if (!next) return std::unexpected(next.error());
+                auto display = display_singleton(machine);
+                if (!display) return std::unexpected(display.error());
+                if (display->is_null()) return {};
+                return set_current_displayable(machine, *display, *next);
+            }
+        }
         return dispatch_command_listener(machine, *component, *current);
     }
 

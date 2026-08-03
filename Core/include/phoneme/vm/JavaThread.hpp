@@ -17,6 +17,7 @@ enum class JavaThreadState : u8 {
     runnable,
     running,
     blocked_monitor,
+    blocked_io,
     waiting,
     sleeping,
     joining,

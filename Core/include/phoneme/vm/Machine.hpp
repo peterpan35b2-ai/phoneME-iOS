@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,9 +24,13 @@
 #include "phoneme/vm/CanvasBridge.hpp"
 #include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/Interpreter.hpp"
+#include "phoneme/vm/MediaEventService.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
+#include "phoneme/vm/NativeRootScope.hpp"
+#include "phoneme/vm/RootSet.hpp"
 #include "phoneme/vm/Scheduler.hpp"
+#include "phoneme/vm/TimerService.hpp"
 
 namespace phoneme::vm
 {
@@ -60,6 +65,7 @@ namespace phoneme::vm
     explicit Machine(ClassRepository &classes,
                      usize maximum_heap_objects = 1'000'000);
     ~Machine();
+    void shutdown() noexcept;
 
     Machine(const Machine &) = delete;
     Machine &operator=(const Machine &) = delete;
@@ -89,6 +95,8 @@ namespace phoneme::vm
     [[nodiscard]] const Scheduler& scheduler() const noexcept {
       return scheduler_;
     }
+    [[nodiscard]] TimerService& timers() noexcept { return timers_; }
+    [[nodiscard]] const TimerService& timers() const noexcept { return timers_; }
     [[nodiscard]] Result<ObjectRef> current_java_thread();
     [[nodiscard]] Status initialize_java_thread(ObjectRef thread,
                                                 ObjectRef target);
@@ -116,6 +124,9 @@ namespace phoneme::vm
     void configure_ui_bridge(i32 app_namespace, UiEventSink sink);
     [[nodiscard]] i32 allocate_ui_component_id() noexcept;
     void emit_ui_event(UiBridgeEvent event);
+    [[nodiscard]] Status enqueue_serial_callback(ObjectRef runnable);
+    [[nodiscard]] Status pump_serial_callbacks(usize maximum_callbacks = 8U);
+    [[nodiscard]] usize pending_serial_callbacks() const noexcept;
     [[nodiscard]] Status register_ui_component(i32 component_id,
                                                ObjectRef object);
     void unregister_ui_component(i32 component_id) noexcept;
@@ -130,6 +141,16 @@ namespace phoneme::vm
       return canvas_bridge_;
     }
     [[nodiscard]] Status collect_garbage();
+    [[nodiscard]] RootSet& native_roots() noexcept { return native_roots_; }
+    [[nodiscard]] const RootSet& native_roots() const noexcept {
+      return native_roots_;
+    }
+    [[nodiscard]] Result<NativeRootScope> pin_native_root(
+        ObjectRef reference = {}) {
+      return NativeRootScope::pin(native_roots_, reference);
+    }
+    [[nodiscard]] Result<NativeRootScope> allocate_pinned_instance(
+        std::string_view class_name);
     void append_console(std::u16string_view text);
     [[nodiscard]] const std::u16string& console_output() const noexcept {
       return console_output_;
@@ -170,6 +191,12 @@ namespace phoneme::vm
     [[nodiscard]] media::MediaService& media() noexcept { return media_; }
     [[nodiscard]] const media::MediaService& media() const noexcept {
       return media_;
+    }
+    [[nodiscard]] MediaEventService& media_events() noexcept {
+      return media_events_;
+    }
+    [[nodiscard]] const MediaEventService& media_events() const noexcept {
+      return media_events_;
     }
     [[nodiscard]] network::ConnectionRegistry& connections() noexcept {
       return connections_;
@@ -271,6 +298,10 @@ namespace phoneme::vm
     std::unordered_map<std::string, ObjectRef> class_mirrors_;
     std::unordered_map<i32, ObjectRef> ui_components_;
     std::unordered_map<u64, LambdaBinding> lambda_bindings_;
+    RootSet native_roots_;
+    mutable std::mutex serial_callbacks_mutex_;
+    std::deque<NativeRootScope> serial_callbacks_;
+    ObjectRef emergency_out_of_memory_error_ {};
     std::unordered_set<std::string> initialized_classes_;
     std::unordered_set<std::string> initializing_classes_;
     std::unordered_set<std::string> erroneous_classes_;
@@ -284,7 +315,10 @@ namespace phoneme::vm
     bool system_streams_initialized_{false};
     std::u16string console_output_;
     std::atomic_bool gc_requested_{false};
+    std::atomic_bool shutdown_started_{false};
+    TimerService timers_;
     Scheduler scheduler_;
+    MediaEventService media_events_;
   };
 
 } // namespace phoneme::vm

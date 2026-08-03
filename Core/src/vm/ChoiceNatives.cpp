@@ -44,12 +44,18 @@ constexpr usize kItemLabelField = 2;
 constexpr usize kItemParentField = 3;
 constexpr usize kItemLayoutField = 4;
 constexpr usize kItemListenerField = 5;
+constexpr usize kItemCommandsField = 6;
+constexpr usize kItemCommandCountField = 7;
+constexpr usize kItemDefaultCommandField = 8;
+constexpr usize kItemPreferredWidthField = 9;
+constexpr usize kItemPreferredHeightField = 10;
 
 constexpr usize kCommandIdField = 0;
 constexpr usize kCommandLabelField = 1;
 constexpr usize kCommandLongLabelField = 2;
 constexpr usize kCommandTypeField = 3;
 constexpr usize kCommandPriorityField = 4;
+constexpr usize kCommandOwnerItemField = 5;
 
 struct ChoiceLayout final {
     bool list {false};
@@ -66,24 +72,24 @@ struct ChoiceLayout final {
 constexpr ChoiceLayout kGroupLayout {
     .list = false,
     .native_id = 0,
-    .type = 6,
-    .strings = 7,
-    .images = 8,
-    .selected = 9,
-    .count = 10,
-    .fit_policy = 11,
+    .type = 11,
+    .strings = 12,
+    .images = 13,
+    .selected = 14,
+    .count = 15,
+    .fit_policy = 16,
 };
 
 constexpr ChoiceLayout kListLayout {
     .list = true,
-    .native_id = 7,
-    .type = 8,
-    .strings = 9,
-    .images = 10,
-    .selected = 11,
-    .count = 12,
-    .fit_policy = 13,
-    .select_command = 14,
+    .native_id = 9,
+    .type = 10,
+    .strings = 11,
+    .images = 12,
+    .selected = 13,
+    .count = 14,
+    .fit_policy = 15,
+    .select_command = 16,
 };
 
 void add(NativeMethodRegistry& registry,
@@ -513,11 +519,27 @@ void append_utf8(std::string& output, u32 code_point) {
     auto layout_stored = set_int_field(machine, group, kItemLayoutField, 0);
     auto listener_stored = set_reference_field(machine, group,
                                                kItemListenerField, {});
+    auto command_count_stored = set_int_field(machine, group,
+                                              kItemCommandCountField, 0);
+    auto default_stored = set_reference_field(machine, group,
+                                              kItemDefaultCommandField, {});
+    auto preferred_width_stored = set_int_field(machine, group,
+                                                kItemPreferredWidthField, -1);
+    auto preferred_height_stored = set_int_field(machine, group,
+                                                 kItemPreferredHeightField, -1);
     if (!type_stored) return type_stored;
     if (!label_stored) return label_stored;
     if (!parent_stored) return parent_stored;
     if (!layout_stored) return layout_stored;
     if (!listener_stored) return listener_stored;
+    if (!command_count_stored) return command_count_stored;
+    if (!default_stored) return default_stored;
+    if (!preferred_width_stored) return preferred_width_stored;
+    if (!preferred_height_stored) return preferred_height_stored;
+    auto commands = ensure_array(machine, group, kItemCommandsField,
+                                 "[Ljavax/microedition/lcdui/Command;", 4U,
+                                 Value::from_reference({}));
+    if (!commands) return std::unexpected(commands.error());
     return initialize_choice_storage(machine, group, kGroupLayout,
                                      choice_type, 4U);
 }
@@ -552,11 +574,14 @@ void append_utf8(std::string& output, u32 code_point) {
                                 kCommandTypeField, 1);
     auto fifth = set_int_field(machine, *allocated,
                                kCommandPriorityField, 0);
+    auto sixth = set_int_field(machine, *allocated,
+                               kCommandOwnerItemField, 0);
     if (!first) return std::unexpected(first.error());
     if (!second) return std::unexpected(second.error());
     if (!third) return std::unexpected(third.error());
     if (!fourth) return std::unexpected(fourth.error());
     if (!fifth) return std::unexpected(fifth.error());
+    if (!sixth) return std::unexpected(sixth.error());
     auto registered = machine.register_ui_component(id, *allocated);
     if (!registered) return std::unexpected(registered.error());
     auto stored = machine.class_states().set_static_field(
@@ -592,12 +617,16 @@ void append_utf8(std::string& output, u32 code_point) {
     auto fifth = set_int_field(machine, list,
                                kDisplayableCommandCountField, 0);
     auto sixth = set_int_field(machine, list, kDisplayableShownField, 0);
+    auto ticker_stored = set_reference_field(machine, list, 7U, {});
+    auto scroll_stored = set_int_field(machine, list, 8U, 0);
     if (!first) return first;
     if (!second) return second;
     if (!third) return third;
     if (!fourth) return fourth;
     if (!fifth) return fifth;
     if (!sixth) return sixth;
+    if (!ticker_stored) return ticker_stored;
+    if (!scroll_stored) return scroll_stored;
     auto commands = ensure_array(machine, list, kDisplayableCommandsField,
                                  "[Ljavax/microedition/lcdui/Command;", 4U,
                                  Value::from_reference({}));

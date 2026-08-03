@@ -3,16 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-if [[ -n "${PHONEME_SCHEDULER_TEST_ROOT:-}" ]]; then
-  TEST_ROOT="$PHONEME_SCHEDULER_TEST_ROOT"
-  rm -rf "$TEST_ROOT"
-  mkdir -p "$TEST_ROOT"
-else
-  TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/phoneme-scheduler-01.XXXXXX")"
-fi
-if [[ "${PHONEME_KEEP_TEST_ROOT:-0}" != "1" ]]; then
-  trap 'rm -rf "$TEST_ROOT"' EXIT
-fi
+source "$SCRIPT_DIR/lib/common-test-root.sh"
+TEST_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "scheduler-host-tests" "${PHONEME_SCHEDULER_TEST_ROOT:-}")"
+phoneme_register_cleanup "$TEST_ROOT"
 TEST_BINARY="$TEST_ROOT/SchedulerTests"
 FIXTURE_CLASSES="$TEST_ROOT/fixture-classes"
 FIXTURE_JAR="$TEST_ROOT/scheduler-fixture.jar"
@@ -20,30 +13,8 @@ CXX="$(xcrun --sdk macosx --find clang++)"
 SDK_ROOT="$(xcrun --sdk macosx --show-sdk-path)"
 JAVAC="${JAVAC:-$(command -v javac)}"
 JAR="${JAR:-$(command -v jar)}"
-SANITIZER_FLAGS=""
-case "${PHONEME_SANITIZER:-}" in
-  ''|none)
-    if [[ "${PHONEME_SANITIZE:-0}" == "1" ]]; then
-      SANITIZER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-    fi
-    ;;
-  asan|address)
-    SANITIZER_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
-    ;;
-  ubsan|undefined)
-    SANITIZER_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
-    ;;
-  asan-ubsan|address-undefined)
-    SANITIZER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-    ;;
-  tsan|thread)
-    SANITIZER_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
-    ;;
-  *)
-    echo "unknown sanitizer mode: ${PHONEME_SANITIZER}" >&2
-    exit 64
-    ;;
-esac
+phoneme_configure_sanitizers
+SANITIZER_FLAGS="$PHONEME_SANITIZER_FLAGS"
 
 [[ -n "$JAVAC" && -n "$JAR" ]] || {
   echo "javac and jar are required for scheduler tests." >&2
@@ -90,4 +61,5 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
   -framework CoreFoundation \
   -o "$TEST_BINARY"
 
-"$TEST_BINARY" "$FIXTURE_JAR"
+phoneme_run_with_timeout "${PHONEME_TEST_TIMEOUT:-600}" \
+  "$TEST_BINARY" "$FIXTURE_JAR"

@@ -844,10 +844,23 @@ Cần ring buffer breadcrumbs để thu thập các sự kiện cuối trước 
 Các lệnh chuẩn:
 
 ```sh
+bash Core/Tools/test-c-api-host.sh
+bash Core/Tools/test-builtin-registry.sh
 bash Core/Tools/test-host.sh
+PHONEME_SANITIZE=1 bash Core/Tools/test-host.sh
+bash Core/Tools/test-all-host.sh
 bash Core/Tools/build-iphoneos.sh
 bash Core/Tools/verify-iphoneos.sh
+bash Core/Tools/test-full-regression.sh
 ```
+
+`test-full-regression.sh` là entrypoint của integration owner: ngoài host matrix và
+sanitizer, script phải rebuild `Core/libphoneMECore.a` đúng archive mà Xcode
+force-load, verify symbol/provenance, rồi build app Debug và Release.
+
+Public C ABI phải compile được dưới C11 và có version additive qua
+`PHONEME_C_API_VERSION`/`phoneme_c_api_version()`. Thay đổi không tương thích
+phải tăng major version; thêm API tương thích chỉ tăng minor/patch.
 
 Xcode Release validation:
 
@@ -868,6 +881,7 @@ Verification phải thất bại nếu:
 - Minimum iOS nhỏ hơn 16.0.
 - Có source implementation C/Objective-C trong `Core/src`.
 - Có pointer-to-narrow-integer cast.
+- Archive thiếu symbol `phoneme_c_api_version`.
 - App bundle chứa `classes.zip` hoặc `PhoneMERuntime`.
 - Link xuất hiện legacy symbols như `KNI_`, `CVM_`, `midp_`, `pcsl_`, `JVM_`, `gxj_`, `lfp_`.
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,12 @@ struct ConnectionToken final {
                                      ConnectionToken) noexcept = default;
 };
 
+struct NetworkBlockingHooks final {
+    std::function<u32()> before_block;
+    std::function<void(u32)> after_block;
+    std::function<std::optional<Error>()> poll_cancellation;
+};
+
 struct OpenedConnection final {
     ConnectionToken token;
     ConnectionKind kind {ConnectionKind::stream};
@@ -48,6 +55,7 @@ public:
 
     [[nodiscard]] Status set_adapter(
         std::shared_ptr<AsyncNetworkAdapter> adapter);
+    void set_blocking_hooks(NetworkBlockingHooks hooks);
     void set_owner(i32 owner) noexcept;
     [[nodiscard]] i32 owner() const noexcept;
 
@@ -114,6 +122,18 @@ public:
         ConnectionToken token);
 
 private:
+    enum class PendingOperationKind : u8 {
+        lifecycle,
+        input,
+        output,
+        control,
+    };
+
+    struct PendingCancellation final {
+        PendingOperationKind kind {PendingOperationKind::control};
+        std::function<void()> callback;
+    };
+
     struct Entry final {
         ConnectionToken token;
         ConnectionKind kind {ConnectionKind::stream};
@@ -122,6 +142,8 @@ private:
         bool timeouts {false};
         i32 timeout_ms {30'000};
         bool connection_open {true};
+        bool input_stream_issued {false};
+        bool output_stream_issued {false};
         usize input_streams {0};
         usize output_streams {0};
         std::optional<NativeConnection> native;
@@ -131,7 +153,20 @@ private:
         std::optional<HttpResponse> response;
         usize response_cursor {0};
         bool request_started {false};
+        std::unordered_map<u64, PendingCancellation> pending_cancellations;
     };
+
+    template <typename T, typename Starter>
+    [[nodiscard]] Result<T> await_operation(ConnectionToken token,
+                                            PendingOperationKind kind,
+                                            i32 timeout_ms,
+                                            Starter&& starter);
+    [[nodiscard]] Result<u64> register_pending_operation(
+        ConnectionToken token,
+        PendingOperationKind kind,
+        std::function<void()> cancellation);
+    void unregister_pending_operation(ConnectionToken token,
+                                      u64 operation) noexcept;
 
     [[nodiscard]] Result<Entry*> mutable_entry(ConnectionToken token);
     [[nodiscard]] Result<const Entry*> entry(ConnectionToken token) const;
@@ -143,10 +178,12 @@ private:
 
     mutable std::mutex mutex_;
     std::shared_ptr<AsyncNetworkAdapter> adapter_;
+    NetworkBlockingHooks blocking_hooks_;
     std::unordered_map<i32, Entry> entries_;
     i32 owner_ {0};
     i32 next_id_ {1};
     i32 next_generation_ {1};
+    u64 next_pending_operation_ {1};
 };
 
 } // namespace phoneme::network

@@ -51,7 +51,14 @@ Result<std::optional<Value>> NativeMethodRegistry::invoke(
         }
         implementation = iterator->second;
     }
-    return implementation(machine, arguments);
+    auto result = implementation(machine, arguments);
+    if (!result) {
+        Error error = result.error();
+        error.message = std::string(owner) + "." + std::string(name) +
+                        std::string(descriptor) + ": " + error.message;
+        return std::unexpected(std::move(error));
+    }
+    return result;
 }
 
 void NativeMethodRegistry::clear() noexcept {

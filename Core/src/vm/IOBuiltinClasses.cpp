@@ -36,6 +36,77 @@ using namespace builtin;
             method(kPublic, "close", "()V"),
         });
     }
+    if (name == "java/io/Reader") {
+        return make_class("java/io/Reader", "java/lang/Object",
+                          kOrdinary | kAbstract, {
+            field(kProtected, "lock", "Ljava/lang/Object;"),
+        }, {
+            method(kProtected, "<init>", "()V"),
+            method(kProtected, "<init>", "(Ljava/lang/Object;)V"),
+            method(kPublic, "read", "()I"),
+            method(kPublic, "read", "([C)I"),
+            method(kPublic | kAbstract, "read", "([CII)I"),
+            method(kPublic, "skip", "(J)J"),
+            method(kPublic, "ready", "()Z"),
+            method(kPublic, "markSupported", "()Z"),
+            method(kPublic, "mark", "(I)V"),
+            method(kPublic, "reset", "()V"),
+            method(kPublic | kAbstract, "close", "()V"),
+        });
+    }
+    if (name == "java/io/Writer") {
+        return make_class("java/io/Writer", "java/lang/Object",
+                          kOrdinary | kAbstract, {
+            field(kProtected, "lock", "Ljava/lang/Object;"),
+        }, {
+            method(kProtected, "<init>", "()V"),
+            method(kProtected, "<init>", "(Ljava/lang/Object;)V"),
+            method(kPublic, "write", "(I)V"),
+            method(kPublic, "write", "([C)V"),
+            method(kPublic | kAbstract, "write", "([CII)V"),
+            method(kPublic, "write", "(Ljava/lang/String;)V"),
+            method(kPublic, "write", "(Ljava/lang/String;II)V"),
+            method(kPublic | kAbstract, "flush", "()V"),
+            method(kPublic | kAbstract, "close", "()V"),
+        });
+    }
+    if (name == "java/io/InputStreamReader") {
+        return make_class("java/io/InputStreamReader", "java/io/Reader",
+                          kOrdinary, {
+            field(kPrivate, "in", "Ljava/io/InputStream;"),
+            field(kPrivate, "charset", "I"),
+            field(kPrivate, "pendingChar", "I"),
+            field(kPrivate, "closed", "Z"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/io/InputStream;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/io/InputStream;Ljava/lang/String;)V"),
+            method(kPublic, "getEncoding", "()Ljava/lang/String;"),
+            method(kPublic, "read", "()I"),
+            method(kPublic, "read", "([CII)I"),
+            method(kPublic, "ready", "()Z"),
+            method(kPublic, "close", "()V"),
+        });
+    }
+    if (name == "java/io/OutputStreamWriter") {
+        return make_class("java/io/OutputStreamWriter", "java/io/Writer",
+                          kOrdinary, {
+            field(kPrivate, "out", "Ljava/io/OutputStream;"),
+            field(kPrivate, "charset", "I"),
+            field(kPrivate, "pendingHigh", "I"),
+            field(kPrivate, "closed", "Z"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/io/OutputStream;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            method(kPublic, "getEncoding", "()Ljava/lang/String;"),
+            method(kPublic, "write", "(I)V"),
+            method(kPublic, "write", "([CII)V"),
+            method(kPublic, "write", "(Ljava/lang/String;II)V"),
+            method(kPublic, "flush", "()V"),
+            method(kPublic, "close", "()V"),
+        });
+    }
     if (name == "java/io/FilterInputStream") {
         return make_class("java/io/FilterInputStream", "java/io/InputStream",
                           kOrdinary, {
@@ -233,9 +304,10 @@ using namespace builtin;
         const char* name;
         const char* super_name;
     };
-    static constexpr std::array<Hierarchy, 4> hierarchy {{
+    static constexpr std::array<Hierarchy, 5> hierarchy {{
         {"java/io/IOException", "java/lang/Exception"},
         {"java/io/EOFException", "java/io/IOException"},
+        {"java/io/InterruptedIOException", "java/io/IOException"},
         {"java/io/UTFDataFormatException", "java/io/IOException"},
         {"java/io/UnsupportedEncodingException", "java/io/IOException"},
     }};

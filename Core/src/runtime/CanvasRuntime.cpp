@@ -23,6 +23,9 @@ constexpr i32 kScreenUpdated = 3;
 constexpr i32 kCanvasComponentType = 22;
 constexpr i32 kScreenModeMetadata = -1007;
 constexpr usize kDisplayableIdField = 0;
+constexpr auto kKeyRepeatInitialDelay = std::chrono::milliseconds(400);
+constexpr auto kKeyRepeatInterval = std::chrono::milliseconds(80);
+constexpr usize kMaximumRepeatsPerPump = 8U;
 
 [[nodiscard]] i32 saturating_i32(i64 value) noexcept {
     return static_cast<i32>(std::clamp<i64>(
@@ -46,6 +49,26 @@ void CanvasRuntime::set_keymap(std::array<i32, 7> keymap) noexcept {
     keymap_ = keymap;
 }
 
+void CanvasRuntime::set_input_capabilities(bool pointer_events,
+                                           bool pointer_motion,
+                                           bool repeat_events) noexcept {
+    pointer_events_supported_ = pointer_events;
+    pointer_motion_supported_ = pointer_events && pointer_motion;
+    repeat_events_supported_ = repeat_events;
+    if (!repeat_events_supported_) {
+        for (auto& [key, state] : canvases_) {
+            (void)key;
+            state.next_key_repeat.clear();
+        }
+    }
+}
+
+void CanvasRuntime::set_repeat_clock_for_testing(
+    std::function<std::chrono::steady_clock::time_point()> clock) {
+    repeat_clock_ = clock ? std::move(clock)
+                          : [] { return std::chrono::steady_clock::now(); };
+}
+
 Status CanvasRuntime::set_dimensions(Dimensions dimensions) {
     if (!dimensions.valid()) {
         return fail(ErrorCode::invalid_argument,
@@ -56,11 +79,12 @@ Status CanvasRuntime::set_dimensions(Dimensions dimensions) {
         return {};
     }
     dimensions_ = dimensions;
-    size_change_pending_ = true;
-    for (auto& [key, state] : canvases_) {
-        (void)key;
-        state.game_graphics = {};
-        merge_region(state.repaint_region, full_region());
+    for (u64 key : canvas_order_) {
+        auto found = canvases_.find(key);
+        if (found == canvases_.end()) continue;
+        found->second.size_change_pending = true;
+        found->second.game_graphics = {};
+        merge_region(found->second.repaint_region, full_region());
     }
     return {};
 }
@@ -70,36 +94,70 @@ Status CanvasRuntime::set_host_foreground(bool foreground) {
         return {};
     }
     host_foreground_ = foreground;
-    for (const auto& [key, state] : canvases_) {
-        (void)key;
+    for (u64 key : canvas_order_) {
+        const auto found = canvases_.find(key);
+        if (found == canvases_.end()) continue;
         visibility_changes_.push_back(VisibilityChange {
-            .object = state.object,
-            .visible = state.display_visible,
+            .object = found->second.object,
+            .visible = found->second.display_visible,
         });
     }
     return {};
 }
 
 void CanvasRuntime::enqueue_key(i32 key_code, bool pressed, u64 sequence) {
-    inputs_.push_back(PendingInput {
+    PendingInput input {
         .kind = InputKind::key,
         .first = key_code,
         .second = pressed ? 1 : 0,
         .sequence = sequence,
-    });
+    };
+    const auto position = std::upper_bound(
+        inputs_.begin(), inputs_.end(), sequence,
+        [](u64 value, const PendingInput& candidate) {
+            return value < candidate.sequence;
+        });
+    inputs_.insert(position, input);
+}
+
+void CanvasRuntime::enqueue_host_key(i32 key_code,
+                                     bool pressed,
+                                     u64 sequence) {
+    PendingInput input {
+        .kind = InputKind::host_key,
+        .first = key_code,
+        .second = pressed ? 1 : 0,
+        .sequence = sequence,
+    };
+    const auto position = std::upper_bound(
+        inputs_.begin(), inputs_.end(), sequence,
+        [](u64 value, const PendingInput& candidate) {
+            return value < candidate.sequence;
+        });
+    inputs_.insert(position, input);
 }
 
 void CanvasRuntime::enqueue_pointer(i32 x,
                                     i32 y,
                                     i32 action,
                                     u64 sequence) {
-    inputs_.push_back(PendingInput {
+    if (!pointer_events_supported_ ||
+        (action == kPointerDragged && !pointer_motion_supported_)) {
+        return;
+    }
+    PendingInput input {
         .kind = InputKind::pointer,
         .first = x,
         .second = y,
         .third = action,
         .sequence = sequence,
-    });
+    };
+    const auto position = std::upper_bound(
+        inputs_.begin(), inputs_.end(), sequence,
+        [](u64 value, const PendingInput& candidate) {
+            return value < candidate.sequence;
+        });
+    inputs_.insert(position, input);
 }
 
 Status CanvasRuntime::pump() {
@@ -118,6 +176,10 @@ Status CanvasRuntime::pump() {
     if (!sizes) return sizes;
     auto inputs = process_inputs();
     if (!inputs) return inputs;
+    auto repeats = process_key_repeats();
+    if (!repeats) return repeats;
+    auto serial_callbacks = machine_.pump_serial_callbacks();
+    if (!serial_callbacks) return serial_callbacks;
     auto visibility_after_input = process_visibility_changes();
     if (!visibility_after_input) return visibility_after_input;
     auto flushes = process_flushes();
@@ -128,11 +190,15 @@ Status CanvasRuntime::pump() {
 usize CanvasRuntime::estimated_bytes() const noexcept {
     usize total = sizeof(*this);
     total += canvases_.size() * sizeof(CanvasState);
+    total += canvas_order_.capacity() * sizeof(u64);
     total += inputs_.size() * sizeof(PendingInput);
     total += visibility_changes_.size() * sizeof(VisibilityChange);
     for (const auto& [key, state] : canvases_) {
         (void)key;
         total += state.pressed_keys.size() * sizeof(i32);
+        total += state.next_key_repeat.size() *
+                 sizeof(std::pair<const i32,
+                                  std::chrono::steady_clock::time_point>);
     }
     return total;
 }
@@ -154,6 +220,9 @@ Status CanvasRuntime::register_canvas(vm::ObjectRef canvas,
     if (!inserted) {
         iterator->second.game_canvas = game_canvas;
         iterator->second.suppress_key_events = suppress_key_events;
+    } else {
+        canvas_order_.push_back(canvas.bits);
+        iterator->second.size_change_pending = true;
     }
     return {};
 }
@@ -165,6 +234,13 @@ Status CanvasRuntime::set_display_visible(vm::ObjectRef displayable,
         return {};
     }
     state->display_visible = visible;
+    if (visible) {
+        active_canvas_ = displayable.bits;
+        state->size_change_pending = true;
+    } else if (active_canvas_.has_value() &&
+               *active_canvas_ == displayable.bits) {
+        active_canvas_.reset();
+    }
     visibility_changes_.push_back(VisibilityChange {
         .object = displayable,
         .visible = visible,
@@ -187,7 +263,11 @@ Status CanvasRuntime::request_service_repaints(vm::ObjectRef canvas) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
     (*state)->service_requested = true;
-    return {};
+    if (pumping_ || !(*state)->effectively_visible ||
+        !(*state)->repaint_region.has_value()) {
+        return {};
+    }
+    return pump();
 }
 
 Status CanvasRuntime::set_fullscreen(vm::ObjectRef canvas, bool fullscreen) {
@@ -289,8 +369,10 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
     if (!render_hooks_.acquire_game_graphics) {
         return vm::ObjectRef {};
     }
-    auto graphics = render_hooks_.acquire_game_graphics(
+    auto graphics_root = render_hooks_.acquire_game_graphics(
         machine_, canvas, dimensions_);
+    if (!graphics_root) return std::unexpected(graphics_root.error());
+    auto graphics = graphics_root->get();
     if (!graphics) return std::unexpected(graphics.error());
     (*state)->game_graphics = *graphics;
     return *graphics;
@@ -313,10 +395,15 @@ Status CanvasRuntime::request_game_flush(vm::ObjectRef canvas,
 
 void CanvasRuntime::append_reference_roots(
     std::vector<vm::ObjectRef>& roots) const {
-    for (const auto& [key, state] : canvases_) {
-        (void)key;
-        if (!state.object.is_null()) roots.push_back(state.object);
-        if (!state.game_graphics.is_null()) roots.push_back(state.game_graphics);
+    for (u64 key : canvas_order_) {
+        const auto found = canvases_.find(key);
+        if (found == canvases_.end()) continue;
+        if (!found->second.object.is_null()) {
+            roots.push_back(found->second.object);
+        }
+        if (!found->second.game_graphics.is_null()) {
+            roots.push_back(found->second.game_graphics);
+        }
     }
 }
 
@@ -422,19 +509,19 @@ Status CanvasRuntime::process_visibility_changes() {
 }
 
 Status CanvasRuntime::process_size_changes() {
-    if (!size_change_pending_) return {};
-    size_change_pending_ = false;
-    std::vector<vm::ObjectRef> canvases;
-    canvases.reserve(canvases_.size());
-    for (const auto& [key, state] : canvases_) {
-        (void)key;
-        canvases.push_back(state.object);
-    }
     const std::array<vm::Value, 2> arguments {
         vm::Value::from_int(dimensions_.width),
         vm::Value::from_int(dimensions_.height),
     };
-    for (vm::ObjectRef canvas : canvases) {
+    for (u64 key : canvas_order_) {
+        auto found = canvases_.find(key);
+        if (found == canvases_.end() ||
+            !found->second.effectively_visible ||
+            !found->second.size_change_pending) {
+            continue;
+        }
+        const vm::ObjectRef canvas = found->second.object;
+        found->second.size_change_pending = false;
         auto invoked = invoke_void(canvas,
                                    "javax/microedition/lcdui/Canvas",
                                    "sizeChanged",
@@ -451,28 +538,36 @@ Status CanvasRuntime::process_inputs() {
         inputs_.pop_front();
         (void)input.sequence;
 
-        CanvasState* state = nullptr;
-        for (auto& [key, candidate] : canvases_) {
-            (void)key;
-            if (candidate.effectively_visible) {
-                state = &candidate;
-                break;
-            }
-        }
+        CanvasState* state = active_visible_state();
         if (state == nullptr) continue;
 
-        if (input.kind == InputKind::key) {
+        if (input.kind != InputKind::pointer) {
+            const bool host_key = input.kind == InputKind::host_key;
             const i32 key_code = input.first;
             const bool pressed = input.second != 0;
             const bool was_pressed = state->pressed_keys.contains(key_code);
             const i32 mask = key_state_mask(key_code);
             std::string_view callback;
             if (pressed) {
-                state->pressed_keys.insert(key_code);
-                state->key_states |= mask;
-                callback = was_pressed ? "keyRepeated" : "keyPressed";
+                if (was_pressed) {
+                    if (!host_key || !repeat_events_supported_) continue;
+                    state->next_key_repeat.insert_or_assign(
+                        key_code, repeat_clock_() + kKeyRepeatInterval);
+                    callback = "keyRepeated";
+                } else {
+                    state->pressed_keys.insert(key_code);
+                    state->key_states |= mask;
+                    if (repeat_events_supported_) {
+                        state->next_key_repeat.insert_or_assign(
+                            key_code,
+                            repeat_clock_() + kKeyRepeatInitialDelay);
+                    }
+                    callback = "keyPressed";
+                }
             } else {
+                if (!was_pressed) continue;
                 state->pressed_keys.erase(key_code);
+                state->next_key_repeat.erase(key_code);
                 state->key_states &= ~mask;
                 callback = "keyReleased";
             }
@@ -493,9 +588,64 @@ Status CanvasRuntime::process_inputs() {
             case kPointerDragged: callback = "pointerDragged"; break;
             default: continue;
             }
+            if (!pointer_events_supported_ ||
+                (input.third == kPointerDragged &&
+                 !pointer_motion_supported_)) {
+                continue;
+            }
+            const i32 maximum_x = std::max(0, dimensions_.width - 1);
+            const i32 maximum_y = std::max(0, dimensions_.height - 1);
+            const i32 clipped_x = std::clamp(input.first, 0, maximum_x);
+            const i32 clipped_y = std::clamp(input.second, 0, maximum_y);
             auto invoked = invoke_pointer_callback(
-                *state, callback, input.first, input.second);
+                *state, callback, clipped_x, clipped_y);
             if (!invoked) return invoked;
+        }
+    }
+    return {};
+}
+
+Status CanvasRuntime::process_key_repeats() {
+    CanvasState* state = active_visible_state();
+    if (!repeat_events_supported_ || state == nullptr ||
+        (state->game_canvas && state->suppress_key_events) ||
+        state->next_key_repeat.empty()) {
+        return {};
+    }
+
+    const auto now = repeat_clock_();
+    std::vector<i32> due_keys;
+    due_keys.reserve(state->next_key_repeat.size());
+    for (const auto& [key_code, deadline] : state->next_key_repeat) {
+        if (deadline <= now && state->pressed_keys.contains(key_code)) {
+            due_keys.push_back(key_code);
+        }
+    }
+    std::sort(due_keys.begin(), due_keys.end());
+
+    const vm::ObjectRef object = state->object;
+    for (i32 key_code : due_keys) {
+        usize delivered = 0U;
+        while (delivered < kMaximumRepeatsPerPump) {
+            state = find_state(object);
+            if (state == nullptr || !state->effectively_visible ||
+                !state->pressed_keys.contains(key_code)) {
+                break;
+            }
+            const auto found = state->next_key_repeat.find(key_code);
+            if (found == state->next_key_repeat.end() || found->second > now) {
+                break;
+            }
+            found->second += kKeyRepeatInterval;
+            auto invoked = invoke_key_callback(*state, "keyRepeated", key_code);
+            if (!invoked) return invoked;
+            ++delivered;
+        }
+        state = find_state(object);
+        if (state == nullptr) break;
+        const auto found = state->next_key_repeat.find(key_code);
+        if (found != state->next_key_repeat.end() && found->second <= now) {
+            found->second = now + kKeyRepeatInterval;
         }
     }
     return {};
@@ -503,8 +653,13 @@ Status CanvasRuntime::process_inputs() {
 
 Status CanvasRuntime::process_flushes() {
     std::vector<u64> pending;
-    for (const auto& [key, state] : canvases_) {
-        if (state.flush_region.has_value()) pending.push_back(key);
+    pending.reserve(canvas_order_.size());
+    for (u64 key : canvas_order_) {
+        const auto found = canvases_.find(key);
+        if (found != canvases_.end() &&
+            found->second.flush_region.has_value()) {
+            pending.push_back(key);
+        }
     }
     for (u64 key : pending) {
         auto found = canvases_.find(key);
@@ -533,8 +688,12 @@ Status CanvasRuntime::process_flushes() {
 
 Status CanvasRuntime::process_repaints() {
     std::vector<u64> pending;
-    for (const auto& [key, state] : canvases_) {
-        if (state.effectively_visible && state.repaint_region.has_value()) {
+    pending.reserve(canvas_order_.size());
+    for (u64 key : canvas_order_) {
+        const auto found = canvases_.find(key);
+        if (found != canvases_.end() &&
+            found->second.effectively_visible &&
+            found->second.repaint_region.has_value()) {
             pending.push_back(key);
         }
     }
@@ -551,11 +710,17 @@ Status CanvasRuntime::process_repaints() {
         found->second.service_requested = false;
 
         vm::ObjectRef graphics;
+        vm::NativeRootScope graphics_root;
         if (render_hooks_.acquire_paint_graphics) {
             auto acquired = render_hooks_.acquire_paint_graphics(
                 machine_, canvas, dimensions_, region);
             if (!acquired) return std::unexpected(acquired.error());
-            graphics = *acquired;
+            graphics_root = std::move(*acquired);
+            auto pinned_graphics = graphics_root.get();
+            if (!pinned_graphics) {
+                return std::unexpected(pinned_graphics.error());
+            }
+            graphics = *pinned_graphics;
         }
         const std::array<vm::Value, 1> arguments {
             vm::Value::from_reference(graphics),
@@ -573,6 +738,40 @@ Status CanvasRuntime::process_repaints() {
         }
     }
     return {};
+}
+
+CanvasRuntime::CanvasState* CanvasRuntime::active_visible_state() noexcept {
+    if (active_canvas_.has_value()) {
+        CanvasState* active = find_state(vm::ObjectRef {*active_canvas_});
+        if (active != nullptr && active->effectively_visible) return active;
+    }
+    for (auto iterator = canvas_order_.rbegin();
+         iterator != canvas_order_.rend(); ++iterator) {
+        const auto found = canvases_.find(*iterator);
+        if (found != canvases_.end() && found->second.effectively_visible) {
+            active_canvas_ = *iterator;
+            return &found->second;
+        }
+    }
+    return nullptr;
+}
+
+const CanvasRuntime::CanvasState*
+CanvasRuntime::active_visible_state() const noexcept {
+    if (active_canvas_.has_value()) {
+        const auto found = canvases_.find(*active_canvas_);
+        if (found != canvases_.end() && found->second.effectively_visible) {
+            return &found->second;
+        }
+    }
+    for (auto iterator = canvas_order_.rbegin();
+         iterator != canvas_order_.rend(); ++iterator) {
+        const auto found = canvases_.find(*iterator);
+        if (found != canvases_.end() && found->second.effectively_visible) {
+            return &found->second;
+        }
+    }
+    return nullptr;
 }
 
 Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
@@ -631,6 +830,7 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     state.effectively_visible = desired;
     const vm::ObjectRef canvas = state.object;
     if (desired) {
+        active_canvas_ = canvas.bits;
         auto shown = invoke_void(canvas,
                                  "javax/microedition/lcdui/Canvas",
                                  "showNotify",
@@ -642,8 +842,12 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
         }
         return {};
     }
+    if (active_canvas_.has_value() && *active_canvas_ == canvas.bits) {
+        active_canvas_.reset();
+    }
     state.key_states = 0;
     state.pressed_keys.clear();
+    state.next_key_repeat.clear();
     return invoke_void(canvas,
                        "javax/microedition/lcdui/Canvas",
                        "hideNotify",

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <exception>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -19,6 +20,14 @@ using namespace graphics_native;
 constexpr usize kFontFaceField = 0;
 constexpr usize kFontStyleField = 1;
 constexpr usize kFontSizeField = 2;
+constexpr usize kDirectGraphicsTargetField = 0;
+constexpr i32 kNokiaTypeUShort4444Argb = 4444;
+constexpr i32 kNokiaTypeUShort444Rgb = 444;
+constexpr i32 kNokiaTypeUShort555Rgb = 555;
+constexpr i32 kNokiaTypeUShort1555Argb = 1555;
+constexpr i32 kNokiaTypeUShort565Rgb = 565;
+constexpr i32 kNokiaTypeInt888Rgb = 888;
+constexpr i32 kNokiaTypeInt8888Argb = 8888;
 
 struct BoundGraphics final {
     graphics::GraphicsContext* context {nullptr};
@@ -57,6 +66,440 @@ void add(NativeMethodRegistry& registry,
     auto target = machine.graphics().image((*context)->target_key);
     if (!target) return graphics_error(target.error());
     return BoundGraphics {.context = *context, .target = *target};
+}
+
+[[nodiscard]] Result<ObjectRef> direct_graphics_target(
+    Machine& machine,
+    std::span<const Value> arguments,
+    std::string_view operation) {
+    auto object = receiver(arguments, operation);
+    if (!object) return std::unexpected(object.error());
+    auto class_name = machine.heap().class_name(*object);
+    if (!class_name) return std::unexpected(class_name.error());
+    if (*class_name == "javax/microedition/lcdui/Graphics") {
+        return *object;
+    }
+    auto target = machine.heap().field(*object, kDirectGraphicsTargetField);
+    if (!target) return std::unexpected(target.error());
+    auto graphics = target->as_reference();
+    if (!graphics || graphics->is_null()) {
+        return fail_java("java/lang/IllegalStateException",
+                         std::string(operation) +
+                             " has no backing Graphics object");
+    }
+    return *graphics;
+}
+
+[[nodiscard]] Result<BoundGraphics> bound_direct_graphics(
+    Machine& machine,
+    std::span<const Value> arguments,
+    std::string_view operation) {
+    auto graphics = direct_graphics_target(machine, arguments, operation);
+    if (!graphics) return std::unexpected(graphics.error());
+    const std::array<Value, 1> forwarded {
+        Value::from_reference(*graphics),
+    };
+    return bound_graphics(machine, forwarded, operation);
+}
+
+[[nodiscard]] Result<ObjectRef> invocation_reference(
+    Machine& machine,
+    const ExecutionResult& result,
+    std::string_view operation) {
+    if (!result.completed_normally()) {
+        if (!result.throwable.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        std::string(operation) +
+                            " failed without a Java throwable");
+        }
+        auto throwable = machine.heap().class_name(*result.throwable);
+        if (!throwable) return std::unexpected(throwable.error());
+        return fail_java(*throwable,
+                         std::string(operation) + " failed");
+    }
+    if (!result.return_value.has_value()) {
+        return fail(ErrorCode::invalid_state,
+                    std::string(operation) + " returned no object");
+    }
+    return result.return_value->as_reference();
+}
+
+[[nodiscard]] Result<graphics::Transform> nokia_transform(i32 manipulation) {
+    constexpr i32 kFlipHorizontal = 0x2000;
+    constexpr i32 kFlipVertical = 0x4000;
+    const i32 flips = manipulation & (kFlipHorizontal | kFlipVertical);
+    const i32 rotation = manipulation & ~(kFlipHorizontal | kFlipVertical);
+    if (rotation != 0 && rotation != 90 &&
+        rotation != 180 && rotation != 270) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "DirectGraphics manipulation is invalid");
+    }
+    if (flips == (kFlipHorizontal | kFlipVertical)) {
+        switch (rotation) {
+        case 0: return graphics::Transform::rotate_180;
+        case 90: return graphics::Transform::rotate_270;
+        case 180: return graphics::Transform::none;
+        case 270: return graphics::Transform::rotate_90;
+        default: break;
+        }
+    }
+    if (flips == kFlipHorizontal) {
+        switch (rotation) {
+        case 0: return graphics::Transform::mirror;
+        case 90: return graphics::Transform::mirror_rotate_90;
+        case 180: return graphics::Transform::mirror_rotate_180;
+        case 270: return graphics::Transform::mirror_rotate_270;
+        default: break;
+        }
+    }
+    if (flips == kFlipVertical) {
+        switch (rotation) {
+        case 0: return graphics::Transform::mirror_rotate_180;
+        case 90: return graphics::Transform::mirror_rotate_270;
+        case 180: return graphics::Transform::mirror;
+        case 270: return graphics::Transform::mirror_rotate_90;
+        default: break;
+        }
+    }
+    switch (rotation) {
+    case 0: return graphics::Transform::none;
+    case 90: return graphics::Transform::rotate_90;
+    case 180: return graphics::Transform::rotate_180;
+    case 270: return graphics::Transform::rotate_270;
+    default:
+        return fail_java("java/lang/IllegalArgumentException",
+                         "DirectGraphics manipulation is invalid");
+    }
+}
+
+[[nodiscard]] bool nokia_short_format(i32 format) noexcept {
+    return format == kNokiaTypeUShort4444Argb ||
+           format == kNokiaTypeUShort444Rgb ||
+           format == kNokiaTypeUShort555Rgb ||
+           format == kNokiaTypeUShort1555Argb ||
+           format == kNokiaTypeUShort565Rgb;
+}
+
+[[nodiscard]] u8 expand4(u32 value) noexcept {
+    return static_cast<u8>(value * 17U);
+}
+
+[[nodiscard]] u8 expand5(u32 value) noexcept {
+    return static_cast<u8>((value << 3U) | (value >> 2U));
+}
+
+[[nodiscard]] u8 expand6(u32 value) noexcept {
+    return static_cast<u8>((value << 2U) | (value >> 4U));
+}
+
+[[nodiscard]] graphics::Pixel nokia_short_to_argb(
+    u16 value,
+    bool transparency,
+    i32 format) noexcept {
+    u8 alpha = 255U;
+    u8 red = 0U;
+    u8 green = 0U;
+    u8 blue = 0U;
+    if (format == kNokiaTypeUShort4444Argb) {
+        alpha = transparency ? expand4((value >> 12U) & 0xFU) : 255U;
+        red = expand4((value >> 8U) & 0xFU);
+        green = expand4((value >> 4U) & 0xFU);
+        blue = expand4(value & 0xFU);
+    } else if (format == kNokiaTypeUShort444Rgb) {
+        red = expand4((value >> 8U) & 0xFU);
+        green = expand4((value >> 4U) & 0xFU);
+        blue = expand4(value & 0xFU);
+    } else if (format == kNokiaTypeUShort1555Argb) {
+        alpha = transparency && (value & 0x8000U) == 0U ? 0U : 255U;
+        red = expand5((value >> 10U) & 0x1FU);
+        green = expand5((value >> 5U) & 0x1FU);
+        blue = expand5(value & 0x1FU);
+    } else if (format == kNokiaTypeUShort555Rgb) {
+        red = expand5((value >> 10U) & 0x1FU);
+        green = expand5((value >> 5U) & 0x1FU);
+        blue = expand5(value & 0x1FU);
+    } else {
+        red = expand5((value >> 11U) & 0x1FU);
+        green = expand6((value >> 5U) & 0x3FU);
+        blue = expand5(value & 0x1FU);
+    }
+    return graphics::argb(alpha, red, green, blue);
+}
+
+[[nodiscard]] u16 nokia_argb_to_short(graphics::Pixel pixel,
+                                      i32 format) noexcept {
+    const u32 alpha = graphics::alpha(pixel);
+    const u32 red = graphics::red(pixel);
+    const u32 green = graphics::green(pixel);
+    const u32 blue = graphics::blue(pixel);
+    if (format == kNokiaTypeUShort4444Argb) {
+        return static_cast<u16>(((alpha >> 4U) << 12U) |
+                                ((red >> 4U) << 8U) |
+                                ((green >> 4U) << 4U) |
+                                (blue >> 4U));
+    }
+    if (format == kNokiaTypeUShort444Rgb) {
+        return static_cast<u16>(((red >> 4U) << 8U) |
+                                ((green >> 4U) << 4U) |
+                                (blue >> 4U));
+    }
+    if (format == kNokiaTypeUShort1555Argb) {
+        return static_cast<u16>((alpha == 0U ? 0U : 0x8000U) |
+                                ((red >> 3U) << 10U) |
+                                ((green >> 3U) << 5U) |
+                                (blue >> 3U));
+    }
+    if (format == kNokiaTypeUShort555Rgb) {
+        return static_cast<u16>(((red >> 3U) << 10U) |
+                                ((green >> 3U) << 5U) |
+                                (blue >> 3U));
+    }
+    return static_cast<u16>(((red >> 3U) << 11U) |
+                            ((green >> 2U) << 5U) |
+                            (blue >> 3U));
+}
+
+[[nodiscard]] Result<usize> checked_array_index(
+    i32 offset,
+    i32 scan_length,
+    i32 row,
+    i32 column,
+    usize array_length,
+    std::string_view operation) {
+    const i64 index = static_cast<i64>(offset) +
+                      static_cast<i64>(row) * scan_length + column;
+    if (index < 0 || static_cast<u64>(index) >= array_length) {
+        return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                         std::string(operation) +
+                             " pixel slice is outside the array");
+    }
+    return static_cast<usize>(index);
+}
+
+[[nodiscard]] Result<std::vector<graphics::Pixel>> nokia_source_pixels(
+    Machine& machine,
+    ObjectRef array,
+    bool short_pixels,
+    bool transparency,
+    i32 offset,
+    i32 scan_length,
+    i32 width,
+    i32 height,
+    i32 format,
+    std::string_view operation) {
+    if (width < 0 || height < 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " dimensions are negative");
+    }
+    if (short_pixels ? !nokia_short_format(format)
+                     : (format != kNokiaTypeInt888Rgb &&
+                        format != kNokiaTypeInt8888Argb)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " pixel format is unsupported");
+    }
+    auto class_name = machine.heap().class_name(array);
+    auto length = machine.heap().array_length(array);
+    if (!class_name || !length) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) + " expects a pixel array");
+    }
+    const std::string_view expected = short_pixels ? "[S" : "[I";
+    if (*class_name != expected) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " pixel array has the wrong type");
+    }
+    if (width == 0 || height == 0) return std::vector<graphics::Pixel> {};
+    auto count = graphics::validated_pixel_count(width, height);
+    if (!count) return graphics_error(count.error());
+    std::vector<graphics::Pixel> result(*count);
+    for (i32 row = 0; row < height; ++row) {
+        for (i32 column = 0; column < width; ++column) {
+            auto source_index = checked_array_index(offset, scan_length,
+                                                    row, column, *length,
+                                                    operation);
+            if (!source_index) return std::unexpected(source_index.error());
+            auto value = machine.heap().element(array, *source_index);
+            if (!value) return std::unexpected(value.error());
+            auto integer = value->as_int();
+            if (!integer) return std::unexpected(integer.error());
+            graphics::Pixel pixel;
+            if (short_pixels) {
+                pixel = nokia_short_to_argb(
+                    static_cast<u16>(*integer), transparency, format);
+            } else {
+                pixel = static_cast<graphics::Pixel>(
+                    static_cast<u32>(*integer));
+                if (format == kNokiaTypeInt888Rgb || !transparency) {
+                    pixel |= 0xFF000000U;
+                }
+            }
+            result[static_cast<usize>(row) *
+                   static_cast<usize>(width) +
+                   static_cast<usize>(column)] = pixel;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] Status draw_nokia_pixels(
+    Machine& machine,
+    std::span<const Value> arguments,
+    bool short_pixels,
+    std::string_view operation) {
+    auto bound = bound_direct_graphics(machine, arguments, operation);
+    auto array = reference_argument(arguments, 1U, operation);
+    auto transparency = int_argument(arguments, 2U, operation);
+    auto offset = int_argument(arguments, 3U, operation);
+    auto scan_length = int_argument(arguments, 4U, operation);
+    auto x = int_argument(arguments, 5U, operation);
+    auto y = int_argument(arguments, 6U, operation);
+    auto width = int_argument(arguments, 7U, operation);
+    auto height = int_argument(arguments, 8U, operation);
+    auto manipulation = int_argument(arguments, 9U, operation);
+    auto format = int_argument(arguments, 10U, operation);
+    if (!bound) return std::unexpected(bound.error());
+    if (!array) return std::unexpected(array.error());
+    if (!transparency) return std::unexpected(transparency.error());
+    if (!offset) return std::unexpected(offset.error());
+    if (!scan_length) return std::unexpected(scan_length.error());
+    if (!x) return std::unexpected(x.error());
+    if (!y) return std::unexpected(y.error());
+    if (!width) return std::unexpected(width.error());
+    if (!height) return std::unexpected(height.error());
+    if (!manipulation) return std::unexpected(manipulation.error());
+    if (!format) return std::unexpected(format.error());
+    auto pixels = nokia_source_pixels(
+        machine, *array, short_pixels, *transparency != 0,
+        *offset, *scan_length, *width, *height, *format, operation);
+    if (!pixels) return std::unexpected(pixels.error());
+    if (*width == 0 || *height == 0) return {};
+    auto source = graphics::Image::create_immutable(*width, *height, *pixels);
+    if (!source) return graphics_error(source.error());
+    auto transform = nokia_transform(*manipulation);
+    if (!transform) return std::unexpected(transform.error());
+    return graphics::draw_region(
+        *bound->target, *bound->context, *source,
+        0, 0, *width, *height, *transform, *x, *y,
+        graphics::anchor_top | graphics::anchor_left);
+}
+
+[[nodiscard]] Result<std::vector<i32>> nokia_polygon_points(
+    Machine& machine,
+    ObjectRef array,
+    i32 offset,
+    i32 count,
+    std::string_view operation) {
+    auto class_name = machine.heap().class_name(array);
+    auto length = machine.heap().array_length(array);
+    if (!class_name || !length || *class_name != "[I") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) + " expects int[]");
+    }
+    if (offset < 0 || count < 0 ||
+        static_cast<usize>(offset) > *length ||
+        static_cast<usize>(count) >
+            *length - static_cast<usize>(offset)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " point range is invalid");
+    }
+    std::vector<i32> points;
+    points.reserve(static_cast<usize>(count));
+    for (i32 index = 0; index < count; ++index) {
+        auto value = machine.heap().element(
+            array, static_cast<usize>(offset + index));
+        if (!value) return std::unexpected(value.error());
+        auto integer = value->as_int();
+        if (!integer) return std::unexpected(integer.error());
+        points.push_back(*integer);
+    }
+    return points;
+}
+
+[[nodiscard]] Status get_nokia_pixels(
+    Machine& machine,
+    std::span<const Value> arguments,
+    bool short_pixels,
+    std::string_view operation) {
+    auto bound = bound_direct_graphics(machine, arguments, operation);
+    auto array = reference_argument(arguments, 1U, operation);
+    auto offset = int_argument(arguments, 2U, operation);
+    auto scan_length = int_argument(arguments, 3U, operation);
+    auto x = int_argument(arguments, 4U, operation);
+    auto y = int_argument(arguments, 5U, operation);
+    auto width = int_argument(arguments, 6U, operation);
+    auto height = int_argument(arguments, 7U, operation);
+    auto format = int_argument(arguments, 8U, operation);
+    if (!bound) return std::unexpected(bound.error());
+    if (!array) return std::unexpected(array.error());
+    if (!offset) return std::unexpected(offset.error());
+    if (!scan_length) return std::unexpected(scan_length.error());
+    if (!x) return std::unexpected(x.error());
+    if (!y) return std::unexpected(y.error());
+    if (!width) return std::unexpected(width.error());
+    if (!height) return std::unexpected(height.error());
+    if (!format) return std::unexpected(format.error());
+    if (*width < 0 || *height < 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " dimensions are negative");
+    }
+    if (short_pixels ? !nokia_short_format(*format)
+                     : (*format != kNokiaTypeInt888Rgb &&
+                        *format != kNokiaTypeInt8888Argb)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " pixel format is unsupported");
+    }
+    auto class_name = machine.heap().class_name(*array);
+    auto array_length = machine.heap().array_length(*array);
+    const std::string_view expected = short_pixels ? "[S" : "[I";
+    if (!class_name || !array_length || *class_name != expected) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " pixel array has the wrong type");
+    }
+    if (*width == 0 || *height == 0) return {};
+    const i64 source_x = static_cast<i64>(*x) +
+                         bound->context->translate_x;
+    const i64 source_y = static_cast<i64>(*y) +
+                         bound->context->translate_y;
+    if (source_x < 0 || source_y < 0 ||
+        source_x + *width > bound->target->width() ||
+        source_y + *height > bound->target->height()) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " source rectangle is outside the surface");
+    }
+    for (i32 row = 0; row < *height; ++row) {
+        for (i32 column = 0; column < *width; ++column) {
+            auto destination_index = checked_array_index(
+                *offset, *scan_length, row, column, *array_length, operation);
+            if (!destination_index) {
+                return std::unexpected(destination_index.error());
+            }
+            auto pixel = bound->target->pixel(
+                static_cast<i32>(source_x) + column,
+                static_cast<i32>(source_y) + row);
+            if (!pixel) return graphics_error(pixel.error());
+            i32 stored_value;
+            if (short_pixels) {
+                stored_value = static_cast<i32>(static_cast<i16>(
+                    nokia_argb_to_short(*pixel, *format)));
+            } else {
+                const u32 value = *format == kNokiaTypeInt888Rgb
+                    ? (*pixel & 0x00FFFFFFU) : *pixel;
+                stored_value = static_cast<i32>(value);
+            }
+            auto stored = machine.heap().set_element(
+                *array, *destination_index, Value::from_int(stored_value));
+            if (!stored) return std::unexpected(stored.error());
+        }
+    }
+    return {};
 }
 
 [[nodiscard]] Result<i32> object_int_field(Machine& machine,
@@ -937,6 +1380,416 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!text) return std::unexpected(text.error());
             return std::optional<Value>(Value::from_int(
                 font->chars_width(*text)));
+        });
+
+    constexpr const char* direct_impl =
+        "com/nokia/mid/ui/DirectGraphicsImpl";
+    constexpr const char* direct_owner =
+        "javax/microedition/lcdui/Graphics";
+    constexpr const char* direct_utils = "com/nokia/mid/ui/DirectUtils";
+    constexpr const char* device_control = "com/nokia/mid/ui/DeviceControl";
+
+    add(registry, direct_impl, "<init>",
+        "(Ljavax/microedition/lcdui/Graphics;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "DirectGraphics.<init>");
+            auto graphics = reference_argument(
+                arguments, 1U, "DirectGraphics.<init>");
+            if (!object) return std::unexpected(object.error());
+            if (!graphics) return std::unexpected(graphics.error());
+            auto valid = machine.object_is_instance(
+                *graphics, "javax/microedition/lcdui/Graphics");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DirectGraphics requires Graphics");
+            }
+            auto stored = machine.heap().set_field(
+                *object, kDirectGraphicsTargetField,
+                Value::from_reference(*graphics));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, direct_utils, "getDirectGraphics",
+        "(Ljavax/microedition/lcdui/Graphics;)"
+        "Lcom/nokia/mid/ui/DirectGraphics;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto graphics = reference_argument(
+                arguments, 0U, "DirectUtils.getDirectGraphics");
+            if (!graphics) return std::unexpected(graphics.error());
+            auto valid = machine.object_is_instance(
+                *graphics, "javax/microedition/lcdui/Graphics");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DirectUtils argument is not Graphics");
+            }
+            return std::optional<Value>(Value::from_reference(*graphics));
+        });
+
+    add(registry, direct_owner, "setARGBColor", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_direct_graphics(
+                machine, arguments, "DirectGraphics.setARGBColor");
+            auto color = int_argument(
+                arguments, 1U, "DirectGraphics.setARGBColor");
+            if (!bound) return std::unexpected(bound.error());
+            if (!color) return std::unexpected(color.error());
+            bound->context->color = static_cast<graphics::Pixel>(
+                static_cast<u32>(*color));
+            return std::optional<Value> {};
+        });
+
+    add(registry, direct_owner, "getAlphaComponent", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_direct_graphics(
+                machine, arguments, "DirectGraphics.getAlphaComponent");
+            if (!bound) return std::unexpected(bound.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>((bound->context->color >> 24U) & 0xFFU)));
+        });
+
+    add(registry, direct_owner, "getNativePixelFormat", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto graphics = direct_graphics_target(
+                machine, arguments, "DirectGraphics.getNativePixelFormat");
+            if (!graphics) return std::unexpected(graphics.error());
+            return std::optional<Value>(
+                Value::from_int(kNokiaTypeUShort565Rgb));
+        });
+
+    add(registry, direct_owner, "drawImage",
+        "(Ljavax/microedition/lcdui/Image;IIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_direct_graphics(
+                machine, arguments, "DirectGraphics.drawImage");
+            auto source_object = reference_argument(
+                arguments, 1U, "DirectGraphics.drawImage");
+            auto x = int_argument(arguments, 2U, "DirectGraphics.drawImage");
+            auto y = int_argument(arguments, 3U, "DirectGraphics.drawImage");
+            auto anchor = int_argument(
+                arguments, 4U, "DirectGraphics.drawImage");
+            auto manipulation = int_argument(
+                arguments, 5U, "DirectGraphics.drawImage");
+            if (!bound) return std::unexpected(bound.error());
+            if (!source_object) return std::unexpected(source_object.error());
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!anchor) return std::unexpected(anchor.error());
+            if (!manipulation) return std::unexpected(manipulation.error());
+            auto source = image_payload(machine, *source_object);
+            if (!source) return std::unexpected(source.error());
+            auto transform = nokia_transform(*manipulation);
+            if (!transform) return std::unexpected(transform.error());
+            return status_result(graphics::draw_region(
+                *bound->target, *bound->context, **source,
+                0, 0, (*source)->width(), (*source)->height(),
+                *transform, *x, *y, *anchor));
+        });
+
+    add(registry, direct_owner, "drawPixels", "([SZIIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto drawn = draw_nokia_pixels(
+                machine, arguments, true, "DirectGraphics.drawPixels(short[])");
+            if (!drawn) return std::unexpected(drawn.error());
+            return std::optional<Value> {};
+        });
+    add(registry, direct_owner, "drawPixels", "([IZIIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto drawn = draw_nokia_pixels(
+                machine, arguments, false, "DirectGraphics.drawPixels(int[])");
+            if (!drawn) return std::unexpected(drawn.error());
+            return std::optional<Value> {};
+        });
+    add(registry, direct_owner, "getPixels", "([SIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto read = get_nokia_pixels(
+                machine, arguments, true, "DirectGraphics.getPixels(short[])");
+            if (!read) return std::unexpected(read.error());
+            return std::optional<Value> {};
+        });
+    add(registry, direct_owner, "getPixels", "([IIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto read = get_nokia_pixels(
+                machine, arguments, false, "DirectGraphics.getPixels(int[])");
+            if (!read) return std::unexpected(read.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, direct_owner, "drawTriangle", "(IIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_direct_graphics(
+                machine, arguments, "DirectGraphics.drawTriangle");
+            std::array<Result<i32>, 7> values {
+                int_argument(arguments, 1U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 2U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 3U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 4U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 5U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 6U, "DirectGraphics.drawTriangle"),
+                int_argument(arguments, 7U, "DirectGraphics.drawTriangle"),
+            };
+            if (!bound) return std::unexpected(bound.error());
+            for (const auto& value : values) {
+                if (!value) return std::unexpected(value.error());
+            }
+            if ((static_cast<u32>(*values[6]) >> 24U) == 0U) {
+                return std::optional<Value> {};
+            }
+            graphics::GraphicsContext context = *bound->context;
+            context.color = static_cast<graphics::Pixel>(
+                static_cast<u32>(*values[6]));
+            auto first = graphics::draw_line(
+                *bound->target, context,
+                *values[0], *values[1], *values[2], *values[3]);
+            if (!first) return graphics_error(first.error());
+            auto second = graphics::draw_line(
+                *bound->target, context,
+                *values[2], *values[3], *values[4], *values[5]);
+            if (!second) return graphics_error(second.error());
+            return status_result(graphics::draw_line(
+                *bound->target, context,
+                *values[4], *values[5], *values[0], *values[1]));
+        });
+
+    add(registry, direct_owner, "fillTriangle", "(IIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_direct_graphics(
+                machine, arguments, "DirectGraphics.fillTriangle");
+            std::array<Result<i32>, 7> values {
+                int_argument(arguments, 1U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 2U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 3U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 4U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 5U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 6U, "DirectGraphics.fillTriangle"),
+                int_argument(arguments, 7U, "DirectGraphics.fillTriangle"),
+            };
+            if (!bound) return std::unexpected(bound.error());
+            for (const auto& value : values) {
+                if (!value) return std::unexpected(value.error());
+            }
+            graphics::GraphicsContext context = *bound->context;
+            context.color = static_cast<graphics::Pixel>(
+                static_cast<u32>(*values[6]));
+            return status_result(graphics::fill_triangle(
+                *bound->target, context,
+                *values[0], *values[1], *values[2], *values[3],
+                *values[4], *values[5]));
+        });
+
+    const auto register_polygon = [&registry](
+        const char* name,
+        bool fill) {
+        add(registry, direct_owner, name, "([II[IIII)V",
+            [fill](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                const std::string operation = fill
+                    ? "DirectGraphics.fillPolygon"
+                    : "DirectGraphics.drawPolygon";
+                auto bound = bound_direct_graphics(machine, arguments,
+                                                   operation);
+                auto x_array = reference_argument(arguments, 1U, operation);
+                auto x_offset = int_argument(arguments, 2U, operation);
+                auto y_array = reference_argument(arguments, 3U, operation);
+                auto y_offset = int_argument(arguments, 4U, operation);
+                auto count = int_argument(arguments, 5U, operation);
+                auto color = int_argument(arguments, 6U, operation);
+                if (!bound) return std::unexpected(bound.error());
+                if (!x_array) return std::unexpected(x_array.error());
+                if (!x_offset) return std::unexpected(x_offset.error());
+                if (!y_array) return std::unexpected(y_array.error());
+                if (!y_offset) return std::unexpected(y_offset.error());
+                if (!count) return std::unexpected(count.error());
+                if (!color) return std::unexpected(color.error());
+                if (*count < 3) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     operation + " requires three points");
+                }
+                auto xs = nokia_polygon_points(machine, *x_array,
+                                               *x_offset, *count, operation);
+                auto ys = nokia_polygon_points(machine, *y_array,
+                                               *y_offset, *count, operation);
+                if (!xs) return std::unexpected(xs.error());
+                if (!ys) return std::unexpected(ys.error());
+                if ((static_cast<u32>(*color) >> 24U) == 0U) {
+                    return std::optional<Value> {};
+                }
+                graphics::GraphicsContext context = *bound->context;
+                context.color = static_cast<graphics::Pixel>(
+                    static_cast<u32>(*color));
+                if (!fill) {
+                    for (i32 index = 0; index < *count; ++index) {
+                        const i32 next = index + 1 == *count ? 0 : index + 1;
+                        auto drawn = graphics::draw_line(
+                            *bound->target, context,
+                            (*xs)[static_cast<usize>(index)],
+                            (*ys)[static_cast<usize>(index)],
+                            (*xs)[static_cast<usize>(next)],
+                            (*ys)[static_cast<usize>(next)]);
+                        if (!drawn) return graphics_error(drawn.error());
+                    }
+                    return std::optional<Value> {};
+                }
+                if (*count == 3) {
+                    return status_result(graphics::fill_triangle(
+                        *bound->target, context,
+                        (*xs)[0], (*ys)[0], (*xs)[1], (*ys)[1],
+                        (*xs)[2], (*ys)[2]));
+                }
+                const auto [minimum_y, maximum_y] =
+                    std::minmax_element(ys->begin(), ys->end());
+                std::vector<i32> intersections;
+                intersections.reserve(static_cast<usize>(*count));
+                for (i32 scan_y = *minimum_y;
+                     scan_y <= *maximum_y;
+                     ++scan_y) {
+                    intersections.clear();
+                    for (i32 index = 0; index < *count; ++index) {
+                        const i32 next = index + 1 == *count ? 0 : index + 1;
+                        const i32 x1 = (*xs)[static_cast<usize>(index)];
+                        const i32 y1 = (*ys)[static_cast<usize>(index)];
+                        const i32 x2 = (*xs)[static_cast<usize>(next)];
+                        const i32 y2 = (*ys)[static_cast<usize>(next)];
+                        if ((y1 <= scan_y && y2 > scan_y) ||
+                            (y2 <= scan_y && y1 > scan_y)) {
+                            const i64 numerator =
+                                static_cast<i64>(scan_y - y1) *
+                                static_cast<i64>(x2 - x1);
+                            intersections.push_back(x1 + static_cast<i32>(
+                                numerator / static_cast<i64>(y2 - y1)));
+                        }
+                    }
+                    std::sort(intersections.begin(), intersections.end());
+                    for (usize index = 0;
+                         index + 1U < intersections.size();
+                         index += 2U) {
+                        auto drawn = graphics::draw_line(
+                            *bound->target, context,
+                            intersections[index], scan_y,
+                            intersections[index + 1U], scan_y);
+                        if (!drawn) return graphics_error(drawn.error());
+                    }
+                    if (scan_y == std::numeric_limits<i32>::max()) break;
+                }
+                return std::optional<Value> {};
+            });
+    };
+    register_polygon("drawPolygon", false);
+    register_polygon("fillPolygon", true);
+
+    add(registry, direct_utils, "createImage",
+        "(III)Ljavax/microedition/lcdui/Image;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto width = int_argument(
+                arguments, 0U, "DirectUtils.createImage");
+            auto height = int_argument(
+                arguments, 1U, "DirectUtils.createImage");
+            auto color = int_argument(
+                arguments, 2U, "DirectUtils.createImage");
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            if (!color) return std::unexpected(color.error());
+            const std::array<Value, 2> image_arguments {
+                Value::from_int(*width), Value::from_int(*height),
+            };
+            auto created = machine.invoke_static(
+                "javax/microedition/lcdui/Image", "createImage",
+                "(II)Ljavax/microedition/lcdui/Image;", image_arguments);
+            if (!created) return std::unexpected(created.error());
+            auto image_object = invocation_reference(
+                machine, *created, "DirectUtils.createImage");
+            if (!image_object) return std::unexpected(image_object.error());
+            auto image = image_payload(machine, *image_object);
+            if (!image) return std::unexpected(image.error());
+            std::fill((*image)->mutable_pixels().begin(),
+                      (*image)->mutable_pixels().end(),
+                      static_cast<graphics::Pixel>(
+                          static_cast<u32>(*color)));
+            (*image)->mark_dirty_region(0, 0, *width, *height);
+            return std::optional<Value>(
+                Value::from_reference(*image_object));
+        });
+
+    add(registry, direct_utils, "createImage",
+        "([BII)Ljavax/microedition/lcdui/Image;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bytes = reference_argument(
+                arguments, 0U, "DirectUtils.createImage");
+            auto offset = int_argument(
+                arguments, 1U, "DirectUtils.createImage");
+            auto length = int_argument(
+                arguments, 2U, "DirectUtils.createImage");
+            if (!bytes) return std::unexpected(bytes.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            const std::array<Value, 3> image_arguments {
+                Value::from_reference(*bytes),
+                Value::from_int(*offset),
+                Value::from_int(*length),
+            };
+            auto created = machine.invoke_static(
+                "javax/microedition/lcdui/Image", "createImage",
+                "([BII)Ljavax/microedition/lcdui/Image;", image_arguments);
+            if (!created) return std::unexpected(created.error());
+            auto image_object = invocation_reference(
+                machine, *created, "DirectUtils.createImage");
+            if (!image_object) return std::unexpected(image_object.error());
+            return std::optional<Value>(
+                Value::from_reference(*image_object));
+        });
+
+    add(registry, device_control, "setLights", "(II)V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto light = int_argument(arguments, 0U, "DeviceControl.setLights");
+            auto level = int_argument(arguments, 1U, "DeviceControl.setLights");
+            if (!light) return std::unexpected(light.error());
+            if (!level) return std::unexpected(level.error());
+            if (*level < 0 || *level > 100) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DeviceControl light level is outside 0..100");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, device_control, "startVibra", "(IJ)V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "DeviceControl.startVibra arguments are missing");
+            }
+            auto frequency = arguments[0].as_int();
+            auto duration = arguments[1].as_long();
+            if (!frequency) return std::unexpected(frequency.error());
+            if (!duration) return std::unexpected(duration.error());
+            if (*frequency < 0 || *frequency > 100 || *duration < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DeviceControl vibration arguments are invalid");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, device_control, "stopVibra", "()V",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value> {};
         });
 }
 

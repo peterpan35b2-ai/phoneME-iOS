@@ -94,6 +94,7 @@ private:
     [[nodiscard]] Status persist_unlocked(const Store& store) const;
     [[nodiscard]] Status sync_directory_unlocked(
         bool inject_fault = true) const;
+    [[nodiscard]] Status scavenge_delete_tombstones_unlocked() const;
     [[nodiscard]] Result<usize> suite_used_bytes_unlocked() const;
     [[nodiscard]] Result<bool> remove_path_family_unlocked(
         const std::string& canonical_path) const;

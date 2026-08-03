@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "phoneme/base/Error.hpp"
+#include "phoneme/filesystem/SandboxResolver.hpp"
 
 namespace phoneme::filesystem {
 
@@ -32,6 +33,12 @@ struct FileInfo final {
     bool hidden {false};
     u64 size {0};
     i64 modified_seconds {0};
+};
+
+struct StorageInfo final {
+    u64 available {0};
+    u64 total {0};
+    u64 used {0};
 };
 
 struct TemporaryFile final {
@@ -88,11 +95,27 @@ public:
                                 std::string_view to);
     [[nodiscard]] Status truncate(std::string_view virtual_path,
                                   u64 length);
+    [[nodiscard]] Status set_readable(std::string_view virtual_path,
+                                      bool readable);
+    [[nodiscard]] Status set_writable(std::string_view virtual_path,
+                                      bool writable);
     [[nodiscard]] Result<std::vector<std::string>> list(
         std::string_view virtual_directory) const;
+    [[nodiscard]] Result<u64> directory_size(
+        std::string_view virtual_directory,
+        bool include_subdirectories) const;
+    [[nodiscard]] Result<StorageInfo> storage_info() const;
+    [[nodiscard]] Result<u64> available_size() const;
+    [[nodiscard]] Result<u64> total_size() const;
+    [[nodiscard]] Result<u64> used_size() const;
+
+    [[nodiscard]] Status atomic_write(
+        std::string_view virtual_path,
+        std::span<const u8> contents);
 
     [[nodiscard]] Result<std::string> host_path(
         std::string_view virtual_path) const;
+
 private:
     struct Handle final {
         int descriptor {-1};
@@ -100,14 +123,17 @@ private:
         bool writable {false};
     };
 
-    [[nodiscard]] Result<std::string> resolve(
-        std::string_view virtual_path,
-        bool allow_empty = false) const;
     [[nodiscard]] Result<i32> adopt_descriptor(int descriptor,
                                                bool readable,
                                                bool writable);
+    [[nodiscard]] Result<int> duplicate_descriptor(i32 handle,
+                                                   bool require_read,
+                                                   bool require_write) const;
+    void cleanup_temporary_root() noexcept;
 
     mutable std::mutex mutex_;
+    SandboxResolver sandbox_;
+    SandboxResolver temporary_;
     std::string sandbox_root_;
     std::string temporary_root_;
     std::unordered_map<i32, Handle> handles_;

@@ -52,6 +52,7 @@ void test_io_registry() {
     const auto data_input = registry.find("java/io/DataInputStream");
     const auto data_output = registry.find("java/io/DataOutputStream");
     const auto byte_output = registry.find("java/io/ByteArrayOutputStream");
+    const auto interrupted = registry.find("java/io/InterruptedIOException");
 
     require(input != nullptr && input->super_name() == "java/lang/Object",
             "io registry owns InputStream");
@@ -67,6 +68,9 @@ void test_io_registry() {
                    "DataOutputStream exposes modified UTF writer");
     require_method(byte_output, "toByteArray", "()[B",
                    "ByteArrayOutputStream exposes byte extraction");
+    require(interrupted != nullptr &&
+                interrupted->super_name() == "java/io/IOException",
+            "InterruptedIOException extends IOException");
     require(registry.find("java/util/Calendar") == nullptr,
             "io registry does not claim util classes");
 }
@@ -103,6 +107,91 @@ void test_util_registry() {
             "util registry does not claim io classes");
 }
 
+void test_connection_registry() {
+    phoneme::vm::BuiltinClassRegistry registry;
+    phoneme::vm::register_connection_classes(registry);
+
+    const auto notifier =
+        registry.find("javax/microedition/io/StreamConnectionNotifier");
+    const auto server =
+        registry.find("javax/microedition/io/ServerSocketConnection");
+    const auto secure =
+        registry.find("javax/microedition/io/SecureConnection");
+    const auto native_server =
+        registry.find("javax/microedition/io/NativeServerSocketConnection");
+    const auto certificate_exception =
+        registry.find("javax/microedition/pki/CertificateException");
+
+    require(notifier != nullptr && notifier->interfaces().size() == 1U &&
+                notifier->interfaces().front() ==
+                    "javax/microedition/io/Connection",
+            "StreamConnectionNotifier extends Connection");
+    require_method(notifier, "acceptAndOpen",
+                   "()Ljavax/microedition/io/StreamConnection;",
+                   "StreamConnectionNotifier exposes acceptAndOpen");
+    require(server != nullptr && server->interfaces().size() == 1U &&
+                server->interfaces().front() ==
+                    "javax/microedition/io/StreamConnectionNotifier",
+            "ServerSocketConnection extends StreamConnectionNotifier");
+    require(secure != nullptr && secure->interfaces().size() == 1U &&
+                secure->interfaces().front() ==
+                    "javax/microedition/io/SocketConnection",
+            "SecureConnection extends SocketConnection");
+    require_method(secure, "getSecurityInfo",
+                   "()Ljavax/microedition/io/SecurityInfo;",
+                   "SecureConnection exposes TLS metadata");
+    require(native_server != nullptr &&
+                native_server->interfaces().size() == 1U &&
+                native_server->interfaces().front() ==
+                    "javax/microedition/io/ServerSocketConnection",
+            "native server retains public notifier hierarchy");
+    require(certificate_exception != nullptr &&
+                certificate_exception->super_name() == "java/io/IOException",
+            "CertificateException extends IOException");
+    require_method(certificate_exception, "<init>",
+                   "(Ljavax/microedition/pki/Certificate;B)V",
+                   "CertificateException exposes reason constructor");
+    require_method(certificate_exception, "getCertificate",
+                   "()Ljavax/microedition/pki/Certificate;",
+                   "CertificateException exposes failing certificate");
+    require_method(certificate_exception, "getReason", "()B",
+                   "CertificateException exposes failure reason");
+}
+
+void test_game_registry() {
+    phoneme::vm::BuiltinClassRegistry registry;
+    phoneme::vm::register_game_classes(registry);
+
+    const auto layer =
+        registry.find("javax/microedition/lcdui/game/Layer");
+    const auto sprite =
+        registry.find("javax/microedition/lcdui/game/Sprite");
+    const auto tiled =
+        registry.find("javax/microedition/lcdui/game/TiledLayer");
+    const auto manager =
+        registry.find("javax/microedition/lcdui/game/LayerManager");
+
+    require(layer != nullptr &&
+                layer->super_name() == "java/lang/Object",
+            "game registry owns Layer");
+    require(sprite != nullptr &&
+                sprite->super_name() == "javax/microedition/lcdui/game/Layer",
+            "Sprite extends Layer");
+    require_method(sprite, "collidesWith",
+                   "(Ljavax/microedition/lcdui/game/TiledLayer;Z)Z",
+                   "Sprite exposes TiledLayer collision");
+    require(tiled != nullptr &&
+                tiled->super_name() == "javax/microedition/lcdui/game/Layer",
+            "TiledLayer extends Layer");
+    require_method(tiled, "createAnimatedTile", "(I)I",
+                   "TiledLayer exposes animated tiles");
+    require_method(manager, "paint",
+                   "(Ljavax/microedition/lcdui/Graphics;II)V",
+                   "LayerManager exposes viewport painting");
+    require(registry.find("javax/microedition/lcdui/Form") == nullptr,
+            "game registry does not claim LCDUI screen classes");
+}
+
 void test_composed_registry() {
     const auto string = phoneme::vm::load_builtin_class("java/lang/String");
     const auto data_input =
@@ -110,11 +199,14 @@ void test_composed_registry() {
     const auto vector = phoneme::vm::load_builtin_class("java/util/Vector");
     const auto form =
         phoneme::vm::load_builtin_class("javax/microedition/lcdui/Form");
+    const auto sprite =
+        phoneme::vm::load_builtin_class("javax/microedition/lcdui/game/Sprite");
 
     require(string.has_value(), "composed registry resolves lang classes");
     require(data_input.has_value(), "composed registry resolves io classes");
     require(vector.has_value(), "composed registry resolves util classes");
     require(form.has_value(), "composed registry resolves lcdui classes");
+    require(sprite.has_value(), "composed registry resolves Game API classes");
     require(!phoneme::vm::load_builtin_class("java/lang/ProcessBuilder").has_value(),
             "composed registry rejects unported classes");
 }
@@ -151,6 +243,8 @@ int main() {
     test_io_registry();
     test_util_registry();
     test_lcdui_registry();
+    test_connection_registry();
+    test_game_registry();
     test_composed_registry();
     std::cout << "Builtin registry package tests passed\n";
     return 0;

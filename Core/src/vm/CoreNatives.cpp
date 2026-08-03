@@ -21,11 +21,13 @@
 #include "ConsoleNatives.hpp"
 #include "FileNatives.hpp"
 #include "GameCanvasNatives.hpp"
+#include "GameApiNatives.hpp"
 #include "GraphicsNatives.hpp"
 #include "ImageNatives.hpp"
 #include "IONatives.hpp"
 #include "LcduiNatives.hpp"
 #include "MathNatives.hpp"
+#include "M3gNatives.hpp"
 #include "MediaNatives.hpp"
 #include "PushNatives.hpp"
 #include "RmsNatives.hpp"
@@ -221,6 +223,12 @@ void add(NativeMethodRegistry& registry,
     }
     return std::optional<Value>(Value::from_reference(*receiver));
 }
+
+[[nodiscard]] Result<std::u16string> char_array_slice(
+    Machine& machine,
+    ObjectRef array,
+    i32 offset,
+    i32 count);
 
 void register_text_builder(NativeMethodRegistry& registry,
                            std::string class_name) {
@@ -427,6 +435,44 @@ void register_text_builder(NativeMethodRegistry& registry,
             }
             return append_builder_text(machine, arguments, std::move(*text));
         });
+    add(registry, class_name, "append", "([C)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder append(char[]) expects one argument");
+            }
+            auto array = arguments[1].as_reference();
+            if (!array) return std::unexpected(array.error());
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail(ErrorCode::overflow,
+                            "string builder char[] exceeds int range");
+            }
+            auto text = char_array_slice(
+                machine, *array, 0, static_cast<i32>(*length));
+            if (!text) return std::unexpected(text.error());
+            return append_builder_text(machine, arguments, std::move(*text));
+        });
+    add(registry, class_name, "append", "([CII)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 4U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder append(char[],int,int) arguments are invalid");
+            }
+            auto array = arguments[1].as_reference();
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!array) return std::unexpected(array.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            auto text = char_array_slice(
+                machine, *array, *offset, *length);
+            if (!text) return std::unexpected(text.error());
+            return append_builder_text(machine, arguments, std::move(*text));
+        });
 
     add(registry, class_name, "length", "()I",
         [](Machine& machine, std::span<const Value> arguments)
@@ -472,6 +518,259 @@ void register_text_builder(NativeMethodRegistry& registry,
             }
             return std::optional<Value>(Value::from_int(static_cast<i32>(
                 static_cast<u16>((*text)[static_cast<usize>(*index)]))));
+        });
+    add(registry, class_name, "setCharAt", "(IC)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder setCharAt arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto index = arguments[1].as_int();
+            auto character = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!index) return std::unexpected(index.error());
+            if (!character) return std::unexpected(character.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*index < 0 || static_cast<usize>(*index) >= text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder setCharAt index is out of range");
+            }
+            (*text)[static_cast<usize>(*index)] = static_cast<char16_t>(
+                static_cast<u16>(*character));
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, class_name, "getChars", "(II[CI)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 5U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder getChars arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto source_begin = arguments[1].as_int();
+            auto source_end = arguments[2].as_int();
+            auto destination = arguments[3].as_reference();
+            auto destination_begin = arguments[4].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!source_begin) return std::unexpected(source_begin.error());
+            if (!source_end) return std::unexpected(source_end.error());
+            if (!destination || destination->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "string builder getChars destination is null");
+            }
+            if (!destination_begin) {
+                return std::unexpected(destination_begin.error());
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto destination_class = machine.heap().class_name(*destination);
+            auto destination_length = machine.heap().array_length(*destination);
+            if (!text) return std::unexpected(text.error());
+            if (!destination_class || *destination_class != "[C" ||
+                !destination_length) {
+                return fail_java("java/lang/ArrayStoreException",
+                                 "string builder getChars expects char[]");
+            }
+            if (*source_begin < 0 || *source_end < *source_begin ||
+                static_cast<usize>(*source_end) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder getChars source range is invalid");
+            }
+            const i32 count = *source_end - *source_begin;
+            if (*destination_begin < 0 ||
+                static_cast<usize>(*destination_begin) > *destination_length ||
+                static_cast<usize>(count) >
+                    *destination_length - static_cast<usize>(*destination_begin)) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "string builder getChars destination range is invalid");
+            }
+            for (i32 index = 0; index < count; ++index) {
+                const char16_t character = (*text)[static_cast<usize>(
+                    *source_begin + index)];
+                auto stored = machine.heap().set_element(
+                    *destination,
+                    static_cast<usize>(*destination_begin + index),
+                    Value::from_int(static_cast<i32>(
+                        static_cast<u16>(character))));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, class_name, "delete", "(II)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder delete arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto start = arguments[1].as_int();
+            auto end = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!start) return std::unexpected(start.error());
+            if (!end) return std::unexpected(end.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*start < 0 || *start > *end ||
+                static_cast<usize>(*start) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder delete range is invalid");
+            }
+            const usize first = static_cast<usize>(*start);
+            const usize last = std::min(
+                text->size(), static_cast<usize>(std::max(*end, 0)));
+            text->erase(first, last - first);
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "deleteCharAt", "(I)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder deleteCharAt expects one argument");
+            }
+            auto receiver = require_receiver(arguments);
+            auto index = arguments[1].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!index) return std::unexpected(index.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*index < 0 || static_cast<usize>(*index) >= text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder deleteCharAt index is out of range");
+            }
+            text->erase(static_cast<usize>(*index), 1U);
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "insert",
+        "(ILjava/lang/String;)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder insert(String) arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto offset = arguments[1].as_int();
+            auto source = arguments[2].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!source) return std::unexpected(source.error());
+            auto text = machine.heap().string_value(*receiver);
+            auto inserted = object_text(machine, *source);
+            if (!text) return std::unexpected(text.error());
+            if (!inserted) return std::unexpected(inserted.error());
+            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder insert offset is out of range");
+            }
+            text->insert(static_cast<usize>(*offset), *inserted);
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "insert", "(IC)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder insert(char) arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto offset = arguments[1].as_int();
+            auto character = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!character) return std::unexpected(character.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder insert offset is out of range");
+            }
+            text->insert(text->begin() + *offset,
+                         static_cast<char16_t>(static_cast<u16>(*character)));
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "insert", "(II)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder insert(int) arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto offset = arguments[1].as_int();
+            auto value = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!value) return std::unexpected(value.error());
+            auto text = machine.heap().string_value(*receiver);
+            auto inserted = integral_text(*value);
+            if (!text) return std::unexpected(text.error());
+            if (!inserted) return std::unexpected(inserted.error());
+            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "string builder insert offset is out of range");
+            }
+            text->insert(static_cast<usize>(*offset), *inserted);
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "reverse", "()" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            std::reverse(text->begin(), text->end());
+            for (usize index = 0; index + 1U < text->size(); ++index) {
+                const u16 first = static_cast<u16>((*text)[index]);
+                const u16 second = static_cast<u16>((*text)[index + 1U]);
+                if (first >= 0xDC00U && first <= 0xDFFFU &&
+                    second >= 0xD800U && second <= 0xDBFFU) {
+                    std::swap((*text)[index], (*text)[index + 1U]);
+                    ++index;
+                }
+            }
+            auto stored = machine.heap().attach_string(*receiver,
+                                                       std::move(*text));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*receiver));
+        });
+    add(registry, class_name, "ensureCapacity", "(I)V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder ensureCapacity expects one argument");
+            }
+            auto minimum = arguments[1].as_int();
+            if (!minimum) return std::unexpected(minimum.error());
+            // The VM stores text in a dynamically sized UTF-16 payload, so
+            // reserve capacity is an implementation hint with no observable
+            // effect. Validation and call compatibility are still preserved.
+            return std::optional<Value> {};
         });
     add(registry, class_name, "setLength", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -572,6 +871,13 @@ void register_text_builder(NativeMethodRegistry& registry,
     return value;
 }
 
+[[nodiscard]] char16_t simple_case_upper(char16_t value) noexcept {
+    if (value >= u'a' && value <= u'z') {
+        return static_cast<char16_t>(value - (u'a' - u'A'));
+    }
+    return value;
+}
+
 void register_string_extensions(NativeMethodRegistry& registry) {
     add(registry, "java/lang/String", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -612,6 +918,34 @@ void register_string_extensions(NativeMethodRegistry& registry) {
             if (!attached) {
                 return std::unexpected(attached.error());
             }
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/String", "<init>",
+        "(Ljava/lang/StringBuffer;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String buffer constructor expects one argument");
+            }
+            auto receiver = require_receiver(arguments);
+            auto source = arguments[1].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!source || source->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String buffer source is null");
+            }
+            auto source_class = machine.heap().class_name(*source);
+            if (!source_class) return std::unexpected(source_class.error());
+            if (*source_class != "java/lang/StringBuffer") {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String buffer source has the wrong class");
+            }
+            auto text = machine.heap().string_value(*source);
+            if (!text) return std::unexpected(text.error());
+            auto attached = machine.heap().attach_string(*receiver,
+                                                         std::move(*text));
+            if (!attached) return std::unexpected(attached.error());
             return std::optional<Value> {};
         });
     add(registry, "java/lang/String", "<init>", "([C)V",
@@ -791,6 +1125,60 @@ void register_string_extensions(NativeMethodRegistry& registry) {
             for (usize index = 0; equal && index < left->size(); ++index) {
                 equal = simple_case_fold((*left)[index]) ==
                         simple_case_fold((*right)[index]);
+            }
+            return std::optional<Value>(Value::from_int(equal ? 1 : 0));
+        });
+    add(registry, "java/lang/String", "regionMatches",
+        "(ZILjava/lang/String;II)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 6U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.regionMatches arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto ignore_case = arguments[1].as_int();
+            auto receiver_offset = arguments[2].as_int();
+            auto other = arguments[3].as_reference();
+            auto other_offset = arguments[4].as_int();
+            auto length = arguments[5].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!ignore_case) return std::unexpected(ignore_case.error());
+            if (!receiver_offset) {
+                return std::unexpected(receiver_offset.error());
+            }
+            if (!other || other->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.regionMatches argument is null");
+            }
+            if (!other_offset) return std::unexpected(other_offset.error());
+            if (!length) return std::unexpected(length.error());
+            auto left = machine.heap().string_value(*receiver);
+            auto right = machine.heap().string_value(*other);
+            if (!left || !right) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.regionMatches argument is not String");
+            }
+            if (*receiver_offset < 0 || *other_offset < 0 || *length < 0 ||
+                static_cast<usize>(*receiver_offset) > left->size() ||
+                static_cast<usize>(*other_offset) > right->size() ||
+                static_cast<usize>(*length) >
+                    left->size() - static_cast<usize>(*receiver_offset) ||
+                static_cast<usize>(*length) >
+                    right->size() - static_cast<usize>(*other_offset)) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            bool equal = true;
+            for (i32 index = 0; equal && index < *length; ++index) {
+                char16_t left_character = (*left)[static_cast<usize>(
+                    *receiver_offset + index)];
+                char16_t right_character = (*right)[static_cast<usize>(
+                    *other_offset + index)];
+                if (*ignore_case != 0) {
+                    left_character = simple_case_fold(left_character);
+                    right_character = simple_case_fold(right_character);
+                }
+                equal = left_character == right_character;
             }
             return std::optional<Value>(Value::from_int(equal ? 1 : 0));
         });
@@ -1151,6 +1539,36 @@ void register_string_extensions(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*result));
         });
 
+    const auto register_string_case = [&registry](
+        const char* name,
+        char16_t (*convert)(char16_t) noexcept) {
+        add(registry, "java/lang/String", name,
+            "()Ljava/lang/String;",
+            [convert](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto receiver = require_receiver(arguments);
+                if (!receiver) return std::unexpected(receiver.error());
+                auto text = machine.heap().string_value(*receiver);
+                if (!text) return std::unexpected(text.error());
+
+                bool changed = false;
+                for (char16_t& character : *text) {
+                    const char16_t converted = convert(character);
+                    changed = changed || converted != character;
+                    character = converted;
+                }
+                if (!changed) {
+                    return std::optional<Value>(
+                        Value::from_reference(*receiver));
+                }
+                auto result = create_java_string(machine, std::move(*text));
+                if (!result) return std::unexpected(result.error());
+                return std::optional<Value>(Value::from_reference(*result));
+            });
+    };
+    register_string_case("toLowerCase", simple_case_fold);
+    register_string_case("toUpperCase", simple_case_upper);
+
     add(registry, "java/lang/String", "valueOf",
         "(Ljava/lang/Object;)Ljava/lang/String;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1295,11 +1713,13 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_console_natives(registry);
     register_file_natives(registry);
     register_game_canvas_natives(registry);
+    register_game_api_natives(registry);
     register_graphics_natives(registry);
     register_image_natives(registry);
     register_io_natives(registry);
     register_lcdui_natives(registry);
     register_math_natives(registry);
+    register_m3g_natives(registry);
     register_media_natives(registry);
     register_push_natives(registry);
     register_rms_natives(registry);

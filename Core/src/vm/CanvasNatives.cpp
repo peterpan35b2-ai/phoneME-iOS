@@ -192,17 +192,20 @@ Status initialize_canvas_object(Machine& machine,
 
 void register_canvas_natives(NativeMethodRegistry& registry) {
     constexpr const char* kCanvas = "javax/microedition/lcdui/Canvas";
+    constexpr const char* kNokiaFullCanvas = "com/nokia/mid/ui/FullCanvas";
 
-    add(registry, kCanvas, "<init>", "()V",
-        [](Machine& machine, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto canvas = receiver(arguments, "Canvas.<init>");
-            if (!canvas) return std::unexpected(canvas.error());
-            auto initialized = initialize_canvas_object(
-                machine, *canvas, false, false);
-            if (!initialized) return std::unexpected(initialized.error());
-            return std::optional<Value> {};
-        });
+    const auto initialize_canvas = [](Machine& machine,
+                                      std::span<const Value> arguments)
+        -> Result<std::optional<Value>> {
+        auto canvas = receiver(arguments, "Canvas.<init>");
+        if (!canvas) return std::unexpected(canvas.error());
+        auto initialized = initialize_canvas_object(
+            machine, *canvas, false, false);
+        if (!initialized) return std::unexpected(initialized.error());
+        return std::optional<Value> {};
+    };
+    add(registry, kCanvas, "<init>", "()V", initialize_canvas);
+    add(registry, kNokiaFullCanvas, "<init>", "()V", initialize_canvas);
 
     add(registry, kCanvas, "getWidth", "()I",
         [](Machine& machine, std::span<const Value> arguments) {
@@ -218,19 +221,28 @@ void register_canvas_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_int(1));
         });
     add(registry, kCanvas, "hasPointerEvents", "()Z",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value>)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(1));
+            auto runtime = bridge(machine);
+            if (!runtime) return std::unexpected(runtime.error());
+            return std::optional<Value>(Value::from_int(
+                (*runtime)->pointer_events_supported() ? 1 : 0));
         });
     add(registry, kCanvas, "hasPointerMotionEvents", "()Z",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value>)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(1));
+            auto runtime = bridge(machine);
+            if (!runtime) return std::unexpected(runtime.error());
+            return std::optional<Value>(Value::from_int(
+                (*runtime)->pointer_motion_supported() ? 1 : 0));
         });
     add(registry, kCanvas, "hasRepeatEvents", "()Z",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value>)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(1));
+            auto runtime = bridge(machine);
+            if (!runtime) return std::unexpected(runtime.error());
+            return std::optional<Value>(Value::from_int(
+                (*runtime)->repeat_events_supported() ? 1 : 0));
         });
 
     add(registry, kCanvas, "getGameAction", "(I)I",

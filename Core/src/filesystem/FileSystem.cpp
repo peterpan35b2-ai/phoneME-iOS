@@ -2,12 +2,11 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
-#include <climits>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -18,9 +17,38 @@
 namespace phoneme::filesystem {
 namespace {
 
-[[nodiscard]] std::unexpected<Error> io_failure(std::string operation) {
+class UniqueFd final {
+public:
+    explicit UniqueFd(int descriptor = -1) noexcept
+        : descriptor_(descriptor) {}
+    ~UniqueFd() {
+        if (descriptor_ >= 0) static_cast<void>(::close(descriptor_));
+    }
+
+    UniqueFd(const UniqueFd&) = delete;
+    UniqueFd& operator=(const UniqueFd&) = delete;
+
+    UniqueFd(UniqueFd&& other) noexcept
+        : descriptor_(std::exchange(other.descriptor_, -1)) {}
+    UniqueFd& operator=(UniqueFd&& other) noexcept {
+        if (this != &other) {
+            if (descriptor_ >= 0) static_cast<void>(::close(descriptor_));
+            descriptor_ = std::exchange(other.descriptor_, -1);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] int get() const noexcept { return descriptor_; }
+
+private:
+    int descriptor_ {-1};
+};
+
+[[nodiscard]] std::unexpected<Error> io_failure(
+    std::string operation,
+    int error_number = errno) {
     operation.append(": ");
-    operation.append(std::strerror(errno));
+    operation.append(std::strerror(error_number));
     return fail(ErrorCode::io_error, std::move(operation));
 }
 
@@ -46,6 +74,10 @@ namespace {
     for (usize index = 0; index < value.size(); ++index) {
         const char current = value[index];
         if (current != '%') {
+            if (current == '\0') {
+                return fail(ErrorCode::invalid_argument,
+                            "path contains a NUL byte");
+            }
             decoded.push_back(current);
             continue;
         }
@@ -70,10 +102,22 @@ namespace {
 [[nodiscard]] Result<std::string> normalize_components(
     std::string_view source,
     bool allow_empty,
-    bool allow_parent) {
+    bool allow_parent,
+    bool reject_absolute) {
     if (source.find('\0') != std::string_view::npos) {
         return fail(ErrorCode::invalid_argument,
                     "path contains a NUL byte");
+    }
+    if (reject_absolute && !source.empty() &&
+        (source.front() == '/' || source.front() == '\\')) {
+        return fail(ErrorCode::invalid_argument,
+                    "absolute paths are not allowed");
+    }
+    if (reject_absolute && source.size() >= 2U &&
+        std::isalpha(static_cast<unsigned char>(source[0])) != 0 &&
+        source[1] == ':') {
+        return fail(ErrorCode::invalid_argument,
+                    "drive-qualified paths are not allowed");
     }
 
     std::string path(source);
@@ -116,18 +160,6 @@ namespace {
     return normalized;
 }
 
-[[nodiscard]] bool path_is_within(const std::filesystem::path& child,
-                                  const std::filesystem::path& root) {
-    auto child_iterator = child.begin();
-    for (auto root_iterator = root.begin(); root_iterator != root.end();
-         ++root_iterator, ++child_iterator) {
-        if (child_iterator == child.end() || *child_iterator != *root_iterator) {
-            return false;
-        }
-    }
-    return true;
-}
-
 [[nodiscard]] Result<std::string> canonical_directory(
     std::string path,
     std::string_view label) {
@@ -142,7 +174,7 @@ namespace {
                     "cannot create " + std::string(label) + ": " +
                         error.message());
     }
-    auto canonical = std::filesystem::weakly_canonical(path, error);
+    auto canonical = std::filesystem::canonical(path, error);
     if (error) {
         return fail(ErrorCode::io_error,
                     "cannot resolve " + std::string(label) + ": " +
@@ -151,26 +183,55 @@ namespace {
     return canonical.string();
 }
 
-[[nodiscard]] i64 file_time_seconds(
-    const std::filesystem::file_time_type& time) noexcept {
-    const auto system_time = std::chrono::time_point_cast<std::chrono::seconds>(
-        time - std::filesystem::file_time_type::clock::now() +
-        std::chrono::system_clock::now());
-    return system_time.time_since_epoch().count();
+[[nodiscard]] bool is_path_prefix(const std::filesystem::path& prefix,
+                                  const std::filesystem::path& path) {
+    auto prefix_iterator = prefix.begin();
+    auto path_iterator = path.begin();
+    while (prefix_iterator != prefix.end()) {
+        if (path_iterator == path.end() ||
+            *prefix_iterator != *path_iterator) {
+            return false;
+        }
+        ++prefix_iterator;
+        ++path_iterator;
+    }
+    return true;
+}
+
+[[nodiscard]] bool paths_overlap(const std::string& first,
+                                 const std::string& second) {
+    const std::filesystem::path first_path(first);
+    const std::filesystem::path second_path(second);
+    return is_path_prefix(first_path, second_path) ||
+           is_path_prefix(second_path, first_path);
+}
+
+[[nodiscard]] i64 modified_seconds(const struct stat& info) noexcept {
+#if defined(__APPLE__)
+    return static_cast<i64>(info.st_mtimespec.tv_sec);
+#else
+    return static_cast<i64>(info.st_mtim.tv_sec);
+#endif
+}
+
+[[nodiscard]] std::string leaf_name(std::string_view normalized_path) {
+    const usize slash = normalized_path.rfind('/');
+    return std::string(normalized_path.substr(
+        slash == std::string_view::npos ? 0U : slash + 1U));
 }
 
 } // namespace
 
 Result<std::string> normalize_virtual_path(std::string_view path,
                                            bool allow_empty) {
-    return normalize_components(path, allow_empty, false);
+    return normalize_components(path, allow_empty, false, true);
 }
 
 Result<std::string> normalize_resource_path(std::string_view path) {
     while (!path.empty() && (path.front() == '/' || path.front() == '\\')) {
         path.remove_prefix(1U);
     }
-    return normalize_components(path, false, true);
+    return normalize_components(path, false, true, false);
 }
 
 Result<std::string> path_from_file_url(std::string_view url) {
@@ -180,6 +241,7 @@ Result<std::string> path_from_file_url(std::string_view url) {
                     "connection URL does not use the file scheme");
     }
     url.remove_prefix(scheme.size());
+
     if (url.starts_with("//")) {
         url.remove_prefix(2U);
         if (!url.empty() && url.front() != '/') {
@@ -194,13 +256,27 @@ Result<std::string> path_from_file_url(std::string_view url) {
                       : url.substr(slash);
         }
     }
+    if (url.find('?') != std::string_view::npos ||
+        url.find('#') != std::string_view::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "file URL query and fragment components are not supported");
+    }
+
     auto decoded = percent_decode(url);
     if (!decoded) return std::unexpected(decoded.error());
-    return normalize_virtual_path(*decoded, false);
+    std::string_view path(*decoded);
+    while (!path.empty() && (path.front() == '/' || path.front() == '\\')) {
+        path.remove_prefix(1U);
+    }
+    return normalize_virtual_path(path, true);
 }
 
 FileSystem::~FileSystem() {
     close_all();
+    cleanup_temporary_root();
+}
+
+void FileSystem::cleanup_temporary_root() noexcept {
     std::string temporary_root;
     std::string sandbox_root;
     {
@@ -216,24 +292,35 @@ FileSystem::~FileSystem() {
 
 Status FileSystem::configure(std::string sandbox_root,
                              std::string temporary_root) {
+    close_all();
+    cleanup_temporary_root();
+    {
+        std::scoped_lock lock(mutex_);
+        sandbox_root_.clear();
+        temporary_root_.clear();
+        configured_ = false;
+    }
+
     auto sandbox = canonical_directory(std::move(sandbox_root),
                                        "filesystem sandbox");
     if (!sandbox) return std::unexpected(sandbox.error());
     auto temporary = canonical_directory(std::move(temporary_root),
                                          "temporary directory");
     if (!temporary) return std::unexpected(temporary.error());
+    if (paths_overlap(*sandbox, *temporary)) {
+        return fail(ErrorCode::invalid_argument,
+                    "persistent and temporary roots must not overlap");
+    }
+
+    auto configured_sandbox = sandbox_.configure(*sandbox);
+    if (!configured_sandbox) return configured_sandbox;
+    auto configured_temporary = temporary_.configure(*temporary);
+    if (!configured_temporary) return configured_temporary;
 
     std::scoped_lock lock(mutex_);
-    for (auto& [handle, state] : handles_) {
-        static_cast<void>(handle);
-        if (state.descriptor >= 0) {
-            static_cast<void>(::close(state.descriptor));
-        }
-    }
-    handles_.clear();
-    next_handle_ = 1;
     sandbox_root_ = std::move(*sandbox);
     temporary_root_ = std::move(*temporary);
+    next_handle_ = 1;
     configured_ = true;
     return {};
 }
@@ -241,40 +328,6 @@ Status FileSystem::configure(std::string sandbox_root,
 bool FileSystem::configured() const noexcept {
     std::scoped_lock lock(mutex_);
     return configured_;
-}
-
-Result<std::string> FileSystem::resolve(std::string_view virtual_path,
-                                        bool allow_empty) const {
-    std::string sandbox_root;
-    {
-        std::scoped_lock lock(mutex_);
-        if (!configured_) {
-            return fail(ErrorCode::not_configured,
-                        "filesystem sandbox has not been configured");
-        }
-        sandbox_root = sandbox_root_;
-    }
-    auto normalized = normalize_virtual_path(virtual_path, allow_empty);
-    if (!normalized) return std::unexpected(normalized.error());
-
-    std::error_code error;
-    const std::filesystem::path root(sandbox_root);
-    const std::filesystem::path candidate =
-        std::filesystem::weakly_canonical(root / *normalized, error);
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot resolve sandbox path: " + error.message());
-    }
-    if (!path_is_within(candidate, root)) {
-        return fail(ErrorCode::invalid_argument,
-                    "resolved path escapes the application sandbox");
-    }
-    return candidate.string();
-}
-
-Result<std::string> FileSystem::host_path(
-    std::string_view virtual_path) const {
-    return resolve(virtual_path, true);
 }
 
 Result<i32> FileSystem::adopt_descriptor(int descriptor,
@@ -285,6 +338,10 @@ Result<i32> FileSystem::adopt_descriptor(int descriptor,
                     "cannot adopt an invalid file descriptor");
     }
     std::scoped_lock lock(mutex_);
+    if (!configured_) {
+        return fail(ErrorCode::not_configured,
+                    "filesystem sandbox has not been configured");
+    }
     for (usize attempts = 0;
          attempts < static_cast<usize>(std::numeric_limits<i32>::max());
          ++attempts) {
@@ -303,80 +360,94 @@ Result<i32> FileSystem::adopt_descriptor(int descriptor,
     return fail(ErrorCode::overflow, "file handle table is exhausted");
 }
 
+Result<int> FileSystem::duplicate_descriptor(i32 handle,
+                                             bool require_read,
+                                             bool require_write) const {
+    std::scoped_lock lock(mutex_);
+    const auto iterator = handles_.find(handle);
+    if (iterator == handles_.end()) {
+        return fail(ErrorCode::invalid_state, "file handle is closed");
+    }
+    if (require_read && !iterator->second.readable) {
+        return fail(ErrorCode::invalid_state,
+                    "file handle is not readable");
+    }
+    if (require_write && !iterator->second.writable) {
+        return fail(ErrorCode::invalid_state,
+                    "file handle is not writable");
+    }
+    const int duplicate = ::dup(iterator->second.descriptor);
+    if (duplicate < 0) {
+        return io_failure("cannot duplicate file handle");
+    }
+    static_cast<void>(::fcntl(duplicate, F_SETFD, FD_CLOEXEC));
+    return duplicate;
+}
+
 Result<i32> FileSystem::open(std::string_view virtual_path,
                              OpenMode mode,
                              bool create,
                              bool truncate_file) {
-    auto path = resolve(virtual_path);
+    auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
 
-    int flags = O_CLOEXEC;
+    int flags = 0;
     bool readable = false;
     bool writable = false;
     switch (mode) {
     case OpenMode::read:
-        flags |= O_RDONLY;
+        flags = O_RDONLY;
         readable = true;
         break;
     case OpenMode::write:
-        flags |= O_WRONLY;
+        flags = O_WRONLY;
         writable = true;
         break;
     case OpenMode::read_write:
-        flags |= O_RDWR;
+        flags = O_RDWR;
         readable = true;
         writable = true;
         break;
     case OpenMode::append:
-        flags |= O_WRONLY | O_APPEND;
+        flags = O_WRONLY | O_APPEND;
         writable = true;
         break;
     }
     if (create) flags |= O_CREAT;
     if (truncate_file) flags |= O_TRUNC;
 
-    const int descriptor = ::open(path->c_str(), flags, S_IRUSR | S_IWUSR);
-    if (descriptor < 0) return io_failure("cannot open sandbox file");
-    auto handle = adopt_descriptor(descriptor, readable, writable);
+    auto descriptor = sandbox_.open_file(*path, flags,
+                                         S_IRUSR | S_IWUSR);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    auto handle = adopt_descriptor(*descriptor, readable, writable);
     if (!handle) {
-        static_cast<void>(::close(descriptor));
+        static_cast<void>(::close(*descriptor));
         return std::unexpected(handle.error());
     }
     return *handle;
 }
 
 Result<usize> FileSystem::read(i32 handle, std::span<u8> destination) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) {
-        return fail(ErrorCode::invalid_state, "file handle is closed");
+    auto descriptor = duplicate_descriptor(handle, true, false);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
+    for (;;) {
+        const ssize_t count = ::read(lease.get(), destination.data(),
+                                     destination.size());
+        if (count >= 0) return static_cast<usize>(count);
+        if (errno != EINTR) return io_failure("cannot read sandbox file");
     }
-    if (!iterator->second.readable) {
-        return fail(ErrorCode::invalid_state,
-                    "file handle is not readable");
-    }
-    const ssize_t count = ::read(iterator->second.descriptor,
-                                 destination.data(), destination.size());
-    if (count < 0) return io_failure("cannot read sandbox file");
-    return static_cast<usize>(count);
 }
 
 Result<usize> FileSystem::write(i32 handle,
                                 std::span<const u8> source) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) {
-        return fail(ErrorCode::invalid_state, "file handle is closed");
-    }
-    if (!iterator->second.writable) {
-        return fail(ErrorCode::invalid_state,
-                    "file handle is not writable");
-    }
+    auto descriptor = duplicate_descriptor(handle, false, true);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
 
     usize total = 0;
     while (total < source.size()) {
-        const ssize_t count = ::write(iterator->second.descriptor,
-                                      source.data() + total,
+        const ssize_t count = ::write(lease.get(), source.data() + total,
                                       source.size() - total);
         if (count < 0) {
             if (errno == EINTR) continue;
@@ -394,26 +465,25 @@ Result<usize> FileSystem::write(i32 handle,
 Result<i64> FileSystem::seek(i32 handle,
                              i64 offset,
                              SeekOrigin origin) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) {
-        return fail(ErrorCode::invalid_state, "file handle is closed");
+    if (offset > static_cast<i64>(std::numeric_limits<off_t>::max()) ||
+        offset < static_cast<i64>(std::numeric_limits<off_t>::min())) {
+        return fail(ErrorCode::out_of_range,
+                    "file seek offset is outside platform range");
     }
+    auto descriptor = duplicate_descriptor(handle, false, false);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
+
     int whence = SEEK_SET;
     switch (origin) {
     case SeekOrigin::begin: whence = SEEK_SET; break;
     case SeekOrigin::current: whence = SEEK_CUR; break;
     case SeekOrigin::end: whence = SEEK_END; break;
     }
-    if (offset > static_cast<i64>(std::numeric_limits<off_t>::max()) ||
-        offset < static_cast<i64>(std::numeric_limits<off_t>::min())) {
-        return fail(ErrorCode::out_of_range,
-                    "file seek offset is outside platform range");
-    }
-    const off_t position = ::lseek(iterator->second.descriptor,
-                                   static_cast<off_t>(offset), whence);
-    if (position < 0) return io_failure("cannot seek sandbox file");
-    return static_cast<i64>(position);
+    const off_t result = ::lseek(lease.get(), static_cast<off_t>(offset),
+                                  whence);
+    if (result < 0) return io_failure("cannot seek sandbox file");
+    return static_cast<i64>(result);
 }
 
 Result<i64> FileSystem::position(i32 handle) {
@@ -421,74 +491,72 @@ Result<i64> FileSystem::position(i32 handle) {
 }
 
 Result<i64> FileSystem::size(i32 handle) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) {
-        return fail(ErrorCode::invalid_state, "file handle is closed");
-    }
+    auto descriptor = duplicate_descriptor(handle, false, false);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
     struct stat info {};
-    if (::fstat(iterator->second.descriptor, &info) != 0) {
+    if (::fstat(lease.get(), &info) != 0) {
         return io_failure("cannot stat sandbox file handle");
     }
     return static_cast<i64>(info.st_size);
 }
 
 Result<i64> FileSystem::available(i32 handle) {
-    auto current = position(handle);
-    if (!current) return std::unexpected(current.error());
-    auto end = size(handle);
-    if (!end) return std::unexpected(end.error());
-    return *end > *current ? *end - *current : 0;
+    auto descriptor = duplicate_descriptor(handle, true, false);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
+    const off_t current = ::lseek(lease.get(), 0, SEEK_CUR);
+    if (current < 0) return io_failure("cannot read sandbox file position");
+    struct stat info {};
+    if (::fstat(lease.get(), &info) != 0) {
+        return io_failure("cannot stat sandbox file handle");
+    }
+    return info.st_size > current
+               ? static_cast<i64>(info.st_size - current)
+               : 0;
 }
 
 Status FileSystem::flush(i32 handle) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) {
-        return fail(ErrorCode::invalid_state, "file handle is closed");
-    }
-    if (!iterator->second.writable) return {};
-    if (::fsync(iterator->second.descriptor) != 0) {
+    auto descriptor = duplicate_descriptor(handle, false, true);
+    if (!descriptor) return std::unexpected(descriptor.error());
+    UniqueFd lease(*descriptor);
+    if (::fsync(lease.get()) != 0) {
         return io_failure("cannot flush sandbox file");
     }
     return {};
 }
 
 Status FileSystem::close(i32 handle) {
-    std::scoped_lock lock(mutex_);
-    const auto iterator = handles_.find(handle);
-    if (iterator == handles_.end()) return {};
-    const int descriptor = iterator->second.descriptor;
-    handles_.erase(iterator);
+    int descriptor = -1;
+    {
+        std::scoped_lock lock(mutex_);
+        const auto iterator = handles_.find(handle);
+        if (iterator == handles_.end()) return {};
+        descriptor = iterator->second.descriptor;
+        handles_.erase(iterator);
+    }
     if (descriptor >= 0 && ::close(descriptor) != 0) {
-        return fail(ErrorCode::io_error,
-                    "cannot close sandbox file descriptor");
+        return io_failure("cannot close sandbox file descriptor");
     }
     return {};
 }
 
 void FileSystem::close_all() noexcept {
-    std::scoped_lock lock(mutex_);
-    for (auto& [handle, state] : handles_) {
+    std::unordered_map<i32, Handle> handles;
+    {
+        std::scoped_lock lock(mutex_);
+        handles.swap(handles_);
+    }
+    for (const auto& [handle, state] : handles) {
         static_cast<void>(handle);
         if (state.descriptor >= 0) {
             static_cast<void>(::close(state.descriptor));
         }
     }
-    handles_.clear();
 }
 
 Result<TemporaryFile> FileSystem::create_temporary(
     std::string_view prefix) {
-    std::string temporary_root;
-    {
-        std::scoped_lock lock(mutex_);
-        if (!configured_) {
-            return fail(ErrorCode::not_configured,
-                        "filesystem sandbox has not been configured");
-        }
-        temporary_root = temporary_root_;
-    }
     std::string safe_prefix;
     safe_prefix.reserve(std::min<usize>(prefix.size(), 32U));
     for (const char character : prefix) {
@@ -501,155 +569,152 @@ Result<TemporaryFile> FileSystem::create_temporary(
     }
     if (safe_prefix.empty()) safe_prefix = "tmp";
 
-    std::string pattern = temporary_root + "/" + safe_prefix + "-XXXXXX";
-    std::vector<char> writable(pattern.begin(), pattern.end());
-    writable.push_back('\0');
-    const int descriptor = ::mkstemp(writable.data());
-    if (descriptor < 0) return io_failure("cannot create temporary file");
-    static_cast<void>(::fcntl(descriptor, F_SETFD, FD_CLOEXEC));
-
-    auto handle = adopt_descriptor(descriptor, true, true);
+    auto temporary = temporary_.create_temporary(safe_prefix);
+    if (!temporary) return std::unexpected(temporary.error());
+    auto handle = adopt_descriptor(temporary->descriptor, true, true);
     if (!handle) {
-        static_cast<void>(::close(descriptor));
-        static_cast<void>(::unlink(writable.data()));
+        static_cast<void>(::close(temporary->descriptor));
+        static_cast<void>(temporary_.remove(temporary->relative_path, false));
         return std::unexpected(handle.error());
     }
     return TemporaryFile {
         .handle = *handle,
-        .host_path = writable.data(),
+        .host_path = std::move(temporary->host_path),
     };
 }
 
 Result<FileInfo> FileSystem::stat(std::string_view virtual_path) const {
-    auto path = resolve(virtual_path, true);
+    auto path = normalize_virtual_path(virtual_path, true);
     if (!path) return std::unexpected(path.error());
-    std::error_code error;
-    const std::filesystem::path host(*path);
-    const auto status = std::filesystem::status(host, error);
-    if (error == std::errc::no_such_file_or_directory) return FileInfo {};
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot stat sandbox path: " + error.message());
-    }
-    const bool exists = std::filesystem::exists(status);
-    const auto filename = host.filename().string();
-    FileInfo result {
-        .exists = exists,
-        .directory = exists && std::filesystem::is_directory(status),
-        .readable = exists && ::access(path->c_str(), R_OK) == 0,
-        .writable = exists && ::access(path->c_str(), W_OK) == 0,
-        .hidden = !filename.empty() && filename.front() == '.',
-        .size = 0,
-        .modified_seconds = 0,
+    auto info = sandbox_.stat(*path, true);
+    if (!info) return std::unexpected(info.error());
+    if (!info->has_value()) return FileInfo {};
+
+    const struct stat& status = info->value();
+    const std::string name = leaf_name(*path);
+    return FileInfo {
+        .exists = true,
+        .directory = S_ISDIR(status.st_mode),
+        .readable = (status.st_mode & S_IRUSR) != 0,
+        .writable = (status.st_mode & S_IWUSR) != 0,
+        .hidden = !name.empty() && name.front() == '.',
+        .size = S_ISREG(status.st_mode) && status.st_size > 0
+                    ? static_cast<u64>(status.st_size)
+                    : 0,
+        .modified_seconds = modified_seconds(status),
     };
-    if (exists && std::filesystem::is_regular_file(status)) {
-        result.size = std::filesystem::file_size(host, error);
-        if (error) {
-            return fail(ErrorCode::io_error,
-                        "cannot read sandbox file size: " + error.message());
-        }
-    }
-    if (exists) {
-        const auto modified = std::filesystem::last_write_time(host, error);
-        if (!error) result.modified_seconds = file_time_seconds(modified);
-    }
-    return result;
 }
 
 Status FileSystem::create_file(std::string_view virtual_path) {
-    auto path = resolve(virtual_path);
+    auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    const int descriptor = ::open(path->c_str(), O_CREAT | O_EXCL | O_WRONLY |
-                                                     O_CLOEXEC,
-                                  S_IRUSR | S_IWUSR);
-    if (descriptor < 0) return io_failure("cannot create sandbox file");
-    if (::close(descriptor) != 0) {
-        return io_failure("cannot close newly created sandbox file");
-    }
-    return {};
+    return sandbox_.create_file(*path);
 }
 
 Status FileSystem::create_directory(std::string_view virtual_path) {
-    auto path = resolve(virtual_path);
+    auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    std::error_code error;
-    const bool created = std::filesystem::create_directory(*path, error);
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot create sandbox directory: " + error.message());
-    }
-    if (!created) {
-        return fail(ErrorCode::invalid_state,
-                    "sandbox directory already exists");
-    }
-    return {};
+    return sandbox_.create_directory(*path);
 }
 
 Status FileSystem::remove(std::string_view virtual_path, bool recursive) {
-    auto path = resolve(virtual_path);
+    auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    std::error_code error;
-    const auto removed = recursive
-                             ? std::filesystem::remove_all(*path, error)
-                             : static_cast<std::uintmax_t>(
-                                   std::filesystem::remove(*path, error));
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot remove sandbox path: " + error.message());
-    }
-    if (removed == 0U) {
-        return fail(ErrorCode::invalid_state,
-                    "sandbox path does not exist");
-    }
-    return {};
+    return sandbox_.remove(*path, recursive);
 }
 
 Status FileSystem::rename(std::string_view from, std::string_view to) {
-    auto source = resolve(from);
-    auto destination = resolve(to);
+    auto source = normalize_virtual_path(from);
+    auto destination = normalize_virtual_path(to);
     if (!source) return std::unexpected(source.error());
     if (!destination) return std::unexpected(destination.error());
-    std::error_code error;
-    std::filesystem::rename(*source, *destination, error);
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot rename sandbox path: " + error.message());
-    }
-    return {};
+    return sandbox_.rename(*source, *destination);
 }
 
 Status FileSystem::truncate(std::string_view virtual_path, u64 length) {
-    if (length > static_cast<u64>(std::numeric_limits<off_t>::max())) {
-        return fail(ErrorCode::out_of_range,
-                    "truncate length is outside platform range");
-    }
-    auto path = resolve(virtual_path);
+    auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    if (::truncate(path->c_str(), static_cast<off_t>(length)) != 0) {
-        return io_failure("cannot truncate sandbox file");
-    }
-    return {};
+    return sandbox_.truncate(*path, length);
+}
+
+Status FileSystem::set_readable(std::string_view virtual_path,
+                                bool readable) {
+    auto path = normalize_virtual_path(virtual_path);
+    if (!path) return std::unexpected(path.error());
+    return sandbox_.set_readable(*path, readable);
+}
+
+Status FileSystem::set_writable(std::string_view virtual_path,
+                                bool writable) {
+    auto path = normalize_virtual_path(virtual_path);
+    if (!path) return std::unexpected(path.error());
+    return sandbox_.set_writable(*path, writable);
 }
 
 Result<std::vector<std::string>> FileSystem::list(
     std::string_view virtual_directory) const {
-    auto path = resolve(virtual_directory, true);
+    auto path = normalize_virtual_path(virtual_directory, true);
     if (!path) return std::unexpected(path.error());
-    std::error_code error;
-    std::filesystem::directory_iterator iterator(*path, error);
-    if (error) {
-        return fail(ErrorCode::io_error,
-                    "cannot list sandbox directory: " + error.message());
-    }
+    auto entries = sandbox_.list(*path);
+    if (!entries) return std::unexpected(entries.error());
     std::vector<std::string> names;
-    for (const auto& entry : iterator) {
-        std::string name = entry.path().filename().string();
-        std::error_code type_error;
-        if (entry.is_directory(type_error) && !type_error) name.push_back('/');
+    names.reserve(entries->size());
+    for (const SandboxDirectoryEntry& entry : *entries) {
+        std::string name = entry.name;
+        if (entry.directory) name.push_back('/');
         names.push_back(std::move(name));
     }
-    std::sort(names.begin(), names.end());
     return names;
+}
+
+Result<u64> FileSystem::directory_size(
+    std::string_view virtual_directory,
+    bool include_subdirectories) const {
+    auto path = normalize_virtual_path(virtual_directory, true);
+    if (!path) return std::unexpected(path.error());
+    return sandbox_.directory_size(*path, include_subdirectories);
+}
+
+Result<StorageInfo> FileSystem::storage_info() const {
+    auto info = sandbox_.space();
+    if (!info) return std::unexpected(info.error());
+    return StorageInfo {
+        .available = info->available,
+        .total = info->total,
+        .used = info->used,
+    };
+}
+
+Result<u64> FileSystem::available_size() const {
+    auto info = storage_info();
+    if (!info) return std::unexpected(info.error());
+    return info->available;
+}
+
+Result<u64> FileSystem::total_size() const {
+    auto info = storage_info();
+    if (!info) return std::unexpected(info.error());
+    return info->total;
+}
+
+Result<u64> FileSystem::used_size() const {
+    auto info = storage_info();
+    if (!info) return std::unexpected(info.error());
+    return info->used;
+}
+
+Status FileSystem::atomic_write(std::string_view virtual_path,
+                                std::span<const u8> contents) {
+    auto path = normalize_virtual_path(virtual_path);
+    if (!path) return std::unexpected(path.error());
+    return sandbox_.atomic_write(*path, contents);
+}
+
+Result<std::string> FileSystem::host_path(
+    std::string_view virtual_path) const {
+    auto path = normalize_virtual_path(virtual_path, true);
+    if (!path) return std::unexpected(path.error());
+    return sandbox_.lexical_host_path(*path, true);
 }
 
 } // namespace phoneme::filesystem

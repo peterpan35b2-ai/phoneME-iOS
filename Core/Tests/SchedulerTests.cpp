@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 
@@ -110,6 +111,27 @@ int main(int argc, char** argv) {
             "no blocked Java threads remain after fixture completion");
     require(snapshot.sleeping.empty(),
             "no sleeping Java threads remain after fixture completion");
+
+    {
+        phoneme::vm::Machine busy_machine(classes);
+        busy_machine.scheduler().set_deterministic(true);
+        auto started = busy_machine.invoke_static("corefixture/ThreadOps",
+                                                  "startBusyThread",
+                                                  "()I",
+                                                  {},
+                                                  20'000'000U);
+        require(started.has_value() && started->completed_normally() &&
+                    started->return_value.has_value() &&
+                    started->return_value->as_int().value_or(0) == 1,
+                "start non-cooperative Java worker");
+
+        const auto shutdown_start = std::chrono::steady_clock::now();
+        busy_machine.scheduler().shutdown();
+        const auto shutdown_elapsed =
+            std::chrono::steady_clock::now() - shutdown_start;
+        require(shutdown_elapsed < std::chrono::seconds(2),
+                "scheduler shutdown cancels and joins a busy Java worker");
+    }
 
     std::cout << "Scheduler tests passed\n";
     return 0;

@@ -25,6 +25,7 @@ constexpr usize kEnumerationArrayField = 0;
 constexpr usize kEnumerationIndexField = 1;
 constexpr usize kEnumerationSizeField = 2;
 constexpr usize kRandomSeedField = 0;
+constexpr usize kDateMillisField = 0;
 constexpr u64 kRandomMultiplier = 0x5DEECE66DULL;
 constexpr u64 kRandomAddend = 0xBULL;
 constexpr u64 kRandomMask = (1ULL << 48U) - 1ULL;
@@ -55,6 +56,62 @@ void add(NativeMethodRegistry& registry,
                          "java.util receiver is null");
     }
     return *reference;
+}
+
+[[nodiscard]] Result<ObjectRef> reference_argument(
+    std::span<const Value> arguments,
+    usize index,
+    bool nullable = false) {
+    if (index >= arguments.size()) {
+        return fail(ErrorCode::invalid_argument,
+                    "java.util reference argument is missing");
+    }
+    auto reference = arguments[index].as_reference();
+    if (!reference) return std::unexpected(reference.error());
+    if (!nullable && reference->is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "java.util reference argument is null");
+    }
+    return *reference;
+}
+
+[[nodiscard]] Result<i32> int_argument(
+    std::span<const Value> arguments,
+    usize index) {
+    if (index >= arguments.size()) {
+        return fail(ErrorCode::invalid_argument,
+                    "java.util int argument is missing");
+    }
+    return arguments[index].as_int();
+}
+
+[[nodiscard]] Result<i64> long_argument(
+    std::span<const Value> arguments,
+    usize index) {
+    if (index >= arguments.size()) {
+        return fail(ErrorCode::invalid_argument,
+                    "java.util long argument is missing");
+    }
+    return arguments[index].as_long();
+}
+
+[[nodiscard]] i64 current_time_millis() noexcept {
+    return static_cast<i64>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+[[nodiscard]] Result<i64> delayed_time(i64 delay) {
+    if (delay < 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "Timer delay cannot be negative");
+    }
+    const i64 now = current_time_millis();
+    if (delay > std::numeric_limits<i64>::max() - now) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "Timer delay overflows absolute time");
+    }
+    return now + delay;
 }
 
 [[nodiscard]] Result<i32> int_field(Machine& machine,
@@ -114,10 +171,10 @@ void add(NativeMethodRegistry& registry,
         return fail(ErrorCode::invalid_argument,
                     "collection contains a stale reference");
     }
-    if (*left_class != *right_class) return false;
-    if (*left_class == "java/lang/String" ||
-        *left_class == "java/lang/StringBuilder" ||
-        *left_class == "java/lang/StringBuffer") {
+    if (*left_class == *right_class &&
+        (*left_class == "java/lang/String" ||
+         *left_class == "java/lang/StringBuilder" ||
+         *left_class == "java/lang/StringBuffer")) {
         auto left_text = machine.heap().string_value(left);
         auto right_text = machine.heap().string_value(right);
         if (!left_text || !right_text) {
@@ -126,14 +183,15 @@ void add(NativeMethodRegistry& registry,
         }
         return *left_text == *right_text;
     }
-    if (*left_class == "java/lang/Boolean" ||
-        *left_class == "java/lang/Byte" ||
-        *left_class == "java/lang/Short" ||
-        *left_class == "java/lang/Integer" ||
-        *left_class == "java/lang/Long" ||
-        *left_class == "java/lang/Character" ||
-        *left_class == "java/lang/Float" ||
-        *left_class == "java/lang/Double") {
+    if (*left_class == *right_class &&
+        (*left_class == "java/lang/Boolean" ||
+         *left_class == "java/lang/Byte" ||
+         *left_class == "java/lang/Short" ||
+         *left_class == "java/lang/Integer" ||
+         *left_class == "java/lang/Long" ||
+         *left_class == "java/lang/Character" ||
+         *left_class == "java/lang/Float" ||
+         *left_class == "java/lang/Double")) {
         auto left_value = machine.heap().field(left, 0);
         auto right_value = machine.heap().field(right, 0);
         if (!left_value || !right_value ||
@@ -169,7 +227,27 @@ void add(NativeMethodRegistry& registry,
             return false;
         }
     }
-    return false;
+    const Value argument = Value::from_reference(right);
+    auto equality = machine.invoke_instance(
+        left,
+        *left_class,
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        std::span<const Value>(&argument, 1U));
+    if (!equality) return std::unexpected(equality.error());
+    if (equality->throwable.has_value()) {
+        auto throwable_class = machine.heap().class_name(*equality->throwable);
+        if (!throwable_class) return std::unexpected(throwable_class.error());
+        return fail_java(*throwable_class,
+                         "collection element equals() threw an exception");
+    }
+    if (!equality->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Object.equals returned without a boolean value");
+    }
+    auto equal = equality->return_value->as_int();
+    if (!equal) return std::unexpected(equal.error());
+    return *equal != 0;
 }
 
 [[nodiscard]] Result<ObjectRef> allocate_object_array(Machine& machine,
@@ -442,6 +520,82 @@ void register_vector(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_int(
                 static_cast<i32>(*length)));
         });
+    add(registry, "java/util/Vector", "ensureCapacity", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto minimum = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!minimum) return std::unexpected(minimum.error());
+            if (*minimum > 0) {
+                auto ensured = ensure_vector_capacity(
+                    machine, *object, *minimum);
+                if (!ensured) return std::unexpected(ensured.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Vector", "trimToSize", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count) return std::unexpected(count.error());
+            if (!data) return std::unexpected(data.error());
+            auto capacity = machine.heap().array_length(*data);
+            if (!capacity) return std::unexpected(capacity.error());
+            if (*capacity == static_cast<usize>(*count)) {
+                return std::optional<Value> {};
+            }
+            auto replacement = allocate_object_array(
+                machine, static_cast<usize>(*count));
+            if (!replacement) return std::unexpected(replacement.error());
+            for (i32 index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *replacement, static_cast<usize>(index), *value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            auto stored = set_reference_field(
+                machine, *object, kVectorDataField, *replacement);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Vector", "setSize", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto requested = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!requested) return std::unexpected(requested.error());
+            if (*requested < 0) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "Vector size is negative");
+            }
+            auto count = int_field(machine, *object, kVectorCountField);
+            if (!count) return std::unexpected(count.error());
+            if (*requested > *count) {
+                auto ensured = ensure_vector_capacity(
+                    machine, *object, *requested);
+                if (!ensured) return std::unexpected(ensured.error());
+            } else if (*requested < *count) {
+                auto data = vector_data(machine, *object);
+                if (!data) return std::unexpected(data.error());
+                for (i32 index = *requested; index < *count; ++index) {
+                    auto cleared = machine.heap().set_element(
+                        *data, static_cast<usize>(index),
+                        Value::from_reference({}));
+                    if (!cleared) return std::unexpected(cleared.error());
+                }
+            }
+            auto updated = set_int_field(
+                machine, *object, kVectorCountField, *requested);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
     add(registry, "java/util/Vector", "isEmpty", "()Z",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -450,6 +604,48 @@ void register_vector(NativeMethodRegistry& registry) {
             auto count = int_field(machine, *object, kVectorCountField);
             if (!count) return std::unexpected(count.error());
             return std::optional<Value>(Value::from_int(*count == 0 ? 1 : 0));
+        });
+    add(registry, "java/util/Vector", "copyInto",
+        "([Ljava/lang/Object;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Vector.copyInto destination is missing");
+            }
+            auto destination = arguments[1].as_reference();
+            if (!object) return std::unexpected(object.error());
+            if (!destination || destination->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Vector.copyInto destination is null");
+            }
+            auto destination_class = machine.heap().class_name(*destination);
+            auto destination_length = machine.heap().array_length(*destination);
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!destination_class || !destination_length || !count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "Vector.copyInto state is invalid");
+            }
+            if (!destination_class->starts_with("[L") &&
+                !destination_class->starts_with("[[")) {
+                return fail_java("java/lang/ArrayStoreException",
+                                 "Vector.copyInto requires a reference array");
+            }
+            if (*destination_length < static_cast<usize>(*count)) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "Vector.copyInto destination is too small");
+            }
+            for (i32 index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *destination, static_cast<usize>(index), *value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
         });
 
     const auto add_index_search = [&registry](const char* name,
@@ -1162,6 +1358,147 @@ void register_hashtable(NativeMethodRegistry& registry) {
     return static_cast<i32>(static_cast<u32>(updated >> (48 - bits)));
 }
 
+void register_timer(NativeMethodRegistry& registry) {
+    add(registry, "java/util/TimerTask", "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto task = receiver(arguments);
+            if (!task) return std::unexpected(task.error());
+            auto initialized = machine.timers().initialize_task(*task);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/TimerTask", "cancel", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto task = receiver(arguments);
+            if (!task) return std::unexpected(task.error());
+            auto cancelled = machine.timers().cancel_task(*task);
+            if (!cancelled) return std::unexpected(cancelled.error());
+            return std::optional<Value>(Value::from_int(*cancelled ? 1 : 0));
+        });
+    add(registry, "java/util/TimerTask", "scheduledExecutionTime", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto task = receiver(arguments);
+            if (!task) return std::unexpected(task.error());
+            auto scheduled = machine.timers().scheduled_execution_time(*task);
+            if (!scheduled) return std::unexpected(scheduled.error());
+            return std::optional<Value>(Value::from_long(*scheduled));
+        });
+
+    add(registry, "java/util/Timer", "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto timer = receiver(arguments);
+            if (!timer) return std::unexpected(timer.error());
+            auto initialized = machine.timers().initialize_timer(*timer, false);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Timer", "<init>", "(Z)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto timer = receiver(arguments);
+            auto daemon = int_argument(arguments, 1U);
+            if (!timer) return std::unexpected(timer.error());
+            if (!daemon) return std::unexpected(daemon.error());
+            auto initialized =
+                machine.timers().initialize_timer(*timer, *daemon != 0);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+
+    const auto schedule_delay = [](bool repeating, bool fixed_rate) {
+        return [repeating, fixed_rate](
+            Machine& machine,
+            std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto timer = receiver(arguments);
+            auto task = reference_argument(arguments, 1U);
+            auto delay = long_argument(arguments, 2U);
+            if (!timer) return std::unexpected(timer.error());
+            if (!task) return std::unexpected(task.error());
+            if (!delay) return std::unexpected(delay.error());
+            auto first = delayed_time(*delay);
+            if (!first) return std::unexpected(first.error());
+            i64 period = 0;
+            if (repeating) {
+                auto value = long_argument(arguments, 3U);
+                if (!value) return std::unexpected(value.error());
+                if (*value <= 0) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Timer period must be positive");
+                }
+                period = *value;
+            }
+            auto scheduled = machine.timers().schedule(
+                *timer, *task, *first, period, fixed_rate);
+            if (!scheduled) return std::unexpected(scheduled.error());
+            return std::optional<Value> {};
+        };
+    };
+    const auto schedule_date = [](bool repeating, bool fixed_rate) {
+        return [repeating, fixed_rate](
+            Machine& machine,
+            std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto timer = receiver(arguments);
+            auto task = reference_argument(arguments, 1U);
+            auto date = reference_argument(arguments, 2U);
+            if (!timer) return std::unexpected(timer.error());
+            if (!task) return std::unexpected(task.error());
+            if (!date) return std::unexpected(date.error());
+            auto time = long_field(machine, *date, kDateMillisField);
+            if (!time) return std::unexpected(time.error());
+            if (*time < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Timer date cannot precede the epoch");
+            }
+            i64 period = 0;
+            if (repeating) {
+                auto value = long_argument(arguments, 3U);
+                if (!value) return std::unexpected(value.error());
+                if (*value <= 0) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Timer period must be positive");
+                }
+                period = *value;
+            }
+            const i64 first = std::max(*time, current_time_millis());
+            auto scheduled = machine.timers().schedule(
+                *timer, *task, first, period, fixed_rate);
+            if (!scheduled) return std::unexpected(scheduled.error());
+            return std::optional<Value> {};
+        };
+    };
+
+    add(registry, "java/util/Timer", "schedule",
+        "(Ljava/util/TimerTask;J)V", schedule_delay(false, false));
+    add(registry, "java/util/Timer", "schedule",
+        "(Ljava/util/TimerTask;JJ)V", schedule_delay(true, false));
+    add(registry, "java/util/Timer", "schedule",
+        "(Ljava/util/TimerTask;Ljava/util/Date;)V",
+        schedule_date(false, false));
+    add(registry, "java/util/Timer", "schedule",
+        "(Ljava/util/TimerTask;Ljava/util/Date;J)V",
+        schedule_date(true, false));
+    add(registry, "java/util/Timer", "scheduleAtFixedRate",
+        "(Ljava/util/TimerTask;JJ)V", schedule_delay(true, true));
+    add(registry, "java/util/Timer", "scheduleAtFixedRate",
+        "(Ljava/util/TimerTask;Ljava/util/Date;J)V",
+        schedule_date(true, true));
+    add(registry, "java/util/Timer", "cancel", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto timer = receiver(arguments);
+            if (!timer) return std::unexpected(timer.error());
+            auto cancelled = machine.timers().cancel_timer(*timer);
+            if (!cancelled) return std::unexpected(cancelled.error());
+            return std::optional<Value> {};
+        });
+}
+
 void register_random(NativeMethodRegistry& registry) {
     const auto set_seed = [](Machine& machine,
                              ObjectRef object,
@@ -1314,6 +1651,7 @@ void register_util_natives(NativeMethodRegistry& registry) {
     register_enumeration(registry);
     register_vector(registry);
     register_hashtable(registry);
+    register_timer(registry);
     register_random(registry);
 }
 

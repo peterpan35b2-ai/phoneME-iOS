@@ -3,9 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_ROOT="${PHONEME_CORE_BUILD_DIR:-$CORE_ROOT/build/iphoneos-arm64}"
+source "$SCRIPT_DIR/lib/common-test-root.sh"
+if [[ -n "${PHONEME_CORE_BUILD_DIR:-}" ]]; then
+  BUILD_ROOT="$(phoneme_prepare_managed_root "$PHONEME_CORE_BUILD_DIR" "$CORE_ROOT")"
+else
+  BUILD_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "iphoneos-arm64")"
+fi
 OBJECT_ROOT="$BUILD_ROOT/objects"
-OUTPUT_ARCHIVE="${PHONEME_CORE_OUTPUT:-$CORE_ROOT/libphoneMECore.a}"
+OUTPUT_ARCHIVE="${PHONEME_CORE_OUTPUT:-$BUILD_ROOT/libphoneMECore.a}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}"
 
 version_is_supported() {
@@ -42,7 +47,7 @@ if find "$CORE_ROOT/src" -type f \
 fi
 
 if rg -n 'Vendor/phoneME|phoneME/Resources/PhoneMERuntime|_MergedSrc' \
-  "$CORE_ROOT/include" "$CORE_ROOT/src" "$CORE_ROOT/tests" \
+  "$CORE_ROOT/include" "$CORE_ROOT/src" "$CORE_ROOT/Tests" \
   "$CORE_ROOT/CMakeLists.txt" >/dev/null; then
   echo "Core contains a forbidden legacy/import dependency." >&2
   exit 1
@@ -51,7 +56,6 @@ fi
 SDK_ROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
 CXX="$(xcrun --sdk iphoneos --find clang++)"
 
-rm -rf "$BUILD_ROOT"
 mkdir -p "$OBJECT_ROOT" "$(dirname "$OUTPUT_ARCHIVE")"
 
 SOURCE_LIST="$BUILD_ROOT/source-files.txt"
@@ -155,6 +159,12 @@ archive_sha256=$ARCHIVE_HASH
 archive_size=$ARCHIVE_SIZE
 EOF
 
+cat > "$BUILD_ROOT/build-result.env" <<EOF
+PHONEME_CORE_BUILD_DIR=$BUILD_ROOT
+PHONEME_CORE_OUTPUT=$OUTPUT_ARCHIVE
+IOS_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET
+EOF
+
 cat <<EOF
 phoneME Core built successfully.
 Source: $CORE_ROOT/include + $CORE_ROOT/src
@@ -167,4 +177,5 @@ Archive members: $OBJECT_COUNT
 Archive size: $ARCHIVE_SIZE
 External phoneME runtime archive required: no
 Built-in C++ boot classes: yes
+Build result: $BUILD_ROOT/build-result.env
 EOF

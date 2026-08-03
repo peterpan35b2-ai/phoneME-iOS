@@ -115,6 +115,24 @@ final class PhoneMECAPI: @unchecked Sendable {
         case error = 4
     }
 
+    enum PushBackgroundPolicy: Int32, Sendable {
+        case foregroundOnly = 0
+        case systemManaged = 1
+    }
+
+    enum PushRequestKind: Int32, Sendable {
+        case connection = 1
+        case alarm = 2
+    }
+
+    struct PushLaunchRequest: Sendable {
+        let requestID: UInt64
+        let kind: PushRequestKind
+        let createdAtMillis: Int64
+        let target: String
+        let midlet: String
+    }
+
     struct LCDUIEvent: Sendable {
         let kind: Int32
         let componentID: Int32
@@ -260,6 +278,97 @@ final class PhoneMECAPI: @unchecked Sendable {
 
     func destroyMidlet(_ runtime: RuntimeHandle?, appID: Int32) -> Int32 {
         phoneme_destroy_midlet(runtime?.rawValue, appID)
+    }
+
+    func setPushBackgroundPolicy(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        policy: PushBackgroundPolicy
+    ) -> Int32 {
+        phoneme_push_set_background_policy(
+            runtime?.rawValue,
+            suiteID,
+            policy.rawValue
+        )
+    }
+
+    func notifyPushConnectionAvailable(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        connection: String,
+        sourceAddress: String? = nil,
+        receivedAtMillis: Int64
+    ) -> Int32 {
+        connection.withCString { connectionValue in
+            guard let sourceAddress else {
+                return phoneme_push_notify_connection_available(
+                    runtime?.rawValue,
+                    suiteID,
+                    connectionValue,
+                    receivedAtMillis
+                )
+            }
+            return sourceAddress.withCString { sourceValue in
+                phoneme_push_notify_connection_available_from_source(
+                    runtime?.rawValue,
+                    suiteID,
+                    connectionValue,
+                    sourceValue,
+                    receivedAtMillis
+                )
+            }
+        }
+    }
+
+    func pollPushLaunchRequests(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        nowMillis: Int64,
+        backgroundExecutionGranted: Bool,
+        maximumCount: Int = 32
+    ) -> [PushLaunchRequest] {
+        guard let runtime, maximumCount > 0 else { return [] }
+        var rawRequests = Array(
+            repeating: PhoneMEPushLaunchRequest(),
+            count: maximumCount
+        )
+        let copied = rawRequests.withUnsafeMutableBufferPointer { buffer in
+            phoneme_push_poll_launch_requests(
+                runtime.rawValue,
+                suiteID,
+                nowMillis,
+                backgroundExecutionGranted ? 1 : 0,
+                buffer.baseAddress,
+                Int32(clamping: buffer.count)
+            )
+        }
+        guard copied > 0 else { return [] }
+        return rawRequests.prefix(Int(copied)).compactMap { raw in
+            guard let kind = PushRequestKind(rawValue: raw.kind) else {
+                return nil
+            }
+            var target = raw.target
+            var midlet = raw.midlet
+            return PushLaunchRequest(
+                requestID: raw.request_id,
+                kind: kind,
+                createdAtMillis: raw.created_at_millis,
+                target: Self.string(from: &target),
+                midlet: Self.string(from: &midlet)
+            )
+        }
+    }
+
+    func acknowledgePushLaunchRequest(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        requestID: UInt64
+    ) -> Int32 {
+        phoneme_push_acknowledge_launch_request(
+            runtime?.rawValue,
+            suiteID,
+            requestID
+        )
     }
 
     func midletState(

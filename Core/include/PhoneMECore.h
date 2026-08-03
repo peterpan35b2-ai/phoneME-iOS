@@ -9,6 +9,18 @@ extern "C" {
 
 typedef void* PhoneMERuntimeRef;
 
+#define PHONEME_C_API_VERSION_MAJOR 1u
+#define PHONEME_C_API_VERSION_MINOR 0u
+#define PHONEME_C_API_VERSION_PATCH 0u
+#define PHONEME_C_API_VERSION \
+    ((PHONEME_C_API_VERSION_MAJOR << 16u) | \
+     (PHONEME_C_API_VERSION_MINOR << 8u) | \
+     PHONEME_C_API_VERSION_PATCH)
+
+/* Returns PHONEME_C_API_VERSION. New ABI surface is added without changing
+ * existing declarations; incompatible changes require a major version bump. */
+uint32_t phoneme_c_api_version(void);
+
 typedef struct {
     int32_t attempted;
     int32_t succeeded;
@@ -200,6 +212,14 @@ int32_t phoneme_push_notify_connection_available(
     PhoneMERuntimeRef runtime,
     int32_t suite_id,
     const char* connection,
+    int64_t received_at_millis);
+/* Source-aware variant for socket/datagram registrations. The source address
+ * is matched against the MIDP PushRegistry filter before a launch is queued. */
+int32_t phoneme_push_notify_connection_available_from_source(
+    PhoneMERuntimeRef runtime,
+    int32_t suite_id,
+    const char* connection,
+    const char* source_address,
     int64_t received_at_millis);
 /* Returns the number of eligible requests copied. With destination == NULL
  * and capacity == 0, returns the number currently eligible without dequeuing.

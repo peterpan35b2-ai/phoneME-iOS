@@ -5,7 +5,36 @@
 #include <stdint.h>
 #include <string.h>
 
-static const NSUInteger kPhoneMEHTTPSMaximumResponseSize = 64U * 1024U * 1024U;
+static const NSUInteger kPhoneMEHTTPSDefaultMaximumResponseSize =
+    32U * 1024U * 1024U;
+
+#if defined(PHONEME_HTTPS_TESTING)
+static NSUInteger gPhoneMEHTTPSMaximumResponseSize =
+    kPhoneMEHTTPSDefaultMaximumResponseSize;
+void phoneme_ios_https_set_test_response_limit(int32_t bytes) {
+    gPhoneMEHTTPSMaximumResponseSize = bytes > 0
+        ? (NSUInteger)bytes : kPhoneMEHTTPSDefaultMaximumResponseSize;
+}
+static NSUInteger PhoneMEHTTPSMaximumResponseSize(void) {
+    return gPhoneMEHTTPSMaximumResponseSize;
+}
+#else
+static NSUInteger PhoneMEHTTPSMaximumResponseSize(void) {
+    return kPhoneMEHTTPSDefaultMaximumResponseSize;
+}
+#endif
+
+static NSString *PhoneMEHTTPSResponseLimitError(NSUInteger limit) {
+    const NSUInteger megabyte = 1024U * 1024U;
+    if (limit != 0U && limit % megabyte == 0U) {
+        return [NSString stringWithFormat:
+            @"HTTP response exceeds %llu MB limit",
+            (unsigned long long)(limit / megabyte)];
+    }
+    return [NSString stringWithFormat:
+        @"HTTP response exceeds %llu byte limit",
+        (unsigned long long)limit];
+}
 
 @interface PhoneMEHTTPSResult : NSObject
 @property(nonatomic) NSInteger statusCode;
@@ -21,18 +50,51 @@ static const NSUInteger kPhoneMEHTTPSMaximumResponseSize = 64U * 1024U * 1024U;
 @property(nonatomic) int64_t certificateNotBefore;
 @property(nonatomic) int64_t certificateNotAfter;
 @property(nonatomic, copy) NSString *errorMessage;
+@property(nonatomic) NSInteger errorCode;
 @property(nonatomic, copy) NSData *body;
 @end
 
 @implementation PhoneMEHTTPSResult
 @end
 
-@interface PhoneMEHTTPSCapture : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
+typedef void (*PhoneMEHTTPSCompletion)(int32_t handle, void *context);
+
+@interface PhoneMEHTTPSPending : NSObject
+@property(nonatomic, strong) NSURLSession *session;
+@property(nonatomic, strong) NSURLSessionDataTask *task;
+@property(nonatomic, assign) PhoneMEHTTPSCompletion completion;
+@property(nonatomic, assign) void *context;
+@end
+
+@implementation PhoneMEHTTPSPending
+@end
+
+@interface PhoneMEHTTPSCapture : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate, NSURLSessionDataDelegate>
 @property(nonatomic, copy) NSString *TLSProtocol;
 @property(nonatomic, copy) NSString *TLSVersion;
 @property(nonatomic, copy) NSString *cipherSuite;
 @property(nonatomic, copy) NSString *certificateSubject;
+@property(nonatomic, copy) NSString *certificateIssuer;
+@property(nonatomic, copy) NSString *certificateSerial;
+@property(nonatomic) int64_t certificateNotBefore;
+@property(nonatomic) int64_t certificateNotAfter;
+@property(nonatomic, copy) NSString *allowedRedirectScheme;
+@property(nonatomic, assign) NSInteger redirectLimit;
+@property(nonatomic, assign) NSInteger redirectsFollowed;
+@property(nonatomic, assign) int32_t handle;
+@property(nonatomic, strong) PhoneMEHTTPSResult *result;
+@property(nonatomic, strong) NSMutableData *responseBody;
+@property(nonatomic, assign) BOOL secureRequest;
+@property(nonatomic, assign) BOOL responseTooLarge;
+@property(nonatomic, copy) NSString *fallbackCertificateHost;
 @end
+
+static NSMutableDictionary<NSNumber *, PhoneMEHTTPSResult *> *
+PhoneMEHTTPSResults(void);
+static NSMutableDictionary<NSNumber *, PhoneMEHTTPSPending *> *
+PhoneMEHTTPSPendingRequests(void);
+static NSString *PhoneMEHTTPReasonPhrase(NSInteger statusCode);
+static NSString *PhoneMESerializeHeaders(NSDictionary *headers);
 
 static NSString *PhoneMETLSVersionString(NSNumber *value) {
     if (value == nil) {
@@ -90,6 +152,292 @@ static NSString *PhoneMECipherSuiteString(NSNumber *value) {
     }
 }
 
+static NSString *PhoneMECertificateName(SecCertificateRef certificate) {
+    if (certificate == NULL) {
+        return nil;
+    }
+    CFStringRef summary = SecCertificateCopySubjectSummary(certificate);
+    if (summary == NULL) {
+        return nil;
+    }
+    NSString *name = CFBridgingRelease(summary);
+    if (name.length == 0) {
+        return nil;
+    }
+    return [name hasPrefix:@"CN="] ? name
+                                   : [@"CN=" stringByAppendingString:name];
+}
+
+static NSString *PhoneMEHexString(NSData *data) {
+    if (data.length == 0) {
+        return nil;
+    }
+    const uint8_t *bytes = data.bytes;
+    NSMutableString *result =
+        [[NSMutableString alloc] initWithCapacity:data.length * 2U];
+    for (NSUInteger index = 0; index < data.length; ++index) {
+        [result appendFormat:@"%02X", bytes[index]];
+    }
+    return result;
+}
+
+static NSString *PhoneMECertificateSerial(SecCertificateRef certificate) {
+    if (certificate == NULL) {
+        return nil;
+    }
+    CFErrorRef error = NULL;
+    CFDataRef serial = SecCertificateCopySerialNumberData(certificate, &error);
+    if (error != NULL) {
+        CFRelease(error);
+    }
+    if (serial == NULL) {
+        return nil;
+    }
+    NSData *data = CFBridgingRelease(serial);
+    return PhoneMEHexString(data);
+}
+
+typedef struct {
+    const uint8_t *bytes;
+    NSUInteger length;
+    NSUInteger cursor;
+} PhoneMEDERCursor;
+
+static BOOL PhoneMEDERReadLength(PhoneMEDERCursor *cursor,
+                                 NSUInteger *value) {
+    if (cursor == NULL || value == NULL || cursor->cursor >= cursor->length) {
+        return NO;
+    }
+    const uint8_t first = cursor->bytes[cursor->cursor++];
+    if ((first & 0x80U) == 0U) {
+        *value = first;
+        return *value <= cursor->length - cursor->cursor;
+    }
+
+    const NSUInteger byteCount = (NSUInteger)(first & 0x7FU);
+    if (byteCount == 0U || byteCount > sizeof(NSUInteger) ||
+            byteCount > cursor->length - cursor->cursor) {
+        return NO;
+    }
+    NSUInteger result = 0U;
+    for (NSUInteger index = 0U; index < byteCount; ++index) {
+        if (result > (NSUIntegerMax >> 8U)) {
+            return NO;
+        }
+        result = (result << 8U) | cursor->bytes[cursor->cursor++];
+    }
+    if (result > cursor->length - cursor->cursor) {
+        return NO;
+    }
+    *value = result;
+    return YES;
+}
+
+static BOOL PhoneMEDERReadElement(PhoneMEDERCursor *cursor,
+                                  uint8_t *tag,
+                                  const uint8_t **contents,
+                                  NSUInteger *contentLength) {
+    if (cursor == NULL || tag == NULL || contents == NULL ||
+            contentLength == NULL || cursor->cursor >= cursor->length) {
+        return NO;
+    }
+    *tag = cursor->bytes[cursor->cursor++];
+    if (!PhoneMEDERReadLength(cursor, contentLength)) {
+        return NO;
+    }
+    *contents = cursor->bytes + cursor->cursor;
+    cursor->cursor += *contentLength;
+    return YES;
+}
+
+static BOOL PhoneMEDERSkipElement(PhoneMEDERCursor *cursor) {
+    uint8_t tag = 0U;
+    const uint8_t *contents = NULL;
+    NSUInteger contentLength = 0U;
+    return PhoneMEDERReadElement(cursor, &tag, &contents, &contentLength);
+}
+
+static int PhoneMEDecimalPair(const uint8_t *bytes) {
+    if (bytes == NULL || bytes[0] < '0' || bytes[0] > '9' ||
+            bytes[1] < '0' || bytes[1] > '9') {
+        return -1;
+    }
+    return (int)(bytes[0] - '0') * 10 + (int)(bytes[1] - '0');
+}
+
+static int64_t PhoneMEASN1TimeMilliseconds(uint8_t tag,
+                                           const uint8_t *bytes,
+                                           NSUInteger length) {
+    const BOOL utcTime = tag == 0x17U;
+    const BOOL generalizedTime = tag == 0x18U;
+    if ((!utcTime && !generalizedTime) || bytes == NULL ||
+            length == 0U || bytes[length - 1U] != 'Z') {
+        return 0;
+    }
+
+    const NSUInteger expectedLength = utcTime ? 13U : 15U;
+    if (length != expectedLength) {
+        return 0;
+    }
+
+    NSUInteger cursor = 0U;
+    int year = 0;
+    if (utcTime) {
+        const int shortYear = PhoneMEDecimalPair(bytes);
+        if (shortYear < 0) return 0;
+        year = shortYear >= 50 ? 1900 + shortYear : 2000 + shortYear;
+        cursor = 2U;
+    } else {
+        const int century = PhoneMEDecimalPair(bytes);
+        const int shortYear = PhoneMEDecimalPair(bytes + 2U);
+        if (century < 0 || shortYear < 0) return 0;
+        year = century * 100 + shortYear;
+        cursor = 4U;
+    }
+
+    const int month = PhoneMEDecimalPair(bytes + cursor);
+    const int day = PhoneMEDecimalPair(bytes + cursor + 2U);
+    const int hour = PhoneMEDecimalPair(bytes + cursor + 4U);
+    const int minute = PhoneMEDecimalPair(bytes + cursor + 6U);
+    const int second = PhoneMEDecimalPair(bytes + cursor + 8U);
+    if (month < 1 || month > 12 || day < 1 || day > 31 ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+            second < 0 || second > 60) {
+        return 0;
+    }
+
+    NSDateComponents *components = [[NSDateComponents alloc] init];
+    components.calendar =
+        [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    components.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    components.year = year;
+    components.month = month;
+    components.day = day;
+    components.hour = hour;
+    components.minute = minute;
+    components.second = second < 59 ? second : 59;
+    NSDate *date = [components.calendar dateFromComponents:components];
+    if (date == nil) {
+        return 0;
+    }
+    return (int64_t)(date.timeIntervalSince1970 * 1000.0);
+}
+
+static void PhoneMECertificateValidity(SecCertificateRef certificate,
+                                       int64_t *notBefore,
+                                       int64_t *notAfter) {
+    if (notBefore != NULL) *notBefore = 0;
+    if (notAfter != NULL) *notAfter = 0;
+    if (certificate == NULL) return;
+
+    CFDataRef copiedData = SecCertificateCopyData(certificate);
+    if (copiedData == NULL) return;
+    NSData *data = CFBridgingRelease(copiedData);
+    PhoneMEDERCursor certificateCursor = {
+        .bytes = data.bytes,
+        .length = data.length,
+        .cursor = 0U,
+    };
+
+    uint8_t tag = 0U;
+    const uint8_t *certificateContents = NULL;
+    NSUInteger certificateLength = 0U;
+    if (!PhoneMEDERReadElement(&certificateCursor, &tag,
+                               &certificateContents, &certificateLength) ||
+            tag != 0x30U || certificateCursor.cursor != certificateCursor.length) {
+        return;
+    }
+
+    PhoneMEDERCursor outer = {
+        .bytes = certificateContents,
+        .length = certificateLength,
+        .cursor = 0U,
+    };
+    const uint8_t *tbsContents = NULL;
+    NSUInteger tbsLength = 0U;
+    if (!PhoneMEDERReadElement(&outer, &tag, &tbsContents, &tbsLength) ||
+            tag != 0x30U) {
+        return;
+    }
+
+    PhoneMEDERCursor tbs = {
+        .bytes = tbsContents,
+        .length = tbsLength,
+        .cursor = 0U,
+    };
+    if (tbs.cursor < tbs.length && tbs.bytes[tbs.cursor] == 0xA0U &&
+            !PhoneMEDERSkipElement(&tbs)) {
+        return;
+    }
+    // serialNumber, signature, issuer
+    if (!PhoneMEDERSkipElement(&tbs) || !PhoneMEDERSkipElement(&tbs) ||
+            !PhoneMEDERSkipElement(&tbs)) {
+        return;
+    }
+
+    const uint8_t *validityContents = NULL;
+    NSUInteger validityLength = 0U;
+    if (!PhoneMEDERReadElement(&tbs, &tag, &validityContents,
+                               &validityLength) || tag != 0x30U) {
+        return;
+    }
+    PhoneMEDERCursor validity = {
+        .bytes = validityContents,
+        .length = validityLength,
+        .cursor = 0U,
+    };
+    uint8_t beforeTag = 0U;
+    uint8_t afterTag = 0U;
+    const uint8_t *beforeContents = NULL;
+    const uint8_t *afterContents = NULL;
+    NSUInteger beforeLength = 0U;
+    NSUInteger afterLength = 0U;
+    if (!PhoneMEDERReadElement(&validity, &beforeTag, &beforeContents,
+                               &beforeLength) ||
+            !PhoneMEDERReadElement(&validity, &afterTag, &afterContents,
+                                   &afterLength) ||
+            validity.cursor != validity.length) {
+        return;
+    }
+    if (notBefore != NULL) {
+        *notBefore = PhoneMEASN1TimeMilliseconds(
+            beforeTag, beforeContents, beforeLength);
+    }
+    if (notAfter != NULL) {
+        *notAfter = PhoneMEASN1TimeMilliseconds(
+            afterTag, afterContents, afterLength);
+    }
+}
+
+static NSInteger PhoneMEEffectiveURLPort(NSURL *url) {
+    if (url.port != nil) return url.port.integerValue;
+    return [url.scheme.lowercaseString isEqualToString:@"https"] ? 443 : 80;
+}
+
+static BOOL PhoneMEURLAuthorityChanged(NSURL *previous, NSURL *next) {
+    if (previous == nil || next == nil) return YES;
+    NSString *previousHost = previous.host.lowercaseString;
+    if (previousHost == nil) previousHost = @"";
+    NSString *nextHost = next.host.lowercaseString;
+    if (nextHost == nil) nextHost = @"";
+    return ![previous.scheme.lowercaseString
+                isEqualToString:next.scheme.lowercaseString] ||
+           ![previousHost isEqualToString:nextHost] ||
+           PhoneMEEffectiveURLPort(previous) != PhoneMEEffectiveURLPort(next);
+}
+
+static int64_t PhoneMEDeclaredContentLength(
+    NSHTTPURLResponse *response) {
+    NSString *value = [response valueForHTTPHeaderField:@"Content-Length"];
+    if (value.length == 0) return -1;
+    NSScanner *scanner = [NSScanner scannerWithString:value];
+    long long parsed = -1;
+    if (![scanner scanLongLong:&parsed] || !scanner.isAtEnd || parsed < 0) {
+        return -1;
+    }
+    return (int64_t)parsed;
+}
+
 @implementation PhoneMEHTTPSCapture
 
 - (void)URLSession:(NSURLSession *)session
@@ -102,20 +450,21 @@ static NSString *PhoneMECipherSuiteString(NSNumber *value) {
         if (trust != NULL) {
             CFArrayRef chain = SecTrustCopyCertificateChain(trust);
             if (chain != NULL && CFArrayGetCount(chain) > 0) {
-                SecCertificateRef certificate =
+                const CFIndex certificateCount = CFArrayGetCount(chain);
+                SecCertificateRef leaf =
                     (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);
-                if (certificate != NULL) {
-                    CFStringRef summary =
-                        SecCertificateCopySubjectSummary(certificate);
-                    if (summary != NULL) {
-                        NSString *subject = CFBridgingRelease(summary);
-                        if (subject.length != 0) {
-                            self.certificateSubject =
-                                [subject hasPrefix:@"CN="]
-                                    ? subject
-                                    : [@"CN=" stringByAppendingString:subject];
-                        }
-                    }
+                SecCertificateRef issuer = certificateCount > 1
+                    ? (SecCertificateRef)CFArrayGetValueAtIndex(chain, 1)
+                    : leaf;
+                if (leaf != NULL) {
+                    self.certificateSubject = PhoneMECertificateName(leaf);
+                    self.certificateIssuer = PhoneMECertificateName(issuer);
+                    self.certificateSerial = PhoneMECertificateSerial(leaf);
+                    int64_t notBefore = 0;
+                    int64_t notAfter = 0;
+                    PhoneMECertificateValidity(leaf, &notBefore, &notAfter);
+                    self.certificateNotBefore = notBefore;
+                    self.certificateNotAfter = notAfter;
                 }
             }
             if (chain != NULL) {
@@ -124,6 +473,33 @@ static NSString *PhoneMECipherSuiteString(NSNumber *value) {
         }
     }
     completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest *request))completionHandler {
+    NSString *redirectScheme = request.URL.scheme.lowercaseString;
+    if (redirectScheme.length == 0 ||
+            ![redirectScheme isEqualToString:self.allowedRedirectScheme]) {
+        completionHandler(nil);
+        return;
+    }
+    if (self.redirectsFollowed >= self.redirectLimit) {
+        completionHandler(nil);
+        return;
+    }
+    self.redirectsFollowed += 1;
+    if (PhoneMEURLAuthorityChanged(response.URL, request.URL)) {
+        NSMutableURLRequest *sanitized = [request mutableCopy];
+        [sanitized setValue:nil forHTTPHeaderField:@"Authorization"];
+        [sanitized setValue:nil forHTTPHeaderField:@"Proxy-Authorization"];
+        [sanitized setValue:nil forHTTPHeaderField:@"Cookie"];
+        completionHandler(sanitized);
+        return;
+    }
+    completionHandler(request);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -141,6 +517,123 @@ static NSString *PhoneMECipherSuiteString(NSNumber *value) {
         PhoneMECipherSuiteString(transaction.negotiatedTLSCipherSuite);
 }
 
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+ didReceiveResponse:(NSURLResponse *)response
+  completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
+    if (![response isKindOfClass:[NSHTTPURLResponse class]]) {
+        self.result.errorMessage = @"HTTP server returned an invalid response";
+        completionHandler(NSURLSessionResponseCancel);
+        return;
+    }
+
+    NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+    self.result.statusCode = httpResponse.statusCode;
+    self.result.responseMessage = PhoneMEHTTPReasonPhrase(httpResponse.statusCode);
+    self.result.responseHeaders =
+        PhoneMESerializeHeaders(httpResponse.allHeaderFields);
+    NSString *finalURL = httpResponse.URL.absoluteString;
+    if (finalURL != nil) self.result.finalURL = finalURL;
+
+    const int64_t expectedLength = response.expectedContentLength;
+    const int64_t declaredLength =
+        PhoneMEDeclaredContentLength(httpResponse);
+    const int64_t boundedLength =
+        expectedLength > declaredLength ? expectedLength : declaredLength;
+    const NSUInteger responseLimit = PhoneMEHTTPSMaximumResponseSize();
+    if (boundedLength > 0 &&
+            (uint64_t)boundedLength > (uint64_t)responseLimit) {
+        self.responseTooLarge = YES;
+        self.result.errorMessage =
+            PhoneMEHTTPSResponseLimitError(responseLimit);
+        completionHandler(NSURLSessionResponseCancel);
+        return;
+    }
+    completionHandler(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+    if (self.result.errorMessage != nil || data.length == 0) {
+        return;
+    }
+    const NSUInteger responseLimit = PhoneMEHTTPSMaximumResponseSize();
+    if (self.responseBody.length > responseLimit ||
+            data.length > responseLimit - self.responseBody.length) {
+        self.responseTooLarge = YES;
+        self.result.errorMessage =
+            PhoneMEHTTPSResponseLimitError(responseLimit);
+        [dataTask cancel];
+        return;
+    }
+    [self.responseBody appendData:data];
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+ didCompleteWithError:(NSError *)error {
+    const int64_t expectedLength = task.countOfBytesExpectedToReceive;
+    const NSUInteger responseLimit = PhoneMEHTTPSMaximumResponseSize();
+    if (expectedLength > 0 &&
+            (uint64_t)expectedLength > (uint64_t)responseLimit) {
+        self.responseTooLarge = YES;
+        self.result.errorMessage =
+            PhoneMEHTTPSResponseLimitError(responseLimit);
+        self.result.errorCode = 0;
+        [self.responseBody setLength:0U];
+    } else if (error != nil && self.result.errorMessage == nil) {
+        NSString *description = error.localizedDescription;
+        self.result.errorMessage = description != nil
+            ? description : @"HTTP request failed";
+        self.result.errorCode =
+            [error.domain isEqualToString:NSURLErrorDomain] ? error.code : 0;
+    }
+    if (self.result.errorMessage == nil && self.result.statusCode < 100) {
+        self.result.errorMessage = @"HTTP server returned an invalid response";
+    }
+    if (self.responseTooLarge) {
+        [self.responseBody setLength:0U];
+    }
+
+    NSData *copiedBody = [self.responseBody copy];
+    self.result.body = copiedBody != nil ? copiedBody : [NSData data];
+    if (self.secureRequest && self.result.errorMessage == nil) {
+        self.result.TLSProtocol = self.TLSProtocol != nil
+            ? self.TLSProtocol : @"TLS";
+        self.result.TLSVersion = self.TLSVersion != nil
+            ? self.TLSVersion : @"1.2";
+        self.result.cipherSuite = self.cipherSuite != nil
+            ? self.cipherSuite : @"IOS_SYSTEM_CIPHER";
+        self.result.certificateSubject = self.certificateSubject != nil
+            ? self.certificateSubject
+            : [@"CN=" stringByAppendingString:self.fallbackCertificateHost];
+        self.result.certificateIssuer = self.certificateIssuer != nil
+            ? self.certificateIssuer : @"";
+        self.result.certificateSerial = self.certificateSerial != nil
+            ? self.certificateSerial : @"";
+        self.result.certificateNotBefore = self.certificateNotBefore;
+        self.result.certificateNotAfter = self.certificateNotAfter;
+    }
+
+    PhoneMEHTTPSCompletion callback = NULL;
+    void *callbackContext = NULL;
+    @synchronized (PhoneMEHTTPSResults()) {
+        PhoneMEHTTPSPending *active =
+            PhoneMEHTTPSPendingRequests()[@(self.handle)];
+        if (active != nil) {
+            callback = active.completion;
+            callbackContext = active.context;
+            [PhoneMEHTTPSPendingRequests() removeObjectForKey:@(self.handle)];
+        }
+        PhoneMEHTTPSResults()[@(self.handle)] = self.result;
+    }
+    [session finishTasksAndInvalidate];
+    if (callback != NULL) {
+        callback(self.handle, callbackContext);
+    }
+}
+
 @end
 
 static NSMutableDictionary<NSNumber *, PhoneMEHTTPSResult *> *
@@ -153,13 +646,24 @@ PhoneMEHTTPSResults(void) {
     return results;
 }
 
+static NSMutableDictionary<NSNumber *, PhoneMEHTTPSPending *> *
+PhoneMEHTTPSPendingRequests(void) {
+    static NSMutableDictionary<NSNumber *, PhoneMEHTTPSPending *> *pending;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pending = [[NSMutableDictionary alloc] init];
+    });
+    return pending;
+}
+
 static int32_t PhoneMENextHTTPSHandle(void) {
     static int32_t nextHandle = 1;
     @synchronized (PhoneMEHTTPSResults()) {
         if (nextHandle <= 0) {
             nextHandle = 1;
         }
-        while (PhoneMEHTTPSResults()[@(nextHandle)] != nil) {
+        while (PhoneMEHTTPSResults()[@(nextHandle)] != nil ||
+               PhoneMEHTTPSPendingRequests()[@(nextHandle)] != nil) {
             nextHandle++;
             if (nextHandle <= 0) {
                 nextHandle = 1;
@@ -261,8 +765,9 @@ static void PhoneMEApplyHeaders(NSString *serialized,
         }
         if (([line hasPrefix:@" "] || [line hasPrefix:@"\t"]) &&
                 previousKey != nil) {
-            NSString *existing = [request valueForHTTPHeaderField:previousKey]
-                ?: @"";
+            NSString *existing =
+                [request valueForHTTPHeaderField:previousKey];
+            if (existing == nil) existing = @"";
             NSString *continued = [line stringByTrimmingCharactersInSet:
                 [NSCharacterSet whitespaceCharacterSet]];
             [request setValue:[NSString stringWithFormat:@"%@ %@",
@@ -289,7 +794,8 @@ static void PhoneMEApplyHeaders(NSString *serialized,
 
         if ([key caseInsensitiveCompare:@"Host"] == NSOrderedSame ||
             [key caseInsensitiveCompare:@"Content-Length"] == NSOrderedSame ||
-            [key caseInsensitiveCompare:@"Connection"] == NSOrderedSame) {
+            [key caseInsensitiveCompare:@"Connection"] == NSOrderedSame ||
+            [key caseInsensitiveCompare:@"Transfer-Encoding"] == NSOrderedSame) {
             previousKey = nil;
             continue;
         }
@@ -298,19 +804,20 @@ static void PhoneMEApplyHeaders(NSString *serialized,
     }
 }
 
-int32_t phoneme_ios_https_execute(const char *url_bytes,
-                                  const char *method_bytes,
-                                  const char *header_bytes,
-                                  const uint8_t *body_bytes,
-                                  int32_t body_length,
-                                  int32_t timeout_ms) {
+int32_t phoneme_ios_https_execute_async(
+    const char *url_bytes,
+    const char *method_bytes,
+    const char *header_bytes,
+    const uint8_t *body_bytes,
+    int32_t body_length,
+    int32_t timeout_ms,
+    int32_t redirect_limit,
+    PhoneMEHTTPSCompletion completion,
+    void *context) {
+    const int32_t handle = PhoneMENextHTTPSHandle();
     PhoneMEHTTPSResult *result = [[PhoneMEHTTPSResult alloc] init];
     result.body = [NSData data];
     result.responseHeaders = @"";
-    result.TLSProtocol = @"TLS";
-    result.TLSVersion = @"1.2";
-    result.cipherSuite = @"IOS_SYSTEM_CIPHER";
-    result.certificateIssuer = @"iOS Trust Store";
 
     NSString *urlString = url_bytes == NULL
         ? nil
@@ -322,95 +829,88 @@ int32_t phoneme_ios_https_execute(const char *url_bytes,
         ? @""
         : [NSString stringWithUTF8String:header_bytes];
     NSURL *url = urlString == nil ? nil : [NSURL URLWithString:urlString];
+    NSString *scheme = url.scheme.lowercaseString;
+    const BOOL supportedScheme = [scheme isEqualToString:@"http"] ||
+                                 [scheme isEqualToString:@"https"];
 
-    if (url == nil || ![url.scheme.lowercaseString isEqualToString:@"https"] ||
-            url.host.length == 0 || method.length == 0 || headers == nil ||
-            body_length < 0 || (body_length > 0 && body_bytes == NULL)) {
-        result.errorMessage = @"Invalid HTTPS request";
-    } else {
-        NSTimeInterval timeout = timeout_ms > 0
-            ? MAX(1.0, (NSTimeInterval)timeout_ms / 1000.0)
-            : 60.0;
-        NSMutableURLRequest *request =
-            [NSMutableURLRequest requestWithURL:url
-                                   cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                               timeoutInterval:timeout];
-        request.HTTPMethod = method;
-        PhoneMEApplyHeaders(headers, request);
-        if (body_length > 0) {
-            request.HTTPBody = [NSData dataWithBytes:body_bytes
-                                              length:(NSUInteger)body_length];
+    if (url == nil || !supportedScheme || url.host.length == 0 ||
+            method.length == 0 || headers == nil || body_length < 0 ||
+            redirect_limit < 0 ||
+            (body_length > 0 && body_bytes == NULL)) {
+        result.errorMessage = @"Invalid HTTP request";
+        @synchronized (PhoneMEHTTPSResults()) {
+            PhoneMEHTTPSResults()[@(handle)] = result;
         }
-
-        NSURLSessionConfiguration *configuration =
-            [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        configuration.requestCachePolicy =
-            NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.timeoutIntervalForRequest = timeout;
-        configuration.timeoutIntervalForResource = timeout;
-        configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
-        configuration.HTTPShouldSetCookies = YES;
-        configuration.waitsForConnectivity = NO;
-
-        PhoneMEHTTPSCapture *capture = [[PhoneMEHTTPSCapture alloc] init];
-        NSOperationQueue *delegateQueue = [[NSOperationQueue alloc] init];
-        delegateQueue.maxConcurrentOperationCount = 1;
-        delegateQueue.qualityOfService = NSQualityOfServiceUtility;
-        NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
-                                                              delegate:capture
-                                                         delegateQueue:delegateQueue];
-
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block NSData *responseData = nil;
-        __block NSURLResponse *response = nil;
-        __block NSError *requestError = nil;
-        NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-            completionHandler:^(NSData *data, NSURLResponse *taskResponse,
-                                NSError *error) {
-                responseData = data;
-                response = taskResponse;
-                requestError = error;
-                dispatch_semaphore_signal(semaphore);
-            }];
-        [task resume];
-
-        int64_t waitNanoseconds =
-            (int64_t)((timeout + 2.0) * (double)NSEC_PER_SEC);
-        long waitResult = dispatch_semaphore_wait(
-            semaphore, dispatch_time(DISPATCH_TIME_NOW, waitNanoseconds));
-        if (waitResult != 0) {
-            [task cancel];
-            result.errorMessage = @"HTTPS request timed out";
-        } else if (requestError != nil) {
-            result.errorMessage = requestError.localizedDescription
-                ?: @"HTTPS request failed";
-        } else if (![response isKindOfClass:[NSHTTPURLResponse class]]) {
-            result.errorMessage = @"HTTPS server returned an invalid response";
-        } else if (responseData.length > kPhoneMEHTTPSMaximumResponseSize) {
-            result.errorMessage = @"HTTPS response exceeds 64 MB limit";
-        } else {
-            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-            result.statusCode = httpResponse.statusCode;
-            result.responseMessage =
-                PhoneMEHTTPReasonPhrase(httpResponse.statusCode);
-            result.responseHeaders =
-                PhoneMESerializeHeaders(httpResponse.allHeaderFields);
-            result.finalURL = httpResponse.URL.absoluteString ?: urlString;
-            result.body = responseData ?: [NSData data];
-            result.TLSProtocol = capture.TLSProtocol ?: @"TLS";
-            result.TLSVersion = capture.TLSVersion ?: @"1.2";
-            result.cipherSuite = capture.cipherSuite ?: @"IOS_SYSTEM_CIPHER";
-            result.certificateSubject = capture.certificateSubject
-                ?: [@"CN=" stringByAppendingString:url.host];
-        }
-        [session finishTasksAndInvalidate];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (completion != NULL) completion(handle, context);
+        });
+        return handle;
     }
 
-    int32_t handle = PhoneMENextHTTPSHandle();
+    const BOOL secureRequest = [scheme isEqualToString:@"https"];
+    result.finalURL = urlString;
+    NSTimeInterval timeout = 60.0;
+    if (timeout_ms > 0) {
+        timeout = (NSTimeInterval)timeout_ms / 1000.0;
+        if (timeout < 1.0) timeout = 1.0;
+    }
+    NSMutableURLRequest *request =
+        [NSMutableURLRequest requestWithURL:url
+                               cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                           timeoutInterval:timeout];
+    request.HTTPMethod = method;
+    PhoneMEApplyHeaders(headers, request);
+    if (body_length > 0) {
+        request.HTTPBody = [NSData dataWithBytes:body_bytes
+                                          length:(NSUInteger)body_length];
+    }
+
+    NSURLSessionConfiguration *configuration =
+        [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    configuration.requestCachePolicy =
+        NSURLRequestReloadIgnoringLocalCacheData;
+    configuration.timeoutIntervalForRequest = timeout;
+    configuration.timeoutIntervalForResource = timeout;
+    configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
+    configuration.HTTPShouldSetCookies = YES;
+    configuration.waitsForConnectivity = NO;
+
+    PhoneMEHTTPSCapture *capture = [[PhoneMEHTTPSCapture alloc] init];
+    capture.allowedRedirectScheme = scheme;
+    capture.redirectLimit = (NSInteger)redirect_limit;
+    capture.redirectsFollowed = 0;
+    capture.handle = handle;
+    capture.result = result;
+    capture.responseBody = [[NSMutableData alloc] init];
+    capture.secureRequest = secureRequest;
+    capture.fallbackCertificateHost = url.host;
+
+    NSOperationQueue *delegateQueue = [[NSOperationQueue alloc] init];
+    delegateQueue.maxConcurrentOperationCount = 1;
+    delegateQueue.qualityOfService = NSQualityOfServiceUtility;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
+                                                          delegate:capture
+                                                     delegateQueue:delegateQueue];
+    PhoneMEHTTPSPending *pending = [[PhoneMEHTTPSPending alloc] init];
+    pending.session = session;
+    pending.completion = completion;
+    pending.context = context;
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request];
+    pending.task = task;
     @synchronized (PhoneMEHTTPSResults()) {
-        PhoneMEHTTPSResults()[@(handle)] = result;
+        PhoneMEHTTPSPendingRequests()[@(handle)] = pending;
     }
+    [task resume];
     return handle;
+}
+
+void phoneme_ios_https_cancel(int32_t handle) {
+    PhoneMEHTTPSPending *pending = nil;
+    @synchronized (PhoneMEHTTPSResults()) {
+        pending = PhoneMEHTTPSPendingRequests()[@(handle)];
+    }
+    [pending.task cancel];
 }
 
 int32_t phoneme_ios_https_get_status_code(int32_t handle) {
@@ -512,6 +1012,8 @@ int64_t phoneme_ios_https_get_long(int32_t handle, int32_t field) {
             return result.certificateNotBefore;
         case 2:
             return result.certificateNotAfter;
+        case 3:
+            return (int64_t)result.errorCode;
         default:
             return 0;
     }
@@ -527,7 +1029,12 @@ void phoneme_ios_https_close(int32_t handle) {
 }
 
 void phoneme_ios_https_reset(void) {
+    NSArray<PhoneMEHTTPSPending *> *pending = nil;
     @synchronized (PhoneMEHTTPSResults()) {
         [PhoneMEHTTPSResults() removeAllObjects];
+        pending = PhoneMEHTTPSPendingRequests().allValues;
+    }
+    for (PhoneMEHTTPSPending *request in pending) {
+        [request.task cancel];
     }
 }

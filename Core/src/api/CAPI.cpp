@@ -135,6 +135,10 @@ void copy_utf8(char* destination,
 
 extern "C" {
 
+uint32_t phoneme_c_api_version(void) {
+    return PHONEME_C_API_VERSION;
+}
+
 int32_t phoneme_preverify_jar_classes(
     const char* runtime_classes_path,
     const char* jar_path,
@@ -372,6 +376,22 @@ int32_t phoneme_push_notify_connection_available(
     }
     return status_code(instance->notify_push_connection_available(
         phoneme::SuiteId {suite_id}, connection, received_at_millis));
+}
+
+int32_t phoneme_push_notify_connection_available_from_source(
+    PhoneMERuntimeRef runtime,
+    int32_t suite_id,
+    const char* connection,
+    const char* source_address,
+    int64_t received_at_millis) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || connection == nullptr ||
+        source_address == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(instance->notify_push_connection_available(
+        phoneme::SuiteId {suite_id}, connection, source_address,
+        received_at_millis));
 }
 
 int32_t phoneme_push_poll_launch_requests(

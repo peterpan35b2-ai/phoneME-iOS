@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <optional>
@@ -14,6 +15,7 @@
 #include "phoneme/base/Error.hpp"
 #include "phoneme/base/Types.hpp"
 #include "phoneme/vm/CanvasBridge.hpp"
+#include "phoneme/vm/NativeRootScope.hpp"
 
 namespace phoneme::vm {
 class Machine;
@@ -22,11 +24,11 @@ class Machine;
 namespace phoneme::runtime {
 
 struct CanvasRenderHooks final {
-    using AcquirePaintGraphics = std::function<Result<vm::ObjectRef>(
+    using AcquirePaintGraphics = std::function<Result<vm::NativeRootScope>(
         vm::Machine&, vm::ObjectRef, Dimensions, vm::CanvasRect)>;
     using CommitPaint = std::function<Status(
         vm::Machine&, vm::ObjectRef, vm::ObjectRef, vm::CanvasRect)>;
-    using AcquireGameGraphics = std::function<Result<vm::ObjectRef>(
+    using AcquireGameGraphics = std::function<Result<vm::NativeRootScope>(
         vm::Machine&, vm::ObjectRef, Dimensions)>;
     using FlushGameGraphics = std::function<Status(
         vm::Machine&, vm::ObjectRef, vm::ObjectRef, vm::CanvasRect)>;
@@ -52,9 +54,15 @@ public:
 
     void configure_render_hooks(CanvasRenderHooks hooks);
     void set_keymap(std::array<i32, 7> keymap) noexcept;
+    void set_input_capabilities(bool pointer_events,
+                                bool pointer_motion,
+                                bool repeat_events) noexcept;
+    void set_repeat_clock_for_testing(
+        std::function<std::chrono::steady_clock::time_point()> clock);
     [[nodiscard]] Status set_dimensions(Dimensions dimensions);
     [[nodiscard]] Status set_host_foreground(bool foreground);
     void enqueue_key(i32 key_code, bool pressed, u64 sequence);
+    void enqueue_host_key(i32 key_code, bool pressed, u64 sequence);
     void enqueue_pointer(i32 x, i32 y, i32 action, u64 sequence);
     [[nodiscard]] Status pump();
     [[nodiscard]] usize estimated_bytes() const noexcept;
@@ -71,6 +79,18 @@ public:
                                         bool fullscreen) override;
     [[nodiscard]] Result<Dimensions> canvas_dimensions(
         vm::ObjectRef canvas) const override;
+    [[nodiscard]] Dimensions display_dimensions() const noexcept override {
+        return dimensions_;
+    }
+    [[nodiscard]] bool pointer_events_supported() const noexcept override {
+        return pointer_events_supported_;
+    }
+    [[nodiscard]] bool pointer_motion_supported() const noexcept override {
+        return pointer_motion_supported_;
+    }
+    [[nodiscard]] bool repeat_events_supported() const noexcept override {
+        return repeat_events_supported_;
+    }
     [[nodiscard]] i32 game_action_for_key(i32 key_code) const noexcept override;
     [[nodiscard]] Result<i32> key_code_for_action(i32 game_action) const override;
     [[nodiscard]] std::string key_name(i32 key_code) const override;
@@ -89,15 +109,18 @@ private:
         bool display_visible {false};
         bool effectively_visible {false};
         bool fullscreen {false};
+        bool size_change_pending {false};
         bool service_requested {false};
         i32 key_states {0};
         std::unordered_set<i32> pressed_keys;
+        std::unordered_map<i32, std::chrono::steady_clock::time_point>
+            next_key_repeat;
         std::optional<vm::CanvasRect> repaint_region;
         std::optional<vm::CanvasRect> flush_region;
         vm::ObjectRef game_graphics;
     };
 
-    enum class InputKind : u8 { key, pointer };
+    enum class InputKind : u8 { key, host_key, pointer };
 
     struct PendingInput final {
         InputKind kind {InputKind::key};
@@ -124,8 +147,11 @@ private:
     [[nodiscard]] Status process_visibility_changes();
     [[nodiscard]] Status process_size_changes();
     [[nodiscard]] Status process_inputs();
+    [[nodiscard]] Status process_key_repeats();
     [[nodiscard]] Status process_flushes();
     [[nodiscard]] Status process_repaints();
+    [[nodiscard]] CanvasState* active_visible_state() noexcept;
+    [[nodiscard]] const CanvasState* active_visible_state() const noexcept;
     [[nodiscard]] Status invoke_void(vm::ObjectRef receiver,
                                      std::string_view declared_class,
                                      std::string_view method_name,
@@ -145,11 +171,17 @@ private:
     Dimensions dimensions_;
     std::array<i32, 7> keymap_;
     CanvasRenderHooks render_hooks_;
+    std::function<std::chrono::steady_clock::time_point()> repeat_clock_ {
+        [] { return std::chrono::steady_clock::now(); }};
     std::unordered_map<u64, CanvasState> canvases_;
+    std::vector<u64> canvas_order_;
+    std::optional<u64> active_canvas_;
     std::deque<PendingInput> inputs_;
     std::deque<VisibilityChange> visibility_changes_;
     bool host_foreground_ {false};
-    bool size_change_pending_ {false};
+    bool pointer_events_supported_ {true};
+    bool pointer_motion_supported_ {true};
+    bool repeat_events_supported_ {true};
     bool pumping_ {false};
 };
 

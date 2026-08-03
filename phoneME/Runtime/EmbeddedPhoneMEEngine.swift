@@ -44,14 +44,21 @@ final class EmbeddedPhoneMEEngine: NSObject {
         var nextAppID: Int32 = 1
 
         func nextAvailableAppID() -> Int32? {
-            for _ in 0..<64 {
-                let candidate = nextAppID
-                nextAppID = candidate >= 64 ? 1 : candidate + 1
-                if gameIDsByAppID[candidate] == nil {
-                    return candidate
-                }
+            guard gameIDsByAppID.count < 64, nextAppID > 0 else {
+                return nil
             }
-            return nil
+
+            // Component IDs are namespaced by appID in Core. Never recycle an
+            // appID while this runtime context is alive, otherwise a delayed
+            // LCDUI action from a destroyed app could target a component in a
+            // later app that inherited the same namespace.
+            let candidate = nextAppID
+            if candidate == Int32.max {
+                nextAppID = 0
+            } else {
+                nextAppID = candidate + 1
+            }
+            return candidate
         }
 
         func removeApplication(gameID: UUID) {

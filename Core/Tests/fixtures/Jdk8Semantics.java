@@ -73,6 +73,23 @@ public final class Jdk8Semantics {
         }
     }
 
+    public static final class EqualKey {
+        private final int value;
+
+        EqualKey(int value) {
+            this.value = value;
+        }
+
+        public boolean equals(Object other) {
+            return other instanceof EqualKey
+                && ((EqualKey) other).value == value;
+        }
+
+        public int hashCode() {
+            return value;
+        }
+    }
+
     private Jdk8Semantics() {
     }
 
@@ -98,6 +115,37 @@ public final class Jdk8Semantics {
         StringBuffer buffer = new StringBuffer("A");
         buffer.append(12).append('Z').append(false);
         return buffer.toString().equals("A12Zfalse") ? buffer.length() : -1;
+    }
+
+    public static int stringBufferExtendedOperations() {
+        int result = 0;
+        StringBuffer buffer = new StringBuffer("abcdef");
+        buffer.ensureCapacity(128);
+        buffer.delete(1, 3).deleteCharAt(1);
+        if (buffer.toString().equals("aef")) result |= 1;
+        buffer.insert(1, "BC").insert(3, 'X').insert(4, 12);
+        if (buffer.toString().equals("aBCX12ef")) result |= 2;
+        buffer.setCharAt(0, 'A');
+        char[] copied = new char[4];
+        buffer.getChars(0, 4, copied, 0);
+        if (new String(copied).equals("ABCX")) result |= 4;
+        buffer.append(new char[] {'Y', 'Z'});
+        buffer.append(new char[] {'0', '1', '2'}, 1, 2);
+        if (buffer.toString().endsWith("YZ12")) result |= 8;
+        StringBuffer reversed = new StringBuffer("A\ud83d\ude00B").reverse();
+        if (reversed.toString().equals("B\ud83d\ude00A")) result |= 16;
+        String copiedBuffer = new String(new StringBuffer("copied"));
+        if (copiedBuffer.equals("copied")) result |= 32;
+        return result;
+    }
+
+    public static int multiArrayDefaults() {
+        int[][] integers = new int[2][3];
+        long[][] longs = new long[1][2];
+        float[][] floats = new float[1][1];
+        Object[][] objects = new Object[1][1];
+        return integers[1][2] == 0 && longs[0][1] == 0L
+                && floats[0][0] == 0.0F && objects[0][0] == null ? 1 : 0;
     }
 
     public static int builderObjectAppend() {
@@ -162,6 +210,15 @@ public final class Jdk8Semantics {
         if (copied.length == 4 && copied[2] == 'ệ'
                 && destination[2] == 'i' && destination[3] == 'ệ') {
             result |= 2048;
+        }
+        if ("MiDp-2.0".toLowerCase().equals("midp-2.0")
+                && "MiDp-2.0".toUpperCase().equals("MIDP-2.0")
+                && "already".toLowerCase() == "already") {
+            result |= 4096;
+        }
+        if ("xxGaMezz".regionMatches(true, 2, "GAME", 0, 4)
+                && !"short".regionMatches(false, 2, "longer", 0, 6)) {
+            result |= 8192;
         }
         return result;
     }
@@ -234,6 +291,19 @@ public final class Jdk8Semantics {
                 && longValue.toString().equals("9")
                 && character.toString().equals("G")) {
             result |= 256;
+        }
+        if (Boolean.TRUE.booleanValue()
+                && !Boolean.FALSE.booleanValue()
+                && Boolean.valueOf(true) == Boolean.TRUE
+                && Boolean.valueOf(false) == Boolean.FALSE
+                && booleanValue == Boolean.TRUE) {
+            result |= 512;
+        }
+        if (Integer.valueOf("321").intValue() == 321
+                && Character.digit('F', 16) == 15
+                && Character.digit('z', 36) == 35
+                && Character.digit('9', 8) == -1) {
+            result |= 1024;
         }
         return result;
     }
@@ -328,6 +398,29 @@ public final class Jdk8Semantics {
                 && first.nextBoolean() == second.nextBoolean()
                 && first.nextFloat() == second.nextFloat()
                 && first.nextDouble() == second.nextDouble()) result |= 32;
+
+        EqualKey stored = new EqualKey(7);
+        EqualKey equivalent = new EqualKey(7);
+        java.util.Vector customVector = new java.util.Vector();
+        customVector.addElement(stored);
+        java.util.Hashtable customTable = new java.util.Hashtable();
+        customTable.put(stored, "custom");
+        if (customVector.contains(equivalent)
+                && customVector.indexOf(equivalent) == 0
+                && "custom".equals(customTable.get(equivalent))
+                && customTable.containsKey(equivalent)) result |= 64;
+
+        java.util.Vector resized = new java.util.Vector(1);
+        resized.addElement("one");
+        resized.setSize(3);
+        Object[] copied = new Object[3];
+        resized.copyInto(copied);
+        resized.setSize(1);
+        resized.ensureCapacity(8);
+        resized.trimToSize();
+        if (copied[0].equals("one") && copied[1] == null
+                && copied[2] == null && resized.size() == 1
+                && resized.capacity() == 1) result |= 128;
         return result;
     }
 

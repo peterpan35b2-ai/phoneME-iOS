@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <mutex>
 #include <span>
 #include <string>
@@ -9,16 +10,36 @@
 
 namespace phoneme::vm {
 
+struct HeapLimits final {
+    usize maximum_objects {1'000'000};
+    usize maximum_bytes {64U * 1024U * 1024U};
+};
+
 struct HeapStats final {
     usize live_objects {0};
     usize live_slots {0};
     usize estimated_bytes {0};
+    usize peak_estimated_bytes {0};
+    usize maximum_objects {0};
+    usize maximum_bytes {0};
     usize collections {0};
+    usize failed_allocations {0};
 };
+
+struct HeapAccessContext final {
+    std::string_view owner;
+    std::string_view method;
+    std::string_view descriptor;
+    usize bytecode_pc {0};
+};
+
+[[nodiscard]] HeapAccessContext current_heap_access_context() noexcept;
+void set_heap_access_context(HeapAccessContext context) noexcept;
 
 class Heap final {
 public:
     explicit Heap(usize maximum_objects = 1'000'000);
+    explicit Heap(HeapLimits limits);
 
     [[nodiscard]] Result<ObjectRef> allocate_object(std::string class_name,
                                                     usize field_count);
@@ -56,19 +77,29 @@ private:
     struct Slot final {
         u32 generation {1};
         bool occupied {false};
+        usize accounted_bytes {0};
         Object object;
     };
 
     [[nodiscard]] Result<usize> resolve_slot_unlocked(ObjectRef reference) const;
-    [[nodiscard]] Result<ObjectRef> allocate_unlocked(Object object);
+    [[nodiscard]] Result<ObjectRef> allocate_unlocked(Object object,
+                                                      usize accounted_bytes);
+    [[nodiscard]] Status ensure_capacity_unlocked(usize object_bytes) noexcept;
     void mark_unlocked(ObjectRef root, std::vector<ObjectRef>& pending);
-    [[nodiscard]] static usize estimate_object_bytes(const Object& object) noexcept;
+    [[nodiscard]] static Result<usize> estimate_object_bytes(
+        std::string_view class_name,
+        usize field_count,
+        usize element_count,
+        usize text_length) noexcept;
 
-    usize maximum_objects_ {0};
+    HeapLimits limits_ {};
     mutable std::mutex mutex_;
     std::vector<Slot> slots_;
     std::vector<usize> free_slots_;
+    usize live_bytes_ {0};
+    usize peak_bytes_ {0};
     usize collections_ {0};
+    usize failed_allocations_ {0};
 };
 
 } // namespace phoneme::vm

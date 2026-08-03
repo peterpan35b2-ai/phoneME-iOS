@@ -1,6 +1,7 @@
 #include "ImageNatives.hpp"
 
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <limits>
 #include <span>
@@ -93,6 +94,98 @@ void add(NativeMethodRegistry& registry,
     return std::move(*decoded);
 }
 
+[[nodiscard]] Result<i32> invocation_int_result(
+    Machine& machine,
+    const ExecutionResult& result,
+    std::string_view operation) {
+    if (!result.completed_normally()) {
+        if (!result.throwable.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        std::string(operation) +
+                            " failed without a Java throwable");
+        }
+        auto throwable = machine.heap().class_name(*result.throwable);
+        if (!throwable) return std::unexpected(throwable.error());
+        return fail_java(*throwable, std::string(operation) + " failed");
+    }
+    if (!result.return_value.has_value()) {
+        return fail(ErrorCode::invalid_state,
+                    std::string(operation) + " returned no value");
+    }
+    return result.return_value->as_int();
+}
+
+[[nodiscard]] Result<std::vector<u8>> read_input_stream(
+    Machine& machine,
+    ObjectRef input) {
+    constexpr usize kChunkSize = 4U * 1024U;
+    constexpr usize kMaximumImageBytes = 64U * 1024U * 1024U;
+
+    auto input_root = machine.pin_native_root(input);
+    if (!input_root) return std::unexpected(input_root.error());
+    auto chunk = machine.heap().allocate_array(
+        "[B", kChunkSize, Value::from_int(0));
+    if (!chunk) return std::unexpected(chunk.error());
+    auto chunk_root = machine.pin_native_root(*chunk);
+    if (!chunk_root) return std::unexpected(chunk_root.error());
+
+    std::vector<u8> bytes;
+    bytes.reserve(kChunkSize);
+    for (;;) {
+        const std::array<Value, 3> arguments {
+            Value::from_reference(*chunk),
+            Value::from_int(0),
+            Value::from_int(static_cast<i32>(kChunkSize)),
+        };
+        auto invoked = machine.invoke_instance(
+            input,
+            "java/io/InputStream",
+            "read",
+            "([BII)I",
+            arguments,
+            1'000'000);
+        if (!invoked) return std::unexpected(invoked.error());
+        auto count = invocation_int_result(
+            machine, *invoked, "Image.createImage InputStream.read");
+        if (!count) return std::unexpected(count.error());
+        if (*count < 0) break;
+        if (*count == 0) {
+            auto one = machine.invoke_instance(
+                input,
+                "java/io/InputStream",
+                "read",
+                "()I",
+                {},
+                1'000'000);
+            if (!one) return std::unexpected(one.error());
+            auto value = invocation_int_result(
+                machine, *one, "Image.createImage InputStream.read");
+            if (!value) return std::unexpected(value.error());
+            if (*value < 0) break;
+            if (bytes.size() >= kMaximumImageBytes) {
+                return fail_java("java/io/IOException",
+                                 "image stream exceeds 64 MiB");
+            }
+            bytes.push_back(static_cast<u8>(*value & 0xFF));
+            continue;
+        }
+        if (static_cast<usize>(*count) > kChunkSize) {
+            return fail(ErrorCode::invalid_state,
+                        "InputStream.read returned more bytes than requested");
+        }
+        if (static_cast<usize>(*count) >
+            kMaximumImageBytes - bytes.size()) {
+            return fail_java("java/io/IOException",
+                             "image stream exceeds 64 MiB");
+        }
+        auto copied = byte_array_slice(
+            machine, *chunk, 0, *count, "Image.createImage");
+        if (!copied) return std::unexpected(copied.error());
+        bytes.insert(bytes.end(), copied->begin(), copied->end());
+    }
+    return bytes;
+}
+
 [[nodiscard]] Result<usize> required_pixel_count(i32 width, i32 height) {
     if (width <= 0 || height <= 0) {
         return fail_java("java/lang/IllegalArgumentException",
@@ -148,6 +241,29 @@ void register_image_natives(NativeMethodRegistry& registry) {
             if (!bytes) {
                 return fail_java("java/io/IOException", bytes.error().message);
             }
+            auto image = decode_png_bytes(*bytes, "java/io/IOException");
+            if (!image) return std::unexpected(image.error());
+            auto object = create_image_object(machine, std::move(*image));
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+
+    add(registry, owner, "createImage",
+        "(Ljava/io/InputStream;)Ljavax/microedition/lcdui/Image;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto input = reference_argument(
+                arguments, 0U, "Image.createImage");
+            if (!input) return std::unexpected(input.error());
+            auto valid = machine.object_is_instance(
+                *input, "java/io/InputStream");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Image.createImage argument is not InputStream");
+            }
+            auto bytes = read_input_stream(machine, *input);
+            if (!bytes) return std::unexpected(bytes.error());
             auto image = decode_png_bytes(*bytes, "java/io/IOException");
             if (!image) return std::unexpected(image.error());
             auto object = create_image_object(machine, std::move(*image));

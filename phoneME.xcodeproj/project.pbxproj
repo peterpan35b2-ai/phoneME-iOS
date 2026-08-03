@@ -257,10 +257,11 @@
 /* Begin PBXShellScriptBuildPhase section */
 		C00000000000000000000004 /* Prepare phoneME Core */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = ();
 			inputPaths = (
-				"$(SRCROOT)/Core/libphoneMECore.a",
+				"$(SRCROOT)/Core",
 			);
 			name = "Prepare phoneME Core";
 			outputPaths = (
@@ -268,7 +269,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"$PLATFORM_NAME\" != \"iphoneos\" ]; then\n  echo \"phoneME Core supports iphoneos only.\" >&2\n  exit 1\nfi\ncp \"$SRCROOT/Core/libphoneMECore.a\" \"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\n";
+			shellScript = "set -eu\nif [ \"$PLATFORM_NAME\" != \"iphoneos\" ]; then\n  echo \"phoneME Core supports iphoneos only.\" >&2\n  exit 1\nfi\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -54,6 +56,10 @@ inline constexpr std::string_view media_capture_video =
     "javax.microedition.media.capture.video";
 inline constexpr std::string_view media_capture_image =
     "javax.microedition.media.capture.image";
+inline constexpr std::string_view push_registry =
+    "javax.microedition.io.PushRegistry";
+inline constexpr std::string_view platform_request =
+    "javax.microedition.midlet.platformRequest";
 } // namespace permissions
 
 enum class PermissionDomain : u8 {
@@ -61,6 +67,8 @@ enum class PermissionDomain : u8 {
     network = 1,
     filesystem = 2,
     media = 3,
+    push = 4,
+    platform = 5,
 };
 
 enum class SuiteTrust : u8 {
@@ -78,6 +86,12 @@ enum class PermissionScope : u8 {
     one_shot = 0,
     session = 1,
     blanket = 2,
+};
+
+enum class PermissionDeclaration : u8 {
+    undeclared = 0,
+    required = 1,
+    optional = 2,
 };
 
 struct PermissionRequest final {
@@ -101,7 +115,11 @@ struct PermissionPolicyConfig final {
     SuiteId suite_id;
     SuiteTrust trust {SuiteTrust::untrusted};
     std::string persistence_path;
+    // Legacy combined declaration list. New callers should populate the
+    // required/optional lists so policy diagnostics preserve manifest intent.
     std::vector<std::string> declared_permissions;
+    std::vector<std::string> required_permissions;
+    std::vector<std::string> optional_permissions;
     bool enforce_declared_permissions {false};
     bool trusted_default_allow {true};
     PermissionPromptCallback prompt;
@@ -140,6 +158,8 @@ public:
 
     [[nodiscard]] SuiteId suite_id() const noexcept;
     [[nodiscard]] SuiteTrust trust() const noexcept;
+    [[nodiscard]] PermissionDeclaration declaration(
+        std::string_view permission) const noexcept;
 
     [[nodiscard]] static Result<std::string> canonicalize_permission_name(
         std::string_view permission);
@@ -149,19 +169,32 @@ public:
 private:
     [[nodiscard]] PermissionDecision check_locked(
         std::string_view canonical_permission) const noexcept;
+    [[nodiscard]] PermissionDeclaration declaration_locked(
+        std::string_view canonical_permission) const noexcept;
     [[nodiscard]] bool is_declared_locked(
         std::string_view canonical_permission) const noexcept;
     [[nodiscard]] Status load_persistent_locked();
     [[nodiscard]] Status save_persistent_locked();
+    void cancel_prompt_flights_locked(Error error) noexcept;
+
+    struct PromptFlight final {
+        std::condition_variable ready;
+        bool completed {false};
+        PermissionResponse response {};
+        std::optional<Error> error;
+    };
 
     mutable std::mutex mutex_;
     std::mutex prompt_mutex_;
     SuiteId suite_id_ {};
     SuiteTrust trust_ {SuiteTrust::untrusted};
     std::string persistence_path_;
-    std::unordered_set<std::string> declared_permissions_;
+    std::unordered_set<std::string> required_permissions_;
+    std::unordered_set<std::string> optional_permissions_;
     std::unordered_map<std::string, PermissionDecision> session_decisions_;
     std::unordered_map<std::string, PermissionDecision> blanket_decisions_;
+    std::unordered_map<std::string, std::shared_ptr<PromptFlight>>
+        active_prompts_;
     PermissionPromptCallback prompt_;
     bool enforce_declared_permissions_ {false};
     bool trusted_default_allow_ {true};

@@ -3,7 +3,35 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-source "$SCRIPT_DIR/lib/common-test-root.sh"
+if [[ -f "$SCRIPT_DIR/lib/common-test-root.sh" ]]; then
+  source "$SCRIPT_DIR/lib/common-test-root.sh"
+else
+  # Keep the RMS handoff runnable from its own historical checkpoint. The
+  # shared tooling helper belongs to item 18 and may not be integrated yet.
+  phoneme_make_isolated_root() {
+    local core_root="$1"
+    local label="$2"
+    local override="${3:-}"
+    local base="${override:-${TMPDIR:-/tmp}}"
+    mkdir -p "$base"
+    mktemp -d "$base/${label}.$$.XXXXXX"
+  }
+  phoneme_register_cleanup() {
+    local root="$1"
+    trap 'rm -rf -- '"'"'$root'"'"'' EXIT
+  }
+  phoneme_configure_sanitizers() {
+    if [[ "${PHONEME_SANITIZE:-0}" == "1" ]]; then
+      PHONEME_SANITIZER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+    else
+      PHONEME_SANITIZER_FLAGS=""
+    fi
+  }
+  phoneme_run_with_timeout() {
+    shift
+    "$@"
+  }
+fi
 TEST_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "rms-host-tests" "${PHONEME_RMS_TEST_ROOT:-}")"
 phoneme_register_cleanup "$TEST_ROOT"
 STUB_CLASSES="$TEST_ROOT/compile-stubs"
@@ -65,7 +93,6 @@ SOURCES=(
   "$CORE_ROOT/src/classfile/ClassFile.cpp"
   "$CORE_ROOT/src/filesystem/FileSystem.cpp"
   "$CORE_ROOT/src/filesystem/ResourceLoader.cpp"
-  "$CORE_ROOT/src/filesystem/SandboxResolver.cpp"
   "$CORE_ROOT/src/media/MediaService.cpp"
   "$CORE_ROOT/src/media/PlatformMediaAdapter.cpp"
   "$CORE_ROOT/src/network/ConnectionRegistry.cpp"
@@ -75,8 +102,12 @@ SOURCES=(
   "$CORE_ROOT/src/runtime/CanvasRuntime.cpp"
   "$CORE_ROOT/src/runtime/Framebuffer.cpp"
   "$CORE_ROOT/src/runtime/RecordStoreRegistry.cpp"
+  "$CORE_ROOT/src/security/PermissionCatalog.cpp"
   "$CORE_ROOT/src/security/PermissionPolicy.cpp"
 )
+if [[ -f "$CORE_ROOT/src/filesystem/SandboxResolver.cpp" ]]; then
+  SOURCES+=("$CORE_ROOT/src/filesystem/SandboxResolver.cpp")
+fi
 while IFS= read -r source; do
   SOURCES+=("$source")
 done < <(find "$CORE_ROOT/src/graphics" -type f -name '*.cpp' -print | LC_ALL=C sort)

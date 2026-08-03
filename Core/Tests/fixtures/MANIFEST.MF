@@ -2,7 +2,11 @@ Manifest-Version: 1.0
 MIDlet-Name: Core Fixture
 MIDlet-Version: 1.0.0
 MIDlet-Vendor: Core Tests
+MicroEdition-Profile: MIDP-2.0
+MicroEdition-Configuration: CLDC-1.1
 MIDlet-1: Lifecycle,,corefixture.LifecycleApp
+MIDlet-Permissions: javax.microedition.io.Connector.http, javax.microedition.io.Connector.file.read
+MIDlet-Permissions-Opt: javax.microedition.media.capture.audio
 Test-Property: hello
 Continuation-Property: phoneME-
  iOS

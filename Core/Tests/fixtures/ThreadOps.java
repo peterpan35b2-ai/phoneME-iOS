@@ -8,6 +8,7 @@ public final class ThreadOps {
     private static int completed;
     private static int interrupted;
     private static int rooted;
+    private static int busyStarted;
 
     private static final class CounterTask implements Runnable {
         private final int iterations;
@@ -107,6 +108,15 @@ public final class ThreadOps {
         }
     }
 
+    private static final class BusyTask implements Runnable {
+        public void run() {
+            busyStarted = 1;
+            while (true) {
+                counter++;
+            }
+        }
+    }
+
     private static synchronized void reentrantLevelTwo() {
         counter++;
     }
@@ -122,6 +132,17 @@ public final class ThreadOps {
             Thread.yield();
         }
         return signal >= expected;
+    }
+
+    public static int startBusyThread() {
+        busyStarted = 0;
+        Thread busy = new Thread(new BusyTask());
+        busy.start();
+        long deadline = System.currentTimeMillis() + 1000L;
+        while (busyStarted == 0 && System.currentTimeMillis() < deadline) {
+            Thread.yield();
+        }
+        return busyStarted;
     }
 
     public static int run() {

@@ -9,5 +9,7 @@ public abstract class Displayable {
     public void addCommand(Command command) { }
     public void removeCommand(Command command) { }
     public void setCommandListener(CommandListener listener) { }
+    public void setTicker(Ticker ticker) { }
+    public Ticker getTicker() { return null; }
     public boolean isShown() { return false; }
 }

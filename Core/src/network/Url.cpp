@@ -34,6 +34,17 @@ namespace {
     return true;
 }
 
+[[nodiscard]] Status validate_url_characters(std::string_view value) {
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte <= 0x20U || byte == 0x7FU) {
+            return fail(ErrorCode::invalid_argument,
+                        "URL contains an unescaped control or space");
+        }
+    }
+    return {};
+}
+
 [[nodiscard]] Status validate_percent_encoding(std::string_view value) {
     for (usize index = 0; index < value.size(); ++index) {
         if (value[index] != '%') continue;
@@ -79,6 +90,8 @@ namespace {
 
 [[nodiscard]] std::string normalize_path(std::string_view path) {
     const bool absolute = !path.empty() && path.front() == '/';
+    const bool trailing_separator =
+        path.ends_with('/') || path.ends_with("/.") || path.ends_with("/..");
     std::vector<std::string> components;
     usize start = 0;
     while (start <= path.size()) {
@@ -102,6 +115,9 @@ namespace {
         result.append(components[index]);
     }
     if (result.empty() && absolute) result = "/";
+    if (trailing_separator && !result.empty() && result.back() != '/') {
+        result.push_back('/');
+    }
     return result;
 }
 
@@ -111,10 +127,8 @@ Result<Url> Url::parse(std::string_view value) {
     if (value.empty()) {
         return fail(ErrorCode::invalid_argument, "GCF URL is empty");
     }
-    if (value.find('\0') != std::string_view::npos) {
-        return fail(ErrorCode::invalid_argument,
-                    "GCF URL contains NUL");
-    }
+    auto characters = validate_url_characters(value);
+    if (!characters) return std::unexpected(characters.error());
     auto percent = validate_percent_encoding(value);
     if (!percent) return std::unexpected(percent.error());
 
@@ -158,6 +172,10 @@ Result<Url> Url::parse(std::string_view value) {
                         "IPv6 URL host is missing ]");
         }
         result.host = std::string(authority.substr(1U, close - 1U));
+        if (result.host.empty()) {
+            return fail(ErrorCode::invalid_argument,
+                        "IPv6 URL host is empty");
+        }
         const std::string_view suffix = authority.substr(close + 1U);
         if (!suffix.empty()) {
             if (suffix.front() != ':') {
@@ -182,6 +200,11 @@ Result<Url> Url::parse(std::string_view value) {
         } else {
             result.host = std::string(authority);
         }
+    }
+
+    if (result.host.find('\\') != std::string::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "URL host contains a backslash");
     }
 
     const usize fragment_position = remainder.find('#');
@@ -264,6 +287,10 @@ Result<Url> Url::parse(std::string_view value) {
 
 Result<Url> Url::resolve(const Url& base, std::string_view location) {
     if (location.empty()) return base;
+    auto characters = validate_url_characters(location);
+    if (!characters) return std::unexpected(characters.error());
+    auto percent = validate_percent_encoding(location);
+    if (!percent) return std::unexpected(percent.error());
     const usize colon = location.find(':');
     const usize slash = location.find('/');
     const usize query = location.find('?');
@@ -287,6 +314,10 @@ Result<Url> Url::resolve(const Url& base, std::string_view location) {
     }
 
     Url result = base;
+    if (location.starts_with('#')) {
+        result.fragment = std::string(location.substr(1U));
+        return result;
+    }
     result.query.clear();
     result.fragment.clear();
 

@@ -499,6 +499,30 @@ void register_integral_wrapper(NativeMethodRegistry& registry,
         });
 
     if (spec.class_name == "java/lang/Integer") {
+        add(registry, spec.class_name, "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Integer;",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                if (arguments.empty()) {
+                    return fail(ErrorCode::invalid_argument,
+                                "Integer.valueOf expects a String");
+                }
+                auto string = arguments[0].as_reference();
+                if (!string) return std::unexpected(string.error());
+                auto text = string_ascii(machine, *string);
+                if (!text) return std::unexpected(text.error());
+                auto parsed = parse_signed(
+                    *text, 10,
+                    std::numeric_limits<i32>::min(),
+                    std::numeric_limits<i32>::max());
+                if (!parsed) return std::unexpected(parsed.error());
+                auto object = allocate_box(
+                    machine, "java/lang/Integer",
+                    Value::from_int(static_cast<i32>(*parsed)));
+                if (!object) return std::unexpected(object.error());
+                return std::optional<Value>(
+                    Value::from_reference(*object));
+            });
         add(registry, spec.class_name, "compareTo",
             "(Ljava/lang/Integer;)I",
             [](Machine& machine, std::span<const Value> arguments)
@@ -810,10 +834,15 @@ void register_boolean_wrapper(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto value = arguments[0].as_int();
             if (!value) return std::unexpected(value.error());
-            auto object = allocate_box(machine, "java/lang/Boolean",
-                Value::from_int(*value == 0 ? 0 : 1));
+            auto field = machine.class_states().resolve_field(
+                "java/lang/Boolean",
+                *value == 0 ? "FALSE" : "TRUE",
+                "Ljava/lang/Boolean;",
+                true);
+            if (!field) return std::unexpected(field.error());
+            auto object = machine.class_states().static_field(*field);
             if (!object) return std::unexpected(object.error());
-            return std::optional<Value>(Value::from_reference(*object));
+            return std::optional<Value>(*object);
         });
     add(registry, "java/lang/Boolean", "booleanValue", "()Z",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1027,6 +1056,33 @@ void register_character_wrapper(NativeMethodRegistry& registry) {
         return value == u' ' || value == u'\t' || value == u'\n' ||
                value == u'\r' || value == u'\f';
     });
+    add(registry, "java/lang/Character", "digit", "(CI)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Character.digit expects character and radix");
+            }
+            auto raw_character = arguments[0].as_int();
+            auto radix = arguments[1].as_int();
+            if (!raw_character) return std::unexpected(raw_character.error());
+            if (!radix) return std::unexpected(radix.error());
+            if (*radix < 2 || *radix > 36) {
+                return std::optional<Value>(Value::from_int(-1));
+            }
+            const char16_t character = static_cast<char16_t>(
+                static_cast<u16>(*raw_character));
+            i32 digit = -1;
+            if (character >= u'0' && character <= u'9') {
+                digit = static_cast<i32>(character - u'0');
+            } else if (character >= u'A' && character <= u'Z') {
+                digit = 10 + static_cast<i32>(character - u'A');
+            } else if (character >= u'a' && character <= u'z') {
+                digit = 10 + static_cast<i32>(character - u'a');
+            }
+            if (digit >= *radix) digit = -1;
+            return std::optional<Value>(Value::from_int(digit));
+        });
     const auto case_method = [&registry](const char* name, bool upper) {
         add(registry, "java/lang/Character", name, "(C)C",
             [upper](Machine&, std::span<const Value> arguments)
@@ -1271,9 +1327,273 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
         });
 }
 
+constexpr usize kThrowableMessageField = 0U;
+constexpr usize kThrowableCauseField = 1U;
+constexpr usize kThrowableCauseInitializedField = 2U;
+
+[[nodiscard]] Status initialize_throwable(Machine& machine,
+                                          ObjectRef throwable,
+                                          ObjectRef message,
+                                          ObjectRef cause,
+                                          bool cause_initialized) {
+    auto message_stored = machine.heap().set_field(
+        throwable, kThrowableMessageField, Value::from_reference(message));
+    auto cause_stored = machine.heap().set_field(
+        throwable, kThrowableCauseField, Value::from_reference(cause));
+    auto initialized_stored = machine.heap().set_field(
+        throwable, kThrowableCauseInitializedField,
+        Value::from_int(cause_initialized ? 1 : 0));
+    if (!message_stored) return message_stored;
+    if (!cause_stored) return cause_stored;
+    return initialized_stored;
+}
+
+[[nodiscard]] Result<ObjectRef> throwable_reference_field(
+    Machine& machine,
+    ObjectRef throwable,
+    usize index) {
+    auto value = machine.heap().field(throwable, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_reference();
+}
+
+[[nodiscard]] Result<std::u16string> throwable_text(Machine& machine,
+                                                    ObjectRef throwable) {
+    auto class_name = machine.heap().class_name(throwable);
+    if (!class_name) return std::unexpected(class_name.error());
+    std::u16string text;
+    text.reserve(class_name->size() + 16U);
+    for (const char character : *class_name) {
+        text.push_back(character == '/'
+            ? u'.'
+            : static_cast<char16_t>(static_cast<unsigned char>(character)));
+    }
+    auto message = throwable_reference_field(machine, throwable,
+                                              kThrowableMessageField);
+    if (!message) return std::unexpected(message.error());
+    if (!message->is_null()) {
+        auto detail = machine.heap().string_value(*message);
+        if (!detail) return std::unexpected(detail.error());
+        if (!detail->empty()) {
+            text.append(u": ");
+            text.append(*detail);
+        }
+    }
+    return text;
+}
+
+void register_throwable_natives(NativeMethodRegistry& registry) {
+    static constexpr std::array<std::string_view, 45U> classes {{
+        "java/lang/Throwable",
+        "java/lang/Exception",
+        "java/lang/RuntimeException",
+        "java/lang/Error",
+        "java/lang/VirtualMachineError",
+        "java/lang/LinkageError",
+        "java/lang/BootstrapMethodError",
+        "java/lang/ExceptionInInitializerError",
+        "java/lang/NoClassDefFoundError",
+        "java/lang/ClassFormatError",
+        "java/lang/VerifyError",
+        "java/lang/IncompatibleClassChangeError",
+        "java/lang/NoSuchMethodError",
+        "java/lang/NoSuchFieldError",
+        "java/lang/AbstractMethodError",
+        "java/lang/InstantiationError",
+        "java/lang/UnsatisfiedLinkError",
+        "java/lang/NullPointerException",
+        "java/lang/ArithmeticException",
+        "java/lang/ArrayIndexOutOfBoundsException",
+        "java/lang/NegativeArraySizeException",
+        "java/lang/ArrayStoreException",
+        "java/lang/IllegalMonitorStateException",
+        "java/lang/ClassCastException",
+        "java/lang/IllegalArgumentException",
+        "java/lang/IllegalStateException",
+        "java/lang/OutOfMemoryError",
+        "java/lang/StackOverflowError",
+        "java/lang/InterruptedException",
+        "java/lang/NumberFormatException",
+        "java/lang/ClassNotFoundException",
+        "java/lang/InstantiationException",
+        "java/lang/IllegalAccessException",
+        "java/lang/CloneNotSupportedException",
+        "java/lang/IndexOutOfBoundsException",
+        "java/lang/StringIndexOutOfBoundsException",
+        "java/lang/UnsupportedOperationException",
+        "java/lang/SecurityException",
+        "java/lang/IllegalThreadStateException",
+        "java/io/IOException",
+        "java/io/EOFException",
+        "java/io/InterruptedIOException",
+        "java/io/UTFDataFormatException",
+        "java/io/UnsupportedEncodingException",
+        "java/util/NoSuchElementException",
+    }};
+    for (const std::string_view class_name : classes) {
+        add(registry, std::string(class_name), "<init>", "()V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto initialized = initialize_throwable(
+                    machine, *object, {}, {}, false);
+                if (!initialized) return std::unexpected(initialized.error());
+                return std::optional<Value> {};
+            });
+        add(registry, std::string(class_name), "<init>",
+            "(Ljava/lang/String;)V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto message = arguments[1].as_reference();
+                if (!object) return std::unexpected(object.error());
+                if (!message) return std::unexpected(message.error());
+                auto initialized = initialize_throwable(
+                    machine, *object, *message, {}, false);
+                if (!initialized) return std::unexpected(initialized.error());
+                return std::optional<Value> {};
+            });
+    }
+
+    add(registry, "java/lang/Throwable", "<init>",
+        "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto message = arguments[1].as_reference();
+            auto cause = arguments[2].as_reference();
+            if (!object || !message || !cause) {
+                return fail(ErrorCode::invalid_argument,
+                            "Throwable constructor arguments are invalid");
+            }
+            auto initialized = initialize_throwable(
+                machine, *object, *message, *cause, true);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/Throwable", "<init>",
+        "(Ljava/lang/Throwable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto cause = arguments[1].as_reference();
+            if (!object || !cause) {
+                return fail(ErrorCode::invalid_argument,
+                            "Throwable cause constructor is invalid");
+            }
+            ObjectRef message {};
+            if (!cause->is_null()) {
+                auto text = throwable_text(machine, *cause);
+                if (!text) return std::unexpected(text.error());
+                auto string = create_string(machine, std::move(*text));
+                if (!string) return std::unexpected(string.error());
+                message = *string;
+            }
+            auto initialized = initialize_throwable(
+                machine, *object, message, *cause, true);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/Throwable", "getMessage",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto message = throwable_reference_field(
+                machine, *object, kThrowableMessageField);
+            if (!message) return std::unexpected(message.error());
+            return std::optional<Value>(Value::from_reference(*message));
+        });
+    add(registry, "java/lang/Throwable", "getLocalizedMessage",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto message = throwable_reference_field(
+                machine, *object, kThrowableMessageField);
+            if (!message) return std::unexpected(message.error());
+            return std::optional<Value>(Value::from_reference(*message));
+        });
+    add(registry, "java/lang/Throwable", "getCause",
+        "()Ljava/lang/Throwable;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto cause = throwable_reference_field(
+                machine, *object, kThrowableCauseField);
+            if (!cause) return std::unexpected(cause.error());
+            return std::optional<Value>(Value::from_reference(*cause));
+        });
+    add(registry, "java/lang/Throwable", "initCause",
+        "(Ljava/lang/Throwable;)Ljava/lang/Throwable;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto cause = arguments[1].as_reference();
+            if (!object || !cause) {
+                return fail(ErrorCode::invalid_argument,
+                            "Throwable.initCause argument is invalid");
+            }
+            if (*cause == *object) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "self-causation is not permitted");
+            }
+            auto initialized_value = machine.heap().field(
+                *object, kThrowableCauseInitializedField);
+            if (!initialized_value) {
+                return std::unexpected(initialized_value.error());
+            }
+            auto initialized = initialized_value->as_int();
+            if (!initialized) return std::unexpected(initialized.error());
+            if (*initialized != 0) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Throwable cause is already initialized");
+            }
+            auto cause_stored = machine.heap().set_field(
+                *object, kThrowableCauseField,
+                Value::from_reference(*cause));
+            auto initialized_stored = machine.heap().set_field(
+                *object, kThrowableCauseInitializedField,
+                Value::from_int(1));
+            if (!cause_stored) return std::unexpected(cause_stored.error());
+            if (!initialized_stored) {
+                return std::unexpected(initialized_stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+    add(registry, "java/lang/Throwable", "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto text = throwable_text(machine, *object);
+            if (!text) return std::unexpected(text.error());
+            auto string = create_string(machine, std::move(*text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
+    add(registry, "java/lang/Throwable", "printStackTrace", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto text = throwable_text(machine, *object);
+            if (!text) return std::unexpected(text.error());
+            text->push_back(u'\n');
+            machine.append_console(*text);
+            return std::optional<Value> {};
+        });
+}
+
 } // namespace
 
 void register_wrapper_natives(NativeMethodRegistry& registry) {
+    register_throwable_natives(registry);
     register_boolean_wrapper(registry);
     register_integral_wrapper(registry, IntegralSpec{
         .class_name = "java/lang/Byte",

@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <span>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "phoneme/media/MediaService.hpp"
+#include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
@@ -27,6 +29,18 @@ constexpr usize kPlayerToneControlField = 4;
 constexpr usize kPlayerContentTypeField = 5;
 constexpr usize kPlayerTimeBaseField = 6;
 constexpr usize kControlPlayerField = 0;
+constexpr usize kNokiaSoundNativeIdField = 0;
+constexpr usize kNokiaSoundStateField = 1;
+constexpr usize kNokiaSoundGainField = 2;
+constexpr usize kNokiaSoundListenerField = 3;
+constexpr usize kNokiaSoundFormatField = 4;
+constexpr usize kNokiaSoundFrequencyField = 5;
+constexpr usize kNokiaSoundDurationField = 6;
+constexpr i32 kNokiaFormatTone = 1;
+constexpr i32 kNokiaFormatWave = 5;
+constexpr i32 kNokiaSoundPlaying = 0;
+constexpr i32 kNokiaSoundStopped = 1;
+constexpr i32 kNokiaSoundUninitialized = 3;
 constexpr usize kMaximumStreamBytes = 32U * 1024U * 1024U;
 
 constexpr std::array<std::string_view, 13> kContentTypes {
@@ -298,6 +312,83 @@ void append_utf8(std::string& output, u32 code_point) {
                                     Value::from_reference(value));
 }
 
+[[nodiscard]] Status set_long_field(Machine& machine,
+                                    ObjectRef object,
+                                    usize index,
+                                    i64 value) {
+    return machine.heap().set_field(object, index, Value::from_long(value));
+}
+
+[[nodiscard]] i32 nokia_gain_to_volume(i32 gain) noexcept {
+    gain = std::clamp(gain, 0, 255);
+    return gain <= 0 ? 0 : 1 + ((gain - 1) * 99) / 254;
+}
+
+[[nodiscard]] i32 nokia_frequency_to_note(i32 frequency) noexcept {
+    if (frequency <= 0) return -1;
+    const double note = 69.0 + 12.0 *
+        std::log2(static_cast<double>(frequency) / 440.0);
+    return std::clamp(static_cast<i32>(std::lround(note)), 0, 127);
+}
+
+[[nodiscard]] Status notify_nokia_sound_state(Machine& machine,
+                                              ObjectRef sound,
+                                              i32 state) {
+    auto listener = reference_field(machine, sound,
+                                    kNokiaSoundListenerField);
+    if (!listener) return std::unexpected(listener.error());
+    if (listener->is_null()) return {};
+    const std::array<Value, 2> arguments {
+        Value::from_reference(sound),
+        Value::from_int(state),
+    };
+    auto invoked = machine.invoke_instance(
+        *listener,
+        "com/nokia/mid/sound/SoundListener",
+        "soundStateChanged",
+        "(Lcom/nokia/mid/sound/Sound;I)V",
+        arguments,
+        1'000'000);
+    if (!invoked) return std::unexpected(invoked.error());
+    // Nokia listeners are isolated from the sound state machine.
+    return {};
+}
+
+[[nodiscard]] Status set_nokia_sound_state(Machine& machine,
+                                           ObjectRef sound,
+                                           i32 state,
+                                           bool notify = true) {
+    auto current = int_field(machine, sound, kNokiaSoundStateField);
+    if (!current) return std::unexpected(current.error());
+    if (*current == state) return {};
+    auto stored = set_int_field(machine, sound, kNokiaSoundStateField, state);
+    if (!stored) return stored;
+    return notify ? notify_nokia_sound_state(machine, sound, state) : Status {};
+}
+
+[[nodiscard]] Status release_nokia_sound(Machine& machine,
+                                         ObjectRef sound,
+                                         bool notify) {
+    auto native_id = int_field(machine, sound, kNokiaSoundNativeIdField);
+    if (!native_id) return std::unexpected(native_id.error());
+    if (*native_id > 0) {
+        auto closed = machine.media().close(*native_id);
+        if (!closed && closed.error().code != ErrorCode::invalid_state) {
+            return std::unexpected(closed.error());
+        }
+    }
+    auto cleared = set_int_field(machine, sound, kNokiaSoundNativeIdField, 0);
+    if (!cleared) return cleared;
+    cleared = set_int_field(machine, sound, kNokiaSoundFormatField, 0);
+    if (!cleared) return cleared;
+    cleared = set_int_field(machine, sound, kNokiaSoundFrequencyField, 0);
+    if (!cleared) return cleared;
+    cleared = set_long_field(machine, sound, kNokiaSoundDurationField, 0);
+    if (!cleared) return cleared;
+    return set_nokia_sound_state(machine, sound,
+                                 kNokiaSoundUninitialized, notify);
+}
+
 [[nodiscard]] Result<i32> player_id(Machine& machine, ObjectRef player) {
     return int_field(machine, player, kPlayerNativeIdField);
 }
@@ -428,46 +519,49 @@ void append_utf8(std::string& output, u32 code_point) {
     return ObjectRef {};
 }
 
-void dispatch_event(Machine& machine,
-                    ObjectRef player,
-                    const media::MediaEvent& event) {
+[[nodiscard]] Status dispatch_event_impl(
+    Machine& machine,
+    ObjectRef player,
+    const media::MediaEvent& event) {
     auto listeners = reference_field(machine, player, kPlayerListenersField);
     auto count = int_field(machine, player, kPlayerListenerCountField);
-    if (!listeners || !count || listeners->is_null() || *count <= 0) {
-        return;
-    }
+    if (!listeners) return std::unexpected(listeners.error());
+    if (!count) return std::unexpected(count.error());
+    if (listeners->is_null() || *count <= 0) return {};
+
     auto event_string = create_ascii_string(machine, event_name(event.kind));
+    if (!event_string) return std::unexpected(event_string.error());
+    auto event_root = machine.pin_native_root(*event_string);
+    if (!event_root) return std::unexpected(event_root.error());
+
     auto data = event_data(machine, player, event);
-    if (!event_string || !data) return;
+    if (!data) return std::unexpected(data.error());
+    auto data_root = machine.pin_native_root(*data);
+    if (!data_root) return std::unexpected(data_root.error());
 
     const usize listener_count = static_cast<usize>(*count);
     for (usize index = 0; index < listener_count; ++index) {
         auto value = machine.heap().element(*listeners, index);
-        if (!value) continue;
+        if (!value) return std::unexpected(value.error());
         auto listener = value->as_reference();
-        if (!listener || listener->is_null()) continue;
+        if (!listener) return std::unexpected(listener.error());
+        if (listener->is_null()) continue;
         const std::array<Value, 3> arguments {
             Value::from_reference(player),
             Value::from_reference(*event_string),
             Value::from_reference(*data),
         };
-        (void)machine.invoke_instance(
+        auto invoked = machine.invoke_instance(
             *listener,
             "javax/microedition/media/PlayerListener",
             "playerUpdate",
             "(Ljavax/microedition/media/Player;Ljava/lang/String;Ljava/lang/Object;)V",
             arguments,
             1'000'000);
+        if (!invoked) return std::unexpected(invoked.error());
+        // A listener throwable is isolated; continue dispatching to the rest.
     }
-}
-
-void synchronize_and_dispatch(Machine& machine, ObjectRef player) {
-    auto id = player_id(machine, player);
-    if (!id) return;
-    auto event = machine.media().synchronize(*id);
-    if (event && event->has_value()) {
-        dispatch_event(machine, player, **event);
-    }
+    return {};
 }
 
 [[nodiscard]] Result<std::vector<u8>> copy_byte_array(Machine& machine,
@@ -546,6 +640,37 @@ void synchronize_and_dispatch(Machine& machine, ObjectRef player) {
     return output;
 }
 
+[[nodiscard]] Status require_locator_permission(
+    Machine& machine,
+    std::string_view locator) {
+    const usize separator = locator.find(':');
+    if (separator == std::string_view::npos || separator == 0U) return {};
+    const std::string protocol = lower_ascii(
+        std::string(locator.substr(0U, separator)));
+    std::string_view permission;
+    if (protocol == "file") {
+        permission = security::permissions::connector_file_read;
+    } else if (protocol == "http") {
+        permission = security::permissions::connector_http;
+    } else if (protocol == "https") {
+        permission = security::permissions::connector_https;
+    } else if (protocol == "capture") {
+        std::string_view target = locator.substr(separator + 1U);
+        while (target.starts_with('/')) target.remove_prefix(1U);
+        if (target.starts_with("video")) {
+            permission = security::permissions::media_capture_video;
+        } else if (target.starts_with("image")) {
+            permission = security::permissions::media_capture_image;
+        } else {
+            permission = security::permissions::media_capture_audio;
+        }
+    } else {
+        return {};
+    }
+    return machine.permission_policy().require(permission,
+                                                std::string(locator));
+}
+
 [[nodiscard]] Result<std::optional<Value>> create_player_from_locator(
     Machine& machine,
     ObjectRef locator_string) {
@@ -555,6 +680,8 @@ void synchronize_and_dispatch(Machine& machine, ObjectRef player) {
         return fail_java("java/lang/IllegalArgumentException",
                          "media locator is empty");
     }
+    auto permitted = require_locator_permission(machine, *locator);
+    if (!permitted) return std::unexpected(permitted.error());
 
     std::string type;
     Result<i32> native_id = fail(ErrorCode::internal_error,
@@ -594,7 +721,16 @@ void synchronize_and_dispatch(Machine& machine, ObjectRef player) {
     }
     if (!native_id) return map_media_error(native_id.error());
     auto player = create_player_object(machine, *native_id, type);
-    if (!player) return std::unexpected(player.error());
+    if (!player) {
+        (void)machine.media().close(*native_id);
+        return std::unexpected(player.error());
+    }
+    auto registered = machine.media_events().register_player(*native_id,
+                                                              *player);
+    if (!registered) {
+        (void)machine.media().close(*native_id);
+        return std::unexpected(registered.error());
+    }
     return std::optional<Value>(Value::from_reference(*player));
 }
 
@@ -627,7 +763,16 @@ void synchronize_and_dispatch(Machine& machine, ObjectRef player) {
     auto native_id = machine.media().create_data(std::move(*data), type);
     if (!native_id) return map_media_error(native_id.error());
     auto player = create_player_object(machine, *native_id, type);
-    if (!player) return std::unexpected(player.error());
+    if (!player) {
+        (void)machine.media().close(*native_id);
+        return std::unexpected(player.error());
+    }
+    auto registered = machine.media_events().register_player(*native_id,
+                                                              *player);
+    if (!registered) {
+        (void)machine.media().close(*native_id);
+        return std::unexpected(registered.error());
+    }
     return std::optional<Value>(Value::from_reference(*player));
 }
 
@@ -799,9 +944,14 @@ void register_player(NativeMethodRegistry& registry) {
                 if (!result) return map_media_error(result.error());
                 if constexpr (requires { result->has_value(); }) {
                     if (result->has_value()) {
-                        dispatch_event(machine, *player, **result);
+                        auto dispatched = dispatch_event_impl(
+                            machine, *player, **result);
+                        if (!dispatched) {
+                            return std::unexpected(dispatched.error());
+                        }
                     }
                 }
+                machine.media_events().wake();
                 return std::optional<Value> {};
             });
     };
@@ -913,9 +1063,11 @@ void register_player(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto player = receiver(arguments);
             if (!player) return std::unexpected(player.error());
-            synchronize_and_dispatch(machine, *player);
             auto id = player_id(machine, *player);
             if (!id) return std::unexpected(id.error());
+            auto synchronized = machine.media().synchronize(*id);
+            if (!synchronized) return map_media_error(synchronized.error());
+            machine.media_events().wake();
             auto snapshot = machine.media().snapshot(*id);
             if (!snapshot) return map_media_error(snapshot.error());
             if (snapshot->state == media::PlayerState::closed) {
@@ -933,9 +1085,11 @@ void register_player(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto player = receiver(arguments);
             if (!player) return std::unexpected(player.error());
-            synchronize_and_dispatch(machine, *player);
             auto id = player_id(machine, *player);
             if (!id) return std::unexpected(id.error());
+            auto synchronized = machine.media().synchronize(*id);
+            if (!synchronized) return map_media_error(synchronized.error());
+            machine.media_events().wake();
             auto snapshot = machine.media().snapshot(*id);
             if (!snapshot) return map_media_error(snapshot.error());
             return std::optional<Value>(Value::from_int(
@@ -950,9 +1104,11 @@ void register_player(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto player = receiver(arguments);
             if (!player) return std::unexpected(player.error());
-            synchronize_and_dispatch(machine, *player);
             auto id = player_id(machine, *player);
             if (!id) return std::unexpected(id.error());
+            auto synchronized = machine.media().synchronize(*id);
+            if (!synchronized) return map_media_error(synchronized.error());
+            machine.media_events().wake();
             auto snapshot = machine.media().snapshot(*id);
             if (!snapshot) return map_media_error(snapshot.error());
             if (snapshot->state == media::PlayerState::closed) {
@@ -1248,12 +1404,15 @@ void register_controls(NativeMethodRegistry& registry) {
             const i32 clamped = std::clamp(*level, 0, 100);
             auto status = machine.media().set_volume(*id, clamped);
             if (!status) return map_media_error(status.error());
-            dispatch_event(machine,
-                           *player,
-                           media::MediaEvent {
-                               .kind = media::MediaEventKind::volume_changed,
-                               .player_id = *id,
-                           });
+            auto dispatched = dispatch_event_impl(
+                machine,
+                *player,
+                media::MediaEvent {
+                    .kind = media::MediaEventKind::volume_changed,
+                    .player_id = *id,
+                });
+            if (!dispatched) return std::unexpected(dispatched.error());
+            machine.media_events().wake();
             return std::optional<Value>(Value::from_int(clamped));
         });
 
@@ -1290,12 +1449,15 @@ void register_controls(NativeMethodRegistry& registry) {
             if (!id) return std::unexpected(id.error());
             auto status = machine.media().set_mute(*id, *muted != 0);
             if (!status) return map_media_error(status.error());
-            dispatch_event(machine,
-                           *player,
-                           media::MediaEvent {
-                               .kind = media::MediaEventKind::volume_changed,
-                               .player_id = *id,
-                           });
+            auto dispatched = dispatch_event_impl(
+                machine,
+                *player,
+                media::MediaEvent {
+                    .kind = media::MediaEventKind::volume_changed,
+                    .player_id = *id,
+                });
+            if (!dispatched) return std::unexpected(dispatched.error());
+            machine.media_events().wake();
             return std::optional<Value> {};
         });
 
@@ -1351,6 +1513,388 @@ void register_controls(NativeMethodRegistry& registry) {
         });
 }
 
+void register_nokia_sound(NativeMethodRegistry& registry) {
+    constexpr const char* owner = "com/nokia/mid/sound/Sound";
+
+    const auto data_initializer = [](bool constructor) -> NativeMethod {
+        return [constructor](Machine& machine,
+                             std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto data = reference_argument(arguments, 1U, false);
+            auto type = integer_argument(arguments, 2U);
+            if (!sound) return std::unexpected(sound.error());
+            if (!data) return std::unexpected(data.error());
+            if (!type) return std::unexpected(type.error());
+            if (*type != kNokiaFormatTone && *type != kNokiaFormatWave) {
+                (void)set_nokia_sound_state(machine, *sound,
+                                            kNokiaSoundUninitialized, false);
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "unsupported Nokia sound format");
+            }
+            if (constructor) {
+                auto initialized = set_int_field(
+                    machine, *sound, kNokiaSoundNativeIdField, 0);
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_int_field(
+                    machine, *sound, kNokiaSoundGainField, 255);
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_reference_field(
+                    machine, *sound, kNokiaSoundListenerField, {});
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_int_field(
+                    machine, *sound, kNokiaSoundStateField,
+                    kNokiaSoundUninitialized);
+                if (!initialized) return std::unexpected(initialized.error());
+            } else {
+                auto released = release_nokia_sound(machine, *sound, false);
+                if (!released) return std::unexpected(released.error());
+            }
+
+            auto bytes = copy_byte_array(machine, *data);
+            if (!bytes) return std::unexpected(bytes.error());
+            Result<i32> created = *type == kNokiaFormatWave
+                ? machine.media().create_data(std::move(*bytes), "audio/x-wav")
+                : machine.media().create_data({}, "audio/x-tone-seq");
+            if (!created) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 created.error().message);
+            }
+            const i32 native_id = *created;
+            if (*type == kNokiaFormatTone) {
+                auto sequence = machine.media().set_tone_sequence(
+                    native_id, std::move(*bytes));
+                if (!sequence) {
+                    (void)machine.media().close(native_id);
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     sequence.error().message);
+                }
+            }
+            auto realized = machine.media().realize(native_id);
+            if (!realized) {
+                (void)machine.media().close(native_id);
+                return fail_java("java/lang/IllegalArgumentException",
+                                 realized.error().message);
+            }
+            auto gain = int_field(machine, *sound, kNokiaSoundGainField);
+            if (!gain) {
+                (void)machine.media().close(native_id);
+                return std::unexpected(gain.error());
+            }
+            auto volume = machine.media().set_volume(
+                native_id, nokia_gain_to_volume(*gain));
+            if (!volume) {
+                (void)machine.media().close(native_id);
+                return fail_java("java/lang/IllegalArgumentException",
+                                 volume.error().message);
+            }
+            auto stored = set_int_field(
+                machine, *sound, kNokiaSoundNativeIdField, native_id);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_int_field(
+                machine, *sound, kNokiaSoundFormatField, *type);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_int_field(
+                machine, *sound, kNokiaSoundFrequencyField, 0);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_long_field(
+                machine, *sound, kNokiaSoundDurationField, 0);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_nokia_sound_state(
+                machine, *sound, kNokiaSoundStopped, false);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        };
+    };
+
+    const auto tone_initializer = [](bool constructor) -> NativeMethod {
+        return [constructor](Machine& machine,
+                             std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto frequency = integer_argument(arguments, 1U);
+            auto duration = long_argument(arguments, 2U);
+            if (!sound) return std::unexpected(sound.error());
+            if (!frequency) return std::unexpected(frequency.error());
+            if (!duration) return std::unexpected(duration.error());
+            if (constructor) {
+                auto initialized = set_int_field(
+                    machine, *sound, kNokiaSoundNativeIdField, 0);
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_int_field(
+                    machine, *sound, kNokiaSoundGainField, 255);
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_reference_field(
+                    machine, *sound, kNokiaSoundListenerField, {});
+                if (!initialized) return std::unexpected(initialized.error());
+                initialized = set_int_field(
+                    machine, *sound, kNokiaSoundStateField,
+                    kNokiaSoundUninitialized);
+                if (!initialized) return std::unexpected(initialized.error());
+            } else {
+                auto released = release_nokia_sound(machine, *sound, false);
+                if (!released) return std::unexpected(released.error());
+            }
+            if (*frequency < 0 || *frequency > 13'288 || *duration <= 0) {
+                (void)set_nokia_sound_state(machine, *sound,
+                                            kNokiaSoundUninitialized, false);
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "invalid Nokia tone parameters");
+            }
+            auto stored = set_int_field(
+                machine, *sound, kNokiaSoundNativeIdField, 0);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_int_field(
+                machine, *sound, kNokiaSoundFormatField, kNokiaFormatTone);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_int_field(
+                machine, *sound, kNokiaSoundFrequencyField, *frequency);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_long_field(
+                machine, *sound, kNokiaSoundDurationField, *duration);
+            if (!stored) return std::unexpected(stored.error());
+            stored = set_nokia_sound_state(
+                machine, *sound, kNokiaSoundStopped, false);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        };
+    };
+
+    add(registry, owner, "<init>", "([BI)V", data_initializer(true));
+    add(registry, owner, "init", "([BI)V", data_initializer(false));
+    add(registry, owner, "<init>", "(IJ)V", tone_initializer(true));
+    add(registry, owner, "init", "(IJ)V", tone_initializer(false));
+
+    add(registry, owner, "getSupportedFormats", "()[I",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto formats = machine.heap().allocate_array(
+                "[I", 2U, Value::from_int(0));
+            if (!formats) return std::unexpected(formats.error());
+            auto first = machine.heap().set_element(
+                *formats, 0U, Value::from_int(kNokiaFormatTone));
+            auto second = machine.heap().set_element(
+                *formats, 1U, Value::from_int(kNokiaFormatWave));
+            if (!first) return std::unexpected(first.error());
+            if (!second) return std::unexpected(second.error());
+            return std::optional<Value>(Value::from_reference(*formats));
+        });
+    add(registry, owner, "getConcurrentSoundCount", "(I)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto type = integer_argument(arguments, 0U);
+            if (!type) return std::unexpected(type.error());
+            const i32 count = (*type == kNokiaFormatTone ||
+                               *type == kNokiaFormatWave) ? 8 : 0;
+            return std::optional<Value>(Value::from_int(count));
+        });
+
+    add(registry, owner, "play", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto loops = integer_argument(arguments, 1U);
+            if (!sound) return std::unexpected(sound.error());
+            if (!loops) return std::unexpected(loops.error());
+            if (*loops < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "negative Nokia sound loop count");
+            }
+            auto state = int_field(machine, *sound, kNokiaSoundStateField);
+            if (!state) return std::unexpected(state.error());
+            if (*state == kNokiaSoundUninitialized) {
+                return std::optional<Value> {};
+            }
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            auto gain = int_field(machine, *sound, kNokiaSoundGainField);
+            if (!native_id) return std::unexpected(native_id.error());
+            if (!gain) return std::unexpected(gain.error());
+            if (*native_id > 0) {
+                if (*state == kNokiaSoundPlaying) {
+                    (void)machine.media().stop(*native_id);
+                }
+                auto loop = machine.media().set_loop_count(
+                    *native_id, *loops == 0 ? -1 : *loops);
+                if (!loop) {
+                    (void)set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    return std::optional<Value> {};
+                }
+                (void)machine.media().set_media_time(*native_id, 0);
+                auto started = machine.media().start(*native_id);
+                if (!started) {
+                    (void)set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    return std::optional<Value> {};
+                }
+                auto updated = set_nokia_sound_state(
+                    machine, *sound, kNokiaSoundPlaying);
+                if (!updated) return std::unexpected(updated.error());
+                return std::optional<Value> {};
+            }
+            auto frequency = int_field(
+                machine, *sound, kNokiaSoundFrequencyField);
+            auto duration_value = field_value(
+                machine, *sound, kNokiaSoundDurationField);
+            if (!frequency) return std::unexpected(frequency.error());
+            if (!duration_value) return std::unexpected(duration_value.error());
+            auto duration = duration_value->as_long();
+            if (!duration) return std::unexpected(duration.error());
+            const i32 note = nokia_frequency_to_note(*frequency);
+            if (note >= 0) {
+                const i32 milliseconds = static_cast<i32>(std::min<i64>(
+                    *duration, std::numeric_limits<i32>::max()));
+                auto played = machine.media().play_tone(
+                    note, milliseconds, nokia_gain_to_volume(*gain));
+                if (!played || !*played) {
+                    (void)set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    return std::optional<Value> {};
+                }
+            }
+            auto updated = set_nokia_sound_state(
+                machine, *sound, kNokiaSoundPlaying);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, owner, "stop", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto state = int_field(machine, *sound, kNokiaSoundStateField);
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            if (!state) return std::unexpected(state.error());
+            if (!native_id) return std::unexpected(native_id.error());
+            if (*state != kNokiaSoundPlaying) {
+                return std::optional<Value> {};
+            }
+            if (*native_id > 0) (void)machine.media().stop(*native_id);
+            auto updated = set_nokia_sound_state(
+                machine, *sound, kNokiaSoundStopped);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, owner, "resume", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto state = int_field(machine, *sound, kNokiaSoundStateField);
+            if (!state) return std::unexpected(state.error());
+            if (*state != kNokiaSoundStopped) {
+                return std::optional<Value> {};
+            }
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            if (!native_id) return std::unexpected(native_id.error());
+            if (*native_id > 0) {
+                auto started = machine.media().start(*native_id);
+                if (!started) return std::optional<Value> {};
+                auto updated = set_nokia_sound_state(
+                    machine, *sound, kNokiaSoundPlaying);
+                if (!updated) return std::unexpected(updated.error());
+                return std::optional<Value> {};
+            }
+            const std::array<Value, 1> play_arguments {Value::from_int(1)};
+            auto played = machine.invoke_instance(
+                *sound, owner, "play", "(I)V",
+                play_arguments, 1'000'000);
+            if (!played) return std::unexpected(played.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, owner, "release", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto released = release_nokia_sound(machine, *sound, true);
+            if (!released) return std::unexpected(released.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, owner, "getState", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            if (!native_id) return std::unexpected(native_id.error());
+            if (*native_id > 0) {
+                auto event = machine.media().synchronize(*native_id);
+                if (event && event->has_value() &&
+                    ((**event).kind == media::MediaEventKind::end_of_media ||
+                     (**event).kind == media::MediaEventKind::error ||
+                     (**event).kind == media::MediaEventKind::closed)) {
+                    auto stopped = set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    if (!stopped) return std::unexpected(stopped.error());
+                }
+            }
+            auto state = int_field(machine, *sound, kNokiaSoundStateField);
+            if (!state) return std::unexpected(state.error());
+            return std::optional<Value>(Value::from_int(*state));
+        });
+
+    add(registry, owner, "setGain", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto gain = integer_argument(arguments, 1U);
+            if (!sound) return std::unexpected(sound.error());
+            if (!gain) return std::unexpected(gain.error());
+            const i32 clamped = std::clamp(*gain, 0, 255);
+            auto stored = set_int_field(
+                machine, *sound, kNokiaSoundGainField, clamped);
+            if (!stored) return std::unexpected(stored.error());
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            if (!native_id) return std::unexpected(native_id.error());
+            if (*native_id > 0) {
+                (void)machine.media().set_volume(
+                    *native_id, nokia_gain_to_volume(clamped));
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, owner, "getGain", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto gain = int_field(machine, *sound, kNokiaSoundGainField);
+            if (!gain) return std::unexpected(gain.error());
+            return std::optional<Value>(Value::from_int(*gain));
+        });
+    add(registry, owner, "setSoundListener",
+        "(Lcom/nokia/mid/sound/SoundListener;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto listener = reference_argument(arguments, 1U, true);
+            if (!sound) return std::unexpected(sound.error());
+            if (!listener) return std::unexpected(listener.error());
+            if (!listener->is_null()) {
+                auto valid = machine.object_is_instance(
+                    *listener, "com/nokia/mid/sound/SoundListener");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "invalid Nokia SoundListener");
+                }
+            }
+            auto stored = set_reference_field(
+                machine, *sound, kNokiaSoundListenerField, *listener);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+}
+
 void register_time_base(NativeMethodRegistry& registry) {
     add(registry,
         "javax/microedition/media/SystemTimeBase",
@@ -1378,10 +1922,17 @@ void register_time_base(NativeMethodRegistry& registry) {
 
 } // namespace
 
+Status dispatch_media_event(Machine& machine,
+                            ObjectRef player,
+                            const media::MediaEvent& event) {
+    return dispatch_event_impl(machine, player, event);
+}
+
 void register_media_natives(NativeMethodRegistry& registry) {
     register_manager(registry);
     register_player(registry);
     register_controls(registry);
+    register_nokia_sound(registry);
     register_time_base(registry);
 }
 

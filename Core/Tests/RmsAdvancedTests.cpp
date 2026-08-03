@@ -435,6 +435,22 @@ void test_delete_store_rollback(const fs::path& root) {
     }
 }
 
+void test_delete_tombstone_scavenger(const fs::path& root) {
+    clear_directory(root);
+    const fs::path stale = root / "orphan.rms.delete-4242";
+    const fs::path unrelated = root / "notes.delete-4242";
+    write_bytes(stale, std::array<u8, 3> {1U, 2U, 3U});
+    write_bytes(unrelated, std::array<u8, 1> {9U});
+
+    RecordStoreRegistry registry;
+    require(registry.configure(root.string()).has_value(),
+            "configure registry with stale delete tombstone");
+    require(!fs::exists(stale),
+            "configure scavenges stale RMS delete tombstone");
+    require(fs::exists(unrelated),
+            "configure preserves unrelated files containing delete marker");
+}
+
 struct Generations final {
     std::string filename;
     std::vector<u8> first;
@@ -827,6 +843,7 @@ int main(int argc, char** argv) {
     test_concurrent_registry(root / "concurrent");
     test_fault_rollback(root / "faults");
     test_delete_store_rollback(root / "delete-faults");
+    test_delete_tombstone_scavenger(root / "delete-scavenger");
     test_recovery_selection(root / "recovery");
     test_process_crash_recovery(root / "crash", crash_harness);
     test_migration_and_future_version(root / "formats");

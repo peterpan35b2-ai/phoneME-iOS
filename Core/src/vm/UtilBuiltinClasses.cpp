@@ -10,6 +10,33 @@ namespace {
 using namespace builtin;
 
 [[nodiscard]] ClassPtr build_util_class(std::string_view name) {
+    if (name == "java/util/TimerTask") {
+        return make_class("java/util/TimerTask", "java/lang/Object",
+                          kOrdinary | kAbstract, {}, {
+            method(kProtected, "<init>", "()V"),
+            method(kPublic | kAbstract, "run", "()V"),
+            method(kPublic, "cancel", "()Z"),
+            method(kPublic, "scheduledExecutionTime", "()J"),
+        });
+    }
+    if (name == "java/util/Timer") {
+        return make_class("java/util/Timer", "java/lang/Object", kOrdinary,
+                          {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Z)V"),
+            method(kPublic, "schedule", "(Ljava/util/TimerTask;J)V"),
+            method(kPublic, "schedule", "(Ljava/util/TimerTask;JJ)V"),
+            method(kPublic, "schedule",
+                   "(Ljava/util/TimerTask;Ljava/util/Date;)V"),
+            method(kPublic, "schedule",
+                   "(Ljava/util/TimerTask;Ljava/util/Date;J)V"),
+            method(kPublic, "scheduleAtFixedRate",
+                   "(Ljava/util/TimerTask;JJ)V"),
+            method(kPublic, "scheduleAtFixedRate",
+                   "(Ljava/util/TimerTask;Ljava/util/Date;J)V"),
+            method(kPublic, "cancel", "()V"),
+        });
+    }
     if (name == "java/util/Date") {
         return make_class("java/util/Date", "java/lang/Object", kOrdinary, {
             field(kPrivate, "fastTime", "J"),
@@ -115,7 +142,11 @@ using namespace builtin;
             method(kPublic, "<init>", "(II)V"),
             method(kPublic | kSynchronized, "size", "()I"),
             method(kPublic | kSynchronized, "capacity", "()I"),
+            method(kPublic | kSynchronized, "ensureCapacity", "(I)V"),
+            method(kPublic | kSynchronized, "trimToSize", "()V"),
+            method(kPublic | kSynchronized, "setSize", "(I)V"),
             method(kPublic | kSynchronized, "isEmpty", "()Z"),
+            method(kPublic | kSynchronized, "copyInto", "([Ljava/lang/Object;)V"),
             method(kPublic | kSynchronized, "contains", "(Ljava/lang/Object;)Z"),
             method(kPublic | kSynchronized, "indexOf", "(Ljava/lang/Object;)I"),
             method(kPublic | kSynchronized, "indexOf", "(Ljava/lang/Object;I)I"),

@@ -1,4 +1,5 @@
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import javax.microedition.io.Connection;
 import javax.microedition.io.Connector;
@@ -7,11 +8,51 @@ import javax.microedition.io.DatagramConnection;
 import javax.microedition.io.HttpConnection;
 import javax.microedition.io.HttpsConnection;
 import javax.microedition.io.SecurityInfo;
+import javax.microedition.io.ServerSocketConnection;
 import javax.microedition.io.SocketConnection;
 import javax.microedition.pki.Certificate;
+import javax.microedition.pki.CertificateException;
 
 public final class NetworkOps {
+    private static int interruptedReadResult;
+
     private NetworkOps() {}
+
+    private static final class BlockingReader implements Runnable {
+        public void run() {
+            SocketConnection connection = null;
+            InputStream input = null;
+            try {
+                connection = (SocketConnection) Connector.open(
+                    "socket://interrupt.test:7200",
+                    Connector.READ_WRITE, true);
+                input = connection.openInputStream();
+                input.read();
+                interruptedReadResult = 1;
+            } catch (InterruptedIOException expected) {
+                interruptedReadResult = 2;
+            } catch (Exception failure) {
+                interruptedReadResult = 3;
+            } finally {
+                try {
+                    if (input != null) input.close();
+                } catch (Exception ignored) {}
+                try {
+                    if (connection != null) connection.close();
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    public static int interruptedRead() throws Exception {
+        interruptedReadResult = 0;
+        Thread worker = new Thread(new BlockingReader());
+        worker.start();
+        Thread.sleep(50L);
+        worker.interrupt();
+        worker.join(2000L);
+        return worker.isAlive() ? 4 : interruptedReadResult;
+    }
 
     public static int socketRoundTrip() throws Exception {
         SocketConnection connection = (SocketConnection) Connector.open(
@@ -39,6 +80,21 @@ public final class NetworkOps {
         int value = input.read();
         input.close();
         return value;
+    }
+
+    public static int serverSocketOpenClose() throws Exception {
+        ServerSocketConnection connection = (ServerSocketConnection)
+            Connector.open("socket://:12345", Connector.READ_WRITE, true);
+        int port = connection.getLocalPort();
+        connection.close();
+        return port;
+    }
+
+    public static int datagramReceiverOpenClose() throws Exception {
+        DatagramConnection connection = (DatagramConnection) Connector.open(
+            "datagram://:9876", Connector.READ_WRITE, true);
+        connection.close();
+        return 1;
     }
 
     public static int datagramRoundTrip() throws Exception {
@@ -80,6 +136,84 @@ public final class NetworkOps {
         if (connection.getHeaderFieldDate("Date", -1L) == 784111777000L) compatibilityScore++;
         connection.close();
         return status + body + header + port + compatibilityScore;
+    }
+
+    public static int runtimeConstantSurface() {
+        int score = HttpConnection.HEAD.length()
+            + HttpConnection.GET.length()
+            + HttpConnection.POST.length();
+        score += Connector.READ + Connector.WRITE + Connector.READ_WRITE;
+        score += SocketConnection.DELAY + SocketConnection.LINGER
+            + SocketConnection.KEEPALIVE + SocketConnection.RCVBUF
+            + SocketConnection.SNDBUF;
+        score += CertificateException.BAD_EXTENSIONS
+            + CertificateException.CERTIFICATE_CHAIN_TOO_LONG
+            + CertificateException.EXPIRED
+            + CertificateException.UNAUTHORIZED_INTERMEDIATE_CA
+            + CertificateException.MISSING_SIGNATURE
+            + CertificateException.NOT_YET_VALID
+            + CertificateException.SITENAME_MISMATCH
+            + CertificateException.UNRECOGNIZED_ISSUER
+            + CertificateException.UNSUPPORTED_SIGALG
+            + CertificateException.INAPPROPRIATE_KEY_USAGE
+            + CertificateException.BROKEN_CHAIN
+            + CertificateException.ROOT_CA_EXPIRED
+            + CertificateException.UNSUPPORTED_PUBLIC_KEY_TYPE
+            + CertificateException.VERIFICATION_FAILED;
+        score += HttpConnection.HTTP_OK + HttpConnection.HTTP_CREATED
+            + HttpConnection.HTTP_ACCEPTED
+            + HttpConnection.HTTP_NOT_AUTHORITATIVE
+            + HttpConnection.HTTP_NO_CONTENT + HttpConnection.HTTP_RESET
+            + HttpConnection.HTTP_PARTIAL + HttpConnection.HTTP_MULT_CHOICE
+            + HttpConnection.HTTP_MOVED_PERM
+            + HttpConnection.HTTP_MOVED_TEMP
+            + HttpConnection.HTTP_SEE_OTHER
+            + HttpConnection.HTTP_NOT_MODIFIED
+            + HttpConnection.HTTP_USE_PROXY
+            + HttpConnection.HTTP_TEMP_REDIRECT
+            + HttpConnection.HTTP_BAD_REQUEST
+            + HttpConnection.HTTP_UNAUTHORIZED
+            + HttpConnection.HTTP_PAYMENT_REQUIRED
+            + HttpConnection.HTTP_FORBIDDEN + HttpConnection.HTTP_NOT_FOUND
+            + HttpConnection.HTTP_BAD_METHOD
+            + HttpConnection.HTTP_NOT_ACCEPTABLE
+            + HttpConnection.HTTP_PROXY_AUTH
+            + HttpConnection.HTTP_CLIENT_TIMEOUT
+            + HttpConnection.HTTP_CONFLICT + HttpConnection.HTTP_GONE
+            + HttpConnection.HTTP_LENGTH_REQUIRED
+            + HttpConnection.HTTP_PRECON_FAILED
+            + HttpConnection.HTTP_ENTITY_TOO_LARGE
+            + HttpConnection.HTTP_REQ_TOO_LONG
+            + HttpConnection.HTTP_UNSUPPORTED_TYPE
+            + HttpConnection.HTTP_UNSUPPORTED_RANGE
+            + HttpConnection.HTTP_EXPECT_FAILED
+            + HttpConnection.HTTP_INTERNAL_ERROR
+            + HttpConnection.HTTP_NOT_IMPLEMENTED
+            + HttpConnection.HTTP_BAD_GATEWAY
+            + HttpConnection.HTTP_UNAVAILABLE
+            + HttpConnection.HTTP_GATEWAY_TIMEOUT
+            + HttpConnection.HTTP_VERSION;
+        return score;
+    }
+
+    public static int certificateExceptionRoundTrip() throws Exception {
+        CertificateException siteName = new CertificateException(
+            (Certificate) null, CertificateException.SITENAME_MISMATCH);
+        CertificateException verification = new CertificateException(
+            "verify", null, CertificateException.VERIFICATION_FAILED);
+        int score = 0;
+        if (siteName.getCertificate() == null) score += siteName.getReason();
+        if ("Certificate does not contain the correct site name".equals(
+                siteName.getMessage())) {
+            score += 100;
+        }
+        if (siteName.getCause() == null) score += 10;
+        if (verification.getCertificate() == null) {
+            score += verification.getReason();
+        }
+        if ("verify".equals(verification.getMessage())) score += 100;
+        if (verification.getCause() == null) score += 10;
+        return score;
     }
 
     public static int httpsRoundTrip() throws Exception {

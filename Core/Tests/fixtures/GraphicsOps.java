@@ -1,5 +1,7 @@
 package corefixture;
 
+import java.io.ByteArrayInputStream;
+
 import javax.microedition.lcdui.Font;
 import javax.microedition.lcdui.Graphics;
 import javax.microedition.lcdui.Image;
@@ -229,6 +231,19 @@ public final class GraphicsOps {
                 decodedPixels[0] != 0xFFFF0000 ||
                 decodedPixels[1] != 0x800000FF) {
             return 13;
+        }
+        try {
+            Image streamed = Image.createImage(new ByteArrayInputStream(png));
+            int[] streamedPixels = new int[2];
+            streamed.getRGB(streamedPixels, 0, 2, 0, 0, 2, 1);
+            if (streamed.isMutable() || streamed.getWidth() != 2 ||
+                    streamed.getHeight() != 1 ||
+                    streamedPixels[0] != 0xFFFF0000 ||
+                    streamedPixels[1] != 0x800000FF) {
+                return 16;
+            }
+        } catch (java.io.IOException exception) {
+            return 17;
         }
         return 0;
     }

@@ -1,6 +1,9 @@
 package corefixture;
 
 import com.sun.midp.security.PermissionGate;
+import javax.microedition.io.Connector;
+import javax.microedition.media.Manager;
+import javax.microedition.media.MediaException;
 import javax.microedition.midlet.MIDlet;
 
 public final class SecurityOps {
@@ -59,6 +62,35 @@ public final class SecurityOps {
                     MEDIA_RECORD, "capture://audio", true);
         } catch (SecurityException expected) {
             result |= 2;
+        }
+        return result;
+    }
+
+    public static int captureAllowedButUnsupported() throws Exception {
+        try {
+            Manager.createPlayer("capture://audio");
+            return 0;
+        } catch (MediaException expected) {
+            return 1;
+        }
+    }
+
+    public static int subsystemDenials() throws Exception {
+        int result = 0;
+        try {
+            Connector.open("socket://denied.test:1234").close();
+        } catch (SecurityException expected) {
+            result |= 1;
+        }
+        try {
+            Connector.open("file:///denied.dat", Connector.READ).close();
+        } catch (SecurityException expected) {
+            result |= 2;
+        }
+        try {
+            Manager.createPlayer("capture://audio").close();
+        } catch (SecurityException expected) {
+            result |= 4;
         }
         return result;
     }

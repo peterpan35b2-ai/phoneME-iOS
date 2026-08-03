@@ -147,6 +147,7 @@ public:
         SocketOption option,
         Completion<i32> completion) = 0;
 
+    [[nodiscard]] virtual Status shutdown_output(NativeHandle handle) = 0;
     [[nodiscard]] virtual Status close(NativeHandle handle) = 0;
     [[nodiscard]] virtual Status cancel(OperationId operation) = 0;
 };

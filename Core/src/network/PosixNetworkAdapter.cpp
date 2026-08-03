@@ -1,4 +1,5 @@
 #include "phoneme/network/AsyncNetworkAdapter.hpp"
+#include "phoneme/network/HttpParser.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -10,26 +11,38 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
 extern "C" {
-__attribute__((weak)) int32_t phoneme_ios_https_execute(
-    const char*, const char*, const char*, const uint8_t*, int32_t, int32_t) {
+using PhoneMEHTTPSCompletion = void (*)(int32_t, void*);
+__attribute__((weak)) int32_t phoneme_ios_https_execute_async(
+    const char*, const char*, const char*, const uint8_t*, int32_t, int32_t,
+    int32_t, PhoneMEHTTPSCompletion, void*) {
     return -1;
 }
 __attribute__((weak)) int32_t phoneme_ios_https_get_status_code(int32_t) {
@@ -46,6 +59,7 @@ __attribute__((weak)) int32_t phoneme_ios_https_copy_body(
 __attribute__((weak)) int64_t phoneme_ios_https_get_long(int32_t, int32_t) {
     return 0;
 }
+__attribute__((weak)) void phoneme_ios_https_cancel(int32_t) {}
 __attribute__((weak)) void phoneme_ios_https_close(int32_t) {}
 }
 #endif
@@ -54,7 +68,121 @@ namespace phoneme::network {
 namespace {
 
 constexpr usize kMaximumHttpResponseBytes = 32U * 1024U * 1024U;
+constexpr usize kMaximumHttpHeaderBytes = 64U * 1024U;
+constexpr usize kMaximumInterimResponses = 8U;
 constexpr usize kIoChunkSize = 16U * 1024U;
+constexpr i32 kCancellationPollMilliseconds = 50;
+constexpr usize kNetworkWorkerCount = 4U;
+
+std::atomic<i32> g_address_resolution_delay_for_tests {0};
+
+using CancellationCheck = std::function<bool()>;
+
+struct ScopedDescriptor final {
+    int value {-1};
+
+    ScopedDescriptor() = default;
+    explicit ScopedDescriptor(int descriptor) noexcept : value(descriptor) {}
+    ScopedDescriptor(const ScopedDescriptor&) = delete;
+    ScopedDescriptor& operator=(const ScopedDescriptor&) = delete;
+    ScopedDescriptor(ScopedDescriptor&& other) noexcept
+        : value(std::exchange(other.value, -1)) {}
+    ScopedDescriptor& operator=(ScopedDescriptor&& other) noexcept {
+        if (this != &other) {
+            reset();
+            value = std::exchange(other.value, -1);
+        }
+        return *this;
+    }
+    ~ScopedDescriptor() { reset(); }
+
+    void reset(int descriptor = -1) noexcept {
+        if (value >= 0) ::close(value);
+        value = descriptor;
+    }
+
+    [[nodiscard]] int release() noexcept {
+        return std::exchange(value, -1);
+    }
+};
+
+struct HandleState final {
+    explicit HandleState(int socket_descriptor) noexcept
+        : descriptor(socket_descriptor) {}
+
+    int descriptor {-1};
+    std::timed_mutex input_gate;
+    std::timed_mutex output_gate;
+};
+
+struct DuplicatedHandle final {
+    ScopedDescriptor descriptor;
+    std::shared_ptr<HandleState> state;
+};
+
+[[nodiscard]] bool cancellation_requested(
+    const CancellationCheck& cancelled) {
+    return cancelled && cancelled();
+}
+
+[[nodiscard]] std::unexpected<Error> cancelled_operation() {
+    return fail(ErrorCode::io_error, "network operation was cancelled");
+}
+
+class OperationDeadline final {
+public:
+    explicit OperationDeadline(i32 timeout_ms) {
+        if (timeout_ms > 0) {
+            deadline_ = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+        }
+    }
+
+    [[nodiscard]] Result<i32> next_poll_timeout() const {
+        if (!deadline_.has_value()) return kCancellationPollMilliseconds;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= *deadline_) {
+            return fail(ErrorCode::io_error,
+                        "network operation timed out");
+        }
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            *deadline_ - now);
+        if (remaining.count() <= 0) {
+            remaining = std::chrono::milliseconds(1);
+        }
+        return static_cast<i32>(std::min<i64>(
+            remaining.count(), kCancellationPollMilliseconds));
+    }
+
+private:
+    std::optional<std::chrono::steady_clock::time_point> deadline_;
+};
+
+[[nodiscard]] Status check_operation_active(
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled) {
+    if (cancellation_requested(cancelled)) return cancelled_operation();
+    auto wait_interval = deadline.next_poll_timeout();
+    if (!wait_interval) return std::unexpected(wait_interval.error());
+    return {};
+}
+
+[[nodiscard]] Result<std::unique_lock<std::timed_mutex>> acquire_operation_gate(
+    std::timed_mutex& gate,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled) {
+    std::unique_lock<std::timed_mutex> lock(gate, std::defer_lock);
+    while (true) {
+        if (cancellation_requested(cancelled)) return cancelled_operation();
+        auto wait_interval = deadline.next_poll_timeout();
+        if (!wait_interval) return std::unexpected(wait_interval.error());
+        if (lock.try_lock_for(std::chrono::milliseconds(*wait_interval))) {
+            break;
+        }
+    }
+    if (cancellation_requested(cancelled)) return cancelled_operation();
+    return lock;
+}
 
 [[nodiscard]] std::unexpected<Error> io_failure(std::string message) {
     if (errno != 0) {
@@ -90,17 +218,22 @@ constexpr usize kIoChunkSize = 16U * 1024U;
     return std::string(value.substr(first, last - first));
 }
 
-[[nodiscard]] Status wait_fd(int descriptor,
-                             short events,
-                             i32 timeout_ms) {
-    pollfd poll_descriptor {
-        .fd = descriptor,
-        .events = events,
-        .revents = 0,
-    };
-    const int timeout = timeout_ms <= 0 ? -1 : timeout_ms;
+[[nodiscard]] Status wait_fd(
+    int descriptor,
+    short events,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
     while (true) {
-        const int result = ::poll(&poll_descriptor, 1, timeout);
+        if (cancellation_requested(cancelled)) return cancelled_operation();
+        auto poll_timeout = deadline.next_poll_timeout();
+        if (!poll_timeout) return std::unexpected(poll_timeout.error());
+
+        pollfd poll_descriptor {
+            .fd = descriptor,
+            .events = events,
+            .revents = 0,
+        };
+        const int result = ::poll(&poll_descriptor, 1, *poll_timeout);
         if (result > 0) {
             if ((poll_descriptor.revents &
                  static_cast<short>(POLLERR | POLLHUP | POLLNVAL)) != 0 &&
@@ -108,12 +241,12 @@ constexpr usize kIoChunkSize = 16U * 1024U;
                 return fail(ErrorCode::io_error,
                             "network descriptor reported an error");
             }
+            if (cancellation_requested(cancelled)) {
+                return cancelled_operation();
+            }
             return {};
         }
-        if (result == 0) {
-            return fail(ErrorCode::io_error,
-                        "network operation timed out");
-        }
+        if (result == 0) continue;
         if (errno != EINTR) return io_failure("poll failed");
     }
 }
@@ -210,21 +343,99 @@ struct AddressList final {
     }
 };
 
-[[nodiscard]] Result<AddressList> resolve_addresses(std::string_view host,
-                                                    u16 port,
-                                                    int socket_type,
-                                                    bool passive) {
+#if defined(__APPLE__)
+struct AddressResolutionState final {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::string host;
+    std::string service;
+    addrinfo hints {};
+    addrinfo* value {nullptr};
+    int result {EAI_AGAIN};
+    bool completed {false};
+
+    ~AddressResolutionState() {
+        if (value != nullptr) ::freeaddrinfo(value);
+    }
+};
+
+void resolve_addresses_on_dispatch_queue(void* opaque) {
+    std::unique_ptr<std::shared_ptr<AddressResolutionState>> owner(
+        static_cast<std::shared_ptr<AddressResolutionState>*>(opaque));
+    if (!owner || !*owner) return;
+    const auto state = *owner;
+    const i32 delay = g_address_resolution_delay_for_tests.load(
+        std::memory_order_acquire);
+    if (delay > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+    addrinfo* value = nullptr;
+    const char* host_pointer = state->host.empty()
+        ? nullptr : state->host.c_str();
+    const int result = ::getaddrinfo(
+        host_pointer, state->service.c_str(), &state->hints, &value);
+    {
+        std::scoped_lock lock(state->mutex);
+        state->result = result;
+        state->value = value;
+        state->completed = true;
+    }
+    state->condition.notify_all();
+}
+#endif
+
+[[nodiscard]] Result<AddressList> resolve_addresses(
+    std::string_view host,
+    u16 port,
+    int socket_type,
+    bool passive,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
+    auto active = check_operation_active(deadline, cancelled);
+    if (!active) return std::unexpected(active.error());
+
     addrinfo hints {};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = socket_type;
     hints.ai_protocol = socket_type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
     hints.ai_flags = passive ? AI_PASSIVE : 0;
-    AddressList list;
     const std::string service = std::to_string(port);
     const std::string host_text(host);
+
+#if defined(__APPLE__)
+    auto state = std::make_shared<AddressResolutionState>();
+    state->host = host_text;
+    state->service = service;
+    state->hints = hints;
+    auto* context =
+        new std::shared_ptr<AddressResolutionState>(state);
+    dispatch_async_f(
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+        context,
+        &resolve_addresses_on_dispatch_queue);
+
+    std::unique_lock lock(state->mutex);
+    while (!state->completed) {
+        if (cancellation_requested(cancelled)) {
+            return cancelled_operation();
+        }
+        auto wait_interval = deadline.next_poll_timeout();
+        if (!wait_interval) return std::unexpected(wait_interval.error());
+        state->condition.wait_for(
+            lock, std::chrono::milliseconds(*wait_interval),
+            [&state] { return state->completed; });
+    }
+    const int result = state->result;
+    AddressList list;
+    list.value = std::exchange(state->value, nullptr);
+#else
+    AddressList list;
     const char* host_pointer = host.empty() ? nullptr : host_text.c_str();
     const int result = ::getaddrinfo(host_pointer, service.c_str(),
                                      &hints, &list.value);
+#endif
+    active = check_operation_active(deadline, cancelled);
+    if (!active) return std::unexpected(active.error());
     if (result != 0) {
         return fail(ErrorCode::io_error,
                     std::string("DNS resolution failed: ") +
@@ -233,17 +444,24 @@ struct AddressList final {
     return list;
 }
 
-[[nodiscard]] Result<int> connect_stream_descriptor(const Url& url,
-                                                    i32 timeout_ms) {
-    auto addresses = resolve_addresses(url.host, url.effective_port(),
-                                       SOCK_STREAM, false);
+[[nodiscard]] Result<int> connect_stream_descriptor(
+    const Url& url,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
+    if (cancellation_requested(cancelled)) return cancelled_operation();
+    auto addresses = resolve_addresses(
+        url.host, url.effective_port(), SOCK_STREAM, false,
+        deadline, cancelled);
     if (!addresses) return std::unexpected(addresses.error());
+    if (cancellation_requested(cancelled)) return cancelled_operation();
 
     Error last_error = Error::make(ErrorCode::io_error,
                                    "no resolved address could be connected");
     for (addrinfo* address = addresses->value;
          address != nullptr;
          address = address->ai_next) {
+        auto active = check_operation_active(deadline, cancelled);
+        if (!active) return std::unexpected(active.error());
         const int descriptor = ::socket(address->ai_family,
                                         address->ai_socktype,
                                         address->ai_protocol);
@@ -262,7 +480,7 @@ struct AddressList final {
         int result = ::connect(descriptor, address->ai_addr,
                                static_cast<socklen_t>(address->ai_addrlen));
         if (result != 0 && errno == EINPROGRESS) {
-            auto ready = wait_fd(descriptor, POLLOUT, timeout_ms);
+            auto ready = wait_fd(descriptor, POLLOUT, deadline, cancelled);
             if (!ready) {
                 last_error = ready.error();
                 ::close(descriptor);
@@ -292,20 +510,22 @@ struct AddressList final {
             ::close(descriptor);
             continue;
         }
-        auto blocking = set_nonblocking(descriptor, false);
-        if (!blocking) {
-            last_error = blocking.error();
+        if (cancellation_requested(cancelled)) {
             ::close(descriptor);
-            continue;
+            return cancelled_operation();
         }
         return descriptor;
     }
     return std::unexpected(std::move(last_error));
 }
 
-[[nodiscard]] Result<int> create_server_descriptor(const Url& url) {
-    auto addresses = resolve_addresses(url.host, url.effective_port(),
-                                       SOCK_STREAM, true);
+[[nodiscard]] Result<int> create_server_descriptor(
+    const Url& url,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
+    auto addresses = resolve_addresses(
+        url.host, url.effective_port(), SOCK_STREAM, true,
+        deadline, cancelled);
     if (!addresses) return std::unexpected(addresses.error());
 
     Error last_error = Error::make(ErrorCode::io_error,
@@ -313,6 +533,8 @@ struct AddressList final {
     for (addrinfo* address = addresses->value;
          address != nullptr;
          address = address->ai_next) {
+        auto active = check_operation_active(deadline, cancelled);
+        if (!active) return std::unexpected(active.error());
         const int descriptor = ::socket(address->ai_family,
                                         address->ai_socktype,
                                         address->ai_protocol);
@@ -324,6 +546,12 @@ struct AddressList final {
         if (::bind(descriptor, address->ai_addr,
                    static_cast<socklen_t>(address->ai_addrlen)) == 0 &&
             ::listen(descriptor, 16) == 0) {
+            auto nonblocking = set_nonblocking(descriptor, true);
+            if (!nonblocking) {
+                last_error = nonblocking.error();
+                ::close(descriptor);
+                continue;
+            }
             return descriptor;
         }
         last_error = Error::make(ErrorCode::io_error,
@@ -334,10 +562,14 @@ struct AddressList final {
     return std::unexpected(std::move(last_error));
 }
 
-[[nodiscard]] Result<int> create_datagram_descriptor(const Url& url) {
+[[nodiscard]] Result<int> create_datagram_descriptor(
+    const Url& url,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
     const bool local = url.host.empty();
-    auto addresses = resolve_addresses(url.host, url.effective_port(),
-                                       SOCK_DGRAM, local);
+    auto addresses = resolve_addresses(
+        url.host, url.effective_port(), SOCK_DGRAM, local,
+        deadline, cancelled);
     if (!addresses) return std::unexpected(addresses.error());
 
     Error last_error = Error::make(ErrorCode::io_error,
@@ -345,11 +577,19 @@ struct AddressList final {
     for (addrinfo* address = addresses->value;
          address != nullptr;
          address = address->ai_next) {
+        auto active = check_operation_active(deadline, cancelled);
+        if (!active) return std::unexpected(active.error());
         const int descriptor = ::socket(address->ai_family,
                                         address->ai_socktype,
                                         address->ai_protocol);
         if (descriptor < 0) continue;
         configure_descriptor(descriptor);
+        auto nonblocking = set_nonblocking(descriptor, true);
+        if (!nonblocking) {
+            last_error = nonblocking.error();
+            ::close(descriptor);
+            continue;
+        }
         const int result = local
             ? ::bind(descriptor, address->ai_addr,
                      static_cast<socklen_t>(address->ai_addrlen))
@@ -365,12 +605,14 @@ struct AddressList final {
     return std::unexpected(std::move(last_error));
 }
 
-[[nodiscard]] Status send_all(int descriptor,
-                              std::span<const u8> bytes,
-                              i32 timeout_ms) {
+[[nodiscard]] Status send_all(
+    int descriptor,
+    std::span<const u8> bytes,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
     usize offset = 0;
     while (offset < bytes.size()) {
-        auto ready = wait_fd(descriptor, POLLOUT, timeout_ms);
+        auto ready = wait_fd(descriptor, POLLOUT, deadline, cancelled);
         if (!ready) return ready;
 #if defined(MSG_NOSIGNAL)
         constexpr int flags = MSG_NOSIGNAL;
@@ -387,26 +629,42 @@ struct AddressList final {
             continue;
         }
         if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        }
         return io_failure("socket write failed");
     }
     return {};
 }
 
-[[nodiscard]] Result<std::vector<u8>> receive_all(int descriptor,
-                                                  i32 timeout_ms) {
+[[nodiscard]] Result<std::optional<usize>> complete_http_response_length(
+    std::string_view request_method,
+    std::span<const u8> bytes);
+
+[[nodiscard]] Result<std::vector<u8>> receive_http_response(
+    int descriptor,
+    std::string_view request_method,
+    const OperationDeadline& deadline,
+    const CancellationCheck& cancelled = {}) {
     std::vector<u8> result;
     std::array<u8, kIoChunkSize> buffer {};
     while (true) {
-        auto ready = wait_fd(descriptor, POLLIN, timeout_ms);
-        if (!ready) {
-            if (!result.empty()) return result;
-            return std::unexpected(ready.error());
+        auto complete = complete_http_response_length(request_method, result);
+        if (!complete) return std::unexpected(complete.error());
+        if (complete->has_value()) {
+            result.resize(**complete);
+            return result;
         }
+
+        auto ready = wait_fd(descriptor, POLLIN, deadline, cancelled);
+        if (!ready) return std::unexpected(ready.error());
         const ssize_t count = ::recv(descriptor, buffer.data(),
                                      buffer.size(), 0);
         if (count == 0) return result;
         if (count < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
             return io_failure("socket read failed");
         }
         const usize amount = static_cast<usize>(count);
@@ -451,7 +709,37 @@ struct AddressList final {
                         "invalid HTTP chunk size");
         }
         cursor = line_end + 2U;
-        if (chunk_size == 0U) return result;
+        if (chunk_size == 0U) {
+            while (true) {
+                usize trailer_end = cursor;
+                while (trailer_end + 1U < encoded.size() &&
+                       !(encoded[trailer_end] == '\r' &&
+                         encoded[trailer_end + 1U] == '\n')) {
+                    ++trailer_end;
+                }
+                if (trailer_end + 1U >= encoded.size()) {
+                    return fail(ErrorCode::io_error,
+                                "truncated HTTP chunk trailer");
+                }
+                if (trailer_end == cursor) {
+                    cursor = trailer_end + 2U;
+                    if (cursor != encoded.size()) {
+                        return fail(ErrorCode::io_error,
+                                    "unexpected bytes after chunked response");
+                    }
+                    return result;
+                }
+                const std::string_view trailer(
+                    reinterpret_cast<const char*>(encoded.data() + cursor),
+                    trailer_end - cursor);
+                const usize separator = trailer.find(':');
+                if (separator == std::string_view::npos || separator == 0U) {
+                    return fail(ErrorCode::io_error,
+                                "malformed HTTP chunk trailer");
+                }
+                cursor = trailer_end + 2U;
+            }
+        }
         if (chunk_size > encoded.size() - cursor ||
             chunk_size + 2U > encoded.size() - cursor) {
             return fail(ErrorCode::io_error,
@@ -484,106 +772,445 @@ struct AddressList final {
     return std::nullopt;
 }
 
+enum class TransferFraming : u8 {
+    none,
+    chunked,
+    connection_close,
+};
+
+[[nodiscard]] Result<TransferFraming> transfer_framing(
+    const std::vector<Header>& headers) {
+    std::vector<std::string> codings;
+    for (const auto& [name, value] : headers) {
+        if (lowercase(name) != "transfer-encoding") continue;
+        usize cursor = 0U;
+        while (cursor <= value.size()) {
+            const usize separator = value.find(',', cursor);
+            const usize end = separator == std::string::npos
+                ? value.size() : separator;
+            std::string coding = lowercase(trim(
+                std::string_view(value).substr(cursor, end - cursor)));
+            if (coding.empty()) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response has an empty transfer coding");
+            }
+            const usize parameter = coding.find(';');
+            if (parameter != std::string::npos) {
+                if (coding.substr(0U, parameter) == "chunked") {
+                    return fail(ErrorCode::io_error,
+                                "HTTP chunked transfer coding has parameters");
+                }
+                coding.resize(parameter);
+                coding = trim(coding);
+                if (coding.empty()) {
+                    return fail(ErrorCode::io_error,
+                                "HTTP response transfer coding is invalid");
+                }
+            }
+            codings.push_back(std::move(coding));
+            if (separator == std::string::npos) break;
+            cursor = separator + 1U;
+        }
+    }
+    if (codings.empty()) return TransferFraming::none;
+
+    bool saw_chunked = false;
+    for (usize index = 0U; index < codings.size(); ++index) {
+        if (codings[index] != "chunked") continue;
+        if (saw_chunked || index + 1U != codings.size()) {
+            return fail(ErrorCode::io_error,
+                        "HTTP chunked transfer coding must appear once and last");
+        }
+        saw_chunked = true;
+    }
+    return saw_chunked ? TransferFraming::chunked
+                       : TransferFraming::connection_close;
+}
+
+[[nodiscard]] bool valid_response_header_name(std::string_view name) {
+    if (name.empty()) return false;
+    for (const char value : name) {
+        const auto character = static_cast<unsigned char>(value);
+        if (character <= 0x20U || character >= 0x7FU || character == ':') {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] Result<std::optional<usize>> content_length(
+    const std::vector<Header>& headers) {
+    std::optional<usize> parsed_length;
+    for (const auto& [name, value] : headers) {
+        if (lowercase(name) != "content-length") continue;
+        usize length = 0;
+        const auto converted = std::from_chars(
+            value.data(), value.data() + value.size(), length);
+        if (converted.ec != std::errc {} ||
+            converted.ptr != value.data() + value.size()) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response Content-Length is invalid");
+        }
+        if (parsed_length.has_value() && *parsed_length != length) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response has conflicting Content-Length headers");
+        }
+        parsed_length = length;
+    }
+    return parsed_length;
+}
+
+[[nodiscard]] Result<std::optional<usize>> complete_chunked_encoded_length(
+    std::span<const u8> encoded) {
+    usize cursor = 0U;
+    while (true) {
+        usize line_end = cursor;
+        while (line_end + 1U < encoded.size() &&
+               !(encoded[line_end] == '\r' &&
+                 encoded[line_end + 1U] == '\n')) {
+            ++line_end;
+        }
+        if (line_end + 1U >= encoded.size()) {
+            if (encoded.size() - cursor > kMaximumHttpHeaderBytes) {
+                return fail(ErrorCode::io_error,
+                            "HTTP chunk size line exceeds maximum size");
+            }
+            return std::optional<usize> {};
+        }
+        std::string_view line(
+            reinterpret_cast<const char*>(encoded.data() + cursor),
+            line_end - cursor);
+        const usize extension = line.find(';');
+        if (extension != std::string_view::npos) {
+            line = line.substr(0U, extension);
+        }
+        if (line.empty()) {
+            return fail(ErrorCode::io_error,
+                        "HTTP chunk size is empty");
+        }
+        usize chunk_size = 0U;
+        const auto converted = std::from_chars(
+            line.data(), line.data() + line.size(), chunk_size, 16);
+        if (converted.ec != std::errc {} ||
+            converted.ptr != line.data() + line.size()) {
+            return fail(ErrorCode::io_error,
+                        "invalid HTTP chunk size");
+        }
+        if (chunk_size > kMaximumHttpResponseBytes) {
+            return fail(ErrorCode::overflow,
+                        "HTTP chunk exceeds maximum response size");
+        }
+        cursor = line_end + 2U;
+
+        if (chunk_size == 0U) {
+            while (true) {
+                usize trailer_end = cursor;
+                while (trailer_end + 1U < encoded.size() &&
+                       !(encoded[trailer_end] == '\r' &&
+                         encoded[trailer_end + 1U] == '\n')) {
+                    ++trailer_end;
+                }
+                if (trailer_end + 1U >= encoded.size()) {
+                    if (encoded.size() - cursor > kMaximumHttpHeaderBytes) {
+                        return fail(ErrorCode::io_error,
+                                    "HTTP chunk trailer exceeds maximum size");
+                    }
+                    return std::optional<usize> {};
+                }
+                if (trailer_end == cursor) {
+                    return std::optional<usize>(trailer_end + 2U);
+                }
+                const std::string_view trailer(
+                    reinterpret_cast<const char*>(encoded.data() + cursor),
+                    trailer_end - cursor);
+                const usize separator = trailer.find(':');
+                if (separator == std::string_view::npos || separator == 0U ||
+                    !valid_response_header_name(
+                        trailer.substr(0U, separator))) {
+                    return fail(ErrorCode::io_error,
+                                "malformed HTTP chunk trailer");
+                }
+                cursor = trailer_end + 2U;
+            }
+        }
+
+        const usize remaining = encoded.size() - cursor;
+        if (chunk_size > remaining || remaining - chunk_size < 2U) {
+            return std::optional<usize> {};
+        }
+        cursor += chunk_size;
+        if (encoded[cursor] != '\r' || encoded[cursor + 1U] != '\n') {
+            return fail(ErrorCode::io_error,
+                        "HTTP chunk is missing terminator");
+        }
+        cursor += 2U;
+    }
+}
+
+[[nodiscard]] Result<std::optional<usize>> complete_http_response_length(
+    std::string_view request_method,
+    std::span<const u8> bytes) {
+    usize offset = 0U;
+    for (usize response_index = 0U;
+         response_index <= kMaximumInterimResponses;
+         ++response_index) {
+        const std::span<const u8> remaining = bytes.subspan(offset);
+        usize header_end = 0U;
+        bool found = false;
+        const usize search_limit = std::min(
+            remaining.size(), kMaximumHttpHeaderBytes + 4U);
+        while (header_end + 3U < search_limit) {
+            if (remaining[header_end] == '\r' &&
+                remaining[header_end + 1U] == '\n' &&
+                remaining[header_end + 2U] == '\r' &&
+                remaining[header_end + 3U] == '\n') {
+                found = true;
+                break;
+            }
+            ++header_end;
+        }
+        if (!found) {
+            if (remaining.size() > kMaximumHttpHeaderBytes) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response header exceeds maximum size");
+            }
+            return std::optional<usize> {};
+        }
+
+        const std::string_view header_text(
+            reinterpret_cast<const char*>(remaining.data()), header_end);
+        const usize status_separator = header_text.find("\r\n");
+        const usize status_end = status_separator == std::string_view::npos
+            ? header_text.size() : status_separator;
+        const std::string_view status_line = header_text.substr(0U, status_end);
+        const usize first_space = status_line.find(' ');
+        const usize second_space = first_space == std::string_view::npos
+            ? std::string_view::npos
+            : status_line.find(' ', first_space + 1U);
+        if (!status_line.starts_with("HTTP/") ||
+            first_space == std::string_view::npos) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response status line is invalid");
+        }
+        const std::string_view code_text =
+            second_space == std::string_view::npos
+                ? status_line.substr(first_space + 1U)
+                : status_line.substr(first_space + 1U,
+                                     second_space - first_space - 1U);
+        i32 status_code = -1;
+        const auto code_converted = std::from_chars(
+            code_text.data(), code_text.data() + code_text.size(),
+            status_code);
+        if (code_converted.ec != std::errc {} ||
+            code_converted.ptr != code_text.data() + code_text.size() ||
+            status_code < 100 || status_code > 599) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response status code is invalid");
+        }
+
+        std::vector<Header> headers;
+        usize cursor = status_separator == std::string_view::npos
+            ? header_text.size() : status_end + 2U;
+        while (cursor < header_text.size()) {
+            const usize line_end = header_text.find("\r\n", cursor);
+            const usize end = line_end == std::string_view::npos
+                ? header_text.size() : line_end;
+            const std::string_view line =
+                header_text.substr(cursor, end - cursor);
+            const usize separator = line.find(':');
+            if (separator == std::string_view::npos || separator == 0U ||
+                !valid_response_header_name(line.substr(0U, separator))) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response contains malformed header");
+            }
+            headers.emplace_back(
+                std::string(line.substr(0U, separator)),
+                trim(line.substr(separator + 1U)));
+            if (line_end == std::string_view::npos) break;
+            cursor = line_end + 2U;
+        }
+
+        const usize body_offset = offset + header_end + 4U;
+        if (status_code >= 100 && status_code < 200 &&
+            status_code != 101) {
+            if (response_index == kMaximumInterimResponses) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response has too many interim responses");
+            }
+            offset = body_offset;
+            continue;
+        }
+
+        const bool body_forbidden =
+            lowercase(request_method) == "head" ||
+            (status_code >= 100 && status_code < 200) ||
+            status_code == 204 || status_code == 304;
+        if (body_forbidden) return std::optional<usize>(body_offset);
+
+        auto framing = transfer_framing(headers);
+        if (!framing) return std::unexpected(framing.error());
+        if (*framing == TransferFraming::chunked) {
+            auto encoded_length = complete_chunked_encoded_length(
+                bytes.subspan(body_offset));
+            if (!encoded_length) {
+                return std::unexpected(encoded_length.error());
+            }
+            if (!encoded_length->has_value()) return std::optional<usize> {};
+            return std::optional<usize>(body_offset + **encoded_length);
+        }
+        if (*framing == TransferFraming::connection_close) {
+            return std::optional<usize> {};
+        }
+
+        auto declared_length = content_length(headers);
+        if (!declared_length) return std::unexpected(declared_length.error());
+        if (!declared_length->has_value()) return std::optional<usize> {};
+        if (**declared_length > bytes.size() - body_offset) {
+            return std::optional<usize> {};
+        }
+        return std::optional<usize>(body_offset + **declared_length);
+    }
+    return fail(ErrorCode::io_error,
+                "HTTP response has too many interim responses");
+}
+
 [[nodiscard]] Result<HttpResponse> parse_http_response(
     const Url& url,
+    std::string_view request_method,
     std::span<const u8> bytes) {
-    usize header_end = 0;
-    bool found = false;
-    while (header_end + 3U < bytes.size()) {
-        if (bytes[header_end] == '\r' && bytes[header_end + 1U] == '\n' &&
-            bytes[header_end + 2U] == '\r' &&
-            bytes[header_end + 3U] == '\n') {
-            found = true;
-            break;
-        }
-        ++header_end;
-    }
-    if (!found) {
-        return fail(ErrorCode::io_error,
-                    "HTTP response has no complete header block");
-    }
-
-    const std::string_view header_text(
-        reinterpret_cast<const char*>(bytes.data()), header_end);
-    const usize status_end = header_text.find("\r\n");
-    if (status_end == std::string_view::npos) {
-        return fail(ErrorCode::io_error,
-                    "HTTP response has malformed status line");
-    }
-    const std::string_view status_line = header_text.substr(0, status_end);
-    const usize first_space = status_line.find(' ');
-    const usize second_space = first_space == std::string_view::npos
-        ? std::string_view::npos
-        : status_line.find(' ', first_space + 1U);
-    if (!status_line.starts_with("HTTP/") ||
-        first_space == std::string_view::npos) {
-        return fail(ErrorCode::io_error,
-                    "HTTP response status line is invalid");
-    }
-    const std::string_view code_text = second_space == std::string_view::npos
-        ? status_line.substr(first_space + 1U)
-        : status_line.substr(first_space + 1U,
-                             second_space - first_space - 1U);
-    i32 status_code = -1;
-    const auto code_converted = std::from_chars(
-        code_text.data(), code_text.data() + code_text.size(), status_code);
-    if (code_converted.ec != std::errc {} || status_code < 100 ||
-        status_code > 999) {
-        return fail(ErrorCode::io_error,
-                    "HTTP response status code is invalid");
-    }
-
-    HttpResponse response;
-    response.final_url = url;
-    response.status_code = status_code;
-    if (second_space != std::string_view::npos) {
-        response.reason = std::string(status_line.substr(second_space + 1U));
-    }
-
-    usize cursor = status_end + 2U;
-    while (cursor < header_text.size()) {
-        const usize line_end = header_text.find("\r\n", cursor);
-        const usize end = line_end == std::string_view::npos
-                              ? header_text.size()
-                              : line_end;
-        const std::string_view line = header_text.substr(cursor, end - cursor);
-        const usize separator = line.find(':');
-        if (separator == std::string_view::npos || separator == 0U) {
-            return fail(ErrorCode::io_error,
-                        "HTTP response contains malformed header");
-        }
-        response.headers.emplace_back(
-            std::string(line.substr(0, separator)),
-            trim(line.substr(separator + 1U)));
-        if (line_end == std::string_view::npos) break;
-        cursor = line_end + 2U;
-    }
-
-    const usize body_offset = header_end + 4U;
-    std::span<const u8> body = bytes.subspan(body_offset);
-    auto transfer_encoding = header_value(response.headers,
-                                          "Transfer-Encoding");
-    if (transfer_encoding.has_value() &&
-        lowercase(*transfer_encoding).find("chunked") != std::string::npos) {
-        auto decoded = decode_chunked(body);
-        if (!decoded) return std::unexpected(decoded.error());
-        response.body = std::move(*decoded);
-    } else {
-        auto length_header = header_value(response.headers, "Content-Length");
-        if (length_header.has_value()) {
-            usize length = 0;
-            const auto converted = std::from_chars(
-                length_header->data(),
-                length_header->data() + length_header->size(), length);
-            if (converted.ec != std::errc {} || length > body.size()) {
-                return fail(ErrorCode::io_error,
-                            "HTTP response Content-Length is invalid");
+    std::span<const u8> remaining = bytes;
+    for (usize response_index = 0;
+         response_index <= kMaximumInterimResponses;
+         ++response_index) {
+        usize header_end = 0;
+        bool found = false;
+        const usize search_limit = std::min(
+            remaining.size(), kMaximumHttpHeaderBytes + 4U);
+        while (header_end + 3U < search_limit) {
+            if (remaining[header_end] == '\r' &&
+                remaining[header_end + 1U] == '\n' &&
+                remaining[header_end + 2U] == '\r' &&
+                remaining[header_end + 3U] == '\n') {
+                found = true;
+                break;
             }
-            body = body.first(length);
+            ++header_end;
+        }
+        if (!found) {
+            return fail(
+                ErrorCode::io_error,
+                remaining.size() > kMaximumHttpHeaderBytes
+                    ? "HTTP response header exceeds maximum size"
+                    : "HTTP response has no complete header block");
+        }
+
+        const std::string_view header_text(
+            reinterpret_cast<const char*>(remaining.data()), header_end);
+        const usize status_separator = header_text.find("\r\n");
+        const usize status_end = status_separator == std::string_view::npos
+            ? header_text.size() : status_separator;
+        const std::string_view status_line = header_text.substr(0, status_end);
+        const usize first_space = status_line.find(' ');
+        const usize second_space = first_space == std::string_view::npos
+            ? std::string_view::npos
+            : status_line.find(' ', first_space + 1U);
+        if (!status_line.starts_with("HTTP/") ||
+            first_space == std::string_view::npos) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response status line is invalid");
+        }
+        const std::string_view code_text =
+            second_space == std::string_view::npos
+                ? status_line.substr(first_space + 1U)
+                : status_line.substr(first_space + 1U,
+                                     second_space - first_space - 1U);
+        i32 status_code = -1;
+        const auto code_converted = std::from_chars(
+            code_text.data(), code_text.data() + code_text.size(),
+            status_code);
+        if (code_converted.ec != std::errc {} ||
+            code_converted.ptr != code_text.data() + code_text.size() ||
+            status_code < 100 || status_code > 599) {
+            return fail(ErrorCode::io_error,
+                        "HTTP response status code is invalid");
+        }
+
+        HttpResponse response;
+        response.final_url = url;
+        response.status_code = status_code;
+        if (second_space != std::string_view::npos) {
+            response.reason =
+                std::string(status_line.substr(second_space + 1U));
+        }
+
+        usize cursor = status_separator == std::string_view::npos
+            ? header_text.size() : status_end + 2U;
+        while (cursor < header_text.size()) {
+            const usize line_end = header_text.find("\r\n", cursor);
+            const usize end = line_end == std::string_view::npos
+                ? header_text.size() : line_end;
+            const std::string_view line =
+                header_text.substr(cursor, end - cursor);
+            const usize separator = line.find(':');
+            if (separator == std::string_view::npos || separator == 0U ||
+                !valid_response_header_name(line.substr(0, separator))) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response contains malformed header");
+            }
+            response.headers.emplace_back(
+                std::string(line.substr(0, separator)),
+                trim(line.substr(separator + 1U)));
+            if (line_end == std::string_view::npos) break;
+            cursor = line_end + 2U;
+        }
+
+        const usize body_offset = header_end + 4U;
+        if (status_code >= 100 && status_code < 200 &&
+            status_code != 101) {
+            if (response_index == kMaximumInterimResponses) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response has too many interim responses");
+            }
+            remaining = remaining.subspan(body_offset);
+            continue;
+        }
+
+        const bool body_forbidden =
+            lowercase(request_method) == "head" ||
+            (status_code >= 100 && status_code < 200) ||
+            status_code == 204 || status_code == 304;
+        if (body_forbidden) return response;
+
+        std::span<const u8> body = remaining.subspan(body_offset);
+        auto framing = transfer_framing(response.headers);
+        if (!framing) return std::unexpected(framing.error());
+        if (*framing == TransferFraming::chunked) {
+            auto decoded = decode_chunked(body);
+            if (!decoded) return std::unexpected(decoded.error());
+            response.body = std::move(*decoded);
+            return response;
+        }
+        if (*framing == TransferFraming::connection_close) {
+            response.body.assign(body.begin(), body.end());
+            return response;
+        }
+
+        auto declared_length = content_length(response.headers);
+        if (!declared_length) {
+            return std::unexpected(declared_length.error());
+        }
+        if (declared_length->has_value()) {
+            if (**declared_length > body.size()) {
+                return fail(ErrorCode::io_error,
+                            "HTTP response body is shorter than Content-Length");
+            }
+            body = body.first(**declared_length);
         }
         response.body.assign(body.begin(), body.end());
+        return response;
     }
-    return response;
+    return fail(ErrorCode::io_error,
+                "HTTP response has too many interim responses");
 }
 
 #if defined(__APPLE__)
@@ -639,35 +1266,37 @@ struct AppleHttpsHandle final {
     return headers;
 }
 
-[[nodiscard]] Result<HttpResponse> perform_apple_https(
+[[nodiscard]] std::string serialize_apple_http_headers(
     const HttpRequest& request) {
-    if (request.body.size() >
-        static_cast<usize>(std::numeric_limits<i32>::max())) {
-        return fail(ErrorCode::overflow,
-                    "HTTPS request body exceeds bridge limit");
-    }
-
-    std::string serialized_headers;
+    std::string serialized;
     for (const auto& [name, value] : request.headers) {
-        serialized_headers.append(name);
-        serialized_headers.append(": ");
-        serialized_headers.append(value);
-        serialized_headers.append("\r\n");
+        serialized.append(name);
+        serialized.append(": ");
+        serialized.append(value);
+        serialized.append("\r\n");
     }
-    const std::string url = request.url.to_string();
-    const i32 raw_handle = phoneme_ios_https_execute(
-        url.c_str(), request.method.c_str(), serialized_headers.c_str(),
-        request.body.empty() ? nullptr : request.body.data(),
-        static_cast<i32>(request.body.size()), request.timeout_ms);
+    return serialized;
+}
+
+[[nodiscard]] Result<HttpResponse> collect_apple_http_response(
+    i32 raw_handle,
+    const HttpRequest& request) {
     AppleHttpsHandle handle(raw_handle);
     if (handle.value <= 0) {
         return fail(ErrorCode::io_error,
-                    "HTTPS bridge failed to create a request result");
+                    "Apple HTTP bridge returned an invalid result handle");
     }
 
     auto error = copy_apple_https_string(handle.value, 10);
     if (!error) return std::unexpected(error.error());
     if (error->has_value() && !(**error).empty()) {
+        const i64 platform_error = phoneme_ios_https_get_long(handle.value, 3);
+        constexpr i64 kCertificateBadDate = -1201;
+        constexpr i64 kClientCertificateRequired = -1206;
+        if (platform_error <= kCertificateBadDate &&
+            platform_error >= kClientCertificateRequired) {
+            return fail_java("java/lang/SecurityException", **error);
+        }
         return fail(ErrorCode::io_error, **error);
     }
 
@@ -744,50 +1373,94 @@ struct AppleHttpsHandle final {
     }
     return response;
 }
+
+struct AppleHttpOperationState final {
+    std::atomic_bool cancelled {false};
+    std::atomic<i32> bridge_handle {0};
+};
+
+struct AppleHttpOperationRegistry final {
+    std::mutex mutex;
+    std::unordered_map<u64, std::shared_ptr<AppleHttpOperationState>> operations;
+};
+
+struct AppleHttpCallbackContext final {
+    std::weak_ptr<AppleHttpOperationRegistry> registry;
+    std::shared_ptr<AppleHttpOperationState> state;
+    OperationId operation;
+    HttpRequest request;
+    Completion<HttpResponse> completion;
+};
+
+extern "C" void phoneme_apple_http_completed(i32 handle, void* opaque) {
+    std::unique_ptr<AppleHttpCallbackContext> context(
+        static_cast<AppleHttpCallbackContext*>(opaque));
+    if (!context) {
+        phoneme_ios_https_close(handle);
+        return;
+    }
+
+    if (auto registry = context->registry.lock()) {
+        std::scoped_lock lock(registry->mutex);
+        const auto found = registry->operations.find(context->operation.value);
+        if (found != registry->operations.end() &&
+            found->second == context->state) {
+            registry->operations.erase(found);
+        }
+    }
+
+    if (context->state->cancelled.load(std::memory_order_acquire)) {
+        phoneme_ios_https_close(handle);
+        return;
+    }
+    auto response = collect_apple_http_response(handle, context->request);
+    if (context->completion) context->completion(std::move(response));
+}
 #endif
 
-[[nodiscard]] Result<HttpResponse> perform_plain_http(HttpRequest request) {
+[[nodiscard]] Result<HttpResponse> perform_plain_http_with_deadline(
+    HttpRequest request,
+    const CancellationCheck& cancelled,
+    const OperationDeadline& deadline) {
     if (request.url.scheme == Scheme::https) {
-#if defined(__APPLE__)
-        return perform_apple_https(request);
-#else
         return fail(ErrorCode::unsupported_feature,
-                    "HTTPS requires a platform TLS AsyncNetworkAdapter");
-#endif
+                    "HTTPS requires an asynchronous platform TLS adapter");
     }
     if (request.url.scheme != Scheme::http) {
         return fail(ErrorCode::invalid_argument,
                     "HTTP adapter received a non-HTTP URL");
     }
 
-    auto descriptor = connect_stream_descriptor(request.url,
-                                                request.timeout_ms);
+    auto descriptor = connect_stream_descriptor(
+        request.url, deadline, cancelled);
     if (!descriptor) return std::unexpected(descriptor.error());
     const int socket = *descriptor;
 
     std::string request_text = request.method + " " +
                                request.url.request_target() +
                                " HTTP/1.1\r\n";
-    bool has_host = false;
-    bool has_length = false;
-    bool has_connection = false;
+    bool content_length_requested = false;
     for (const auto& [name, value] : request.headers) {
         const std::string normalized = lowercase(name);
-        has_host = has_host || normalized == "host";
-        has_length = has_length || normalized == "content-length";
-        has_connection = has_connection || normalized == "connection";
+        if (normalized == "content-length") {
+            content_length_requested = true;
+            continue;
+        }
+        if (normalized == "host" || normalized == "connection" ||
+            normalized == "transfer-encoding") {
+            continue;
+        }
         request_text.append(name);
         request_text.append(": ");
         request_text.append(value);
         request_text.append("\r\n");
     }
-    if (!has_host) {
-        request_text.append("Host: ");
-        request_text.append(request.url.authority());
-        request_text.append("\r\n");
-    }
-    if (!has_connection) request_text.append("Connection: close\r\n");
-    if (!request.body.empty() && !has_length) {
+    request_text.append("Host: ");
+    request_text.append(request.url.authority());
+    request_text.append("\r\n");
+    request_text.append("Connection: close\r\n");
+    if (!request.body.empty() || request.method == "POST" ||
+        content_length_requested) {
         request_text.append("Content-Length: ");
         request_text.append(std::to_string(request.body.size()));
         request_text.append("\r\n");
@@ -798,16 +1471,18 @@ struct AppleHttpsHandle final {
     wire.reserve(request_text.size() + request.body.size());
     wire.insert(wire.end(), request_text.begin(), request_text.end());
     wire.insert(wire.end(), request.body.begin(), request.body.end());
-    auto sent = send_all(socket, wire, request.timeout_ms);
+    auto sent = send_all(socket, wire, deadline, cancelled);
     if (!sent) {
         ::close(socket);
         return std::unexpected(sent.error());
     }
-    auto received = receive_all(socket, request.timeout_ms);
+    auto received = receive_http_response(
+        socket, request.method, deadline, cancelled);
     ::close(socket);
     if (!received) return std::unexpected(received.error());
 
-    auto response = parse_http_response(request.url, *received);
+    auto response = parse_http_response(
+        request.url, request.method, *received);
     if (!response) return std::unexpected(response.error());
     const bool redirect = response->status_code == 301 ||
                           response->status_code == 302 ||
@@ -819,6 +1494,18 @@ struct AppleHttpsHandle final {
     if (!location.has_value()) return response;
     auto redirected = Url::resolve(request.url, *location);
     if (!redirected) return std::unexpected(redirected.error());
+    const bool authority_changed =
+        redirected->scheme != request.url.scheme ||
+        lowercase(redirected->host) != lowercase(request.url.host) ||
+        redirected->effective_port() != request.url.effective_port();
+    if (authority_changed) {
+        std::erase_if(request.headers, [](const Header& header) {
+            const std::string name = lowercase(header.first);
+            return name == "authorization" ||
+                   name == "proxy-authorization" ||
+                   name == "cookie";
+        });
+    }
     request.url = std::move(*redirected);
     --request.redirect_limit;
     if (response->status_code == 303 ||
@@ -827,20 +1514,60 @@ struct AppleHttpsHandle final {
         request.method = "GET";
         request.body.clear();
     }
-    return perform_plain_http(std::move(request));
+    return perform_plain_http_with_deadline(
+        std::move(request), cancelled, deadline);
+}
+
+[[nodiscard]] Result<HttpResponse> perform_plain_http(
+    HttpRequest request,
+    const CancellationCheck& cancelled = {}) {
+    OperationDeadline deadline(request.timeout_ms);
+    return perform_plain_http_with_deadline(
+        std::move(request), cancelled, deadline);
 }
 
 class PosixNetworkAdapter final : public AsyncNetworkAdapter {
 public:
+    PosixNetworkAdapter() {
+        workers_.reserve(kNetworkWorkerCount);
+        for (usize index = 0; index < kNetworkWorkerCount; ++index) {
+            workers_.emplace_back(
+                [this](std::stop_token stop_token) {
+                    worker_loop(stop_token);
+                });
+        }
+    }
+
     ~PosixNetworkAdapter() override {
-        std::unordered_map<u64, int> handles;
+#if defined(__APPLE__)
+        std::vector<i32> apple_handles;
+        {
+            std::scoped_lock lock(apple_http_operations_->mutex);
+            apple_handles.reserve(apple_http_operations_->operations.size());
+            for (const auto& [id, state] :
+                 apple_http_operations_->operations) {
+                (void)id;
+                state->cancelled.store(true, std::memory_order_release);
+                const i32 handle = state->bridge_handle.load(
+                    std::memory_order_acquire);
+                if (handle > 0) apple_handles.push_back(handle);
+            }
+            apple_http_operations_->operations.clear();
+        }
+        for (i32 handle : apple_handles) phoneme_ios_https_cancel(handle);
+#endif
+        shutdown_workers();
+        std::unordered_map<u64, std::shared_ptr<HandleState>> handles;
         {
             std::scoped_lock lock(mutex_);
             handles.swap(handles_);
         }
-        for (const auto& [unused, descriptor] : handles) {
+        for (const auto& [unused, state] : handles) {
             (void)unused;
-            ::close(descriptor);
+            if (state != nullptr && state->descriptor >= 0) {
+                ::close(state->descriptor);
+                state->descriptor = -1;
+            }
         }
     }
 
@@ -848,76 +1575,128 @@ public:
         const Url& url,
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
-        auto descriptor = connect_stream_descriptor(url, timeout_ms);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto connection = store_connection(*descriptor, true);
-        if (!connection) {
-            ::close(*descriptor);
-            return finish(std::move(completion),
-                          std::unexpected(connection.error()));
-        }
-        return finish(std::move(completion), std::move(*connection));
+        return start_async_with_cleanup<NativeConnection>(
+            std::move(completion),
+            [this, url, timeout_ms](const CancellationCheck& cancelled)
+                -> Result<NativeConnection> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = connect_stream_descriptor(
+                    url, deadline, cancelled);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                ScopedDescriptor owned(*descriptor);
+                auto connection = store_connection(owned.value, true);
+                if (!connection) return std::unexpected(connection.error());
+                (void)owned.release();
+                return std::move(*connection);
+            },
+            [this](Result<NativeConnection>& result) {
+                if (result) (void)close(result->handle);
+            });
     }
 
     Result<OperationId> open_server(
         const Url& url,
-        i32,
+        i32 timeout_ms,
         Completion<NativeConnection> completion) override {
-        auto descriptor = create_server_descriptor(url);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto connection = store_connection(*descriptor, false);
-        if (!connection) {
-            ::close(*descriptor);
-            return finish(std::move(completion),
-                          std::unexpected(connection.error()));
-        }
-        return finish(std::move(completion), std::move(*connection));
+        return start_async_with_cleanup<NativeConnection>(
+            std::move(completion),
+            [this, url, timeout_ms](const CancellationCheck& cancelled)
+                -> Result<NativeConnection> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = create_server_descriptor(
+                    url, deadline, cancelled);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                ScopedDescriptor owned(*descriptor);
+                if (cancellation_requested(cancelled)) {
+                    return cancelled_operation();
+                }
+                auto connection = store_connection(owned.value, false);
+                if (!connection) return std::unexpected(connection.error());
+                (void)owned.release();
+                return std::move(*connection);
+            },
+            [this](Result<NativeConnection>& result) {
+                if (result) (void)close(result->handle);
+            });
     }
 
     Result<OperationId> accept(
         NativeHandle server,
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
-        auto descriptor = lookup(server);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto ready = wait_fd(*descriptor, POLLIN, timeout_ms);
-        if (!ready) return finish(std::move(completion),
-                                  std::unexpected(ready.error()));
-        sockaddr_storage address {};
-        socklen_t length = static_cast<socklen_t>(sizeof(address));
-        const int accepted = ::accept(
-            *descriptor, reinterpret_cast<sockaddr*>(&address), &length);
-        if (accepted < 0) {
-            return finish<NativeConnection>(std::move(completion),
-                                            io_failure("accept failed"));
-        }
-        configure_descriptor(accepted);
-        auto connection = store_connection(accepted, true);
-        if (!connection) {
-            ::close(accepted);
-            return finish(std::move(completion),
-                          std::unexpected(connection.error()));
-        }
-        return finish(std::move(completion), std::move(*connection));
+        return start_async_with_cleanup<NativeConnection>(
+            std::move(completion),
+            [this, server, timeout_ms](const CancellationCheck& cancelled)
+                -> Result<NativeConnection> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = duplicate_handle(server);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                auto gate = acquire_operation_gate(
+                    descriptor->state->input_gate, deadline, cancelled);
+                if (!gate) return std::unexpected(gate.error());
+                while (true) {
+                    auto ready = wait_fd(descriptor->descriptor.value, POLLIN,
+                                         deadline, cancelled);
+                    if (!ready) return std::unexpected(ready.error());
+                    sockaddr_storage address {};
+                    socklen_t length = static_cast<socklen_t>(sizeof(address));
+                    const int accepted = ::accept(
+                        descriptor->descriptor.value,
+                        reinterpret_cast<sockaddr*>(&address), &length);
+                    if (accepted < 0) {
+                        if (errno == EINTR || errno == EAGAIN ||
+                            errno == EWOULDBLOCK) {
+                            continue;
+                        }
+                        return io_failure("accept failed");
+                    }
+                    ScopedDescriptor owned(accepted);
+                    configure_descriptor(owned.value);
+                    auto nonblocking = set_nonblocking(owned.value, true);
+                    if (!nonblocking) {
+                        return std::unexpected(nonblocking.error());
+                    }
+                    if (cancellation_requested(cancelled)) {
+                        return cancelled_operation();
+                    }
+                    auto connection = store_connection(owned.value, true);
+                    if (!connection) {
+                        return std::unexpected(connection.error());
+                    }
+                    (void)owned.release();
+                    return std::move(*connection);
+                }
+            },
+            [this](Result<NativeConnection>& result) {
+                if (result) (void)close(result->handle);
+            });
     }
 
     Result<OperationId> open_datagram(
         const Url& url,
-        i32,
+        i32 timeout_ms,
         Completion<NativeConnection> completion) override {
-        auto descriptor = create_datagram_descriptor(url);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto connection = store_connection(*descriptor, !url.host.empty());
-        if (!connection) {
-            ::close(*descriptor);
-            return finish(std::move(completion),
-                          std::unexpected(connection.error()));
-        }
-        return finish(std::move(completion), std::move(*connection));
+        return start_async_with_cleanup<NativeConnection>(
+            std::move(completion),
+            [this, url, timeout_ms](const CancellationCheck& cancelled)
+                -> Result<NativeConnection> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = create_datagram_descriptor(
+                    url, deadline, cancelled);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                ScopedDescriptor owned(*descriptor);
+                if (cancellation_requested(cancelled)) {
+                    return cancelled_operation();
+                }
+                auto connection = store_connection(
+                    owned.value, !url.host.empty());
+                if (!connection) return std::unexpected(connection.error());
+                (void)owned.release();
+                return std::move(*connection);
+            },
+            [this](Result<NativeConnection>& result) {
+                if (result) (void)close(result->handle);
+            });
     }
 
     Result<OperationId> read(
@@ -925,29 +1704,38 @@ public:
         usize maximum_bytes,
         i32 timeout_ms,
         Completion<std::vector<u8>> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        if (maximum_bytes == 0U) {
-            return finish(std::move(completion), std::vector<u8> {});
-        }
-        auto ready = wait_fd(*descriptor, POLLIN, timeout_ms);
-        if (!ready) return finish(std::move(completion),
-                                  std::unexpected(ready.error()));
-        std::vector<u8> bytes(std::min(maximum_bytes, kIoChunkSize));
-        while (true) {
-            const ssize_t count = ::recv(*descriptor, bytes.data(),
-                                         bytes.size(), 0);
-            if (count >= 0) {
-                bytes.resize(static_cast<usize>(count));
-                return finish(std::move(completion), std::move(bytes));
-            }
-            if (errno != EINTR) {
-                return finish<std::vector<u8>>(
-                    std::move(completion),
-                    io_failure("socket read failed"));
-            }
-        }
+        return start_async<std::vector<u8>>(
+            std::move(completion),
+            [this, handle, maximum_bytes, timeout_ms](
+                const CancellationCheck& cancelled)
+                -> Result<std::vector<u8>> {
+                if (maximum_bytes == 0U) return std::vector<u8> {};
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                auto gate = acquire_operation_gate(
+                    descriptor->state->input_gate, deadline, cancelled);
+                if (!gate) return std::unexpected(gate.error());
+                std::vector<u8> bytes(
+                    std::min(maximum_bytes, kIoChunkSize));
+                while (true) {
+                    auto ready = wait_fd(descriptor->descriptor.value, POLLIN,
+                                         deadline, cancelled);
+                    if (!ready) return std::unexpected(ready.error());
+                    const ssize_t count = ::recv(
+                        descriptor->descriptor.value, bytes.data(),
+                        bytes.size(), 0);
+                    if (count >= 0) {
+                        bytes.resize(static_cast<usize>(count));
+                        return bytes;
+                    }
+                    if (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    return io_failure("socket read failed");
+                }
+            });
     }
 
     Result<OperationId> write(
@@ -955,28 +1743,41 @@ public:
         std::vector<u8> bytes,
         i32 timeout_ms,
         Completion<usize> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto written = send_all(*descriptor, bytes, timeout_ms);
-        if (!written) return finish(std::move(completion),
-                                    std::unexpected(written.error()));
-        return finish(std::move(completion), bytes.size());
+        return start_async<usize>(
+            std::move(completion),
+            [this, handle, bytes = std::move(bytes), timeout_ms](
+                const CancellationCheck& cancelled) -> Result<usize> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                auto gate = acquire_operation_gate(
+                    descriptor->state->output_gate, deadline, cancelled);
+                if (!gate) return std::unexpected(gate.error());
+                auto written = send_all(descriptor->descriptor.value, bytes,
+                                        deadline, cancelled);
+                if (!written) return std::unexpected(written.error());
+                return bytes.size();
+            });
     }
 
     Result<OperationId> available(
         NativeHandle handle,
         Completion<usize> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        int count = 0;
-        if (::ioctl(*descriptor, FIONREAD, &count) != 0) {
-            return finish<usize>(std::move(completion),
-                                 io_failure("FIONREAD failed"));
-        }
-        return finish(std::move(completion),
-                      static_cast<usize>(std::max(count, 0)));
+        return start_async<usize>(
+            std::move(completion),
+            [this, handle](const CancellationCheck& cancelled)
+                -> Result<usize> {
+                if (cancellation_requested(cancelled)) {
+                    return cancelled_operation();
+                }
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                int count = 0;
+                if (::ioctl(descriptor->descriptor.value, FIONREAD, &count) != 0) {
+                    return io_failure("FIONREAD failed");
+                }
+                return static_cast<usize>(std::max(count, 0));
+            });
     }
 
     Result<OperationId> send_datagram(
@@ -984,37 +1785,62 @@ public:
         DatagramPacket packet,
         i32 timeout_ms,
         Completion<usize> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto ready = wait_fd(*descriptor, POLLOUT, timeout_ms);
-        if (!ready) return finish(std::move(completion),
-                                  std::unexpected(ready.error()));
-        ssize_t sent = -1;
-        if (packet.peer.host.empty()) {
-            sent = ::send(*descriptor, packet.bytes.data(),
-                          packet.bytes.size(), 0);
-        } else {
-            auto addresses = resolve_addresses(packet.peer.host,
-                                               packet.peer.port,
-                                               SOCK_DGRAM, false);
-            if (!addresses) return finish(std::move(completion),
-                                          std::unexpected(addresses.error()));
-            for (addrinfo* address = addresses->value;
-                 address != nullptr;
-                 address = address->ai_next) {
-                sent = ::sendto(*descriptor, packet.bytes.data(),
-                                packet.bytes.size(), 0,
+        return start_async<usize>(
+            std::move(completion),
+            [this, handle, packet = std::move(packet), timeout_ms](
+                const CancellationCheck& cancelled) mutable -> Result<usize> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                auto gate = acquire_operation_gate(
+                    descriptor->state->output_gate, deadline, cancelled);
+                if (!gate) return std::unexpected(gate.error());
+                std::optional<AddressList> addresses;
+                if (!packet.peer.host.empty()) {
+                    auto resolved = resolve_addresses(
+                        packet.peer.host, packet.peer.port, SOCK_DGRAM, false,
+                        deadline, cancelled);
+                    if (!resolved) return std::unexpected(resolved.error());
+                    addresses.emplace(std::move(*resolved));
+                }
+                while (true) {
+                    auto ready = wait_fd(descriptor->descriptor.value,
+                                         POLLOUT, deadline, cancelled);
+                    if (!ready) return std::unexpected(ready.error());
+                    ssize_t sent = -1;
+                    if (!addresses.has_value()) {
+                        sent = ::send(descriptor->descriptor.value,
+                                      packet.bytes.data(),
+                                      packet.bytes.size(), 0);
+                    } else {
+                        for (addrinfo* address = addresses->value;
+                             address != nullptr;
+                             address = address->ai_next) {
+                            auto active = check_operation_active(
+                                deadline, cancelled);
+                            if (!active) {
+                                return std::unexpected(active.error());
+                            }
+                            sent = ::sendto(
+                                descriptor->descriptor.value,
+                                packet.bytes.data(), packet.bytes.size(), 0,
                                 address->ai_addr,
                                 static_cast<socklen_t>(address->ai_addrlen));
-                if (sent >= 0) break;
-            }
-        }
-        if (sent < 0) {
-            return finish<usize>(std::move(completion),
-                                 io_failure("UDP send failed"));
-        }
-        return finish(std::move(completion), static_cast<usize>(sent));
+                            if (sent >= 0 ||
+                                (errno != EAGAIN && errno != EWOULDBLOCK &&
+                                 errno != EINTR)) {
+                                break;
+                            }
+                        }
+                    }
+                    if (sent >= 0) return static_cast<usize>(sent);
+                    if (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    return io_failure("UDP send failed");
+                }
+            });
     }
 
     Result<OperationId> receive_datagram(
@@ -1022,40 +1848,103 @@ public:
         usize maximum_bytes,
         i32 timeout_ms,
         Completion<DatagramPacket> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        auto ready = wait_fd(*descriptor, POLLIN, timeout_ms);
-        if (!ready) return finish(std::move(completion),
-                                  std::unexpected(ready.error()));
-        DatagramPacket packet;
-        packet.bytes.resize(std::min(maximum_bytes, static_cast<usize>(65'507)));
-        sockaddr_storage peer {};
-        socklen_t peer_length = static_cast<socklen_t>(sizeof(peer));
-        const ssize_t count = ::recvfrom(
-            *descriptor, packet.bytes.data(), packet.bytes.size(), 0,
-            reinterpret_cast<sockaddr*>(&peer), &peer_length);
-        if (count < 0) {
-            return finish<DatagramPacket>(
-                std::move(completion),
-                io_failure("UDP receive failed"));
-        }
-        packet.bytes.resize(static_cast<usize>(count));
-        auto endpoint = endpoint_from_sockaddr(
-            reinterpret_cast<const sockaddr*>(&peer), peer_length);
-        if (!endpoint) return finish(std::move(completion),
-                                     std::unexpected(endpoint.error()));
-        packet.peer = std::move(*endpoint);
-        return finish(std::move(completion), std::move(packet));
+        return start_async<DatagramPacket>(
+            std::move(completion),
+            [this, handle, maximum_bytes, timeout_ms](
+                const CancellationCheck& cancelled) -> Result<DatagramPacket> {
+                OperationDeadline deadline(timeout_ms);
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                auto gate = acquire_operation_gate(
+                    descriptor->state->input_gate, deadline, cancelled);
+                if (!gate) return std::unexpected(gate.error());
+                while (true) {
+                    auto ready = wait_fd(descriptor->descriptor.value,
+                                         POLLIN, deadline, cancelled);
+                    if (!ready) return std::unexpected(ready.error());
+                    DatagramPacket packet;
+                    packet.bytes.resize(std::min(
+                        maximum_bytes, static_cast<usize>(65'507)));
+                    sockaddr_storage peer {};
+                    socklen_t peer_length =
+                        static_cast<socklen_t>(sizeof(peer));
+                    const ssize_t count = ::recvfrom(
+                        descriptor->descriptor.value, packet.bytes.data(),
+                        packet.bytes.size(), 0,
+                        reinterpret_cast<sockaddr*>(&peer), &peer_length);
+                    if (count < 0) {
+                        if (errno == EINTR || errno == EAGAIN ||
+                            errno == EWOULDBLOCK) {
+                            continue;
+                        }
+                        return io_failure("UDP receive failed");
+                    }
+                    packet.bytes.resize(static_cast<usize>(count));
+                    auto endpoint = endpoint_from_sockaddr(
+                        reinterpret_cast<const sockaddr*>(&peer), peer_length);
+                    if (!endpoint) return std::unexpected(endpoint.error());
+                    packet.peer = std::move(*endpoint);
+                    return packet;
+                }
+            });
     }
 
     Result<OperationId> perform_http(
         HttpRequest request,
         Completion<HttpResponse> completion) override {
-        auto response = perform_plain_http(std::move(request));
-        if (!response) return finish(std::move(completion),
-                                     std::unexpected(response.error()));
-        return finish(std::move(completion), std::move(*response));
+#if defined(__APPLE__)
+        if (request.url.scheme == Scheme::http ||
+            request.url.scheme == Scheme::https) {
+            if (request.body.size() >
+                static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail(ErrorCode::overflow,
+                            "HTTP request body exceeds Apple bridge limit");
+            }
+            const OperationId operation {next_operation_.fetch_add(1U)};
+            auto state = std::make_shared<AppleHttpOperationState>();
+            {
+                std::scoped_lock lock(apple_http_operations_->mutex);
+                apple_http_operations_->operations.insert_or_assign(
+                    operation.value, state);
+            }
+            auto* context = new AppleHttpCallbackContext {
+                .registry = apple_http_operations_,
+                .state = state,
+                .operation = operation,
+                .request = request,
+                .completion = std::move(completion),
+            };
+            const std::string url = request.url.to_string();
+            const std::string headers = serialize_apple_http_headers(request);
+            const i32 handle = phoneme_ios_https_execute_async(
+                url.c_str(), request.method.c_str(), headers.c_str(),
+                request.body.empty() ? nullptr : request.body.data(),
+                static_cast<i32>(request.body.size()), request.timeout_ms,
+                static_cast<i32>(request.redirect_limit),
+                &phoneme_apple_http_completed, context);
+            if (handle <= 0) {
+                {
+                    std::scoped_lock lock(apple_http_operations_->mutex);
+                    apple_http_operations_->operations.erase(operation.value);
+                }
+                delete context;
+                return fail(ErrorCode::io_error,
+                            "Apple HTTP bridge failed to start request");
+            }
+            state->bridge_handle.store(handle, std::memory_order_release);
+            if (state->cancelled.load(std::memory_order_acquire)) {
+                phoneme_ios_https_cancel(handle);
+            }
+            return operation;
+        }
+#endif
+        return start_async<HttpResponse>(
+            std::move(completion),
+            [request = std::move(request)](
+                const CancellationCheck& cancelled) mutable
+                -> Result<HttpResponse> {
+                return perform_plain_http(std::move(request), cancelled);
+            });
     }
 
     Result<OperationId> set_socket_option(
@@ -1063,158 +1952,110 @@ public:
         SocketOption option,
         i32 value,
         Completion<bool> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        int level = SOL_SOCKET;
-        int name = 0;
-        int integer = value;
-        linger linger_value {};
-        const void* pointer = &integer;
-        socklen_t length = static_cast<socklen_t>(sizeof(integer));
-        switch (option) {
-        case SocketOption::delay:
-            level = IPPROTO_TCP;
-            name = TCP_NODELAY;
-            integer = value == 0 ? 0 : 1;
-            break;
-        case SocketOption::linger:
-            name = SO_LINGER;
-            linger_value.l_onoff = value > 0 ? 1 : 0;
-            linger_value.l_linger = std::max(value, 0);
-            pointer = &linger_value;
-            length = static_cast<socklen_t>(sizeof(linger_value));
-            break;
-        case SocketOption::keep_alive:
-            name = SO_KEEPALIVE;
-            integer = value == 0 ? 0 : 1;
-            break;
-        case SocketOption::receive_buffer:
-            if (value <= 0) return finish<bool>(
-                std::move(completion),
-                fail(ErrorCode::invalid_argument,
-                     "receive buffer must be positive"));
-            name = SO_RCVBUF;
-            break;
-        case SocketOption::send_buffer:
-            if (value <= 0) return finish<bool>(
-                std::move(completion),
-                fail(ErrorCode::invalid_argument,
-                     "send buffer must be positive"));
-            name = SO_SNDBUF;
-            break;
+        if ((option == SocketOption::receive_buffer ||
+             option == SocketOption::send_buffer) && value <= 0) {
+            return fail(ErrorCode::invalid_argument,
+                        "socket buffer size must be positive");
         }
-        if (::setsockopt(*descriptor, level, name, pointer, length) != 0) {
-            return finish<bool>(std::move(completion),
-                                io_failure("setsockopt failed"));
-        }
-        return finish(std::move(completion), true);
+        return start_async<bool>(
+            std::move(completion),
+            [this, handle, option, value](
+                const CancellationCheck& cancelled) -> Result<bool> {
+                if (cancellation_requested(cancelled)) {
+                    return cancelled_operation();
+                }
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                int level = SOL_SOCKET;
+                int name = 0;
+                int integer = value;
+                linger linger_value {};
+                const void* pointer = &integer;
+                socklen_t length = static_cast<socklen_t>(sizeof(integer));
+                switch (option) {
+                case SocketOption::delay:
+                    level = IPPROTO_TCP;
+                    name = TCP_NODELAY;
+                    integer = value == 0 ? 0 : 1;
+                    break;
+                case SocketOption::linger:
+                    name = SO_LINGER;
+                    linger_value.l_onoff = value > 0 ? 1 : 0;
+                    linger_value.l_linger = std::max(value, 0);
+                    pointer = &linger_value;
+                    length = static_cast<socklen_t>(sizeof(linger_value));
+                    break;
+                case SocketOption::keep_alive:
+                    name = SO_KEEPALIVE;
+                    integer = value == 0 ? 0 : 1;
+                    break;
+                case SocketOption::receive_buffer:
+                    name = SO_RCVBUF;
+                    break;
+                case SocketOption::send_buffer:
+                    name = SO_SNDBUF;
+                    break;
+                }
+                if (::setsockopt(descriptor->descriptor.value, level, name,
+                                 pointer, length) != 0) {
+                    return io_failure("setsockopt failed");
+                }
+                return true;
+            });
     }
 
     Result<OperationId> get_socket_option(
         NativeHandle handle,
         SocketOption option,
         Completion<i32> completion) override {
-        auto descriptor = lookup(handle);
-        if (!descriptor) return finish(std::move(completion),
-                                       std::unexpected(descriptor.error()));
-        int level = SOL_SOCKET;
-        int name = 0;
-        int integer = 0;
-        linger linger_value {};
-        void* pointer = &integer;
-        socklen_t length = static_cast<socklen_t>(sizeof(integer));
-        switch (option) {
-        case SocketOption::delay:
-            level = IPPROTO_TCP;
-            name = TCP_NODELAY;
-            break;
-        case SocketOption::linger:
-            name = SO_LINGER;
-            pointer = &linger_value;
-            length = static_cast<socklen_t>(sizeof(linger_value));
-            break;
-        case SocketOption::keep_alive:
-            name = SO_KEEPALIVE;
-            break;
-        case SocketOption::receive_buffer:
-            name = SO_RCVBUF;
-            break;
-        case SocketOption::send_buffer:
-            name = SO_SNDBUF;
-            break;
-        }
-        if (::getsockopt(*descriptor, level, name, pointer, &length) != 0) {
-            return finish<i32>(std::move(completion),
-                               io_failure("getsockopt failed"));
-        }
-        if (option == SocketOption::linger) {
-            integer = linger_value.l_onoff == 0 ? 0
-                                                : linger_value.l_linger;
-        }
-        return finish(std::move(completion), static_cast<i32>(integer));
+        return start_async<i32>(
+            std::move(completion),
+            [this, handle, option](const CancellationCheck& cancelled)
+                -> Result<i32> {
+                if (cancellation_requested(cancelled)) {
+                    return cancelled_operation();
+                }
+                auto descriptor = duplicate_handle(handle);
+                if (!descriptor) return std::unexpected(descriptor.error());
+                int level = SOL_SOCKET;
+                int name = 0;
+                int integer = 0;
+                linger linger_value {};
+                void* pointer = &integer;
+                socklen_t length = static_cast<socklen_t>(sizeof(integer));
+                switch (option) {
+                case SocketOption::delay:
+                    level = IPPROTO_TCP;
+                    name = TCP_NODELAY;
+                    break;
+                case SocketOption::linger:
+                    name = SO_LINGER;
+                    pointer = &linger_value;
+                    length = static_cast<socklen_t>(sizeof(linger_value));
+                    break;
+                case SocketOption::keep_alive:
+                    name = SO_KEEPALIVE;
+                    break;
+                case SocketOption::receive_buffer:
+                    name = SO_RCVBUF;
+                    break;
+                case SocketOption::send_buffer:
+                    name = SO_SNDBUF;
+                    break;
+                }
+                if (::getsockopt(descriptor->descriptor.value, level, name,
+                                 pointer, &length) != 0) {
+                    return io_failure("getsockopt failed");
+                }
+                if (option == SocketOption::linger) {
+                    integer = linger_value.l_onoff == 0
+                        ? 0 : linger_value.l_linger;
+                }
+                return static_cast<i32>(integer);
+            });
     }
 
-    Status close(NativeHandle handle) override {
-        int descriptor = -1;
-        {
-            std::scoped_lock lock(mutex_);
-            const auto found = handles_.find(handle.value);
-            if (found == handles_.end()) return {};
-            descriptor = found->second;
-            handles_.erase(found);
-        }
-        if (descriptor >= 0) {
-            (void)::shutdown(descriptor, SHUT_RDWR);
-            ::close(descriptor);
-        }
-        return {};
-    }
-
-    Status cancel(OperationId) override {
-        return {};
-    }
-
-private:
-    template <typename T, typename U>
-    [[nodiscard]] Result<OperationId> finish(Completion<T> completion,
-                                             U&& value) {
-        Result<T> result(std::forward<U>(value));
-        const OperationId operation {next_operation_.fetch_add(1U)};
-        if (completion) completion(std::move(result));
-        return operation;
-    }
-
-    [[nodiscard]] Result<NativeConnection> store_connection(
-        int descriptor,
-        bool has_peer) {
-        const NativeHandle handle {next_handle_.fetch_add(1U)};
-        {
-            std::scoped_lock lock(mutex_);
-            handles_.insert_or_assign(handle.value, descriptor);
-        }
-        auto local = socket_endpoint(descriptor, false);
-        if (!local) {
-            (void)close(handle);
-            return std::unexpected(local.error());
-        }
-        Endpoint remote;
-        if (has_peer) {
-            auto peer = socket_endpoint(descriptor, true);
-            if (!peer) {
-                (void)close(handle);
-                return std::unexpected(peer.error());
-            }
-            remote = std::move(*peer);
-        }
-        return NativeConnection {
-            .handle = handle,
-            .local = std::move(*local),
-            .remote = std::move(remote),
-        };
-    }
-
-    [[nodiscard]] Result<int> lookup(NativeHandle handle) const {
+    Status shutdown_output(NativeHandle handle) override {
         if (!handle.valid()) {
             return fail(ErrorCode::invalid_argument,
                         "native network handle is invalid");
@@ -1225,16 +2066,266 @@ private:
             return fail(ErrorCode::invalid_state,
                         "native network handle is closed");
         }
-        return found->second;
+        // phoneME treats output shutdown as best-effort: it must send FIN when
+        // possible, but a peer that already closed must not make stream close
+        // fail.
+        (void)::shutdown(found->second->descriptor, SHUT_WR);
+        return {};
     }
 
+    Status close(NativeHandle handle) override {
+        std::shared_ptr<HandleState> state;
+        {
+            std::scoped_lock lock(mutex_);
+            const auto found = handles_.find(handle.value);
+            if (found == handles_.end()) return {};
+            state = std::move(found->second);
+            handles_.erase(found);
+        }
+        if (state != nullptr && state->descriptor >= 0) {
+            (void)::shutdown(state->descriptor, SHUT_RDWR);
+            ::close(state->descriptor);
+            state->descriptor = -1;
+        }
+        return {};
+    }
+
+    Status cancel(OperationId operation) override {
+        {
+            std::scoped_lock lock(operation_mutex_);
+            const auto found = operations_.find(operation.value);
+            if (found != operations_.end()) {
+                found->second->cancelled.store(true,
+                                               std::memory_order_release);
+            }
+        }
+        operation_condition_.notify_all();
+#if defined(__APPLE__)
+        std::shared_ptr<AppleHttpOperationState> state;
+        {
+            std::scoped_lock lock(apple_http_operations_->mutex);
+            const auto found =
+                apple_http_operations_->operations.find(operation.value);
+            if (found != apple_http_operations_->operations.end()) {
+                state = found->second;
+                apple_http_operations_->operations.erase(found);
+            }
+        }
+        if (state != nullptr) {
+            state->cancelled.store(true, std::memory_order_release);
+            const i32 handle = state->bridge_handle.load(
+                std::memory_order_acquire);
+            if (handle > 0) phoneme_ios_https_cancel(handle);
+        }
+#endif
+        return {};
+    }
+
+private:
+    struct OperationState final {
+        std::atomic_bool cancelled {false};
+    };
+
+    using AsyncTask = std::function<void()>;
+
+    template <typename T, typename Work, typename Cleanup>
+    [[nodiscard]] Result<OperationId> start_async_with_cleanup(
+        Completion<T> completion,
+        Work work,
+        Cleanup cleanup) {
+        const OperationId operation {next_operation_.fetch_add(1U)};
+        if (!operation.valid()) {
+            return fail(ErrorCode::overflow,
+                        "network operation identifier space was exhausted");
+        }
+        auto state = std::make_shared<OperationState>();
+        AsyncTask task = [this,
+                          operation,
+                          state,
+                          completion = std::move(completion),
+                          work = std::move(work),
+                          cleanup = std::move(cleanup)]() mutable {
+            const CancellationCheck cancelled = [state] {
+                return state->cancelled.load(std::memory_order_acquire);
+            };
+            Result<T> result = work(cancelled);
+            bool deliver = false;
+            {
+                std::scoped_lock lock(operation_mutex_);
+                const auto found = operations_.find(operation.value);
+                if (found != operations_.end() && found->second == state) {
+                    operations_.erase(found);
+                }
+                deliver = !stopping_ &&
+                          !state->cancelled.load(std::memory_order_acquire);
+            }
+            if (!deliver) {
+                cleanup(result);
+                return;
+            }
+            if (completion) completion(std::move(result));
+        };
+
+        {
+            std::scoped_lock lock(operation_mutex_);
+            if (stopping_) {
+                return fail(ErrorCode::invalid_state,
+                            "network adapter is shutting down");
+            }
+            operations_.insert_or_assign(operation.value, state);
+            operation_queue_.push_back(std::move(task));
+        }
+        operation_condition_.notify_one();
+        return operation;
+    }
+
+    template <typename T, typename Work>
+    [[nodiscard]] Result<OperationId> start_async(
+        Completion<T> completion,
+        Work work) {
+        return start_async_with_cleanup<T>(
+            std::move(completion), std::move(work),
+            [](Result<T>&) {});
+    }
+
+    void worker_loop(std::stop_token stop_token) noexcept {
+        while (true) {
+            AsyncTask task;
+            {
+                std::unique_lock lock(operation_mutex_);
+                operation_condition_.wait(lock, [this, &stop_token] {
+                    return stopping_ || stop_token.stop_requested() ||
+                           !operation_queue_.empty();
+                });
+                if ((stopping_ || stop_token.stop_requested()) &&
+                    operation_queue_.empty()) {
+                    return;
+                }
+                task = std::move(operation_queue_.front());
+                operation_queue_.pop_front();
+            }
+            if (task) task();
+        }
+    }
+
+    void shutdown_workers() noexcept {
+        {
+            std::scoped_lock lock(operation_mutex_);
+            if (stopping_) return;
+            stopping_ = true;
+            for (auto& [unused, state] : operations_) {
+                (void)unused;
+                state->cancelled.store(true, std::memory_order_release);
+            }
+            operation_queue_.clear();
+        }
+        for (auto& worker : workers_) worker.request_stop();
+        operation_condition_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable() &&
+                worker.get_id() != std::this_thread::get_id()) {
+                worker.join();
+            }
+        }
+        workers_.clear();
+        std::scoped_lock lock(operation_mutex_);
+        operations_.clear();
+    }
+
+    [[nodiscard]] Result<DuplicatedHandle> duplicate_handle(
+        NativeHandle handle) const {
+        if (!handle.valid()) {
+            return fail(ErrorCode::invalid_argument,
+                        "native network handle is invalid");
+        }
+        int descriptor = -1;
+        std::shared_ptr<HandleState> state;
+        {
+            std::scoped_lock lock(mutex_);
+            const auto found = handles_.find(handle.value);
+            if (found == handles_.end() || found->second == nullptr ||
+                found->second->descriptor < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "native network handle is closed");
+            }
+            state = found->second;
+            descriptor = ::dup(state->descriptor);
+        }
+        if (descriptor < 0) return io_failure("dup network handle failed");
+        configure_descriptor(descriptor);
+        auto nonblocking = set_nonblocking(descriptor, true);
+        if (!nonblocking) {
+            ::close(descriptor);
+            return std::unexpected(nonblocking.error());
+        }
+        return DuplicatedHandle {
+            .descriptor = ScopedDescriptor {descriptor},
+            .state = std::move(state),
+        };
+    }
+
+    [[nodiscard]] Result<NativeConnection> store_connection(
+        int descriptor,
+        bool has_peer) {
+        auto local = socket_endpoint(descriptor, false);
+        if (!local) return std::unexpected(local.error());
+        Endpoint remote;
+        if (has_peer) {
+            auto peer = socket_endpoint(descriptor, true);
+            if (!peer) return std::unexpected(peer.error());
+            remote = std::move(*peer);
+        }
+        const NativeHandle handle {next_handle_.fetch_add(1U)};
+        auto state = std::make_shared<HandleState>(descriptor);
+        {
+            std::scoped_lock lock(mutex_);
+            handles_.insert_or_assign(handle.value, std::move(state));
+        }
+        return NativeConnection {
+            .handle = handle,
+            .local = std::move(*local),
+            .remote = std::move(remote),
+        };
+    }
+
+#if defined(__APPLE__)
+    std::shared_ptr<AppleHttpOperationRegistry> apple_http_operations_ {
+        std::make_shared<AppleHttpOperationRegistry>()};
+#endif
+    mutable std::mutex operation_mutex_;
+    std::condition_variable operation_condition_;
+    std::deque<AsyncTask> operation_queue_;
+    std::unordered_map<u64, std::shared_ptr<OperationState>> operations_;
+    std::vector<std::jthread> workers_;
+    bool stopping_ {false};
+
     mutable std::mutex mutex_;
-    std::unordered_map<u64, int> handles_;
+    std::unordered_map<u64, std::shared_ptr<HandleState>> handles_;
     std::atomic<u64> next_handle_ {1U};
     std::atomic<u64> next_operation_ {1U};
 };
 
 } // namespace
+
+namespace detail {
+
+Result<HttpResponse> parse_http_response_bytes(
+    const Url& url,
+    std::string_view request_method,
+    std::span<const u8> bytes) {
+    return parse_http_response(url, request_method, bytes);
+}
+
+Result<HttpResponse> perform_plain_http_request(HttpRequest request) {
+    return perform_plain_http(std::move(request));
+}
+
+void set_address_resolution_delay_for_tests(i32 milliseconds) noexcept {
+    g_address_resolution_delay_for_tests.store(
+        std::max(milliseconds, 0), std::memory_order_release);
+}
+
+} // namespace detail
 
 std::shared_ptr<AsyncNetworkAdapter> make_posix_network_adapter() {
     return std::make_shared<PosixNetworkAdapter>();

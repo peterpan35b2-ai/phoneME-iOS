@@ -3,3 +3,7 @@ graph.db
 *.db
 build/
 generated/
+results/
+fuzz-corpus/
+fuzz-artifacts/
+*.profraw

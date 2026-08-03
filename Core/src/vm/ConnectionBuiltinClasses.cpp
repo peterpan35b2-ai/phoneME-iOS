@@ -110,6 +110,15 @@ using namespace builtin;
                           },
                           {"javax/microedition/io/InputConnection"});
     }
+    if (name == "javax/microedition/io/StreamConnectionNotifier") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "acceptAndOpen",
+                                     "()Ljavax/microedition/io/StreamConnection;"),
+                          },
+                          {"javax/microedition/io/Connection"});
+    }
     if (name == "javax/microedition/io/SocketConnection") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract,
@@ -121,6 +130,7 @@ using namespace builtin;
                               field(kPublic | kStatic | kFinal, "SNDBUF", "B"),
                           },
                           {
+                              method(kStatic, "<clinit>", "()V"),
                               method(kPublic | kAbstract, "getAddress", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getLocalAddress", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getPort", "()I"),
@@ -130,15 +140,23 @@ using namespace builtin;
                           },
                           {"javax/microedition/io/StreamConnection"});
     }
+    if (name == "javax/microedition/io/SecureConnection") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "getSecurityInfo",
+                                     "()Ljavax/microedition/io/SecurityInfo;"),
+                          },
+                          {"javax/microedition/io/SocketConnection"});
+    }
     if (name == "javax/microedition/io/ServerSocketConnection") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract, {},
                           {
-                              method(kPublic | kAbstract, "acceptAndOpen", "()Ljavax/microedition/io/StreamConnection;"),
                               method(kPublic | kAbstract, "getLocalAddress", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getLocalPort", "()I"),
                           },
-                          {"javax/microedition/io/Connection"});
+                          {"javax/microedition/io/StreamConnectionNotifier"});
     }
     if (name == "javax/microedition/io/DatagramConnection") {
         return make_class(name.data(), "java/lang/Object",
@@ -180,6 +198,51 @@ using namespace builtin;
                               method(kPublic | kAbstract, "getCipherSuite", "()Ljava/lang/String;"),
                           });
     }
+    if (name == "javax/microedition/pki/CertificateException") {
+        return make_class(name.data(), "java/io/IOException", kOrdinary,
+                          {
+                              field(kPublic | kStatic | kFinal,
+                                    "BAD_EXTENSIONS", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "CERTIFICATE_CHAIN_TOO_LONG", "B"),
+                              field(kPublic | kStatic | kFinal, "EXPIRED", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "UNAUTHORIZED_INTERMEDIATE_CA", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "MISSING_SIGNATURE", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "NOT_YET_VALID", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "SITENAME_MISMATCH", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "UNRECOGNIZED_ISSUER", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "UNSUPPORTED_SIGALG", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "INAPPROPRIATE_KEY_USAGE", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "BROKEN_CHAIN", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "ROOT_CA_EXPIRED", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "UNSUPPORTED_PUBLIC_KEY_TYPE", "B"),
+                              field(kPublic | kStatic | kFinal,
+                                    "VERIFICATION_FAILED", "B"),
+                              field(kPrivate, "cert",
+                                    "Ljavax/microedition/pki/Certificate;"),
+                              field(kPrivate, "reason", "B"),
+                          },
+                          {
+                              method(kStatic, "<clinit>", "()V"),
+                              method(kPublic, "<init>",
+                                     "(Ljavax/microedition/pki/Certificate;B)V"),
+                              method(kPublic, "<init>",
+                                     "(Ljava/lang/String;Ljavax/microedition/pki/Certificate;B)V"),
+                              method(kPublic, "getCertificate",
+                                     "()Ljavax/microedition/pki/Certificate;"),
+                              method(kPublic, "getReason", "()B"),
+                          });
+    }
     if (name == "javax/microedition/pki/Certificate") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract, {},
@@ -202,12 +265,46 @@ using namespace builtin;
                               field(kPublic | kStatic | kFinal, "GET", "Ljava/lang/String;"),
                               field(kPublic | kStatic | kFinal, "POST", "Ljava/lang/String;"),
                               field(kPublic | kStatic | kFinal, "HTTP_OK", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_CREATED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_ACCEPTED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_NOT_AUTHORITATIVE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_NO_CONTENT", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_RESET", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_PARTIAL", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_MULT_CHOICE", "I"),
                               field(kPublic | kStatic | kFinal, "HTTP_MOVED_PERM", "I"),
                               field(kPublic | kStatic | kFinal, "HTTP_MOVED_TEMP", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_SEE_OTHER", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_NOT_MODIFIED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_USE_PROXY", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_TEMP_REDIRECT", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_BAD_REQUEST", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_UNAUTHORIZED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_PAYMENT_REQUIRED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_FORBIDDEN", "I"),
                               field(kPublic | kStatic | kFinal, "HTTP_NOT_FOUND", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_BAD_METHOD", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_NOT_ACCEPTABLE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_PROXY_AUTH", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_CLIENT_TIMEOUT", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_CONFLICT", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_GONE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_LENGTH_REQUIRED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_PRECON_FAILED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_ENTITY_TOO_LARGE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_REQ_TOO_LONG", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_UNSUPPORTED_TYPE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_UNSUPPORTED_RANGE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_EXPECT_FAILED", "I"),
                               field(kPublic | kStatic | kFinal, "HTTP_INTERNAL_ERROR", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_NOT_IMPLEMENTED", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_BAD_GATEWAY", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_UNAVAILABLE", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_GATEWAY_TIMEOUT", "I"),
+                              field(kPublic | kStatic | kFinal, "HTTP_VERSION", "I"),
                           },
                           {
+                              method(kStatic, "<clinit>", "()V"),
                               method(kPublic | kAbstract, "getURL", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getProtocol", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getHost", "()Ljava/lang/String;"),

@@ -61,6 +61,8 @@ struct App final {
     Dimensions dimensions;
     AppState state {AppState::none};
     u64 generation {0};
+    u64 lifecycle_token {0};
+    bool lifecycle_busy {false};
     std::shared_ptr<ApplicationVM> vm;
 };
 
@@ -75,6 +77,10 @@ public:
     [[nodiscard]] Status configure(std::string runtime_home,
                                    std::string optional_class_archive = {});
     [[nodiscard]] Status configure_keymap(std::array<i32, 7> keymap);
+    [[nodiscard]] Status configure_input_capabilities(
+        bool pointer_events,
+        bool pointer_motion,
+        bool repeat_events);
     [[nodiscard]] Status configure_permission_prompt(
         security::PermissionPromptCallback prompt);
     [[nodiscard]] Status set_suite_trust(
@@ -97,6 +103,11 @@ public:
     [[nodiscard]] Status notify_push_connection_available(
         SuiteId suite_id,
         std::string connection,
+        i64 received_at_millis);
+    [[nodiscard]] Status notify_push_connection_available(
+        SuiteId suite_id,
+        std::string connection,
+        std::string source_address,
         i64 received_at_millis);
     [[nodiscard]] Result<std::vector<push::LaunchRequest>>
     poll_push_launch_requests(SuiteId suite_id,
@@ -139,16 +150,20 @@ private:
     [[nodiscard]] const App* find_app_unlocked(AppId app_id) const noexcept;
     [[nodiscard]] Status require_running_unlocked() const;
     [[nodiscard]] i32 mapped_key_code_unlocked(i32 host_key_code) const noexcept;
-    void dispatch_input_unlocked();
-    [[nodiscard]] Status pump_canvas_unlocked(App& app);
+    void dispatch_input();
     void mark_canvas_failure_unlocked(App& app, const Error& error);
     void push_ui_action(i32 kind, i32 component_id, i32 first, i64 value64,
                         std::string text = {});
 
+    // Protects Runtime state only. Java/native callbacks are serialized by the
+    // owning ApplicationVM and must never execute while this mutex is held.
     mutable std::mutex mutex_;
     std::string runtime_home_;
     std::string optional_class_archive_;
     std::array<i32, 7> keymap_ {-1, -2, -3, -4, -5, -6, -7};
+    bool pointer_events_supported_ {true};
+    bool pointer_motion_supported_ {true};
+    bool repeat_events_supported_ {true};
     SuiteStore suite_store_;
     security::PermissionPromptCallback permission_prompt_;
     std::unordered_map<i32, security::SuiteTrust> suite_trust_;

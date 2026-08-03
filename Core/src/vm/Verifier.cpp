@@ -755,7 +755,8 @@ void replace_uninitialized(FrameState& state,
     const classfile::CodeAttribute& code,
     usize pc,
     const FrameState& input,
-    std::span<const usize> jsr_return_sites) {
+    std::span<const usize> jsr_return_sites,
+    bool allow_legacy_return_stack) {
     TransferResult result {.state = input};
     Cursor cursor(code.bytecode, pc);
     auto opcode_result = cursor.read_u8("opcode");
@@ -1462,7 +1463,7 @@ void replace_uninitialized(FrameState& state,
             ? pop_reference(result.state)
             : pop_kind(result.state, opcode_kind);
         if (!returned) return std::unexpected(returned.error());
-        if (!result.state.stack.empty()) {
+        if (!result.state.stack.empty() && !allow_legacy_return_stack) {
             return verify_fail(method, pc, "return leaves values on stack");
         }
         result.falls_through = false;
@@ -1483,7 +1484,7 @@ void replace_uninitialized(FrameState& state,
                                pc,
                                "constructor returns before this is initialized");
         }
-        if (!result.state.stack.empty()) {
+        if (!result.state.stack.empty() && !allow_legacy_return_stack) {
             return verify_fail(method, pc, "return leaves values on stack");
         }
         result.falls_through = false;
@@ -1827,7 +1828,8 @@ void replace_uninitialized(FrameState& state,
         // Structural verification has already decoded every instruction. This
         // compact scanner only needs exact lengths to collect jsr return sites.
         if (*opcode <= 0x0FU ||
-            (*opcode >= 0x1AU && *opcode <= 0x83U) ||
+            (*opcode >= 0x1AU && *opcode <= 0x35U) ||
+            (*opcode >= 0x3BU && *opcode <= 0x83U) ||
             (*opcode >= 0x85U && *opcode <= 0x98U) ||
             (*opcode >= 0xACU && *opcode <= 0xB1U) ||
             *opcode == 0xBEU || *opcode == 0xBFU ||
@@ -1917,8 +1919,10 @@ void replace_uninitialized(FrameState& state,
 
 } // namespace
 
-Status verify_method(const classfile::ClassFile& owner,
-                     const classfile::Method& method) {
+[[nodiscard]] Status verify_method_impl(
+    const classfile::ClassFile& owner,
+    const classfile::Method& method,
+    bool enforce_stack_maps) {
     auto descriptor = parse_method_descriptor(method.descriptor);
     if (!descriptor) {
         return fail(ErrorCode::verification_failed,
@@ -1972,10 +1976,16 @@ Status verify_method(const classfile::ClassFile& owner,
                     method.name + method.descriptor + ": " +
                         initial.error().message);
     }
-    auto stack_maps = build_stack_maps(method, code, *initial);
+    Result<std::unordered_map<usize, FrameState>> stack_maps =
+        enforce_stack_maps
+            ? build_stack_maps(method, code, *initial)
+            : Result<std::unordered_map<usize, FrameState>>(
+                  std::unordered_map<usize, FrameState> {});
     if (!stack_maps) return std::unexpected(stack_maps.error());
     auto jsr_return_sites = collect_jsr_return_sites(code.bytecode);
     if (!jsr_return_sites) return std::unexpected(jsr_return_sites.error());
+    const bool allow_legacy_return_stack =
+        !enforce_stack_maps && owner.major_version() <= 50U;
 
     FrameState entry_state = *initial;
     if (const auto entry_map = stack_maps->find(0U);
@@ -2037,7 +2047,8 @@ Status verify_method(const classfile::ClassFile& owner,
                                              code,
                                              pc,
                                              input,
-                                             *jsr_return_sites);
+                                             *jsr_return_sites,
+                                             allow_legacy_return_stack);
         if (!transfer) {
             if (transfer.error().code == ErrorCode::verification_failed) {
                 return std::unexpected(transfer.error());
@@ -2081,6 +2092,35 @@ Status verify_method(const classfile::ClassFile& owner,
         }
     }
     return {};
+}
+
+Status verify_method(const classfile::ClassFile& owner,
+                     const classfile::Method& method) {
+    auto strict = verify_method_impl(owner, method, true);
+    if (strict || strict.error().code != ErrorCode::verification_failed ||
+        owner.major_version() > 50U || !method.code.has_value()) {
+        return strict;
+    }
+
+    const bool has_cldc_stack_map = std::any_of(
+        method.code->stack_map_frames.begin(),
+        method.code->stack_map_frames.end(),
+        [](const classfile::StackMapFrame& frame) {
+            return frame.kind == classfile::StackMapFrameKind::cldc_full;
+        });
+    const bool legacy_return_stack =
+        owner.major_version() <= 48U &&
+        method.code->stack_map_frames.empty() &&
+        strict.error().message.find("return leaves values on stack") !=
+            std::string::npos;
+    if (!has_cldc_stack_map && !legacy_return_stack) return strict;
+
+    // Some preverified MIDP 1.x/2.x JARs contain stale CLDC StackMap metadata
+    // after obfuscation. A small number of class-file 45..48 games also leave
+    // an obsolete value on the operand stack at a void return. The fallback
+    // still performs complete bytecode data-flow verification; it only ignores
+    // the legacy hint table and permits that pre-Java-6 return-stack quirk.
+    return verify_method_impl(owner, method, false);
 }
 
 Status verify_class(const classfile::ClassFile& class_file) {

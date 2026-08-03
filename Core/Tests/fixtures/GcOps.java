@@ -17,4 +17,28 @@ public final class GcOps {
         }
         return staticRoot != null && localRoot != null ? 59 : 0;
     }
+
+    public static int catchObjectOutOfMemory() {
+        Object[] roots = new Object[64];
+        try {
+            for (int index = 0; index < roots.length; ++index) {
+                roots[index] = new Object();
+            }
+        } catch (OutOfMemoryError expected) {
+            return expected != null ? 71 : 0;
+        }
+        return 0;
+    }
+
+    public static int catchArrayOutOfMemory() {
+        Object[] roots = new Object[64];
+        try {
+            for (int index = 0; index < roots.length; ++index) {
+                roots[index] = new int[1];
+            }
+        } catch (OutOfMemoryError expected) {
+            return expected != null ? 73 : 0;
+        }
+        return 0;
+    }
 }

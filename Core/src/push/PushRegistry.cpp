@@ -23,10 +23,14 @@ constexpr std::array<u8, 8> kMagic{
     static_cast<u8>('U'), static_cast<u8>('S'), static_cast<u8>('H'),
     static_cast<u8>('0'), static_cast<u8>('1'),
 };
-constexpr u32 kVersion = 1U;
+constexpr u32 kVersion = 2U;
+constexpr u32 kLegacyVersion = 1U;
 constexpr usize kMaximumFileBytes = 16U * 1024U * 1024U;
 constexpr u32 kMaximumEntries = 4'096U;
 constexpr u32 kMaximumStringBytes = 4'096U;
+constexpr i64 kLaunchLifetimeMillis = 24LL * 60LL * 60LL * 1'000LL;
+constexpr i64 kMaximumRetryDelayMillis = 5LL * 60LL * 1'000LL;
+constexpr u32 kMaximumLaunchAttempts = 8U;
 
 [[nodiscard]] std::mutex &persistence_mutex() {
   static std::mutex mutex;
@@ -224,6 +228,129 @@ private:
   return value.find('\0') != std::string_view::npos;
 }
 
+[[nodiscard]] bool uses_ip_filter(std::string_view connection) noexcept {
+  return connection.starts_with("socket://") ||
+         connection.starts_with("serversocket://") ||
+         connection.starts_with("datagram://");
+}
+
+[[nodiscard]] bool uses_text_filter(std::string_view connection) noexcept {
+  return connection.starts_with("sms://") ||
+         connection.starts_with("mms://") ||
+         connection.starts_with("cbs://");
+}
+
+[[nodiscard]] bool wildcard_matches(std::string_view pattern,
+                                    std::string_view value) noexcept {
+  std::vector<bool> current(value.size() + 1U, false);
+  std::vector<bool> next(value.size() + 1U, false);
+  current[0] = true;
+  for (const char token : pattern) {
+    std::fill(next.begin(), next.end(), false);
+    if (token == '*') {
+      next[0] = current[0];
+      for (usize index = 1U; index <= value.size(); ++index) {
+        next[index] = current[index] || next[index - 1U];
+      }
+    } else {
+      for (usize index = 1U; index <= value.size(); ++index) {
+        next[index] = current[index - 1U] &&
+            (token == '?' || token == value[index - 1U]);
+      }
+    }
+    current.swap(next);
+  }
+  return current[value.size()];
+}
+
+[[nodiscard]] Result<u16> parse_local_port(std::string_view connection,
+                                           std::string_view prefix) {
+  if (!connection.starts_with(prefix)) {
+    return fail(ErrorCode::invalid_argument,
+                "push connection scheme is invalid");
+  }
+  const std::string_view authority = connection.substr(prefix.size());
+  if (authority.size() < 2U || authority.front() != ':' ||
+      authority.find_first_of("/?#", 1U) != std::string_view::npos) {
+    return fail(ErrorCode::invalid_argument,
+                "push listener connection must use :port with no path");
+  }
+  u32 port = 0U;
+  const auto parsed = std::from_chars(authority.data() + 1U,
+                                      authority.data() + authority.size(),
+                                      port);
+  if (parsed.ec != std::errc {} ||
+      parsed.ptr != authority.data() + authority.size() ||
+      port == 0U || port > std::numeric_limits<u16>::max()) {
+    return fail(ErrorCode::invalid_argument,
+                "push listener port is invalid");
+  }
+  return static_cast<u16>(port);
+}
+
+[[nodiscard]] bool split_ipv4(std::string_view value,
+                              bool allow_wildcards,
+                              std::array<std::string_view, 4>& parts) noexcept {
+  usize start = 0U;
+  for (usize index = 0U; index < parts.size(); ++index) {
+    const usize end = value.find('.', start);
+    if ((index + 1U < parts.size() && end == std::string_view::npos) ||
+        (index + 1U == parts.size() && end != std::string_view::npos)) {
+      return false;
+    }
+    const usize limit = end == std::string_view::npos ? value.size() : end;
+    if (limit == start) return false;
+    parts[index] = value.substr(start, limit - start);
+    bool has_wildcard = false;
+    for (char character : parts[index]) {
+      if (character == '*' || character == '?') {
+        if (!allow_wildcards) return false;
+        has_wildcard = true;
+      } else if (character < '0' || character > '9') {
+        return false;
+      }
+    }
+    if (!has_wildcard) {
+      unsigned value_number = 0U;
+      const auto parsed = std::from_chars(parts[index].data(),
+                                          parts[index].data() +
+                                              parts[index].size(),
+                                          value_number);
+      if (parsed.ec != std::errc {} ||
+          parsed.ptr != parts[index].data() + parts[index].size() ||
+          value_number > 255U) {
+        return false;
+      }
+    }
+    start = limit + 1U;
+  }
+  return true;
+}
+
+[[nodiscard]] bool wildcard_segment_matches(std::string_view pattern,
+                                            std::string_view value) noexcept {
+  std::array<bool, 4> current {};
+  std::array<bool, 4> next {};
+  if (value.size() >= current.size()) return false;
+  current[0] = true;
+  for (char token : pattern) {
+    next.fill(false);
+    if (token == '*') {
+      next[0] = current[0];
+      for (usize index = 1U; index <= value.size(); ++index) {
+        next[index] = current[index] || next[index - 1U];
+      }
+    } else {
+      for (usize index = 1U; index <= value.size(); ++index) {
+        next[index] = current[index - 1U] &&
+            (token == '?' || token == value[index - 1U]);
+      }
+    }
+    current = next;
+  }
+  return current[value.size()];
+}
+
 } // namespace
 
 Status PushRegistry::configure(std::string root_directory, SuiteId suite_id) {
@@ -287,7 +414,7 @@ Status PushRegistry::register_connection(std::string connection,
                                          std::string filter) {
   auto connection_valid = validate_connection(connection);
   auto midlet_valid = validate_midlet(midlet);
-  auto filter_valid = validate_filter(filter);
+  auto filter_valid = validate_filter(connection, filter);
   if (!connection_valid)
     return connection_valid;
   if (!midlet_valid)
@@ -373,6 +500,20 @@ PushRegistry::list_connections(bool available_only) {
   return result;
 }
 
+Result<std::vector<ConnectionRegistration>>
+PushRegistry::connection_registrations() {
+  std::scoped_lock lock(mutex_, persistence_mutex());
+  auto loaded = reload_unlocked();
+  if (!loaded) return std::unexpected(loaded.error());
+  std::vector<ConnectionRegistration> result;
+  result.reserve(state_.connections.size());
+  for (const auto& [connection, registration] : state_.connections) {
+    (void)connection;
+    result.push_back(registration);
+  }
+  return result;
+}
+
 Result<std::optional<std::string>>
 PushRegistry::midlet_for(std::string_view connection) {
   auto valid = validate_connection(connection);
@@ -433,11 +574,49 @@ Result<i64> PushRegistry::register_alarm(std::string midlet, i64 time_millis) {
   return previous_time;
 }
 
+Result<std::optional<i64>> PushRegistry::next_alarm_time() {
+  std::scoped_lock lock(mutex_, persistence_mutex());
+  auto loaded = reload_unlocked();
+  if (!loaded) return std::unexpected(loaded.error());
+  if (state_.alarms.empty()) return std::optional<i64> {};
+  const auto earliest = std::min_element(
+      state_.alarms.begin(), state_.alarms.end(),
+      [](const auto& left, const auto& right) {
+        return left.second.time_millis < right.second.time_millis;
+      });
+  return std::optional<i64>(earliest->second.time_millis);
+}
+
 Status PushRegistry::notify_connection_available(std::string_view connection,
                                                  i64 received_at_millis) {
+  return notify_connection_available_impl(connection, std::nullopt,
+                                          received_at_millis);
+}
+
+Status PushRegistry::notify_connection_available(
+    std::string_view connection,
+    std::string_view source_address,
+    i64 received_at_millis) {
+  return notify_connection_available_impl(connection, source_address,
+                                          received_at_millis);
+}
+
+Status PushRegistry::notify_connection_available_impl(
+    std::string_view connection,
+    std::optional<std::string_view> source_address,
+    i64 received_at_millis) {
   auto valid = validate_connection(connection);
-  if (!valid)
-    return valid;
+  if (!valid) return valid;
+  if (received_at_millis < 0) {
+    return fail(ErrorCode::invalid_argument,
+                "push event wall-clock time must be nonnegative");
+  }
+  if (source_address.has_value() &&
+      (source_address->size() > kMaximumStringBytes ||
+       contains_nul(*source_address))) {
+    return fail(ErrorCode::invalid_argument,
+                "push source address is invalid");
+  }
   std::scoped_lock lock(mutex_, persistence_mutex());
   auto loaded = reload_unlocked();
   if (!loaded)
@@ -447,14 +626,34 @@ Status PushRegistry::notify_connection_available(std::string_view connection,
     return fail(ErrorCode::out_of_range,
                 "push connection is not registered by this suite");
   }
+  if (source_address.has_value() && uses_ip_filter(connection)) {
+    std::array<std::string_view, 4> source_parts {};
+    if (!split_ipv4(*source_address, false, source_parts)) {
+      return fail(ErrorCode::invalid_argument,
+                  "push source address is not valid IPv4");
+    }
+  }
+  if (source_address.has_value() &&
+      !source_matches_filter(connection, registration->second.filter,
+                             *source_address)) {
+    return {};
+  }
+  const std::string source = source_address.has_value()
+      ? std::string(*source_address)
+      : std::string {};
   const bool already_pending =
       std::any_of(state_.requests.begin(), state_.requests.end(),
-                  [connection](const LaunchRequest &request) {
+                  [connection, &source](const LaunchRequest &request) {
                     return request.kind == LaunchRequestKind::connection &&
-                           request.target == connection;
+                           request.target == connection &&
+                           request.source_address == source;
                   });
   if (already_pending)
     return {};
+  if (state_.requests.size() >= kMaximumEntries) {
+    return fail(ErrorCode::overflow,
+                "push launch queue is full");
+  }
   if (state_.next_request_id == 0 ||
       state_.next_request_id == std::numeric_limits<u64>::max()) {
     return fail(ErrorCode::overflow,
@@ -465,9 +664,15 @@ Status PushRegistry::notify_connection_available(std::string_view connection,
   state_.requests.push_back(LaunchRequest{
       .id = state_.next_request_id++,
       .kind = LaunchRequestKind::connection,
+      .state = LaunchRequestState::pending,
       .target = std::string(connection),
       .midlet = registration->second.midlet,
+      .source_address = source,
       .created_at_millis = received_at_millis,
+      .next_attempt_millis = received_at_millis,
+      .lease_deadline_millis = 0,
+      .expires_at_millis = launch_expiry(received_at_millis),
+      .attempt_count = 0U,
   });
   auto persisted = persist_unlocked();
   if (!persisted)
@@ -493,13 +698,19 @@ Result<std::vector<LaunchRequest>>
 PushRegistry::eligible_launch_requests(i64 now_millis, bool app_in_foreground,
                                        bool background_execution_granted,
                                        usize limit) {
+  if (now_millis < 0) {
+    return fail(ErrorCode::invalid_argument,
+                "push launch wall-clock time must be nonnegative");
+  }
   std::scoped_lock lock(mutex_, persistence_mutex());
   auto loaded = reload_unlocked();
-  if (!loaded)
-    return std::unexpected(loaded.error());
+  if (!loaded) return std::unexpected(loaded.error());
 
   State previous = state_;
-  if (queue_due_alarms_unlocked(now_millis)) {
+  const bool alarms_changed = queue_due_alarms_unlocked(now_millis);
+  const bool launches_changed = recover_launch_requests_unlocked(now_millis);
+  const bool changed = alarms_changed || launches_changed;
+  if (changed) {
     auto persisted = persist_unlocked();
     if (!persisted) {
       state_ = std::move(previous);
@@ -510,13 +721,69 @@ PushRegistry::eligible_launch_requests(i64 now_millis, bool app_in_foreground,
   const bool eligible =
       app_in_foreground || (state_.policy == BackgroundPolicy::system_managed &&
                             background_execution_granted);
-  if (!eligible || limit == 0U)
-    return std::vector<LaunchRequest>{};
+  if (!eligible || limit == 0U) return std::vector<LaunchRequest> {};
 
-  const usize count = std::min(limit, state_.requests.size());
-  return std::vector<LaunchRequest>(state_.requests.begin(),
-                                    state_.requests.begin() +
-                                        static_cast<std::ptrdiff_t>(count));
+  std::vector<LaunchRequest> result;
+  result.reserve(std::min(limit, state_.requests.size()));
+  for (const LaunchRequest& request : state_.requests) {
+    if (result.size() >= limit) break;
+    if (request.state != LaunchRequestState::pending ||
+        request.next_attempt_millis > now_millis ||
+        request.attempt_count >= kMaximumLaunchAttempts) {
+      continue;
+    }
+    result.push_back(request);
+  }
+  return result;
+}
+
+Status PushRegistry::mark_launching(u64 request_id,
+                                    i64 now_millis,
+                                    i64 lease_millis) {
+  if (request_id == 0U || now_millis < 0 || lease_millis <= 0) {
+    return fail(ErrorCode::invalid_argument,
+                "push launch lease arguments are invalid");
+  }
+  std::scoped_lock lock(mutex_, persistence_mutex());
+  auto loaded = reload_unlocked();
+  if (!loaded) return loaded;
+  State previous = state_;
+  const bool recovered = recover_launch_requests_unlocked(now_millis);
+  const auto found = std::find_if(
+      state_.requests.begin(), state_.requests.end(),
+      [request_id](const LaunchRequest& request) {
+        return request.id == request_id;
+      });
+  if (found == state_.requests.end()) {
+    if (recovered) {
+      auto persisted = persist_unlocked();
+      if (!persisted) state_ = std::move(previous);
+    }
+    return fail(ErrorCode::out_of_range,
+                "push launch request does not exist");
+  }
+  if (found->state != LaunchRequestState::pending ||
+      found->next_attempt_millis > now_millis) {
+    if (recovered) {
+      auto persisted = persist_unlocked();
+      if (!persisted) state_ = std::move(previous);
+    }
+    return fail(ErrorCode::invalid_state,
+                "push launch request is not eligible");
+  }
+  if (found->attempt_count >= kMaximumLaunchAttempts) {
+    state_.requests.erase(found);
+  } else {
+    found->state = LaunchRequestState::launching;
+    ++found->attempt_count;
+    found->lease_deadline_millis =
+        lease_millis > std::numeric_limits<i64>::max() - now_millis
+            ? std::numeric_limits<i64>::max()
+            : now_millis + lease_millis;
+  }
+  auto persisted = persist_unlocked();
+  if (!persisted) state_ = std::move(previous);
+  return persisted;
 }
 
 Status PushRegistry::acknowledge_launch_request(u64 request_id) {
@@ -526,30 +793,86 @@ Status PushRegistry::acknowledge_launch_request(u64 request_id) {
   }
   std::scoped_lock lock(mutex_, persistence_mutex());
   auto loaded = reload_unlocked();
-  if (!loaded)
-    return loaded;
-  const auto found =
-      std::find_if(state_.requests.begin(), state_.requests.end(),
-                   [request_id](const LaunchRequest &request) {
-                     return request.id == request_id;
-                   });
+  if (!loaded) return loaded;
+  const auto found = std::find_if(
+      state_.requests.begin(), state_.requests.end(),
+      [request_id](const LaunchRequest& request) {
+        return request.id == request_id;
+      });
   if (found == state_.requests.end()) {
-    return fail(ErrorCode::out_of_range, "push launch request does not exist");
+    return fail(ErrorCode::out_of_range,
+                "push launch request does not exist");
   }
   State previous = state_;
   state_.requests.erase(found);
   auto persisted = persist_unlocked();
-  if (!persisted)
-    state_ = std::move(previous);
+  if (!persisted) state_ = std::move(previous);
+  return persisted;
+}
+
+Status PushRegistry::fail_launch_request(u64 request_id,
+                                         i64 now_millis) {
+  if (request_id == 0U || now_millis < 0) {
+    return fail(ErrorCode::invalid_argument,
+                "push launch failure arguments are invalid");
+  }
+  std::scoped_lock lock(mutex_, persistence_mutex());
+  auto loaded = reload_unlocked();
+  if (!loaded) return loaded;
+  const auto found = std::find_if(
+      state_.requests.begin(), state_.requests.end(),
+      [request_id](const LaunchRequest& request) {
+        return request.id == request_id;
+      });
+  if (found == state_.requests.end()) {
+    return fail(ErrorCode::out_of_range,
+                "push launch request does not exist");
+  }
+
+  State previous = state_;
+  if (found->attempt_count >= kMaximumLaunchAttempts ||
+      (found->expires_at_millis > 0 &&
+       now_millis >= found->expires_at_millis)) {
+    state_.requests.erase(found);
+  } else {
+    found->state = LaunchRequestState::pending;
+    found->lease_deadline_millis = 0;
+    const i64 delay = retry_delay(found->attempt_count);
+    found->next_attempt_millis =
+        delay > std::numeric_limits<i64>::max() - now_millis
+            ? std::numeric_limits<i64>::max()
+            : now_millis + delay;
+  }
+  auto persisted = persist_unlocked();
+  if (!persisted) state_ = std::move(previous);
   return persisted;
 }
 
 Result<usize> PushRegistry::pending_launch_count() {
   std::scoped_lock lock(mutex_, persistence_mutex());
   auto loaded = reload_unlocked();
-  if (!loaded)
-    return std::unexpected(loaded.error());
+  if (!loaded) return std::unexpected(loaded.error());
   return state_.requests.size();
+}
+
+Status PushRegistry::remove_suite_state() {
+  std::scoped_lock lock(mutex_, persistence_mutex());
+  auto configured = require_configured_unlocked();
+  if (!configured) return configured;
+  const std::string path = state_path_unlocked();
+  const std::string temporary = path + ".tmp";
+  if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+    return fail(ErrorCode::io_error,
+                "failed to remove push registry state: " +
+                    std::string(std::strerror(errno)));
+  }
+  if (::unlink(temporary.c_str()) != 0 && errno != ENOENT) {
+    return fail(ErrorCode::io_error,
+                "failed to remove push registry recovery state: " +
+                    std::string(std::strerror(errno)));
+  }
+  state_ = State {};
+  return {};
 }
 
 Status PushRegistry::require_configured_unlocked() const {
@@ -593,9 +916,13 @@ Status PushRegistry::reload_unlocked() {
     return {};
   }
   auto loaded = read_state_file_unlocked(path, suite_id_);
-  if (!loaded)
-    return std::unexpected(loaded.error());
+  if (!loaded) return std::unexpected(loaded.error());
   state_ = std::move(*loaded);
+  if (state_.persistence_version == kLegacyVersion) {
+    state_.persistence_version = kVersion;
+    auto migrated = persist_unlocked();
+    if (!migrated) return migrated;
+  }
   return {};
 }
 
@@ -636,7 +963,8 @@ Result<PushRegistry::State> PushRegistry::read_state_file_unlocked(
   if (!version || !suite_value || !policy_value || !next_request_id) {
     return fail(ErrorCode::io_error, "push registry header is invalid");
   }
-  if (*version != kVersion || *suite_value <= 0) {
+  if ((*version != kLegacyVersion && *version != kVersion) ||
+      *suite_value <= 0) {
     return fail(ErrorCode::unsupported_feature,
                 "push registry version or suite ID is unsupported");
   }
@@ -651,6 +979,7 @@ Result<PushRegistry::State> PushRegistry::read_state_file_unlocked(
   }
 
   State state;
+  state.persistence_version = *version;
   state.policy = static_cast<BackgroundPolicy>(*policy_value);
   state.next_request_id = *next_request_id;
 
@@ -668,7 +997,7 @@ Result<PushRegistry::State> PushRegistry::read_state_file_unlocked(
                   "push connection registration is malformed");
     }
     if (!validate_connection(*connection) || !validate_midlet(*midlet) ||
-        !validate_filter(*filter)) {
+        !validate_filter(*connection, *filter)) {
       return fail(ErrorCode::io_error,
                   "push connection registration is invalid");
     }
@@ -718,12 +1047,43 @@ Result<PushRegistry::State> PushRegistry::read_state_file_unlocked(
   for (u32 index = 0; index < *request_count; ++index) {
     auto id = reader.read_u64();
     auto kind = reader.read_u8();
-    auto created = reader.read_i64();
-    auto target = reader.read_string();
-    auto midlet = reader.read_string();
-    if (!id || !kind || !created || !target || !midlet || *id == 0U ||
+    Result<u8> state_value = static_cast<u8>(LaunchRequestState::pending);
+    Result<u32> attempt_count = 0U;
+    Result<i64> created = 0;
+    Result<i64> next_attempt = 0;
+    Result<i64> lease_deadline = 0;
+    Result<i64> expires_at = 0;
+    Result<std::string> target = std::string {};
+    Result<std::string> midlet = std::string {};
+    Result<std::string> source = std::string {};
+    if (*version == kLegacyVersion) {
+      created = reader.read_i64();
+      target = reader.read_string();
+      midlet = reader.read_string();
+      if (created) {
+        next_attempt = *created;
+        expires_at = launch_expiry(*created);
+      }
+    } else {
+      state_value = reader.read_u8();
+      attempt_count = reader.read_u32();
+      created = reader.read_i64();
+      next_attempt = reader.read_i64();
+      lease_deadline = reader.read_i64();
+      expires_at = reader.read_i64();
+      target = reader.read_string();
+      midlet = reader.read_string();
+      source = reader.read_string();
+    }
+    if (!id || !kind || !state_value || !attempt_count || !created ||
+        !next_attempt || !lease_deadline || !expires_at || !target ||
+        !midlet || !source || *id == 0U ||
         (*kind != static_cast<u8>(LaunchRequestKind::connection) &&
          *kind != static_cast<u8>(LaunchRequestKind::alarm)) ||
+        *state_value > static_cast<u8>(LaunchRequestState::launching) ||
+        *attempt_count > kMaximumLaunchAttempts || *created < 0 ||
+        *next_attempt < 0 || *lease_deadline < 0 || *expires_at < 0 ||
+        source->size() > kMaximumStringBytes || contains_nul(*source) ||
         !validate_midlet(*midlet)) {
       return fail(ErrorCode::io_error, "push launch request is invalid");
     }
@@ -732,12 +1092,23 @@ Result<PushRegistry::State> PushRegistry::read_state_file_unlocked(
       return fail(ErrorCode::io_error,
                   "push connection launch request is invalid");
     }
+    if (*kind == static_cast<u8>(LaunchRequestKind::alarm) &&
+        *target != *midlet) {
+      return fail(ErrorCode::io_error,
+                  "push alarm launch target is invalid");
+    }
     state.requests.push_back(LaunchRequest{
         .id = *id,
         .kind = static_cast<LaunchRequestKind>(*kind),
+        .state = static_cast<LaunchRequestState>(*state_value),
         .target = std::move(*target),
         .midlet = std::move(*midlet),
+        .source_address = std::move(*source),
         .created_at_millis = *created,
+        .next_attempt_millis = *next_attempt,
+        .lease_deadline_millis = *lease_deadline,
+        .expires_at_millis = *expires_at,
+        .attempt_count = *attempt_count,
     });
     maximum_request_id = std::max(maximum_request_id, *id);
   }
@@ -767,7 +1138,7 @@ Status PushRegistry::persist_unlocked() const {
 
   std::vector<u8> bytes;
   bytes.reserve(256U + state_.connections.size() * 96U +
-                state_.alarms.size() * 48U + state_.requests.size() * 72U);
+                state_.alarms.size() * 48U + state_.requests.size() * 128U);
   bytes.insert(bytes.end(), kMagic.begin(), kMagic.end());
   append_u32(bytes, kVersion);
   append_i32(bytes, suite_id_.value);
@@ -789,9 +1160,15 @@ Status PushRegistry::persist_unlocked() const {
   for (const LaunchRequest &request : state_.requests) {
     append_u64(bytes, request.id);
     append_u8(bytes, static_cast<u8>(request.kind));
+    append_u8(bytes, static_cast<u8>(request.state));
+    append_u32(bytes, request.attempt_count);
     append_i64(bytes, request.created_at_millis);
+    append_i64(bytes, request.next_attempt_millis);
+    append_i64(bytes, request.lease_deadline_millis);
+    append_i64(bytes, request.expires_at_millis);
     append_string(bytes, request.target);
     append_string(bytes, request.midlet);
+    append_string(bytes, request.source_address);
   }
   append_u64(bytes, checksum(bytes));
   return write_atomic(state_path_unlocked(), bytes);
@@ -842,9 +1219,7 @@ bool PushRegistry::queue_due_alarms_unlocked(i64 now_millis) {
   bool changed = false;
   for (auto iterator = state_.alarms.begin();
        iterator != state_.alarms.end();) {
-    if (iterator->second.time_millis > now_millis ||
-        state_.next_request_id == 0U ||
-        state_.next_request_id == std::numeric_limits<u64>::max()) {
+    if (iterator->second.time_millis > now_millis) {
       ++iterator;
       continue;
     }
@@ -852,21 +1227,62 @@ bool PushRegistry::queue_due_alarms_unlocked(i64 now_millis) {
     const i64 alarm_time = iterator->second.time_millis;
     const bool already_pending =
         std::any_of(state_.requests.begin(), state_.requests.end(),
-                    [&midlet](const LaunchRequest &request) {
+                    [&midlet](const LaunchRequest& request) {
                       return request.kind == LaunchRequestKind::alarm &&
                              request.target == midlet;
                     });
-    if (!already_pending) {
+    const bool can_queue = state_.requests.size() < kMaximumEntries &&
+        state_.next_request_id != 0U &&
+        state_.next_request_id != std::numeric_limits<u64>::max();
+    if (!already_pending && can_queue) {
       state_.requests.push_back(LaunchRequest{
           .id = state_.next_request_id++,
           .kind = LaunchRequestKind::alarm,
+          .state = LaunchRequestState::pending,
           .target = midlet,
           .midlet = midlet,
+          .source_address = {},
           .created_at_millis = alarm_time,
+          .next_attempt_millis = now_millis,
+          .lease_deadline_millis = 0,
+          .expires_at_millis = launch_expiry(now_millis),
+          .attempt_count = 0U,
       });
+    }
+    if (!already_pending && !can_queue) {
+      ++iterator;
+      continue;
     }
     iterator = state_.alarms.erase(iterator);
     changed = true;
+  }
+  return changed;
+}
+
+bool PushRegistry::recover_launch_requests_unlocked(i64 now_millis) {
+  bool changed = false;
+  auto iterator = state_.requests.begin();
+  while (iterator != state_.requests.end()) {
+    if ((iterator->expires_at_millis > 0 &&
+         now_millis >= iterator->expires_at_millis) ||
+        iterator->attempt_count >= kMaximumLaunchAttempts) {
+      iterator = state_.requests.erase(iterator);
+      changed = true;
+      continue;
+    }
+    if (iterator->state == LaunchRequestState::launching &&
+        iterator->lease_deadline_millis > 0 &&
+        now_millis >= iterator->lease_deadline_millis) {
+      iterator->state = LaunchRequestState::pending;
+      iterator->lease_deadline_millis = 0;
+      const i64 delay = retry_delay(iterator->attempt_count);
+      iterator->next_attempt_millis =
+          delay > std::numeric_limits<i64>::max() - now_millis
+              ? std::numeric_limits<i64>::max()
+              : now_millis + delay;
+      changed = true;
+    }
+    ++iterator;
   }
   return changed;
 }
@@ -881,7 +1297,51 @@ Status PushRegistry::validate_connection(std::string_view connection) {
     return fail(ErrorCode::invalid_argument,
                 "push connection is empty or too long");
   }
-  return {};
+  if (connection.starts_with("socket://")) {
+    auto port = parse_local_port(connection, "socket://");
+    if (!port) return std::unexpected(port.error());
+    return {};
+  }
+  if (connection.starts_with("serversocket://")) {
+    auto port = parse_local_port(connection, "serversocket://");
+    if (!port) return std::unexpected(port.error());
+    return {};
+  }
+  if (connection.starts_with("datagram://")) {
+    auto port = parse_local_port(connection, "datagram://");
+    if (!port) return std::unexpected(port.error());
+    return {};
+  }
+  if (connection.starts_with("sms://")) {
+    auto port = parse_local_port(connection, "sms://");
+    if (!port) return std::unexpected(port.error());
+    return {};
+  }
+  if (connection.starts_with("cbs://")) {
+    auto port = parse_local_port(connection, "cbs://");
+    if (!port) return std::unexpected(port.error());
+    return {};
+  }
+  if (connection.starts_with("mms://:")) {
+    const std::string_view application_id = connection.substr(7U);
+    if (application_id.empty() || application_id.size() > 32U) {
+      return fail(ErrorCode::invalid_argument,
+                  "MMS push application ID is invalid");
+    }
+    for (const char character : application_id) {
+      const bool valid = (character >= 'a' && character <= 'z') ||
+          (character >= 'A' && character <= 'Z') ||
+          (character >= '0' && character <= '9') || character == '.' ||
+          character == '_' || character == '-';
+      if (!valid) {
+        return fail(ErrorCode::invalid_argument,
+                    "MMS push application ID contains invalid characters");
+      }
+    }
+    return {};
+  }
+  return fail(ErrorCode::unsupported_feature,
+              "push connection scheme is not supported");
 }
 
 Status PushRegistry::validate_midlet(std::string_view midlet) {
@@ -907,12 +1367,69 @@ Status PushRegistry::validate_midlet(std::string_view midlet) {
   return {};
 }
 
-Status PushRegistry::validate_filter(std::string_view filter) {
-  if (filter.size() > 2'048U || contains_nul(filter)) {
+Status PushRegistry::validate_filter(std::string_view connection,
+                                     std::string_view filter) {
+  if (filter.empty() || filter.size() > 2'048U || contains_nul(filter)) {
     return fail(ErrorCode::invalid_argument,
-                "push connection filter is too long");
+                "push connection filter is empty or too long");
   }
-  return {};
+  for (const char character : filter) {
+    const auto byte = static_cast<unsigned char>(character);
+    if (byte < 0x20U || byte == 0x7FU) {
+      return fail(ErrorCode::invalid_argument,
+                  "push connection filter contains control characters");
+    }
+  }
+  if (uses_ip_filter(connection)) {
+    if (filter == "*") return {};
+    std::array<std::string_view, 4> parts {};
+    if (!split_ipv4(filter, true, parts)) {
+      return fail(ErrorCode::invalid_argument,
+                  "push IP filter must be '*' or four IPv4 fields using digits, '*' and '?'");
+    }
+    return {};
+  }
+  if (uses_text_filter(connection)) return {};
+  return fail(ErrorCode::unsupported_feature,
+              "push connection filter scheme is not supported");
+}
+
+bool PushRegistry::source_matches_filter(
+    std::string_view connection,
+    std::string_view filter,
+    std::string_view source_address) noexcept {
+  if (filter == "*") return true;
+  if (uses_text_filter(connection)) {
+    return wildcard_matches(filter, source_address);
+  }
+  std::array<std::string_view, 4> filter_parts {};
+  std::array<std::string_view, 4> source_parts {};
+  if (!split_ipv4(filter, true, filter_parts) ||
+      !split_ipv4(source_address, false, source_parts)) {
+    return false;
+  }
+  for (usize index = 0U; index < filter_parts.size(); ++index) {
+    if (!wildcard_segment_matches(filter_parts[index], source_parts[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+i64 PushRegistry::launch_expiry(i64 created_at_millis) noexcept {
+  if (created_at_millis < 0 ||
+      created_at_millis >
+          std::numeric_limits<i64>::max() - kLaunchLifetimeMillis) {
+    return std::numeric_limits<i64>::max();
+  }
+  return created_at_millis + kLaunchLifetimeMillis;
+}
+
+i64 PushRegistry::retry_delay(u32 attempt_count) noexcept {
+  if (attempt_count == 0U) return 1'000;
+  const u32 shift = std::min<u32>(attempt_count - 1U, 18U);
+  const i64 delay = 1'000LL << shift;
+  return std::min(delay, kMaximumRetryDelayMillis);
 }
 
 } // namespace phoneme::push

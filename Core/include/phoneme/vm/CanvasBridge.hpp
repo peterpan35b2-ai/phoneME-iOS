@@ -33,6 +33,10 @@ public:
                                                 bool fullscreen) = 0;
     [[nodiscard]] virtual Result<Dimensions> canvas_dimensions(
         ObjectRef canvas) const = 0;
+    [[nodiscard]] virtual Dimensions display_dimensions() const noexcept = 0;
+    [[nodiscard]] virtual bool pointer_events_supported() const noexcept = 0;
+    [[nodiscard]] virtual bool pointer_motion_supported() const noexcept = 0;
+    [[nodiscard]] virtual bool repeat_events_supported() const noexcept = 0;
     [[nodiscard]] virtual i32 game_action_for_key(i32 key_code) const noexcept = 0;
     [[nodiscard]] virtual Result<i32> key_code_for_action(
         i32 game_action) const = 0;

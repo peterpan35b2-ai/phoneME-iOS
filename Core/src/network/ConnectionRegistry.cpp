@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <limits>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace phoneme::network {
@@ -15,6 +17,7 @@ constexpr i32 kTimeoutEnabledMilliseconds = 30'000;
 constexpr i32 kTimeoutDisabledSafetyMilliseconds = 120'000;
 constexpr usize kMaximumBufferedHttpBody = 16U * 1024U * 1024U;
 constexpr usize kMaximumDatagramLength = 65'507U;
+constexpr i32 kBlockingCancellationPollMilliseconds = 25;
 
 [[nodiscard]] bool readable(ConnectionMode mode) noexcept {
     return mode == ConnectionMode::read ||
@@ -55,54 +58,147 @@ constexpr usize kMaximumDatagramLength = 65'507U;
            value.find('\n') == std::string_view::npos;
 }
 
-template <typename T>
-struct WaitState final {
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool completed {false};
-    std::optional<Result<T>> result;
+class NetworkBlockingScope final {
+public:
+    explicit NetworkBlockingScope(const NetworkBlockingHooks& hooks)
+        : after_(hooks.after_block) {
+        if (hooks.before_block) depth_ = hooks.before_block();
+    }
+
+    ~NetworkBlockingScope() {
+        if (after_) after_(depth_);
+    }
+
+    NetworkBlockingScope(const NetworkBlockingScope&) = delete;
+    NetworkBlockingScope& operator=(const NetworkBlockingScope&) = delete;
+
+private:
+    std::function<void(u32)> after_;
+    u32 depth_ {0};
 };
 
-template <typename T, typename Starter>
-[[nodiscard]] Result<T> await_operation(
-    const std::shared_ptr<AsyncNetworkAdapter>& adapter,
-    i32 timeout_ms,
-    Starter&& starter) {
-    if (!adapter) {
-        return fail(ErrorCode::not_configured,
-                    "network adapter is not configured");
+template <typename T>
+class WaitState final {
+public:
+    [[nodiscard]] std::optional<Result<T>> complete(Result<T> value) {
+        {
+            std::scoped_lock lock(mutex_);
+            if (completed_) return std::move(value);
+            result_.emplace(std::move(value));
+            completed_ = true;
+        }
+        condition_.notify_all();
+        return std::nullopt;
     }
-    auto state = std::make_shared<WaitState<T>>();
-    auto started = starter(
-        [state](Result<T> result) {
-            std::scoped_lock lock(state->mutex);
-            if (state->completed) return;
-            state->result.emplace(std::move(result));
-            state->completed = true;
-            state->condition.notify_all();
-        });
-    if (!started) return std::unexpected(started.error());
 
-    std::unique_lock lock(state->mutex);
-    const bool completed = timeout_ms <= 0
-        ? (state->condition.wait(lock, [&state] { return state->completed; }),
-           true)
-        : state->condition.wait_for(
-              lock, std::chrono::milliseconds(timeout_ms),
-              [&state] { return state->completed; });
-    if (!completed) {
-        state->completed = true;
+    void attach_operation(
+        OperationId operation,
+        const std::shared_ptr<AsyncNetworkAdapter>& adapter) {
+        bool cancel_now = false;
+        {
+            std::scoped_lock lock(mutex_);
+            operation_ = operation;
+            cancel_now = cancel_requested_;
+        }
+        if (cancel_now && adapter) {
+            (void)adapter->cancel(operation);
+        }
+    }
+
+    void cancel(const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+                std::string message) {
+        std::optional<OperationId> operation;
+        {
+            std::scoped_lock lock(mutex_);
+            if (completed_) return;
+            cancel_requested_ = true;
+            completed_ = true;
+            result_.emplace(std::unexpected(
+                Error::make(ErrorCode::io_error, std::move(message))));
+            operation = operation_;
+        }
+        condition_.notify_all();
+        if (operation.has_value() && adapter) {
+            (void)adapter->cancel(*operation);
+        }
+    }
+
+    [[nodiscard]] std::optional<Result<T>> consume_if_completed() {
+        std::scoped_lock lock(mutex_);
+        if (!completed_ || !result_.has_value()) return std::nullopt;
+        auto value = std::move(*result_);
+        result_.reset();
+        return value;
+    }
+
+    [[nodiscard]] Result<T> wait(
+        i32 timeout_ms,
+        const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+        const NetworkBlockingHooks& hooks) {
+        std::optional<OperationId> operation;
+        const auto started = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::milliseconds(
+            std::max(timeout_ms, 0));
+        std::unique_lock lock(mutex_);
+        while (!completed_) {
+            lock.unlock();
+            std::optional<Error> cancellation;
+            if (hooks.poll_cancellation) {
+                cancellation = hooks.poll_cancellation();
+            }
+            lock.lock();
+            if (completed_) break;
+            if (cancellation.has_value()) {
+                cancel_requested_ = true;
+                completed_ = true;
+                result_.emplace(std::unexpected(std::move(*cancellation)));
+                operation = operation_;
+                break;
+            }
+
+            auto wait_slice = std::chrono::milliseconds(
+                kBlockingCancellationPollMilliseconds);
+            if (timeout_ms > 0) {
+                const auto elapsed =
+                    std::chrono::steady_clock::now() - started;
+                if (elapsed >= timeout) {
+                    cancel_requested_ = true;
+                    completed_ = true;
+                    result_.emplace(std::unexpected(Error::make(
+                        ErrorCode::io_error,
+                        "network adapter operation timed out")));
+                    operation = operation_;
+                    break;
+                }
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        timeout - elapsed);
+                wait_slice = std::min(wait_slice, remaining);
+            }
+            condition_.wait_for(lock, wait_slice,
+                                [this] { return completed_; });
+        }
+        if (!result_.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        "network adapter completed without a result");
+        }
+        auto value = std::move(*result_);
+        result_.reset();
         lock.unlock();
-        (void)adapter->cancel(*started);
-        return fail(ErrorCode::io_error,
-                    "network adapter operation timed out");
+        if (operation.has_value() && adapter) {
+            (void)adapter->cancel(*operation);
+        }
+        return value;
     }
-    if (!state->result.has_value()) {
-        return fail(ErrorCode::internal_error,
-                    "network adapter completed without a result");
-    }
-    return std::move(*state->result);
-}
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool completed_ {false};
+    bool cancel_requested_ {false};
+    std::optional<OperationId> operation_;
+    std::optional<Result<T>> result_;
+};
 
 [[nodiscard]] std::optional<std::string> find_header(
     const std::vector<Header>& headers,
@@ -133,6 +229,99 @@ void set_header(std::vector<Header>& headers,
 
 } // namespace
 
+template <typename T, typename Starter>
+Result<T> ConnectionRegistry::await_operation(ConnectionToken token,
+                                              PendingOperationKind kind,
+                                              i32 timeout_ms,
+                                              Starter&& starter) {
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
+    NetworkBlockingHooks hooks;
+    {
+        std::scoped_lock lock(mutex_);
+        adapter = adapter_;
+        hooks = blocking_hooks_;
+    }
+    if (!adapter) {
+        return fail(ErrorCode::not_configured,
+                    "network adapter is not configured");
+    }
+
+    auto state = std::make_shared<WaitState<T>>();
+    auto registered = register_pending_operation(
+        token, kind,
+        [state, adapter] {
+            state->cancel(
+                adapter,
+                "network operation was cancelled because the connection closed");
+        });
+    if (!registered) return std::unexpected(registered.error());
+    const u64 pending_operation = *registered;
+
+    if (auto cancelled = state->consume_if_completed();
+        cancelled.has_value()) {
+        unregister_pending_operation(token, pending_operation);
+        return std::move(*cancelled);
+    }
+
+    NetworkBlockingScope blocking_scope(hooks);
+    auto started = starter(
+        adapter,
+        Completion<T> {[state, adapter](Result<T> result) {
+            auto dropped = state->complete(std::move(result));
+            if constexpr (std::is_same_v<T, NativeConnection>) {
+                if (dropped.has_value() && dropped->has_value()) {
+                    (void)adapter->close((**dropped).handle);
+                }
+            }
+        }});
+    if (!started) {
+        auto cancelled = state->consume_if_completed();
+        unregister_pending_operation(token, pending_operation);
+        if (cancelled.has_value()) return std::move(*cancelled);
+        return std::unexpected(started.error());
+    }
+
+    state->attach_operation(*started, adapter);
+    auto result = state->wait(timeout_ms, adapter, hooks);
+    unregister_pending_operation(token, pending_operation);
+    return result;
+}
+
+Result<u64> ConnectionRegistry::register_pending_operation(
+    ConnectionToken token,
+    PendingOperationKind kind,
+    std::function<void()> cancellation) {
+    if (!cancellation) {
+        return fail(ErrorCode::invalid_argument,
+                    "network pending-operation cancellation is empty");
+    }
+    std::scoped_lock lock(mutex_);
+    auto found = mutable_entry(token);
+    if (!found) return std::unexpected(found.error());
+    if (next_pending_operation_ == 0U ||
+        next_pending_operation_ == std::numeric_limits<u64>::max()) {
+        return fail(ErrorCode::overflow,
+                    "network pending-operation identifier space was exhausted");
+    }
+    const u64 operation = next_pending_operation_++;
+    (*found)->pending_cancellations.insert_or_assign(
+        operation,
+        PendingCancellation {
+            .kind = kind,
+            .callback = std::move(cancellation),
+        });
+    return operation;
+}
+
+void ConnectionRegistry::unregister_pending_operation(
+    ConnectionToken token,
+    u64 operation) noexcept {
+    std::scoped_lock lock(mutex_);
+    auto found = entries_.find(token.id);
+    if (found == entries_.end() || found->second.token != token) return;
+    found->second.pending_cancellations.erase(operation);
+}
+
 ConnectionRegistry::ConnectionRegistry()
     : ConnectionRegistry(make_posix_network_adapter()) {}
 
@@ -155,6 +344,11 @@ Status ConnectionRegistry::set_adapter(
     }
     adapter_ = std::move(adapter);
     return {};
+}
+
+void ConnectionRegistry::set_blocking_hooks(NetworkBlockingHooks hooks) {
+    std::scoped_lock lock(mutex_);
+    blocking_hooks_ = std::move(hooks);
 }
 
 void ConnectionRegistry::set_owner(i32 owner) noexcept {
@@ -218,28 +412,36 @@ Result<const ConnectionRegistry::Entry*> ConnectionRegistry::entry(
 
 Result<NativeConnection> ConnectionRegistry::open_native(
     const Entry& entry_value) {
-    const auto adapter = adapter_;
     switch (entry_value.kind) {
     case ConnectionKind::stream:
         return await_operation<NativeConnection>(
-            adapter, entry_value.timeout_ms,
-            [&entry_value, &adapter](Completion<NativeConnection> completion) {
+            entry_value.token, PendingOperationKind::lifecycle,
+            entry_value.timeout_ms,
+            [&entry_value](
+                const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+                Completion<NativeConnection> completion) {
                 return adapter->open_stream(entry_value.parsed_url,
                                             entry_value.timeout_ms,
                                             std::move(completion));
             });
     case ConnectionKind::server:
         return await_operation<NativeConnection>(
-            adapter, entry_value.timeout_ms,
-            [&entry_value, &adapter](Completion<NativeConnection> completion) {
+            entry_value.token, PendingOperationKind::lifecycle,
+            entry_value.timeout_ms,
+            [&entry_value](
+                const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+                Completion<NativeConnection> completion) {
                 return adapter->open_server(entry_value.parsed_url,
                                             entry_value.timeout_ms,
                                             std::move(completion));
             });
     case ConnectionKind::datagram:
         return await_operation<NativeConnection>(
-            adapter, entry_value.timeout_ms,
-            [&entry_value, &adapter](Completion<NativeConnection> completion) {
+            entry_value.token, PendingOperationKind::lifecycle,
+            entry_value.timeout_ms,
+            [&entry_value](
+                const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+                Completion<NativeConnection> completion) {
                 return adapter->open_datagram(entry_value.parsed_url,
                                               entry_value.timeout_ms,
                                               std::move(completion));
@@ -357,10 +559,10 @@ Result<OpenedConnection> ConnectionRegistry::accept(
         timeout_ms = (*found)->timeout_ms;
         timeouts = (*found)->timeouts;
     }
-    const auto adapter = adapter_;
     auto accepted = await_operation<NativeConnection>(
-        adapter, timeout_ms,
-        [&adapter, handle, timeout_ms](
+        server, PendingOperationKind::lifecycle, timeout_ms,
+        [handle, timeout_ms](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<NativeConnection> completion) {
             return adapter->accept(handle, timeout_ms,
                                    std::move(completion));
@@ -400,6 +602,8 @@ Result<OpenedConnection> ConnectionRegistry::accept(
 Status ConnectionRegistry::reconnect(ConnectionToken token) {
     Entry snapshot;
     std::optional<NativeHandle> old_handle;
+    std::vector<std::function<void()>> cancellations;
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
     {
         std::scoped_lock lock(mutex_);
         auto found = mutable_entry(token);
@@ -408,7 +612,21 @@ Status ConnectionRegistry::reconnect(ConnectionToken token) {
             return fail(ErrorCode::invalid_state,
                         "closed connection cannot reconnect");
         }
+        if (((*found)->kind == ConnectionKind::http ||
+             (*found)->kind == ConnectionKind::https) &&
+            (*found)->request_started && (*found)->http_method == "POST") {
+            return fail(ErrorCode::invalid_state,
+                        "reconnect cannot replay a committed HTTP POST");
+        }
         snapshot = **found;
+        snapshot.pending_cancellations.clear();
+        cancellations.reserve((*found)->pending_cancellations.size());
+        for (auto& [unused, pending] :
+             (*found)->pending_cancellations) {
+            (void)unused;
+            cancellations.push_back(std::move(pending.callback));
+        }
+        (*found)->pending_cancellations.clear();
         if ((*found)->native.has_value()) {
             old_handle = (*found)->native->handle;
             (*found)->native.reset();
@@ -416,8 +634,12 @@ Status ConnectionRegistry::reconnect(ConnectionToken token) {
         (*found)->response.reset();
         (*found)->response_cursor = 0;
         (*found)->request_started = false;
+        adapter = adapter_;
     }
-    if (old_handle.has_value()) (void)adapter_->close(*old_handle);
+    for (auto& cancellation : cancellations) cancellation();
+    if (old_handle.has_value() && adapter) {
+        (void)adapter->close(*old_handle);
+    }
     if (snapshot.kind == ConnectionKind::http ||
         snapshot.kind == ConnectionKind::https) {
         return {};
@@ -427,7 +649,7 @@ Status ConnectionRegistry::reconnect(ConnectionToken token) {
     std::scoped_lock lock(mutex_);
     auto found = mutable_entry(token);
     if (!found) {
-        (void)adapter_->close(reopened->handle);
+        if (adapter) (void)adapter->close(reopened->handle);
         return std::unexpected(found.error());
     }
     (*found)->native = std::move(*reopened);
@@ -436,6 +658,8 @@ Status ConnectionRegistry::reconnect(ConnectionToken token) {
 
 Status ConnectionRegistry::close(ConnectionToken token) {
     std::optional<NativeHandle> native;
+    std::vector<std::function<void()>> cancellations;
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
     {
         std::scoped_lock lock(mutex_);
         auto found = mutable_entry(token);
@@ -446,28 +670,47 @@ Status ConnectionRegistry::close(ConnectionToken token) {
             return {};
         }
         if ((*found)->native.has_value()) native = (*found)->native->handle;
+        cancellations.reserve((*found)->pending_cancellations.size());
+        for (auto& [unused, pending] :
+             (*found)->pending_cancellations) {
+            (void)unused;
+            cancellations.push_back(std::move(pending.callback));
+        }
+        (*found)->pending_cancellations.clear();
+        adapter = adapter_;
         entries_.erase(token.id);
     }
-    if (native.has_value()) return adapter_->close(*native);
+    for (auto& cancellation : cancellations) cancellation();
+    if (native.has_value() && adapter) return adapter->close(*native);
     return {};
 }
 
 void ConnectionRegistry::close_all() noexcept {
     std::vector<NativeHandle> handles;
+    std::vector<std::function<void()>> cancellations;
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
     {
         std::scoped_lock lock(mutex_);
         handles.reserve(entries_.size());
-        for (const auto& [unused, value] : entries_) {
+        for (auto& [unused, value] : entries_) {
             (void)unused;
             if (value.native.has_value()) {
                 handles.push_back(value.native->handle);
             }
+            for (auto& [pending_id, pending] :
+                 value.pending_cancellations) {
+                (void)pending_id;
+                cancellations.push_back(std::move(pending.callback));
+            }
+            value.pending_cancellations.clear();
         }
+        adapter = adapter_;
         entries_.clear();
     }
-    if (adapter_) {
+    for (auto& cancellation : cancellations) cancellation();
+    if (adapter) {
         for (const NativeHandle handle : handles) {
-            (void)adapter_->close(handle);
+            (void)adapter->close(handle);
         }
     }
 }
@@ -527,7 +770,12 @@ Status ConnectionRegistry::open_input(ConnectionToken token) {
         return fail(ErrorCode::invalid_state,
                     "connection is not open for input");
     }
-    ++(*found)->input_streams;
+    if ((*found)->input_stream_issued) {
+        return fail(ErrorCode::io_error,
+                    "no more input streams are available");
+    }
+    (*found)->input_stream_issued = true;
+    (*found)->input_streams = 1U;
     return {};
 }
 
@@ -543,12 +791,19 @@ Status ConnectionRegistry::open_output(ConnectionToken token) {
         return fail(ErrorCode::invalid_state,
                     "HTTP request output cannot open after request starts");
     }
-    ++(*found)->output_streams;
+    if ((*found)->output_stream_issued) {
+        return fail(ErrorCode::io_error,
+                    "no more output streams are available");
+    }
+    (*found)->output_stream_issued = true;
+    (*found)->output_streams = 1U;
     return {};
 }
 
 Status ConnectionRegistry::release_if_unused(ConnectionToken token) {
     std::optional<NativeHandle> native;
+    std::vector<std::function<void()>> cancellations;
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
     {
         std::scoped_lock lock(mutex_);
         auto found = mutable_entry(token);
@@ -558,30 +813,81 @@ Status ConnectionRegistry::release_if_unused(ConnectionToken token) {
             return {};
         }
         if ((*found)->native.has_value()) native = (*found)->native->handle;
+        cancellations.reserve((*found)->pending_cancellations.size());
+        for (auto& [unused, pending] :
+             (*found)->pending_cancellations) {
+            (void)unused;
+            cancellations.push_back(std::move(pending.callback));
+        }
+        (*found)->pending_cancellations.clear();
+        adapter = adapter_;
         entries_.erase(token.id);
     }
-    if (native.has_value()) return adapter_->close(*native);
+    for (auto& cancellation : cancellations) cancellation();
+    if (native.has_value() && adapter) return adapter->close(*native);
     return {};
 }
 
 Status ConnectionRegistry::close_input(ConnectionToken token) {
+    std::vector<std::function<void()>> cancellations;
     {
         std::scoped_lock lock(mutex_);
         auto found = mutable_entry(token);
         if (!found) return {};
         if ((*found)->input_streams != 0U) --(*found)->input_streams;
+        if ((*found)->input_streams == 0U) {
+            auto iterator = (*found)->pending_cancellations.begin();
+            while (iterator != (*found)->pending_cancellations.end()) {
+                if (iterator->second.kind == PendingOperationKind::input) {
+                    cancellations.push_back(
+                        std::move(iterator->second.callback));
+                    iterator = (*found)->pending_cancellations.erase(iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+        }
     }
+    for (auto& cancellation : cancellations) cancellation();
     return release_if_unused(token);
 }
 
 Status ConnectionRegistry::close_output(ConnectionToken token) {
+    std::vector<std::function<void()>> cancellations;
+    std::optional<NativeHandle> shutdown_handle;
+    std::shared_ptr<AsyncNetworkAdapter> adapter;
     {
         std::scoped_lock lock(mutex_);
         auto found = mutable_entry(token);
         if (!found) return {};
-        if ((*found)->output_streams != 0U) --(*found)->output_streams;
+        const bool was_open = (*found)->output_streams != 0U;
+        if (was_open) --(*found)->output_streams;
+        if (was_open && (*found)->output_streams == 0U) {
+            auto iterator = (*found)->pending_cancellations.begin();
+            while (iterator != (*found)->pending_cancellations.end()) {
+                if (iterator->second.kind == PendingOperationKind::output) {
+                    cancellations.push_back(
+                        std::move(iterator->second.callback));
+                    iterator = (*found)->pending_cancellations.erase(iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+            if ((*found)->kind == ConnectionKind::stream &&
+                (*found)->native.has_value()) {
+                shutdown_handle = (*found)->native->handle;
+                adapter = adapter_;
+            }
+        }
     }
-    return release_if_unused(token);
+    for (auto& cancellation : cancellations) cancellation();
+    Status shutdown_status {};
+    if (shutdown_handle.has_value() && adapter) {
+        shutdown_status = adapter->shutdown_output(*shutdown_handle);
+    }
+    auto released = release_if_unused(token);
+    if (!shutdown_status) return shutdown_status;
+    return released;
 }
 
 Status ConnectionRegistry::ensure_http_response(ConnectionToken token) {
@@ -612,10 +918,10 @@ Status ConnectionRegistry::ensure_http_response(ConnectionToken token) {
         request.timeout_ms = (*found)->timeout_ms;
     }
 
-    const auto adapter = adapter_;
     auto response = await_operation<HttpResponse>(
-        adapter, request.timeout_ms,
-        [&adapter, request = std::move(request)](
+        token, PendingOperationKind::input, request.timeout_ms,
+        [request = std::move(request)](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<HttpResponse> completion) mutable {
             return adapter->perform_http(std::move(request),
                                          std::move(completion));
@@ -679,10 +985,10 @@ Result<std::vector<u8>> ConnectionRegistry::read(
         return result;
     }
 
-    const auto adapter = adapter_;
     return await_operation<std::vector<u8>>(
-        adapter, timeout_ms,
-        [&adapter, handle, maximum_bytes, timeout_ms](
+        token, PendingOperationKind::input, timeout_ms,
+        [handle, maximum_bytes, timeout_ms](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<std::vector<u8>> completion) {
             return adapter->read(handle, maximum_bytes, timeout_ms,
                                  std::move(completion));
@@ -723,11 +1029,11 @@ Status ConnectionRegistry::write(ConnectionToken token,
         handle = (*found)->native->handle;
     }
 
-    const auto adapter = adapter_;
     std::vector<u8> owned(bytes.begin(), bytes.end());
     auto written = await_operation<usize>(
-        adapter, timeout_ms,
-        [&adapter, handle, timeout_ms, owned = std::move(owned)](
+        token, PendingOperationKind::output, timeout_ms,
+        [handle, timeout_ms, owned = std::move(owned)](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<usize> completion) mutable {
             return adapter->write(handle, std::move(owned), timeout_ms,
                                   std::move(completion));
@@ -760,10 +1066,11 @@ Result<usize> ConnectionRegistry::available(ConnectionToken token) {
         }
         handle = (*found)->native->handle;
     }
-    const auto adapter = adapter_;
     return await_operation<usize>(
-        adapter, kTimeoutEnabledMilliseconds,
-        [&adapter, handle](Completion<usize> completion) {
+        token, PendingOperationKind::input,
+        kTimeoutEnabledMilliseconds,
+        [handle](const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+                 Completion<usize> completion) {
             return adapter->available(handle, std::move(completion));
         });
 }
@@ -792,10 +1099,11 @@ Status ConnectionRegistry::set_socket_option(ConnectionToken token,
                                              i32 value) {
     auto handle = native_handle(token);
     if (!handle) return std::unexpected(handle.error());
-    const auto adapter = adapter_;
     auto changed = await_operation<bool>(
-        adapter, kTimeoutEnabledMilliseconds,
-        [&adapter, handle = *handle, option, value](
+        token, PendingOperationKind::control,
+        kTimeoutEnabledMilliseconds,
+        [handle = *handle, option, value](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<bool> completion) {
             return adapter->set_socket_option(handle, option, value,
                                               std::move(completion));
@@ -808,10 +1116,12 @@ Result<i32> ConnectionRegistry::socket_option(ConnectionToken token,
                                               SocketOption option) {
     auto handle = native_handle(token);
     if (!handle) return std::unexpected(handle.error());
-    const auto adapter = adapter_;
     return await_operation<i32>(
-        adapter, kTimeoutEnabledMilliseconds,
-        [&adapter, handle = *handle, option](Completion<i32> completion) {
+        token, PendingOperationKind::control,
+        kTimeoutEnabledMilliseconds,
+        [handle = *handle, option](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
+            Completion<i32> completion) {
             return adapter->get_socket_option(handle, option,
                                               std::move(completion));
         });
@@ -841,10 +1151,10 @@ Status ConnectionRegistry::send_datagram(ConnectionToken token,
         return fail(ErrorCode::out_of_range,
                     "UDP payload exceeds maximum datagram length");
     }
-    const auto adapter = adapter_;
     auto sent = await_operation<usize>(
-        adapter, timeout_ms,
-        [&adapter, handle, packet = std::move(packet), timeout_ms](
+        token, PendingOperationKind::output, timeout_ms,
+        [handle, packet = std::move(packet), timeout_ms](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<usize> completion) mutable {
             return adapter->send_datagram(handle, std::move(packet),
                                           timeout_ms,
@@ -871,10 +1181,10 @@ Result<DatagramPacket> ConnectionRegistry::receive_datagram(
         handle = (*found)->native->handle;
         timeout_ms = (*found)->timeout_ms;
     }
-    const auto adapter = adapter_;
     return await_operation<DatagramPacket>(
-        adapter, timeout_ms,
-        [&adapter, handle, maximum_bytes, timeout_ms](
+        token, PendingOperationKind::input, timeout_ms,
+        [handle, maximum_bytes, timeout_ms](
+            const std::shared_ptr<AsyncNetworkAdapter>& adapter,
             Completion<DatagramPacket> completion) {
             return adapter->receive_datagram(
                 handle, std::min(maximum_bytes, kMaximumDatagramLength),
@@ -907,6 +1217,10 @@ Status ConnectionRegistry::set_http_method(ConnectionToken token,
                        }
                        return static_cast<char>(character);
                    });
+    if (method != "GET" && method != "HEAD" && method != "POST") {
+        return fail(ErrorCode::io_error,
+                    "unsupported HTTP request method: " + method);
+    }
     std::scoped_lock lock(mutex_);
     auto found = mutable_entry(token);
     if (!found) return std::unexpected(found.error());
@@ -918,6 +1232,9 @@ Status ConnectionRegistry::set_http_method(ConnectionToken token,
     if ((*found)->request_started) {
         return fail(ErrorCode::invalid_state,
                     "HTTP request is already committed");
+    }
+    if ((*found)->output_stream_issued) {
+        return {};
     }
     (*found)->http_method = std::move(method);
     return {};
@@ -954,6 +1271,9 @@ Status ConnectionRegistry::set_http_header(ConnectionToken token,
     if ((*found)->request_started) {
         return fail(ErrorCode::invalid_state,
                     "HTTP request is already committed");
+    }
+    if ((*found)->output_stream_issued) {
+        return {};
     }
     set_header((*found)->request_headers, std::move(name), std::move(value));
     return {};
@@ -1032,7 +1352,10 @@ Result<i64> ConnectionRegistry::http_content_length(
     i64 length = -1;
     const auto converted = std::from_chars(
         header->data(), header->data() + header->size(), length);
-    if (converted.ec != std::errc {} || length < 0) return -1;
+    if (converted.ec != std::errc {} ||
+        converted.ptr != header->data() + header->size() || length < 0) {
+        return -1;
+    }
     return length;
 }
 

@@ -12,6 +12,7 @@
 #include "phoneme/filesystem/FileSystem.hpp"
 #include "phoneme/runtime/Framebuffer.hpp"
 #include "phoneme/runtime/Runtime.hpp"
+#include "phoneme/runtime/SuiteStore.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/ClassLayout.hpp"
@@ -61,6 +62,49 @@ void test_archive_and_classfile(const std::string& fixture_jar) {
             "Code parser preserves Java exception table");
     require(!nested_catch->code->stack_map_frames.empty(),
             "Code parser preserves Java StackMapTable frames");
+}
+
+void test_suite_permissions(const std::string& fixture_jar) {
+    const auto store_root =
+        std::filesystem::path(fixture_jar).parent_path() /
+        "suite-permission-store";
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(store_root, cleanup_error);
+    require(!cleanup_error, "clear suite permission test store");
+
+    phoneme::runtime::SuiteStore suites;
+    auto configured = suites.configure(phoneme::runtime::SuiteStoreConfig {
+        .root_path = store_root.string(),
+    });
+    if (!configured) {
+        std::cerr << "SuiteStore configure error: "
+                  << configured.error().message << '\n';
+    }
+    require(configured.has_value(), "configure suite permission test store");
+    auto suite_id = suites.install(fixture_jar);
+    if (!suite_id) {
+        std::cerr << "SuiteStore install error: "
+                  << suite_id.error().message << '\n';
+    }
+    require(suite_id.has_value(), "inspect suite permission manifest");
+    const auto* suite = suites.find(*suite_id);
+    require(suite != nullptr, "find installed permission fixture suite");
+    require(suite->declared_midlets.size() == 1U &&
+                suite->declared_midlets.front() ==
+                    "corefixture.LifecycleApp",
+            "permission attributes are not parsed as MIDlet declarations");
+    require(suite->has_permission_declarations &&
+                suite->declared_permissions.size() == 3U &&
+                suite->declared_permissions[0] ==
+                    "javax.microedition.io.Connector.http" &&
+                suite->declared_permissions[1] ==
+                    "javax.microedition.io.Connector.file.read" &&
+                suite->declared_permissions[2] ==
+                    "javax.microedition.media.capture.audio",
+            "required and optional MIDP permissions are parsed per suite");
+
+    std::filesystem::remove_all(store_root, cleanup_error);
+    require(!cleanup_error, "remove suite permission test store");
 }
 
 void test_builtin_boot_classes() {
@@ -179,6 +223,15 @@ void test_bytecode_structure_verifier() {
                 .has_value(),
             "structural verifier accepts aligned branch targets");
 
+    const std::vector<phoneme::u8> generic_local_operands {
+        0x19, 0x18, // aload 24
+        0x3A, 0x18, // astore 24
+        0xB1,       // return
+    };
+    require(phoneme::classfile::verify_code_structure(
+                generic_local_operands, {}).has_value(),
+            "structural verifier consumes generic local operands");
+
     const std::vector<phoneme::u8> branch_into_operand {
         0x10, 0x01,       // bipush 1
         0xA7, 0xFF, 0xFF, // goto pc 1 (inside bipush operand)
@@ -273,6 +326,109 @@ void test_type_state_verifier() {
                    0,
                    "()I",
                    "type verifier rejects incompatible branch stack depth");
+
+    phoneme::classfile::Method legacy_method {
+        .access_flags = 0x0009U,
+        .name = "legacy",
+        .descriptor = "()I",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 1,
+            .max_locals = 0,
+            .bytecode = {0x03, 0x99, 0x00, 0x05,
+                         0x04, 0xAC, 0x05, 0xAC},
+            .stack_map_frames = {
+                phoneme::classfile::StackMapFrame {
+                    .kind = phoneme::classfile::StackMapFrameKind::cldc_full,
+                    .bytecode_offset = 6,
+                    .stack = {
+                        phoneme::classfile::VerificationType {
+                            .kind = phoneme::classfile::VerificationTypeKind::integer,
+                        },
+                    },
+                },
+            },
+        },
+    };
+    const auto legacy_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/LegacyVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {legacy_method});
+    require(phoneme::vm::verify_method(legacy_owner, legacy_method).has_value(),
+            "legacy CLDC verifier ignores stale StackMap after safe data-flow validation");
+
+    auto modern_method = legacy_method;
+    modern_method.name = "modern";
+    modern_method.code->stack_map_frames.front().kind =
+        phoneme::classfile::StackMapFrameKind::full;
+    const auto modern_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/ModernVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {modern_method});
+    require(!phoneme::vm::verify_method(modern_owner, modern_method).has_value(),
+            "modern StackMapTable inconsistency remains strict");
+
+    phoneme::classfile::Method legacy_void_return {
+        .access_flags = 0x0009U,
+        .name = "legacyVoidReturn",
+        .descriptor = "()V",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 1,
+            .max_locals = 0,
+            .bytecode = {0x01, 0xB1},
+            .stack_map_frames = {
+                phoneme::classfile::StackMapFrame {
+                    .kind = phoneme::classfile::StackMapFrameKind::cldc_full,
+                    .bytecode_offset = 1,
+                    .stack = {
+                        phoneme::classfile::VerificationType {
+                            .kind = phoneme::classfile::VerificationTypeKind::object,
+                            .class_name = "java/lang/Object",
+                        },
+                    },
+                },
+            },
+        },
+    };
+    const auto legacy_return_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/LegacyReturnVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {legacy_void_return});
+    require(phoneme::vm::verify_method(legacy_return_owner,
+                                       legacy_void_return).has_value(),
+            "legacy CLDC verifier tolerates obsolete operand at void return");
+
+    auto legacy_unmapped_return = legacy_void_return;
+    legacy_unmapped_return.name = "legacyUnmappedVoidReturn";
+    legacy_unmapped_return.code->stack_map_frames.clear();
+    const auto legacy_unmapped_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/LegacyUnmappedReturnVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {legacy_unmapped_return});
+    require(phoneme::vm::verify_method(legacy_unmapped_owner,
+                                       legacy_unmapped_return).has_value(),
+            "pre-Java-6 verifier tolerates obsolete return stack without maps");
+
+    auto modern_void_return = legacy_void_return;
+    modern_void_return.name = "modernVoidReturn";
+    modern_void_return.code->stack_map_frames.front().kind =
+        phoneme::classfile::StackMapFrameKind::full;
+    const auto modern_return_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/ModernReturnVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {modern_void_return});
+    require(!phoneme::vm::verify_method(modern_return_owner,
+                                        modern_void_return).has_value(),
+            "modern verifier rejects operand stack values at void return");
 }
 
 void test_monitor_table() {
@@ -687,6 +843,10 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute javac 8 StringBuilder concatenation");
     require_jdk8_string_result("stringBufferOperations", 9,
                                "execute synchronized StringBuffer operations");
+    require_jdk8_string_result("stringBufferExtendedOperations", 63,
+                               "execute StringBuffer mutation and copy operations");
+    require_jdk8_string_result("multiArrayDefaults", 1,
+                               "initialize primitive multianewarray leaves correctly");
     require_jdk8_string_result("builderObjectAppend", 8,
                                "append object and null through StringBuilder");
     require_jdk8_string_result("arraycopyOverlap", 1123,
@@ -695,7 +855,7 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "System.arraycopy validates reference arrays");
     require_jdk8_string_result("arraycopyExceptions", 60,
                                "native arraycopy failures unwind as Java exceptions");
-    require_jdk8_string_result("stringApi", 4095,
+    require_jdk8_string_result("stringApi", 16383,
                                "execute CLDC String construction and search APIs");
     require_jdk8_string_result("nativeStringExceptions", 15,
                                "native String failures unwind through Java catch blocks");
@@ -727,13 +887,13 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute String byte constructors and charset encoders");
     require_jdk8_string_result("stringEncodingExceptions", 7,
                                "String encoding failures preserve Java exceptions");
-    require_jdk8_string_result("wrapperApi", 511,
+    require_jdk8_string_result("wrapperApi", 2047,
                                "execute JDK 8 boxing and java.lang wrapper APIs");
     require_jdk8_string_result("wrapperExceptions", 15,
                                "wrapper parse failures unwind as NumberFormatException");
     require_jdk8_string_result("mathApi", 255,
                                "execute java.lang.Math numeric semantics");
-    require_jdk8_string_result("utilApi", 63,
+    require_jdk8_string_result("utilApi", 255,
                                "execute CLDC Vector Stack Hashtable and Random APIs");
     require_jdk8_string_result("utilExceptions", 15,
                                "java.util failures unwind through Java exceptions");
@@ -905,10 +1065,14 @@ void test_machine_filesystem(const std::string& fixture_jar) {
     const std::filesystem::path root =
         std::filesystem::path(fixture_jar).parent_path() /
         "filesystem-sandbox";
-    const std::filesystem::path temporary = root / "tmp";
+    const std::filesystem::path temporary =
+        std::filesystem::path(fixture_jar).parent_path() /
+        "filesystem-temporary";
     std::error_code cleanup_error;
     std::filesystem::remove_all(root, cleanup_error);
     require(!cleanup_error, "clear filesystem fixture directory");
+    std::filesystem::remove_all(temporary, cleanup_error);
+    require(!cleanup_error, "clear filesystem temporary directory");
 
     phoneme::filesystem::FileSystem files;
     require(files.configure(root.string(), temporary.string()).has_value(),
@@ -955,6 +1119,35 @@ void test_machine_filesystem(const std::string& fixture_jar) {
     require(classes.add_archive(fixture_jar).has_value(),
             "add filesystem fixture JAR to VM classpath");
     phoneme::vm::Machine machine(classes);
+    int file_read_prompts = 0;
+    int file_write_prompts = 0;
+    auto file_policy =
+        std::make_shared<phoneme::security::PermissionPolicy>();
+    require(file_policy->configure(
+                phoneme::security::PermissionPolicyConfig {
+                    .suite_id = phoneme::SuiteId {201},
+                    .trust = phoneme::security::SuiteTrust::untrusted,
+                    .declared_permissions = {
+                        std::string(phoneme::security::permissions::connector_file_read),
+                        std::string(phoneme::security::permissions::connector_file_write),
+                    },
+                    .enforce_declared_permissions = true,
+                    .prompt = [&](const phoneme::security::PermissionRequest& request) {
+                        if (request.permission ==
+                            phoneme::security::permissions::connector_file_read) {
+                            ++file_read_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_file_write) {
+                            ++file_write_prompts;
+                        }
+                        return phoneme::security::PermissionResponse {
+                            phoneme::security::PermissionDecision::allowed,
+                            phoneme::security::PermissionScope::session,
+                        };
+                    },
+                }).has_value(),
+            "configure filesystem permission policy");
+    machine.set_permission_policy(file_policy);
     require(machine.configure_filesystem(root.string(), temporary.string())
                 .has_value(),
             "configure VM filesystem sandbox");
@@ -982,9 +1175,13 @@ void test_machine_filesystem(const std::string& fixture_jar) {
            "JSR-75 rejects paths outside the application sandbox");
     invoke("closedHandleRejected", 1,
            "java.io file stream rejects access after close");
+    require(file_read_prompts == 1 && file_write_prompts == 1,
+            "filesystem gates prompt once per session permission");
 
     std::filesystem::remove_all(root, cleanup_error);
     require(!cleanup_error, "remove filesystem fixture directory");
+    std::filesystem::remove_all(temporary, cleanup_error);
+    require(!cleanup_error, "remove filesystem temporary directory");
 }
 
 void test_machine_network(const std::string& fixture_jar) {
@@ -1014,6 +1211,55 @@ void test_machine_network(const std::string& fixture_jar) {
     require(classes.add_archive(fixture_jar).has_value(),
             "add network fixture JAR to VM classpath");
     phoneme::vm::Machine machine(classes);
+    int socket_prompts = 0;
+    int server_socket_prompts = 0;
+    int datagram_prompts = 0;
+    int datagram_receiver_prompts = 0;
+    int http_prompts = 0;
+    int https_prompts = 0;
+    auto network_policy =
+        std::make_shared<phoneme::security::PermissionPolicy>();
+    require(network_policy->configure(
+                phoneme::security::PermissionPolicyConfig {
+                    .suite_id = phoneme::SuiteId {202},
+                    .trust = phoneme::security::SuiteTrust::untrusted,
+                    .declared_permissions = {
+                        std::string(phoneme::security::permissions::connector_socket),
+                        std::string(phoneme::security::permissions::connector_server_socket),
+                        std::string(phoneme::security::permissions::connector_datagram),
+                        std::string(phoneme::security::permissions::connector_datagram_receiver),
+                        std::string(phoneme::security::permissions::connector_http),
+                        std::string(phoneme::security::permissions::connector_https),
+                    },
+                    .enforce_declared_permissions = true,
+                    .prompt = [&](const phoneme::security::PermissionRequest& request) {
+                        if (request.permission ==
+                            phoneme::security::permissions::connector_socket) {
+                            ++socket_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_server_socket) {
+                            ++server_socket_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_datagram) {
+                            ++datagram_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_datagram_receiver) {
+                            ++datagram_receiver_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_http) {
+                            ++http_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::connector_https) {
+                            ++https_prompts;
+                        }
+                        return phoneme::security::PermissionResponse {
+                            phoneme::security::PermissionDecision::allowed,
+                            phoneme::security::PermissionScope::session,
+                        };
+                    },
+                }).has_value(),
+            "configure network permission policy");
+    machine.set_permission_policy(network_policy);
     auto adapter = std::make_shared<phoneme::tests::FakeNetworkAdapter>();
     require(machine.configure_network_owner(101).has_value(),
             "configure MIDlet network owner");
@@ -1038,6 +1284,12 @@ void test_machine_network(const std::string& fixture_jar) {
     require(invoke_integer("streamSurvivesConnectionClose",
                            "execute connection ownership fixture") == 0x33,
             "stream remains valid after Connection.close");
+    require(invoke_integer("serverSocketOpenClose",
+                           "execute server socket permission fixture") == 12345,
+            "server socket opens and closes through GCF");
+    require(invoke_integer("datagramReceiverOpenClose",
+                           "execute datagram receiver permission fixture") == 1,
+            "datagram receiver opens and closes through GCF");
     require(invoke_integer("datagramRoundTrip",
                            "execute UDP datagram fixture") == 0x01020304,
             "datagram preserves DataInput DataOutput byte order");
@@ -1049,11 +1301,27 @@ void test_machine_network(const std::string& fixture_jar) {
                 request->body == std::vector<phoneme::u8> {0x41} &&
                 !request->headers.empty(),
             "HTTP request preserves method headers and output body");
+    require(invoke_integer("runtimeConstantSurface",
+                           "execute runtime GCF constants fixture") == 14043,
+            "GCF constants are initialized for getstatic bytecode");
+    require(invoke_integer("certificateExceptionRoundTrip",
+                           "execute CertificateException fixture") == 241,
+            "CertificateException preserves Throwable message cause and "
+            "certificate reason state");
     require(invoke_integer("httpsRoundTrip",
                            "execute HTTPS adapter fixture") == 288,
             "HTTPS exposes TLS and certificate security metadata");
+    adapter->set_defer_reads(true);
+    require(invoke_integer("interruptedRead",
+                           "execute interrupted network read fixture") == 2,
+            "Thread.interrupt aborts read with InterruptedIOException");
+    adapter->set_defer_reads(false);
     require(adapter->open_handle_count() == 0U,
             "all Java network handles close after fixture execution");
+    require(socket_prompts == 1 && server_socket_prompts == 1 &&
+                datagram_prompts == 1 && datagram_receiver_prompts == 1 &&
+                http_prompts == 1 && https_prompts == 1,
+            "network gates prompt once per session permission and scheme");
 
     auto reconnect_adapter =
         std::make_shared<phoneme::tests::FakeNetworkAdapter>();
@@ -1086,6 +1354,40 @@ void test_machine_media(const std::string& fixture_jar) {
     require(classes.add_archive(fixture_jar).has_value(),
             "add media fixture JAR to VM classpath");
     phoneme::vm::Machine machine(classes);
+    int capture_prompts = 0;
+    auto media_policy =
+        std::make_shared<phoneme::security::PermissionPolicy>();
+    require(media_policy->configure(
+                phoneme::security::PermissionPolicyConfig {
+                    .suite_id = phoneme::SuiteId {203},
+                    .trust = phoneme::security::SuiteTrust::untrusted,
+                    .declared_permissions = {
+                        std::string(phoneme::security::permissions::media_capture_audio),
+                    },
+                    .enforce_declared_permissions = true,
+                    .prompt = [&](const phoneme::security::PermissionRequest& request) {
+                        if (request.permission ==
+                            phoneme::security::permissions::media_capture_audio) {
+                            ++capture_prompts;
+                        }
+                        return phoneme::security::PermissionResponse {
+                            phoneme::security::PermissionDecision::allowed,
+                            phoneme::security::PermissionScope::session,
+                        };
+                    },
+                }).has_value(),
+            "configure media permission policy");
+    machine.set_permission_policy(media_policy);
+    auto capture = machine.invoke_static(
+        "corefixture/SecurityOps",
+        "captureAllowedButUnsupported",
+        "()I");
+    require(capture.has_value() && capture->completed_normally() &&
+                capture->return_value.has_value() &&
+                capture->return_value->as_int().has_value() &&
+                *capture->return_value->as_int() == 1 &&
+                capture_prompts == 1,
+            "media capture gate prompts before unsupported capture backend");
 
     auto result = machine.invoke_static("corefixture/MediaOps",
                                         "run",
@@ -1117,6 +1419,34 @@ void test_machine_graphics(const std::string& fixture_jar) {
     auto status = result->return_value->as_int();
     require(status.has_value() && *status == 0,
             "graphics fixture preserves pixels transforms alpha and metrics");
+}
+
+void test_machine_game_api(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add MIDP Game API fixture JAR to VM classpath");
+    phoneme::vm::Machine machine(classes);
+
+    auto result = machine.invoke_static("corefixture/GameApiOps",
+                                        "run",
+                                        "()I",
+                                        {},
+                                        80'000'000);
+    if (!result) {
+        std::cerr << "Game API fixture VM error: "
+                  << result.error().message << '\n';
+    } else if (result->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*result->throwable);
+        std::cerr << "Game API fixture throwable: "
+                  << (throwable ? *throwable : std::string("unknown"))
+                  << '\n';
+    }
+    require(result.has_value() && result->completed_normally() &&
+                result->return_value.has_value(),
+            "execute MIDP Layer Sprite TiledLayer and LayerManager fixture");
+    auto status = result->return_value->as_int();
+    require(status.has_value() && *status == 0,
+            "MIDP Game API fixture preserves transforms collisions and painting");
 }
 
 void test_security_policy(const std::string& fixture_jar) {
@@ -1300,6 +1630,15 @@ void test_machine_security(const std::string& fixture_jar) {
     };
     invoke("checkStatuses", 15);
     invoke("requestAndRequire", 3);
+    require(policy->set_blanket_decision(
+                security::permissions::connector_file_read,
+                security::PermissionDecision::denied).has_value(),
+            "deny file reads for subsystem gate fixture");
+    require(policy->set_blanket_decision(
+                security::permissions::media_capture_audio,
+                security::PermissionDecision::denied).has_value(),
+            "deny audio capture for subsystem gate fixture");
+    invoke("subsystemDenials", 7);
 }
 
 void test_machine_push(const std::string& fixture_jar) {
@@ -1416,8 +1755,26 @@ void test_machine_gc_roots(const std::string& fixture_jar) {
     require(machine.collect_garbage().has_value(),
             "idle machine collection succeeds");
     const auto final_stats = machine.heap().stats();
-    require(final_stats.live_objects == 1U,
-            "idle collection retains only the static root");
+    require(final_stats.live_objects == 2U,
+            "idle collection retains the static root and emergency OOME");
+
+    phoneme::vm::Machine object_oom_machine(classes, 8U);
+    auto object_oom = object_oom_machine.invoke_static(
+        "corefixture/GcOps", "catchObjectOutOfMemory", "()I");
+    require(object_oom.has_value() && object_oom->completed_normally() &&
+                object_oom->return_value.has_value() &&
+                object_oom->return_value->as_int().has_value() &&
+                *object_oom->return_value->as_int() == 71,
+            "full heap throws catchable OutOfMemoryError for objects");
+
+    phoneme::vm::Machine array_oom_machine(classes, 8U);
+    auto array_oom = array_oom_machine.invoke_static(
+        "corefixture/GcOps", "catchArrayOutOfMemory", "()I");
+    require(array_oom.has_value() && array_oom->completed_normally() &&
+                array_oom->return_value.has_value() &&
+                array_oom->return_value->as_int().has_value() &&
+                *array_oom->return_value->as_int() == 73,
+            "full heap throws catchable OutOfMemoryError for arrays");
 }
 
 void test_runtime_lcdui(const std::string& fixture_jar) {
@@ -1431,34 +1788,53 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     require(runtime.start_system().has_value(),
             "start runtime for LCDUI fixture");
     constexpr phoneme::AppId app_id {22};
-    require(runtime.start_midlet(*suite_id,
-                                 "corefixture.LcduiApp",
-                                 app_id,
-                                 phoneme::Dimensions {320, 240}).has_value(),
+    auto lcd_ui_started = runtime.start_midlet(
+        *suite_id,
+        "corefixture.LcduiApp",
+        app_id,
+        phoneme::Dimensions {320, 240});
+    if (!lcd_ui_started) {
+        std::cerr << "LCDUI fixture launch error: "
+                  << lcd_ui_started.error().message << '\n';
+    }
+    require(lcd_ui_started.has_value(),
             "start MIDlet that creates native LCDUI components");
     require(runtime.app_state(app_id) == phoneme::runtime::AppState::active,
             "LCDUI fixture remains active after startApp");
+    for (int pump = 0; pump < 8; ++pump) {
+        (void)runtime.frame_snapshot();
+    }
 
     bool screen_created = false;
     bool screen_shown = false;
     bool screen_updated = false;
     bool status_ready = false;
+    bool status_serial = false;
     bool status_running = false;
     bool text_field_updated = false;
     bool gauge_updated = false;
     bool choice_group_shown = false;
     bool easy_choice = false;
     bool hard_choice = false;
+    bool date_field_shown = false;
+    bool spacer_shown = false;
+    bool action_item_shown = false;
     bool tail_item = false;
     bool ok_command = false;
     bool back_command = false;
     bool menu_command = false;
+    bool text_command = false;
+    bool alert_command = false;
     phoneme::i32 status_id = 0;
     phoneme::i32 text_field_id = 0;
     phoneme::i32 gauge_id = 0;
     phoneme::i32 choice_id = 0;
+    phoneme::i32 date_field_id = 0;
+    phoneme::i32 action_item_id = 0;
     phoneme::i32 ok_command_id = 0;
     phoneme::i32 menu_command_id = 0;
+    phoneme::i32 text_command_id = 0;
+    phoneme::i32 alert_command_id = 0;
     phoneme::i32 bridged_event_count = 0;
 
     while (auto event = runtime.poll_ui_event()) {
@@ -1485,6 +1861,10 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             event->text == "Trạng thái" && event->detail == "Ready") {
             status_ready = true;
             status_id = event->component_id;
+        }
+        if (event->kind == 8 && event->component_type == 12 &&
+            event->text == "Trạng thái" && event->detail == "Serial") {
+            status_serial = true;
         }
         if (event->kind == 8 && event->component_type == 12 &&
             event->text == "Trạng thái" && event->detail == "Running") {
@@ -1519,6 +1899,25 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             choice_id = event->component_id;
         }
         if ((event->kind == 7 || event->kind == 9) &&
+            event->component_type == 5 && event->text == "Ngày" &&
+            event->arguments[1] == 3 && event->arguments[3] == -1003 &&
+            event->value64 == 1'700'000'000 &&
+            event->detail == "GMT+07:00") {
+            date_field_shown = true;
+            date_field_id = event->component_id;
+        }
+        if ((event->kind == 7 || event->kind == 9) &&
+            event->component_type == 11 &&
+            event->arguments[2] == 12 && event->arguments[3] == 18) {
+            spacer_shown = true;
+        }
+        if ((event->kind == 7 || event->kind == 9) &&
+            event->component_type == 14 && event->text == "Action" &&
+            event->detail == "Tap") {
+            action_item_shown = true;
+            action_item_id = event->component_id;
+        }
+        if ((event->kind == 7 || event->kind == 9) &&
             event->component_type == 12 && event->text.empty() &&
             event->detail == "Tail") {
             tail_item = true;
@@ -1538,36 +1937,61 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             menu_command = true;
             menu_command_id = event->component_id;
         }
+        if (event->kind == 15 && event->text == "Text" &&
+            event->arguments[0] == 1 && event->arguments[1] == 4) {
+            text_command = true;
+            text_command_id = event->component_id;
+        }
+        if (event->kind == 15 && event->text == "Alert" &&
+            event->arguments[0] == 1 && event->arguments[1] == 5) {
+            alert_command = true;
+            alert_command_id = event->component_id;
+        }
     }
 
-    require(bridged_event_count >= 23,
+    require(bridged_event_count >= 32,
             "LCDUI fixture emits a complete screen and item event stream");
     require(screen_created && screen_shown && screen_updated,
             "LCDUI Form creation visibility and title updates are bridged");
-    require(status_ready && status_running,
-            "StringItem creation and mutation are bridged");
+    require(status_ready && status_serial && status_running,
+            "StringItem mutation and Display.callSerially are bridged");
     require(text_field_updated,
             "TextField metadata and UTF-8 text are bridged");
     require(gauge_updated,
             "Gauge value and range updates are bridged");
     require(choice_group_shown && easy_choice && hard_choice,
             "ChoiceGroup items and initial selections are bridged");
+    require(date_field_shown,
+            "DateField epoch mode and timezone metadata are bridged");
+    require(spacer_shown,
+            "Spacer minimum dimensions are bridged");
+    require(action_item_shown,
+            "button StringItem and item command owner are bridged");
     require(tail_item, "Form.append(String) creates a native StringItem");
-    require(ok_command && back_command && menu_command,
+    require(ok_command && back_command && menu_command && text_command &&
+                alert_command,
             "MIDP commands preserve labels types priorities and long labels");
     require(status_id != 0 && text_field_id != 0 && gauge_id != 0 &&
-                choice_id != 0 && ok_command_id != 0 && menu_command_id != 0,
+                choice_id != 0 && date_field_id != 0 && action_item_id != 0 &&
+                ok_command_id != 0 && menu_command_id != 0 &&
+                text_command_id != 0 && alert_command_id != 0,
             "LCDUI bridge registers interactive component IDs");
 
     runtime.ui_set_text(text_field_id, "Người", 5);
     runtime.ui_set_gauge(gauge_id, 9);
     runtime.ui_set_choice(choice_id, 1, true);
+    runtime.ui_set_date(date_field_id, 1'800'000'000);
     runtime.ui_focus_item(text_field_id);
     runtime.ui_select_command(ok_command_id);
 
     bool native_text_applied = false;
     bool native_gauge_applied = false;
     bool native_choice_applied = false;
+    bool native_date_applied = false;
+    bool text_state_callback = false;
+    bool gauge_state_callback = false;
+    bool choice_state_callback = false;
+    bool date_state_callback = false;
     bool focus_applied = false;
     bool command_callback_applied = false;
     while (auto event = runtime.poll_ui_event()) {
@@ -1583,6 +2007,27 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             event->text == "Hard" && event->arguments[0] == 1) {
             native_choice_applied = true;
         }
+        if (event->kind == 8 && event->component_id == date_field_id &&
+            event->component_type == 5 &&
+            event->value64 == 1'800'000'000) {
+            native_date_applied = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "State Tên") {
+            text_state_callback = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "State Tiến độ") {
+            gauge_state_callback = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "State Chế độ") {
+            choice_state_callback = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "State Ngày") {
+            date_state_callback = true;
+        }
         if (event->kind == 16 && event->component_id == text_field_id) {
             focus_applied = true;
         }
@@ -1592,10 +2037,40 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
         }
     }
     require(native_text_applied && native_gauge_applied &&
-                native_choice_applied && focus_applied,
+                native_choice_applied && native_date_applied && focus_applied,
             "native LCDUI input updates Java item state and emits refresh events");
+    require(text_state_callback && gauge_state_callback &&
+                choice_state_callback && date_state_callback,
+            "Form ItemStateListener receives all native item mutations");
     require(command_callback_applied,
             "native command selection invokes Java CommandListener callback");
+
+    runtime.ui_focus_item(action_item_id);
+    bool action_focus_applied = false;
+    phoneme::i32 item_command_id = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 16 && event->component_id == action_item_id) {
+            action_focus_applied = true;
+        }
+        if (event->kind == 15 && event->text == "Go" &&
+            event->arguments[0] == 8 && event->arguments[1] == 1 &&
+            event->arguments[2] == 1 &&
+            event->arguments[3] == action_item_id) {
+            item_command_id = event->component_id;
+        }
+    }
+    require(action_focus_applied && item_command_id != 0,
+            "focused Item exposes its ITEM command with item scope");
+    runtime.ui_select_command(item_command_id);
+    bool item_command_callback = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "Item Go") {
+            item_command_callback = true;
+        }
+    }
+    require(item_command_callback,
+            "ItemCommandListener receives the selected item command");
 
     runtime.ui_select_command(menu_command_id);
     bool list_created = false;
@@ -1648,6 +2123,119 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     require(implicit_selection_applied && select_command_callback_applied &&
                 form_restored,
             "implicit List selection dispatches SELECT_COMMAND and restores Form");
+
+    runtime.ui_select_command(text_command_id);
+    bool text_box_created = false;
+    bool text_box_kind = false;
+    bool text_box_shown = false;
+    bool text_box_initial_text = false;
+    phoneme::i32 text_box_peer_id = 0;
+    phoneme::i32 done_command_id = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 2 && event->component_type == 23 &&
+            event->text == "Nhập") {
+            text_box_created = true;
+        }
+        if (event->kind == 3 && event->component_type == 23 &&
+            event->text == "Nhập" && event->arguments[0] == 2 &&
+            event->arguments[3] == -1006) {
+            text_box_kind = true;
+        }
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Nhập") {
+            text_box_shown = true;
+        }
+        if ((event->kind == 7 || event->kind == 9) &&
+            event->component_type == 15 && event->detail == "abc" &&
+            event->arguments[0] == 20 && event->arguments[1] == 0 &&
+            event->arguments[2] == 3 && event->arguments[3] == -1001) {
+            text_box_initial_text = true;
+            text_box_peer_id = event->component_id;
+        }
+        if (event->kind == 15 && event->text == "Done" &&
+            event->arguments[0] == 4 && event->arguments[1] == 1) {
+            done_command_id = event->component_id;
+        }
+    }
+    require(text_box_created && text_box_kind && text_box_shown &&
+                text_box_initial_text && text_box_peer_id != 0 &&
+                done_command_id != 0,
+            "TextBox screen peer metadata text and command are bridged");
+
+    runtime.ui_set_text(text_box_peer_id, "Việt Nam", 8);
+    runtime.ui_select_command(done_command_id);
+    bool text_box_native_text_applied = false;
+    bool text_box_callback_applied = false;
+    bool text_box_form_restored = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 8 && event->component_id == text_box_peer_id &&
+            event->detail == "Việt Nam" && event->arguments[2] == 8) {
+            text_box_native_text_applied = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "Text Việt Nam @1800000000") {
+            text_box_callback_applied = true;
+        }
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Native Form") {
+            text_box_form_restored = true;
+        }
+    }
+    require(text_box_native_text_applied && text_box_callback_applied &&
+                text_box_form_restored,
+            "native TextBox input reaches Java and command restores Form");
+
+    runtime.ui_select_command(alert_command_id);
+    bool alert_created = false;
+    bool alert_shown = false;
+    bool alert_metadata = false;
+    phoneme::i32 dismiss_command_id = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 2 && event->component_type == 18 &&
+            event->text == "Cảnh báo" &&
+            event->detail == "Nội dung Việt") {
+            alert_created = true;
+        }
+        if (event->kind == 4 && event->component_type == 18 &&
+            event->text == "Cảnh báo" &&
+            event->detail == "Nội dung Việt") {
+            alert_shown = true;
+            if (event->arguments[0] == -2 &&
+                event->arguments[1] != 0 &&
+                event->arguments[2] == 3 &&
+                event->arguments[3] == -1009) {
+                alert_metadata = true;
+            }
+        }
+        if (event->kind == 15 && event->text.empty() &&
+            event->arguments[0] == 4 && event->arguments[1] == 0) {
+            dismiss_command_id = event->component_id;
+        }
+    }
+    require(alert_created && alert_shown && alert_metadata &&
+                dismiss_command_id != 0,
+            "Warning Alert body FOREVER timeout next screen and dismiss command are bridged");
+
+    runtime.ui_select_command(dismiss_command_id);
+    bool alert_callback_applied = false;
+    bool alert_hidden = false;
+    bool alert_form_restored = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "Alert dismissed") {
+            alert_callback_applied = true;
+        }
+        if (event->kind == 5 && event->component_type == 18 &&
+            event->text == "Cảnh báo") {
+            alert_hidden = true;
+        }
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Native Form") {
+            alert_form_restored = true;
+        }
+    }
+    require(alert_callback_applied && alert_hidden && alert_form_restored,
+            "Alert.DISMISS_COMMAND invokes Java listener and restores the next Form");
 
     require(runtime.destroy_midlet(app_id).has_value(),
             "destroy LCDUI fixture MIDlet");
@@ -1798,6 +2386,42 @@ void test_runtime_canvas(const std::string& fixture_jar) {
             "destroy secondary lifecycle MIDlet");
 }
 
+void test_machine_timer(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add Timer fixture archive");
+    phoneme::vm::Machine machine(classes);
+    auto result = machine.invoke_static("corefixture/TimerOps",
+                                        "run",
+                                        "()I",
+                                        {},
+                                        100'000'000U);
+    if (!result) {
+        std::cerr << "Timer fixture VM error: " << result.error().message
+                  << '\n';
+    }
+    require(result.has_value() && result->completed_normally() &&
+                result->return_value.has_value(),
+            "Timer fixture completes normally");
+    auto status = result->return_value->as_int();
+    if (status && *status != 0) {
+        std::cerr << "Timer fixture status: " << *status << '\n';
+    }
+    require(status.has_value() && *status == 0,
+            "Timer/TimerTask scheduling and cancellation semantics");
+
+    auto timer = machine.class_states().allocate_instance(
+        machine.heap(), "java/util/Timer");
+    require(timer.has_value(), "allocate Timer for shutdown regression");
+    auto constructed = machine.invoke_instance(*timer,
+                                               "java/util/Timer",
+                                               "<init>",
+                                               "()V");
+    require(constructed.has_value() && constructed->completed_normally(),
+            "construct Timer for shutdown regression");
+    // Machine destruction below must wake and join an idle Timer thread.
+}
+
 void test_runtime_lifecycle(const std::string& fixture_jar) {
     phoneme::runtime::Runtime runtime;
     const std::string runtime_home =
@@ -1855,6 +2479,56 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
             "destroy self-paused MIDlet");
 }
 
+void test_runtime_lock_reentry(const std::string& fixture_jar) {
+    phoneme::runtime::Runtime runtime;
+    const std::string runtime_home =
+        std::filesystem::path(fixture_jar).parent_path().string();
+    require(runtime.configure(runtime_home).has_value(),
+            "configure runtime for lifecycle re-entry");
+
+    constexpr phoneme::AppId app_id {21};
+    phoneme::i32 prompt_count = 0;
+    require(runtime.configure_permission_prompt(
+                [&](const phoneme::security::PermissionRequest&)
+                    -> phoneme::security::PermissionResponse {
+                    require(runtime.is_running(),
+                            "permission prompt re-enters Runtime read API");
+                    const auto state = runtime.app_state(app_id);
+                    require(state == phoneme::runtime::AppState::none ||
+                                state == phoneme::runtime::AppState::active ||
+                                state == phoneme::runtime::AppState::paused,
+                            "re-entrant lifecycle state remains observable");
+                    ++prompt_count;
+                    return {
+                        .decision =
+                            phoneme::security::PermissionDecision::allowed,
+                        .scope = phoneme::security::PermissionScope::one_shot,
+                    };
+                })
+                .has_value(),
+            "configure re-entrant permission prompt");
+
+    auto suite_id = runtime.install_jar(fixture_jar);
+    require(suite_id.has_value(),
+            "install lifecycle re-entry fixture suite");
+    require(runtime.start_system().has_value(),
+            "start lifecycle re-entry runtime");
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.ReentrantLifecycleApp",
+                                 app_id,
+                                 {320, 240})
+                .has_value(),
+            "startApp may synchronously re-enter Runtime without deadlock");
+    require(runtime.pause_midlet(app_id).has_value(),
+            "pauseApp may synchronously re-enter Runtime without deadlock");
+    require(runtime.resume_midlet(app_id).has_value(),
+            "resumed startApp may re-enter Runtime without deadlock");
+    require(runtime.destroy_midlet(app_id).has_value(),
+            "destroyApp may synchronously re-enter Runtime without deadlock");
+    require(prompt_count == 4,
+            "every lifecycle callback reached the re-entrant permission prompt");
+}
+
 void test_runtime_failure_isolation(const std::string& fixture_jar) {
     phoneme::runtime::Runtime runtime;
     const std::string runtime_home =
@@ -1905,6 +2579,17 @@ int main(int argc, char** argv) {
     require(argc == 2, "usage: CoreTests <fixture.jar>");
     const std::string fixture_jar = argv[1];
     const char* filter = std::getenv("PHONEME_TEST_FILTER");
+    if (filter != nullptr && std::string_view(filter) == "security") {
+        test_archive_and_classfile(fixture_jar);
+        test_suite_permissions(fixture_jar);
+        test_security_policy(fixture_jar);
+        test_machine_security(fixture_jar);
+        test_machine_filesystem(fixture_jar);
+        test_machine_network(fixture_jar);
+        test_machine_media(fixture_jar);
+        std::cout << "Standalone Security Core tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "network") {
         test_archive_and_classfile(fixture_jar);
         test_builtin_boot_classes();
@@ -1933,7 +2618,15 @@ int main(int argc, char** argv) {
         std::cout << "Standalone Canvas Graphics tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "game-api") {
+        test_archive_and_classfile(fixture_jar);
+        test_builtin_boot_classes();
+        test_machine_game_api(fixture_jar);
+        std::cout << "Standalone MIDP Game API tests passed\n";
+        return 0;
+    }
     test_archive_and_classfile(fixture_jar);
+    test_suite_permissions(fixture_jar);
     test_security_policy(fixture_jar);
     test_machine_security(fixture_jar);
     test_machine_filesystem(fixture_jar);
@@ -1954,10 +2647,13 @@ int main(int argc, char** argv) {
     test_machine_network(fixture_jar);
     test_machine_media(fixture_jar);
     test_machine_graphics(fixture_jar);
+    test_machine_game_api(fixture_jar);
     test_machine_gc_roots(fixture_jar);
     test_runtime_lcdui(fixture_jar);
     test_runtime_canvas(fixture_jar);
+    test_machine_timer(fixture_jar);
     test_runtime_lifecycle(fixture_jar);
+    test_runtime_lock_reentry(fixture_jar);
     test_runtime_failure_isolation(fixture_jar);
     test_framebuffer_sizes();
     std::cout << "Standalone Core tests passed\n";

@@ -2,8 +2,10 @@
 #include <iostream>
 #include <memory>
 
+#include "ConnectionNatives.hpp"
 #include "GraphicsNatives.hpp"
 #include "ImageNatives.hpp"
+#include "IONatives.hpp"
 #include "phoneme/network/AsyncNetworkAdapter.hpp"
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/Machine.hpp"
@@ -18,9 +20,36 @@ std::shared_ptr<AsyncNetworkAdapter> make_posix_network_adapter() {
 
 namespace phoneme::vm {
 
+Result<std::optional<i32>> connection_stream_read_one(Machine&, ObjectRef) {
+    return std::optional<i32> {};
+}
+
+Result<std::optional<usize>> connection_stream_available(Machine&, ObjectRef) {
+    return std::optional<usize> {};
+}
+
+Result<std::optional<bool>> connection_stream_write_one(Machine&,
+                                                        ObjectRef,
+                                                        u8) {
+    return std::optional<bool> {};
+}
+
+Result<std::optional<bool>> connection_stream_flush(Machine&, ObjectRef) {
+    return std::optional<bool> {};
+}
+
+Result<std::optional<bool>> connection_stream_close_input(Machine&, ObjectRef) {
+    return std::optional<bool> {};
+}
+
+Result<std::optional<bool>> connection_stream_close_output(Machine&, ObjectRef) {
+    return std::optional<bool> {};
+}
+
 void register_core_natives(NativeMethodRegistry& registry) {
     register_graphics_natives(registry);
     register_image_natives(registry);
+    register_io_natives(registry);
 }
 
 } // namespace phoneme::vm

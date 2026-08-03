@@ -131,7 +131,9 @@ namespace phoneme::vm
     }
 
     return fail(ErrorCode::class_not_found,
-                "field was not found in the class hierarchy");
+                "field was not found in the class hierarchy: " +
+                    normalize_name(owner) + "." + std::string(name) +
+                    std::string(descriptor));
   }
 
   Result<ObjectRef> ClassStateRegistry::allocate_instance(

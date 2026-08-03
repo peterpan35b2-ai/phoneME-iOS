@@ -58,6 +58,8 @@ Quy trình bắt buộc:
 12. Agent chỉ được sửa block trạng thái của mục mình sở hữu; không cập nhật hộ mục khác.
 13. Khi trả task mà chưa hoàn thành, phải ghi lý do rồi để user/integration owner chuyển sang `CANCELLED` hoặc reset về `TODO`.
 14. Nếu một agent được giao nhiều mục, phải claim riêng từng mục; không dùng claim của mục này để sửa ownership mục khác.
+15. Trước mỗi checkpoint và trước khi chuyển `READY_FOR_INTEGRATION`, agent phải đọc link `Review notes` của mục mình và xử lý mọi finding `BLOCKER`/`HIGH` còn `OPEN`.
+16. Agent không được sửa `Core/SUBAGENT_REVIEW_NOTES.md`; file đó do reviewer cập nhật. Agent phải ghi checkpoint review mới nhất đã đọc và các mã finding đã xử lý trong `Handoff`.
 
 Mẫu block trạng thái:
 
@@ -71,6 +73,8 @@ Mẫu block trạng thái:
 - Blocker: -
 - Handoff: -
 ```
+
+Link `Review notes` cố định được đặt ngay dưới tiêu đề từng mục; không được xóa hoặc đổi sang section khác.
 
 ### 0.2 Quy tắc bắt buộc cho tất cả agent
 
@@ -108,6 +112,7 @@ Ngoại lệ:
 
 - Mục 16 được phép chuẩn bị patch C ABI/Swift trong file riêng, nhưng thay đổi cuối vào các file trên vẫn do mục 20 thực hiện.
 - Mọi agent được phép sửa **duy nhất block `TRẠNG THÁI` của mục mình đang claim** trong `Core/PARALLEL_SUBAGENT_WORKPLAN.md`. Không được sửa mô tả, ownership, dependency hoặc block trạng thái của mục khác.
+- `Core/SUBAGENT_REVIEW_NOTES.md` do reviewer sở hữu; subagent chỉ đọc và dẫn mã finding trong handoff, không trực tiếp sửa file review.
 
 Nếu module mới cần đăng ký built-in class hoặc native method:
 
@@ -189,14 +194,16 @@ Tất cả mục
 
 # 01. Java scheduler, Thread và monitor blocking
 
+**Review notes:** [Review 01](SUBAGENT_REVIEW_NOTES.md#review-01)
+
 **TRẠNG THÁI**
 - Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:50 +07:00`
-- Cập nhật cuối: `2026-08-02 19:42 +07:00`
-- Blocker: `Review 01` vẫn còn finding `OPEN`; chờ reviewer xác nhận/đóng `RG-20260802-03`, `R01-20260802-01`, `R01-20260802-02`, `R01-20260802-03` trước khi chuyển `READY_FOR_INTEGRATION`.
-- Handoff: Checkpoint `3c4fd4a` (`feat(core): implement Java scheduler and monitor blocking`). Đã xử lý `RG-20260802-01/02/03/06` và `R01-20260802-01/02/03`: Java thread identity/state/interrupt/join/priority, execution-root snapshots, quantum safepoint, contended/reentrant monitor, `wait/notify/notifyAll`, abnormal cleanup và isolated test root. Test pass: normal, ASan+UBSan, TSan, 50 stress runs. Mục 20 cần đưa các source mới `ExecutionContext.cpp`, `JavaThread.cpp`, `Scheduler.cpp` và `SchedulerTests.cpp` vào CMake/Xcode/full regression; không có file trung tâm nào được commit trong checkpoint này.
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `Các finding chức năng Review 01 đã RESOLVED; cần commit follow-up stop-safepoint/BusyTask regression và cập nhật Handoff SHA trước integration.`
+- Handoff: Checkpoint `3c4fd4a` cộng follow-up cooperative shutdown: interpreter kiểm tra scheduler stop mỗi dispatch, busy Java loop không còn treo `Scheduler::shutdown()`. Scheduler normal + ASan/UBSan, host matrix và sanitizer matrix đều PASS; follow-up hiện chưa có commit sạch.
 
 **Loại:** ĐỘC QUYỀN, P0  
 **Không giao cùng file cho agent khác.**
@@ -307,14 +314,16 @@ Core/Tools/test-scheduler-host.sh
 
 # 02. Runtime lifecycle, lock boundary và multi-MIDlet execution
 
+**Review notes:** [Review 02](SUBAGENT_REVIEW_NOTES.md#review-02)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-02 21:36 +07:00`
+- Cập nhật cuối: `2026-08-02 22:05 +07:00`
+- Blocker: `R02-01/02/03 đã RESOLVED; còn R02-04 cần gom concurrent Runtime edits thành commit sạch và tái chạy isolated.`
+- Handoff: `Prepare/execute/commit lifecycle, per-VM operation serialization, graceful stop ngoài state lock, active-only input routing và synchronous permission-prompt re-entry fixture. Full host + ASan/UBSan và Canvas normal + ASan/UBSan PASS; chưa có SHA sạch.`
 
 **Loại:** ĐỘC QUYỀN, P0  
 **Phụ thuộc:** API scheduler của mục 01.
@@ -399,14 +408,16 @@ Core/Tools/test-runtime-concurrency-host.sh
 
 # 03. Heap, GC safepoint, OOM và native handle roots
 
+**Review notes:** [Review 03](SUBAGENT_REVIEW_NOTES.md#review-03)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 09:42 +07:00`
+- Cập nhật cuối: `2026-08-03 10:18 +07:00`
+- Blocker: `Review 03 vẫn còn findings OPEN và shared checkout chưa có commit sạch; cần reviewer xác nhận checkpoint trước READY_FOR_INTEGRATION.`
+- Handoff: `Heap có object+64 MiB byte budget, overflow-safe sizing, live/peak/failure diagnostics và atomic String accounting. Thêm generation-safe RootSet/NativeRootScope, nối native roots vào Machine GC. GcStress normal + ASan/UBSan + TSan PASS; full host normal + ASan/UBSan PASS.`
 
 **Loại:** ĐỘC QUYỀN, P0/P1  
 **Phụ thuộc:** execution context của mục 01.
@@ -479,14 +490,16 @@ Core/Tools/test-gc-stress-host.sh
 
 # 04. Hoàn thiện CLDC `java.lang`, `java.io`, `java.util`
 
+**Review notes:** [Review 04](SUBAGENT_REVIEW_NOTES.md#review-04)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 10:18 +07:00`
+- Cập nhật cuối: `2026-08-03 11:07 +07:00`
+- Blocker: `Full host hiện bị chặn bởi refactor deadline chưa hoàn tất trong PosixNetworkAdapter thuộc mục 09; review 04 vẫn OPEN và shared checkout chưa có clean commit.`
+- Handoff: `Thêm Reader/Writer/InputStreamReader/OutputStreamWriter với UTF-8, ISO-8859-1, US-ASCII, UTF-16BE; state nằm trong Java object. Hoàn thiện Throwable message/cause/initCause/toString/printStackTrace và String constructors cho hierarchy. PrintStream dispatch/flush/close đúng custom OutputStream. Timer xác nhận chạy qua scheduler và GC roots. CldcLibraryTests normal + ASan/UBSan PASS; strict syntax compile PASS.`
 
 **Loại:** SONG SONG, P1  
 **Không sửa phần Thread/Object wait/notify của mục 01.**
@@ -563,14 +576,16 @@ Core/Tools/test-cldc-library-host.sh
 
 # 05. JAD, installer và persistent Suite Store
 
+**Review notes:** [Review 05](SUBAGENT_REVIEW_NOTES.md#review-05)
+
 **TRẠNG THÁI**
-- Trạng thái: `READY_FOR_INTEGRATION`
+- Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 19:58 +07:00`
-- Blocker: `-`
-- Handoff: `7cf49d5 + b25c246 + 6548b5f; đã đọc checkpoint Review 05 lúc 2026-08-02 19:29 +07:00 và xử lý R05-20260802-05/06/07: fsync đầy đủ staged files/directories và suites parent trước DB commit, commit outcome phân biệt durable/unknown, giữ transaction candidates để crash recovery, capability matrix chính xác MIDP-1.0/2.0 và CLDC-1.0/1.1. Test pass: SuiteInstaller standalone, ASan/UBSan, full Core host, compile arm64-apple-ios16.0. Mục 20 vẫn cần tích hợp source mới vào CMake và gọi SuiteStore::configure(runtime_home).`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `Source commit 6548b5f đã review pass; cần commit fallback self-contained của test-suite-installer-host.sh và cập nhật Handoff SHA.`
+- Handoff: `7cf49d5 + b25c246 + 6548b5f; R05-05/06/07 RESOLVED. Isolated source normal + ASan/UBSan PASS; host/sanitizer matrix và iPhoneOS build PASS. Test-script follow-up đang ở shared checkout, chưa có commit sạch.`
 
 **Loại:** SONG SONG, P1
 
@@ -649,14 +664,16 @@ Core/Tools/test-suite-installer-host.sh
 
 # 06. Security domain, manifest permissions và resource gating
 
+**Review notes:** [Review 06](SUBAGENT_REVIEW_NOTES.md#review-06)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 11:08 +07:00`
+- Cập nhật cuối: `2026-08-03 11:36 +07:00`
+- Blocker: `Gate File/Network/Media đã có; PushRegistry và MIDlet.platformRequest thuộc integration mục 10/16 vẫn phải gọi require() tại operation. Review 06 chưa checkpoint và shared checkout chưa clean.`
+- Handoff: `PermissionPolicy giữ riêng required/optional metadata, Runtime truyền đúng manifest lists. Thêm canonical PermissionCatalog cho network/file/media/push/platform. Prompt cùng permission được coalesce, callback ngoài policy/Runtime lock, recursive prompt fail-safe. Persistence V2 bind suite_id + checksum + atomic fsync/rename + V1 migration; URL prompt redact credentials/query/fragment. SecurityIntegrationTests normal + ASan/UBSan + TSan PASS; strict compile PASS.`
 
 **Loại:** SONG SONG, P1  
 **Phụ thuộc:** declared permission output từ mục 05.
@@ -732,14 +749,16 @@ Core/Tools/test-security-integration-host.sh
 
 # 07. RMS semantics, crash recovery và stress verification
 
+**Review notes:** [Review 07](SUBAGENT_REVIEW_NOTES.md#review-07)
+
 **TRẠNG THÁI**
-- Trạng thái: `READY_FOR_INTEGRATION`
+- Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 19:50 +07:00`
-- Blocker: `Full Core regression đang bị chặn trước khi chạy bởi lỗi compile ngoài ownership tại Core/src/runtime/SuiteDatabase.cpp:566.`
-- Handoff: `66a435f`, review fix `a8cd498`; đã đọc Review 07 checkpoint 19:29 và xử lý R07-20260802-04/05. RMS suite và ASan/UBSan pass; delete rollback được xác nhận qua restart; corruption/future-version listing trả lỗi; RecordStoreRegistry compile sạch cho iphoneos arm64/iOS 16.0.
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `R07-06/07 đã RESOLVED; cần commit follow-up test-script fallback và tombstone scavenger, rồi cập nhật Handoff SHA.`
+- Handoff: `66a435f + a8cd498` cộng scavenger follow-up. RMS normal + ASan/UBSan, host/sanitizer matrix và iphoneos arm64 verify PASS; follow-up chưa có commit sạch.
 
 **Loại:** SONG SONG, P1
 
@@ -806,14 +825,16 @@ Core/Tools/test-rms-host.sh
 
 # 08. Filesystem sandbox, resource loading và JSR-75 FileConnection
 
+**Review notes:** [Review 08](SUBAGENT_REVIEW_NOTES.md#review-08)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-02 18:51 +07:00`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `R08-05 đã RESOLVED bằng backup rollback + fault injection; còn R08-04 cần commit sạch và R08-06 phụ thuộc Runtime lock boundary mục 02.`
+- Handoff: `Filesystem normal + ASan/UBSan, host/sanitizer matrix và iPhoneOS verify PASS. Atomic write rollback được test cho existing/absent destination. Toàn bộ ownership vẫn ở shared checkout, chưa có SHA sạch.`
 
 **Loại:** SONG SONG, P1  
 **Phụ thuộc mềm:** security gate API mục 06.
@@ -890,14 +911,16 @@ Core/Tools/test-filesystem-host.sh
 
 # 09. Network/GCF asynchronous completion, socket/TLS và cancellation
 
+**Review notes:** [Review 09](SUBAGENT_REVIEW_NOTES.md#review-09)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 11:37 +07:00`
+- Cập nhật cuối: `2026-08-03 12:02 +07:00`
+- Blocker: `HTTP response hiện bounded 32 MiB nhưng vẫn thu toàn body trước khi trả response metadata; cần body-stream contract mới để đạt headers-before-body. HTTPS cert/hostname/cancel cần matrix real-device mục 19. Review 09 chưa checkpoint.`
+- Handoff: `Adapter dùng worker pool + nonblocking poll với absolute deadline, cancellable Apple DNS/HTTPS bridge, late-callback generation/state drop và operation/handle ownership. ConnectionRegistry nhả Machine execution mutex, đánh dấu blocked_io, poll Java interrupt, cancel theo stream/connection/destroy và không replay committed POST. HTTP parser hardening, redirects, repeated headers, chunked/content-length/close framing, 1xx/204/304, 16 MiB request + 32 MiB response bounds. Full host + NetworkAsync + PosixNetworkAdapter normal/ASan/UBSan/TSan PASS; strict compile PASS.`
 
 **Loại:** SONG SONG nhưng ownership lớn, P0/P1  
 **Phụ thuộc:** scheduler mục 01 và security API mục 06.
@@ -984,14 +1007,16 @@ Core/Tools/test-network-host.sh
 
 # 10. Push Registry end-to-end Core
 
+**Review notes:** [Review 10](SUBAGENT_REVIEW_NOTES.md#review-10)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 12:03 +07:00`
+- Cập nhật cuối: `2026-08-03 12:48 +07:00`
+- Blocker: `Host iOS mục 16 vẫn phải reconcile listener registrations, schedule next_alarm_time bằng wall clock + monotonic wait, cấp execution window và gọi begin/complete launch. Core không giả định process luôn sống; review 10 chưa checkpoint.`
+- Handoff: `PushRegistry persistence V2 có migration V1, checksum/suite ownership, request pending/launching lease, crash recovery, exponential retry, max attempts/24h expiry, distinct source identity, alarm queue, uninstall cleanup và scheme/filter validation cho socket/server/datagram/SMS/MMS/CBS. Thêm PushDispatcher contract cho listener snapshot, alarm tick, execution-window poll và begin/complete. PushNatives yêu cầu PushRegistry + protocol receive permission và root array native. PushRegistry/Dispatcher normal + ASan/UBSan + TSan PASS; full host normal + ASan/UBSan PASS; strict compile PASS.`
 
 **Loại:** SONG SONG, P1  
 **Phụ thuộc:** mục 09 cho listener connection; mục 06 cho permission.
@@ -1068,14 +1093,16 @@ Core/Tools/test-push-dispatch-host.sh
 
 # 11. Graphics/Image/Font pixel accuracy và performance
 
+**Review notes:** [Review 11](SUBAGENT_REVIEW_NOTES.md#review-11)
+
 **TRẠNG THÁI**
-- Trạng thái: `READY_FOR_INTEGRATION`
+- Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:51 +07:00`
-- Cập nhật cuối: `2026-08-02 20:00 +07:00`
-- Blocker: `-`
-- Handoff: `Commits 935db5b + ee56ae0 + 153e88e. R11-05: benchmark dùng warmup + median/slowest, chỉ gate regression và report riêng 60 FPS/device. R11-06: toàn bộ ownership mục 11 đã commit sạch. R11-04: thêm GraphicsStore::consume_dirty_update() trả pixel packed đúng dirty rect và clear generation; mục 20 cần nối Runtime/Framebuffer/C API/Swift để partial upload end-to-end. Clean worktree pass module, VM, ASan/UBSan và iphoneos arm64 iOS 16.0.`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `Production source commit 153e88e đã review pass; cần commit follow-up Graphics VM harness dependency fixes (R11-07).`
+- Handoff: `935db5b + ee56ae0 + 153e88e`; module/VM normal + ASan/UBSan và iPhoneOS PASS. Dirty update contract, benchmark reporting và Image/Graphics semantics đã review; chỉ còn test harness follow-up chưa có SHA.
 
 **Loại:** SONG SONG, P1
 
@@ -1145,14 +1172,16 @@ Core/Tests/fixtures/GraphicsOps.java
 
 # 12. Canvas/GameCanvas/Input và event scheduling
 
+**Review notes:** [Review 12](SUBAGENT_REVIEW_NOTES.md#review-12)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 12:49 +07:00`
+- Cập nhật cuối: `2026-08-03 13:31 +07:00`
+- Blocker: `Graphics/render backend và scheduler internals thuộc mục 11/01; real-device multi-touch/rotation performance vẫn cần matrix mục 19. Review 12 chưa checkpoint.`
+- Handoff: `CanvasRuntime dùng active canvas + registration order deterministic, host input sắp theo sequence, duplicate key-down/release edge idempotent, repeat chỉ từ timer, pointer clip bounds và tôn trọng pointer/motion/repeat capabilities. sizeChanged chỉ cho visible canvas theo pending state; serviceRepaints ngoài callback pump đồng bộ, repaint tạo trong paint không mất/không recurse. Runtime expose configure_input_capabilities; Canvas natives trả capability thật. Callback exception cô lập MIDlet. CanvasGraphicsRuntime normal + ASan/UBSan + TSan PASS; full host normal + ASan/UBSan PASS; strict compile PASS.`
 
 **Loại:** SONG SONG, P1  
 **Phụ thuộc:** scheduler mục 01; phối hợp với Graphics mục 11.
@@ -1220,14 +1249,16 @@ Core/Tools/test-canvas-events-host.sh
 
 # 13. LCDUI extended widgets và callback hai chiều
 
+**Review notes:** [Review 13](SUBAGENT_REVIEW_NOTES.md#review-13)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-02 18:52 +07:00`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `R13-01/02/03 đã RESOLVED; cần commit sạch LCDUI source/tests và Swift monotonic AppId follow-up (R13-04).`
+- Handoff: `LCDUI extended normal + ASan/UBSan, host/sanitizer matrix, iPhoneOS và Xcode Debug/Release PASS. AppId không còn quay vòng 1..64 nên stale UI namespace không bị tái sử dụng; chưa có SHA sạch.`
 
 **Loại:** SONG SONG, P1
 
@@ -1299,14 +1330,16 @@ Core/Tools/test-lcdui-extended-host.sh
 
 # 14. MIDP Game API: Layer, Sprite, TiledLayer, LayerManager
 
+**Review notes:** [Review 14](SUBAGENT_REVIEW_NOTES.md#review-14)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 13:32 +07:00`
+- Cập nhật cuối: `2026-08-03 13:43 +07:00`
+- Blocker: `Pixel collision/render correctness phụ thuộc Graphics/Image mục 11; device benchmark scene dài vẫn thuộc mục 19. Review 14 chưa checkpoint.`
+- Handoff: `Layer/Sprite/TiledLayer/LayerManager built-ins+natives đã có frame sequence, transforms, reference pixel, collision rectangle, bounds/pixel collision, animated tiles, view-window clip/translate và layer ordering. Tối ưu LayerManager.paint duyệt trực tiếp Java layer array, loại vector allocation trên mỗi draw; mutation vẫn snapshot array an toàn cho GC. Game API fixture normal + ASan/UBSan + TSan PASS; strict compile PASS.`
 
 **Loại:** SONG SONG, P1  
 **Phụ thuộc:** Graphics/Image ổn định từ mục 11.
@@ -1379,14 +1412,16 @@ Core/Tools/test-game-api-host.sh
 
 # 15. MMAPI media hardening và optional capture/video surface
 
+**Review notes:** [Review 15](SUBAGENT_REVIEW_NOTES.md#review-15)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-03 13:44 +07:00`
+- Cập nhật cuối: `2026-08-03 13:44 +07:00`
+- Blocker: `AVFoundation codec/interruption/background matrix cần iPhoneOS real-device mục 19; Core chỉ công bố control khi bridge báo capability thật.`
+- Handoff: `Đang audit Player state machine, adapter callback threading, event delivery, close/load race và permission gates trước khi bổ sung async tests.`
 
 **Loại:** SONG SONG, P1
 
@@ -1462,6 +1497,8 @@ Core/Tools/test-media-host.sh
 ---
 
 # 16. C ABI và iOS Swift/Objective-C host integration
+
+**Review notes:** [Review 16](SUBAGENT_REVIEW_NOTES.md#review-16)
 
 **TRẠNG THÁI**
 - Trạng thái: `TODO`
@@ -1547,14 +1584,16 @@ phoneME/Runtime/PhoneMEEventPump.swift
 
 # 17. Real-game compatibility corpus và differential testing
 
+**Review notes:** [Review 17](SUBAGENT_REVIEW_NOTES.md#review-17)
+
 **TRẠNG THÁI**
-- Trạng thái: `READY_FOR_INTEGRATION`
+- Trạng thái: `IN_PROGRESS`
 - Agent: `GPT-5.6 Thinking`
 - Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
 - Bắt đầu: `2026-08-02 18:53 +07:00`
-- Cập nhật cuối: `2026-08-02 19:36 +07:00`
-- Blocker: `-`
-- Handoff: `Implementation commit 2b8ce42; đã xử lý R17-20260802-01..03 bằng legal provenance/device profile, failure taxonomy tách miền, scenario + logs/frame/hash/reference runtime evidence; 7 analyzer unit tests pass, 3/3 corpus enabled pass end-to-end, 7 fixture disabled pass static scan và 2 local legal placeholders skip đúng thiết kế, differential control run MATCH; không cần đăng ký source/CMake/C API trung tâm.`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `R17-04/06 đã RESOLVED; R17-05 còn OPEN vì enabled corpus mới có Canvas/LCDUI/RMS fixtures, chưa đủ game thật/critical domains.`
+- Handoff: `2b8ce42` cộng local Game API compile stubs và Canvas golden hash follow-up. Analyzer 7/7, enabled corpus 3/3 PASS; hạ tầng sẵn sàng nhưng mục 17 chưa hoàn thành coverage.
 
 **Loại:** SONG SONG, P1/P2  
 **Phụ thuộc:** có thể bắt đầu thu thập corpus ngay, nhưng kết luận cuối sau các module chính.
@@ -1630,14 +1669,16 @@ Core/Tests/Compatibility/CompatibilityHarness.cpp
 
 # 18. Test infrastructure, isolated build roots, sanitizer và CI
 
+**Review notes:** [Review 18](SUBAGENT_REVIEW_NOTES.md#review-18)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `IN_PROGRESS`
+- Agent: `Agent J (GPT-5.6 Thinking)`
+- Worktree/Branch: `checkout / main`
+- Bắt đầu: `2026-08-02 18:52 +0700`
+- Cập nhật cuối: `2026-08-02 21:35 +0700`
+- Blocker: `R18-01..04 đã RESOLVED; còn R18-05 yêu cầu commit sạch toàn bộ tooling ownership và tái chạy từ SHA.`
+- Handoff: `Tooling self-test, concurrent two-host, host matrix 15/15, ASan/UBSan matrix 15/15, coverage inventory 21/21, iphoneos verify và Xcode Debug/Release đều PASS. libFuzzer unavailable nên optional fuzz SKIP đúng thiết kế; tooling files chưa có commit sạch.`
 
 **Loại:** ĐỘC QUYỀN ở test tooling, P0/P1
 
@@ -1702,6 +1743,8 @@ Core/Tools/lib/common-test-root.sh
 ---
 
 # 19. Performance, multi-MIDlet soak, RAM/CPU/battery và device validation
+
+**Review notes:** [Review 19](SUBAGENT_REVIEW_NOTES.md#review-19)
 
 **TRẠNG THÁI**
 - Trạng thái: `TODO`
@@ -1779,14 +1822,16 @@ phoneME/Diagnostics/RuntimeMetrics.swift
 
 # 20. Integration owner: registry, CMake, C API, Xcode project và full regression
 
+**Review notes:** [Review 20](SUBAGENT_REVIEW_NOTES.md#review-20)
+
 **TRẠNG THÁI**
-- Trạng thái: `TODO`
-- Agent: `UNASSIGNED`
-- Worktree/Branch: `-`
-- Bắt đầu: `-`
-- Cập nhật cuối: `-`
-- Blocker: `-`
-- Handoff: `-`
+- Trạng thái: `BLOCKED`
+- Agent: `GPT-5.6 Thinking`
+- Worktree/Branch: `/Users/duypham/Developer/phoneME-iOS @ main`
+- Bắt đầu: `2026-08-02 18:52 +07:00`
+- Cập nhật cuối: `2026-08-02 21:35 +07:00`
+- Blocker: `R20-02/03/04 đã RESOLVED; R20-01 và R20-05 còn OPEN vì module follow-up chưa có commit sạch và mục 17 chưa đủ corpus. Snapshot hiện tại đã pass toàn matrix.`
+- Handoff: `Central composition snapshot PASS: host 15/15, ASan/UBSan 15/15, C11 C API, iphoneos arm64/iOS 16 verify 79/79 unique objects, Xcode Debug/Release no-sign. Không forbidden vendor symbols hoặc pointer truncation. Chưa tạo integration commit do shared checkout còn nhiều M/MM/??.`
 
 **Loại:** ĐỘC QUYỀN, thực hiện sau/định kỳ khi nhận handoff từ các mục khác, P0  
 **Đây là agent duy nhất được sửa các file trung tâm đã khóa ở mục 0.3.**
@@ -1867,6 +1912,8 @@ Và tương tự cho Release.
 
 # 21. Optional APIs theo corpus: Wireless Messaging, Bluetooth, Location, SIP, PIM
 
+**Review notes:** [Review 21](SUBAGENT_REVIEW_NOTES.md#review-21)
+
 **TRẠNG THÁI**
 - Trạng thái: `TODO`
 - Agent: `UNASSIGNED`
@@ -1916,6 +1963,8 @@ với ownership, security permission, platform adapter và test matrix cụ th�
 ---
 
 # 22. Optional compatibility layer cho game J2ME cũ/không chuẩn
+
+**Review notes:** [Review 22](SUBAGENT_REVIEW_NOTES.md#review-22)
 
 **TRẠNG THÁI**
 - Trạng thái: `TODO`

@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "phoneme/push/PushRegistry.hpp"
+#include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
@@ -188,6 +189,36 @@ string_argument(Machine &machine, std::span<const Value> arguments, usize index,
   return {};
 }
 
+[[nodiscard]] Status require_push_permission(Machine& machine,
+                                             std::string_view resource) {
+  return machine.permission_policy().require(
+      security::permissions::push_registry, std::string(resource), true);
+}
+
+[[nodiscard]] Status require_connection_permission(
+    Machine& machine,
+    std::string_view connection) {
+  std::string_view permission;
+  if (connection.starts_with("socket://")) {
+    permission = security::permissions::connector_socket;
+  } else if (connection.starts_with("serversocket://")) {
+    permission = security::permissions::connector_server_socket;
+  } else if (connection.starts_with("datagram://")) {
+    permission = security::permissions::connector_datagram_receiver;
+  } else if (connection.starts_with("sms://")) {
+    permission = security::permissions::wireless_sms_receive;
+  } else if (connection.starts_with("mms://")) {
+    permission = security::permissions::wireless_mms_receive;
+  } else if (connection.starts_with("cbs://")) {
+    permission = security::permissions::wireless_cbs_receive;
+  } else {
+    return fail_java("java/lang/IllegalArgumentException",
+                     "unsupported PushRegistry connection scheme");
+  }
+  return machine.permission_policy().require(
+      permission, std::string(connection), true);
+}
+
 [[nodiscard]] Result<std::optional<Value>>
 optional_string_result(Machine &machine,
                        Result<std::optional<std::string>> value) {
@@ -222,6 +253,13 @@ void register_push_natives(NativeMethodRegistry &registry) {
         auto valid_midlet = require_midlet_class(machine, *midlet);
         if (!valid_midlet)
           return std::unexpected(valid_midlet.error());
+        auto push_allowed = require_push_permission(machine, *connection);
+        if (!push_allowed) return std::unexpected(push_allowed.error());
+        auto connection_allowed =
+            require_connection_permission(machine, *connection);
+        if (!connection_allowed) {
+          return std::unexpected(connection_allowed.error());
+        }
         auto registered = machine.push_registry().register_connection(
             std::move(*connection), std::move(*midlet), std::move(*filter));
         if (!registered)
@@ -237,6 +275,8 @@ void register_push_natives(NativeMethodRegistry &registry) {
             string_argument(machine, arguments, 0, "push connection");
         if (!connection)
           return std::unexpected(connection.error());
+        auto allowed = require_push_permission(machine, *connection);
+        if (!allowed) return std::unexpected(allowed.error());
         auto removed =
             machine.push_registry().unregister_connection(*connection);
         if (!removed)
@@ -264,6 +304,8 @@ void register_push_natives(NativeMethodRegistry &registry) {
                                                    Value::from_reference({}));
         if (!array)
           return std::unexpected(array.error());
+        auto array_root = machine.pin_native_root(*array);
+        if (!array_root) return std::unexpected(array_root.error());
         for (usize index = 0; index < connections->size(); ++index) {
           auto string = create_string(machine, (*connections)[index]);
           if (!string)
@@ -318,6 +360,8 @@ void register_push_natives(NativeMethodRegistry &registry) {
         auto valid_midlet = require_midlet_class(machine, *midlet);
         if (!valid_midlet)
           return std::unexpected(valid_midlet.error());
+        auto allowed = require_push_permission(machine, *midlet);
+        if (!allowed) return std::unexpected(allowed.error());
         auto previous =
             machine.push_registry().register_alarm(std::move(*midlet), *time);
         if (!previous)

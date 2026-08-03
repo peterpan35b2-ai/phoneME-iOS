@@ -39,12 +39,25 @@ reference while a module is rewritten.
 ## Commands
 
 ```sh
+bash Core/Tools/test-c-api-host.sh
 bash Core/Tools/test-builtin-registry.sh
 bash Core/Tools/test-host.sh
 PHONEME_SANITIZE=1 bash Core/Tools/test-host.sh
+bash Core/Tools/test-all-host.sh
 bash Core/Tools/build-iphoneos.sh
 bash Core/Tools/verify-iphoneos.sh
+bash Core/Tools/test-full-regression.sh
 ```
+
+`test-full-regression.sh` is the integration-owner entrypoint. It runs the host
+and standalone module suites, ASan/UBSan, rebuilds the arm64 iPhoneOS archive at
+the path consumed by the app project, verifies archive provenance/symbols, then
+builds the iOS app in Debug and Release without code signing.
+
+`test-c-api-host.sh` compiles the public header as strict C11. The public ABI is
+additive and exposes `PHONEME_C_API_VERSION` plus
+`phoneme_c_api_version()` so the Swift/Objective-C host can reject incompatible
+major versions before creating a runtime.
 
 `test-builtin-registry.sh` is intentionally independent of `Machine`; it checks
 package ownership, class hierarchy, native field layout and critical CLDC method
@@ -59,8 +72,9 @@ must be added to the owning module instead of extending the central lookup file:
 - `IOBuiltinClasses.cpp`: `java.io`, byte/data streams and modified UTF contracts
 - `UtilBuiltinClasses.cpp`: collections, Enumeration, Random and time classes
 - `LcduiBuiltinClasses.cpp`: `javax.microedition.lcdui`
-- separate MIDlet, RMS, filesystem, push, security and later API modules follow
-  the same registration contract
+- `GameBuiltinClasses.cpp`: `javax.microedition.lcdui.game`
+- separate MIDlet, RMS, filesystem, network, media, push and security modules
+  follow the same registration contract
 
 Each module exports exactly one `register_*_classes(BuiltinClassRegistry&)`
 function. `BuiltinClasses.cpp` must remain composition-only so parallel agents do

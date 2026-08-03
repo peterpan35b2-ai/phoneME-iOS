@@ -403,12 +403,29 @@ def build_fixture_jars(
         return
     javac = command_path(os.environ.get("JAVAC", "javac"))
     jar_tool = command_path(os.environ.get("JAR", "jar"))
-    stub_root = (manifest_dir.parent / "Tests" / "stubs").resolve()
-    if not stub_root.is_dir():
-        raise CorpusError(f"compile-time MIDP stubs not found: {stub_root}")
-    stub_sources = sorted(stub_root.rglob("*.java"))
+    shared_stub_root = (manifest_dir.parent / "Tests" / "stubs").resolve()
+    local_stub_root = (manifest_dir / "fixtures" / "stubs").resolve()
+    if not shared_stub_root.is_dir():
+        raise CorpusError(
+            f"compile-time MIDP stubs not found: {shared_stub_root}"
+        )
+
+    # Compatibility-owned stubs make the corpus checkpoint self-contained for
+    # APIs that may still be under development in another workplan item. They
+    # override shared stubs by relative Java source path to avoid duplicate
+    # class definitions when the subsystem is later integrated.
+    stub_sources_by_name: dict[str, pathlib.Path] = {}
+    for root in (shared_stub_root, local_stub_root):
+        if not root.is_dir():
+            continue
+        for source in sorted(root.rglob("*.java")):
+            stub_sources_by_name[source.relative_to(root).as_posix()] = source
+    stub_sources = [stub_sources_by_name[name]
+                    for name in sorted(stub_sources_by_name)]
     if not stub_sources:
-        raise CorpusError(f"no Java stubs found under {stub_root}")
+        raise CorpusError(
+            f"no Java stubs found under {shared_stub_root} or {local_stub_root}"
+        )
 
     stub_classes = build_root / "compile-stubs"
     if stub_classes.exists():

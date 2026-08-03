@@ -49,6 +49,7 @@ using namespace builtin;
                           kOrdinary | kFinal, {}, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/StringBuffer;)V"),
             method(kPublic, "<init>", "([C)V"),
             method(kPublic, "<init>", "([CII)V"),
             method(kPublic, "<init>", "([B)V"),
@@ -64,6 +65,8 @@ using namespace builtin;
             method(kPublic, "getBytes", "(Ljava/lang/String;)[B"),
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic, "equalsIgnoreCase", "(Ljava/lang/String;)Z"),
+            method(kPublic, "regionMatches",
+                   "(ZILjava/lang/String;II)Z"),
             method(kPublic, "compareTo", "(Ljava/lang/String;)I"),
             method(kPublic, "startsWith", "(Ljava/lang/String;)Z"),
             method(kPublic, "startsWith", "(Ljava/lang/String;I)Z"),
@@ -81,6 +84,8 @@ using namespace builtin;
             method(kPublic, "concat", "(Ljava/lang/String;)Ljava/lang/String;"),
             method(kPublic, "replace", "(CC)Ljava/lang/String;"),
             method(kPublic, "trim", "()Ljava/lang/String;"),
+            method(kPublic, "toLowerCase", "()Ljava/lang/String;"),
+            method(kPublic, "toUpperCase", "()Ljava/lang/String;"),
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "intern", "()Ljava/lang/String;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
@@ -177,6 +182,8 @@ using namespace builtin;
         return make_class("java/lang/Boolean", "java/lang/Object",
                           kOrdinary | kFinal, {
             field(kPrivate | kFinal, "value", "Z"),
+            field(kPublic | kStatic | kFinal, "TRUE", "Ljava/lang/Boolean;"),
+            field(kPublic | kStatic | kFinal, "FALSE", "Ljava/lang/Boolean;"),
             field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
         }, {
             method(kPublic, "<init>", "(Z)V"),
@@ -250,6 +257,8 @@ using namespace builtin;
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "compareTo", "(Ljava/lang/Integer;)I"),
             method(kPublic | kStatic, "valueOf", "(I)Ljava/lang/Integer;"),
+            method(kPublic | kStatic, "valueOf",
+                   "(Ljava/lang/String;)Ljava/lang/Integer;"),
             method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;)I"),
             method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;I)I"),
             method(kPublic | kStatic, "toString", "(I)Ljava/lang/String;"),
@@ -298,6 +307,7 @@ using namespace builtin;
             method(kPublic | kStatic, "isLetter", "(C)Z"),
             method(kPublic | kStatic, "isLetterOrDigit", "(C)Z"),
             method(kPublic | kStatic, "isWhitespace", "(C)Z"),
+            method(kPublic | kStatic, "digit", "(CI)I"),
             method(kPublic | kStatic, "toLowerCase", "(C)C"),
             method(kPublic | kStatic, "toUpperCase", "(C)C"),
         });
@@ -389,13 +399,33 @@ using namespace builtin;
         return make_class("java/lang/Cloneable", "java/lang/Object",
                           kPublic | kInterface | kAbstract);
     }
+    if (name == "java/lang/Throwable") {
+        return make_class("java/lang/Throwable", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate, "detailMessage", "Ljava/lang/String;"),
+            field(kPrivate, "cause", "Ljava/lang/Throwable;"),
+            field(kPrivate, "causeInitialized", "Z"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/lang/Throwable;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
+            method(kPublic, "getMessage", "()Ljava/lang/String;"),
+            method(kPublic, "getLocalizedMessage", "()Ljava/lang/String;"),
+            method(kPublic, "getCause", "()Ljava/lang/Throwable;"),
+            method(kPublic | kSynchronized, "initCause",
+                   "(Ljava/lang/Throwable;)Ljava/lang/Throwable;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic, "printStackTrace", "()V"),
+        });
+    }
 
     struct Hierarchy final {
         const char* name;
         const char* super_name;
     };
-    static constexpr std::array<Hierarchy, 29> hierarchy {{
-        {"java/lang/Throwable", "java/lang/Object"},
+    static constexpr std::array<Hierarchy, 28> hierarchy {{
         {"java/lang/Exception", "java/lang/Throwable"},
         {"java/lang/RuntimeException", "java/lang/Exception"},
         {"java/lang/Error", "java/lang/Throwable"},
@@ -429,6 +459,7 @@ using namespace builtin;
         if (name == entry.name) {
             return make_class(entry.name, entry.super_name, kOrdinary, {}, {
                 method(kPublic, "<init>", "()V"),
+                method(kPublic, "<init>", "(Ljava/lang/String;)V"),
             });
         }
     }
@@ -449,6 +480,7 @@ using namespace builtin;
         if (name == entry.name) {
             return make_class(entry.name, entry.super_name, kOrdinary, {}, {
                 method(kPublic, "<init>", "()V"),
+                method(kPublic, "<init>", "(Ljava/lang/String;)V"),
             });
         }
     }

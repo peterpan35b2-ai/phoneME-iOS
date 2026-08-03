@@ -185,6 +185,72 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
     return {};
 }
 
+Status Scheduler::start_native_thread(
+    Machine& machine,
+    ObjectRef thread_object,
+    SchedulerNativeTask task) {
+    if (!task) {
+        return fail(ErrorCode::invalid_argument,
+                    "native Java thread requires a task");
+    }
+    std::shared_ptr<JavaThread> thread;
+    {
+        std::scoped_lock lock(mutex_);
+        if (shutting_down_) {
+            return fail(ErrorCode::invalid_state,
+                        "scheduler is shutting down");
+        }
+        thread = find_thread_locked(thread_object);
+        if (!thread) {
+            if (next_thread_id_ == 0U) {
+                return fail(ErrorCode::overflow,
+                            "Java thread identifier space was exhausted");
+            }
+            const JavaThreadId id = next_thread_id_++;
+            thread = std::make_shared<JavaThread>(
+                id, thread_object, ObjectRef {});
+            by_object_.emplace(thread_object.bits, thread);
+            by_id_.emplace(id, thread);
+        }
+        {
+            std::scoped_lock thread_lock(thread->mutex_);
+            if (thread->started_) {
+                return fail_java("java/lang/IllegalThreadStateException",
+                                 "native Java thread was started twice");
+            }
+            thread->started_ = true;
+            thread->state_ = JavaThreadState::runnable;
+        }
+        update_queue_membership_locked(thread->id_,
+                                       JavaThreadState::runnable);
+    }
+
+    thread->worker_ = std::jthread(
+        [this, &machine, thread, task = std::move(task)](
+            std::stop_token stop_token) mutable {
+            tls_scheduler_ = this;
+            tls_thread_id_ = thread->id_;
+            set_current_state(JavaThreadState::running);
+
+            std::optional<ObjectRef> throwable;
+            std::optional<Error> failure;
+            if (!stop_token.stop_requested()) {
+                auto result = task(stop_token);
+                if (!result) {
+                    failure = result.error();
+                } else {
+                    throwable = *result;
+                }
+            }
+
+            machine.monitors().release_all(thread->id_);
+            finish_thread(thread, throwable, failure);
+            tls_scheduler_ = nullptr;
+            tls_thread_id_ = 0;
+        });
+    return {};
+}
+
 Result<ObjectRef> Scheduler::runnable_target(ObjectRef thread_object) const {
     std::shared_ptr<JavaThread> thread;
     {
@@ -370,6 +436,15 @@ bool Scheduler::current_is_interrupted() const noexcept {
     return current->interrupted_;
 }
 
+bool Scheduler::current_stop_requested() const noexcept {
+    auto current = current_thread_record();
+    if (!current) {
+        return false;
+    }
+    std::scoped_lock lock(current->mutex_);
+    return current->stop_requested_;
+}
+
 bool Scheduler::consume_current_interrupt() noexcept {
     auto current = current_thread_record();
     if (!current) {
@@ -456,6 +531,7 @@ void Scheduler::update_queue_membership_locked(JavaThreadId id,
         runnable_queue_.push_back(id);
         break;
     case JavaThreadState::blocked_monitor:
+    case JavaThreadState::blocked_io:
     case JavaThreadState::waiting:
     case JavaThreadState::joining:
         blocked_queue_.push_back(id);

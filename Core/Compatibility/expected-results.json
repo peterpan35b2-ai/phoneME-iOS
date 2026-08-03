@@ -59,7 +59,9 @@
         "app_state": "active",
         "max_startup_ms": 10000,
         "min_frames": 1,
-        "frame_hashes": [],
+        "frame_hashes": [
+          "8053e3a6e4bc19d5c029eaac6b2e8dd7c6ca9f4198012eaeca7175a733e1ee53"
+        ],
         "milestones": ["midlet-started", "app-active", "canvas-created", "frame-produced"],
         "network_actions": [],
         "media_actions": []

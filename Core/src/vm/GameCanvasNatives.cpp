@@ -79,6 +79,18 @@ void register_game_canvas_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    add(registry, kOwner, "paint",
+        "(Ljavax/microedition/lcdui/Graphics;)V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto canvas = receiver(arguments, "GameCanvas.paint");
+            if (!canvas) return std::unexpected(canvas.error());
+            // Compatibility path for direct-render GameCanvas implementations.
+            // Several Nokia/Sony Ericsson-era games draw exclusively through
+            // getGraphics()/flushGraphics() and omit a paint override.
+            return std::optional<Value> {};
+        });
+
     add(registry, kOwner, "getKeyStates", "()I",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

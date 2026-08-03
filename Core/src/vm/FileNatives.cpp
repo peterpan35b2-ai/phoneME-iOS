@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "phoneme/filesystem/FileSystem.hpp"
+#include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
@@ -24,6 +25,8 @@ constexpr usize kFileStreamClosedField = 1;
 constexpr usize kConnectionPathField = 0;
 constexpr usize kConnectionModeField = 1;
 constexpr usize kConnectionOpenField = 2;
+constexpr usize kConnectionInputField = 3;
+constexpr usize kConnectionOutputField = 4;
 constexpr usize kFilterStreamField = 0;
 constexpr usize kArrayEnumerationValuesField = 0;
 constexpr usize kArrayEnumerationIndexField = 1;
@@ -31,6 +34,26 @@ constexpr usize kArrayEnumerationSizeField = 2;
 constexpr i32 kConnectorRead = 1;
 constexpr i32 kConnectorWrite = 2;
 constexpr i32 kConnectorReadWrite = 3;
+
+[[nodiscard]] Status require_file_permissions(
+    Machine& machine,
+    bool read,
+    bool write,
+    std::string_view resource) {
+    if (read) {
+        auto allowed = machine.permission_policy().require(
+            security::permissions::connector_file_read,
+            std::string(resource));
+        if (!allowed) return allowed;
+    }
+    if (write) {
+        auto allowed = machine.permission_policy().require(
+            security::permissions::connector_file_write,
+            std::string(resource));
+        if (!allowed) return allowed;
+    }
+    return {};
+}
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -297,6 +320,72 @@ void add(NativeMethodRegistry& registry,
     return set_int_field(machine, stream, kFileStreamClosedField, 0);
 }
 
+[[nodiscard]] Result<bool> stream_is_open(Machine& machine,
+                                          ObjectRef stream) {
+    if (stream.is_null()) return false;
+    auto closed = int_field(machine, stream, kFileStreamClosedField);
+    if (!closed) return std::unexpected(closed.error());
+    return *closed == 0;
+}
+
+[[nodiscard]] Status register_connection_stream(
+    Machine& machine,
+    ObjectRef connection,
+    ObjectRef stream,
+    bool input) {
+    const usize field = input ? kConnectionInputField
+                              : kConnectionOutputField;
+    auto existing = reference_field(machine, connection, field);
+    if (!existing) return std::unexpected(existing.error());
+    auto open = stream_is_open(machine, *existing);
+    if (!open) return std::unexpected(open.error());
+    if (*open) {
+        return fail_java("java/io/IOException",
+                         input
+                             ? "FileConnection already has an open input stream"
+                             : "FileConnection already has an open output stream");
+    }
+    return set_reference_field(machine, connection, field, stream);
+}
+
+[[nodiscard]] Status close_connection_stream(
+    Machine& machine,
+    ObjectRef connection,
+    bool input) {
+    const usize field = input ? kConnectionInputField
+                              : kConnectionOutputField;
+    auto stream = reference_field(machine, connection, field);
+    if (!stream) return std::unexpected(stream.error());
+    if (stream->is_null()) return {};
+    auto open = stream_is_open(machine, *stream);
+    if (!open) return std::unexpected(open.error());
+    if (*open) {
+        auto closed = input ? file_input_close(machine, *stream)
+                            : file_output_close(machine, *stream);
+        if (!closed) return closed;
+    }
+    return set_reference_field(machine, connection, field, {});
+}
+
+[[nodiscard]] Status close_connection_streams(Machine& machine,
+                                              ObjectRef connection) {
+    auto input = close_connection_stream(machine, connection, true);
+    auto output = close_connection_stream(machine, connection, false);
+    if (!input) return input;
+    return output;
+}
+
+[[nodiscard]] Status flush_connection_output(Machine& machine,
+                                             ObjectRef connection) {
+    auto stream = reference_field(machine, connection,
+                                  kConnectionOutputField);
+    if (!stream) return std::unexpected(stream.error());
+    if (stream->is_null()) return {};
+    auto open = stream_is_open(machine, *stream);
+    if (!open) return std::unexpected(open.error());
+    return *open ? file_output_flush(machine, *stream) : Status {};
+}
+
 [[nodiscard]] Result<std::string> normalize_path_argument(
     Machine& machine,
     ObjectRef path) {
@@ -310,11 +399,12 @@ void add(NativeMethodRegistry& registry,
 
 [[nodiscard]] Result<ObjectRef> create_file_input_stream(
     Machine& machine,
-    std::string_view path) {
+    std::string_view path,
+    std::optional<ObjectRef> connection = std::nullopt) {
     auto handle = machine.filesystem().open(path,
                                             filesystem::OpenMode::read,
                                             false, false);
-    if (!handle) return file_error(handle.error(), true);
+    if (!handle) return file_error(handle.error());
     auto stream = machine.class_states().allocate_instance(
         machine.heap(), "java/io/FileInputStream");
     if (!stream) {
@@ -326,28 +416,45 @@ void add(NativeMethodRegistry& registry,
         static_cast<void>(machine.filesystem().close(*handle));
         return std::unexpected(initialized.error());
     }
+    if (connection.has_value()) {
+        auto registered = register_connection_stream(
+            machine, *connection, *stream, true);
+        if (!registered) {
+            static_cast<void>(file_input_close(machine, *stream));
+            return std::unexpected(registered.error());
+        }
+    }
     return *stream;
 }
 
 [[nodiscard]] Result<ObjectRef> create_file_output_stream(
     Machine& machine,
     std::string_view path,
-    bool append,
-    std::optional<i64> offset = std::nullopt) {
-    const auto mode = append ? filesystem::OpenMode::append
-                             : filesystem::OpenMode::read_write;
-    auto handle = machine.filesystem().open(path, mode, true,
-                                            !append && !offset.has_value());
-    if (!handle) return file_error(handle.error(), true);
+    std::optional<i64> offset = std::nullopt,
+    std::optional<ObjectRef> connection = std::nullopt) {
+    if (offset.has_value() && *offset < 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "output stream offset is negative");
+    }
+    auto handle = machine.filesystem().open(
+        path, filesystem::OpenMode::read_write, false, false);
+    if (!handle) return file_error(handle.error());
     if (offset.has_value()) {
         auto size = machine.filesystem().size(*handle);
-        if (!size || *offset < 0 || *offset > *size) {
+        if (!size) {
             static_cast<void>(machine.filesystem().close(*handle));
-            return fail_java("java/io/IOException",
-                             "output stream offset is outside the file");
+            return file_error(size.error());
         }
+        const i64 position = std::min(*offset, *size);
         auto positioned = machine.filesystem().seek(
-            *handle, *offset, filesystem::SeekOrigin::begin);
+            *handle, position, filesystem::SeekOrigin::begin);
+        if (!positioned) {
+            static_cast<void>(machine.filesystem().close(*handle));
+            return file_error(positioned.error());
+        }
+    } else {
+        auto positioned = machine.filesystem().seek(
+            *handle, 0, filesystem::SeekOrigin::begin);
         if (!positioned) {
             static_cast<void>(machine.filesystem().close(*handle));
             return file_error(positioned.error());
@@ -363,6 +470,14 @@ void add(NativeMethodRegistry& registry,
     if (!initialized) {
         static_cast<void>(machine.filesystem().close(*handle));
         return std::unexpected(initialized.error());
+    }
+    if (connection.has_value()) {
+        auto registered = register_connection_stream(
+            machine, *connection, *stream, false);
+        if (!registered) {
+            static_cast<void>(file_output_close(machine, *stream));
+            return std::unexpected(registered.error());
+        }
     }
     return *stream;
 }
@@ -389,6 +504,8 @@ void add(NativeMethodRegistry& registry,
     return *stream;
 }
 
+[[nodiscard]] std::string file_resource_uri(std::string_view path);
+
 struct ConnectionState final {
     ObjectRef object;
     std::string path;
@@ -410,21 +527,27 @@ struct ConnectionState final {
                     "FileConnection state is invalid");
     }
     if (*open == 0) {
-        return fail_java("java/io/IOException",
-                         "FileConnection is closed");
+        return fail_java(
+            "javax/microedition/io/file/ConnectionClosedException",
+            "FileConnection is closed");
     }
     if (require_read && *mode != kConnectorRead &&
         *mode != kConnectorReadWrite) {
-        return fail_java("java/io/IOException",
-                         "FileConnection is not open for reading");
+        return fail_java(
+            "javax/microedition/io/file/IllegalModeException",
+            "FileConnection is not open for reading");
     }
     if (require_write && *mode != kConnectorWrite &&
         *mode != kConnectorReadWrite) {
-        return fail_java("java/io/IOException",
-                         "FileConnection is not open for writing");
+        return fail_java(
+            "javax/microedition/io/file/IllegalModeException",
+            "FileConnection is not open for writing");
     }
     auto path = utf8_text(machine, *path_object);
     if (!path) return std::unexpected(path.error());
+    auto permitted = require_file_permissions(
+        machine, require_read, require_write, file_resource_uri(*path));
+    if (!permitted) return std::unexpected(permitted.error());
     return ConnectionState {
         .object = *object,
         .path = std::move(*path),
@@ -444,6 +567,12 @@ struct ConnectionState final {
     if (!text) return std::unexpected(text.error());
     auto path = filesystem::path_from_file_url(*text);
     if (!path) return file_error(path.error());
+    auto permitted = require_file_permissions(
+        machine,
+        mode == kConnectorRead || mode == kConnectorReadWrite,
+        mode == kConnectorWrite || mode == kConnectorReadWrite,
+        file_resource_uri(*path));
+    if (!permitted) return std::unexpected(permitted.error());
     auto path_string = create_string(machine, *path);
     if (!path_string) return std::unexpected(path_string.error());
     auto connection = machine.class_states().allocate_instance(
@@ -456,9 +585,15 @@ struct ConnectionState final {
                                      kConnectionModeField, mode);
     auto stored_open = set_int_field(machine, *connection,
                                      kConnectionOpenField, 1);
+    auto stored_input = set_reference_field(machine, *connection,
+                                            kConnectionInputField, {});
+    auto stored_output = set_reference_field(machine, *connection,
+                                             kConnectionOutputField, {});
     if (!stored_path) return std::unexpected(stored_path.error());
     if (!stored_mode) return std::unexpected(stored_mode.error());
     if (!stored_open) return std::unexpected(stored_open.error());
+    if (!stored_input) return std::unexpected(stored_input.error());
+    if (!stored_output) return std::unexpected(stored_output.error());
     return *connection;
 }
 
@@ -535,6 +670,17 @@ struct ConnectionState final {
                                        : slash + 1U));
 }
 
+[[nodiscard]] std::string file_resource_uri(std::string_view path) {
+    std::string uri = "file:///";
+    uri.append(path);
+    return uri;
+}
+
+[[nodiscard]] i64 clamp_java_long_size(u64 value) noexcept {
+    const auto maximum = static_cast<u64>(std::numeric_limits<i64>::max());
+    return static_cast<i64>(std::min(value, maximum));
+}
+
 void register_file_stream_natives(NativeMethodRegistry& registry) {
     add(registry, "java/io/FileInputStream", "<init>",
         "(Ljava/lang/String;)V",
@@ -549,6 +695,9 @@ void register_file_stream_natives(NativeMethodRegistry& registry) {
             }
             auto path = normalize_path_argument(machine, *path_object);
             if (!path) return file_error(path.error());
+            auto permitted = require_file_permissions(
+                machine, true, false, file_resource_uri(*path));
+            if (!permitted) return std::unexpected(permitted.error());
             auto handle = machine.filesystem().open(
                 *path, filesystem::OpenMode::read, false, false);
             if (!handle) return file_error(handle.error(), true);
@@ -582,6 +731,9 @@ void register_file_stream_natives(NativeMethodRegistry& registry) {
                 }
                 auto path = normalize_path_argument(machine, *path_object);
                 if (!path) return file_error(path.error());
+                auto permitted = require_file_permissions(
+                    machine, false, true, file_resource_uri(*path));
+                if (!permitted) return std::unexpected(permitted.error());
                 auto handle = machine.filesystem().open(
                     *path,
                     append ? filesystem::OpenMode::append
@@ -752,13 +904,29 @@ void register_file_stream_natives(NativeMethodRegistry& registry) {
 void register_file_connection_natives(NativeMethodRegistry& registry) {
     constexpr const char* owner =
         "javax/microedition/io/file/FileConnectionImpl";
+    add(registry, owner, "isOpen", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto open = int_field(machine, *object, kConnectionOpenField);
+            if (!open) return std::unexpected(open.error());
+            return std::optional<Value>(Value::from_int(*open != 0 ? 1 : 0));
+        });
     add(registry, owner, "close", "()V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
+            auto open = int_field(machine, *object, kConnectionOpenField);
+            if (!open) return std::unexpected(open.error());
+            if (*open == 0) return std::optional<Value> {};
+            auto streams_closed = close_connection_streams(machine, *object);
             auto closed = set_int_field(machine, *object,
                                         kConnectionOpenField, 0);
+            if (!streams_closed) {
+                return std::unexpected(streams_closed.error());
+            }
             if (!closed) return std::unexpected(closed.error());
             return std::optional<Value> {};
         });
@@ -769,7 +937,7 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             [selector](Machine& machine,
                        std::span<const Value> arguments)
                 -> Result<std::optional<Value>> {
-                auto state = connection_state(machine, arguments);
+                auto state = connection_state(machine, arguments, true);
                 if (!state) return std::unexpected(state.error());
                 auto info = machine.filesystem().stat(state->path);
                 if (!info) return file_error(info.error());
@@ -800,17 +968,73 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             if (!state) return std::unexpected(state.error());
             auto info = machine.filesystem().stat(state->path);
             if (!info) return file_error(info.error());
-            if (!info->exists || info->directory) {
+            if (!info->exists) {
+                return std::optional<Value>(Value::from_long(-1));
+            }
+            if (info->directory) {
                 return fail_java("java/io/IOException",
                                  "FileConnection does not name a file");
             }
             return std::optional<Value>(Value::from_long(
-                static_cast<i64>(info->size)));
+                clamp_java_long_size(info->size)));
         });
+    add(registry, owner, "directorySize", "(Z)J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments, true);
+            auto include_subdirectories = arguments[1].as_int();
+            if (!state) return std::unexpected(state.error());
+            if (!include_subdirectories) {
+                return std::unexpected(include_subdirectories.error());
+            }
+            auto info = machine.filesystem().stat(state->path);
+            if (!info) return file_error(info.error());
+            if (!info->exists) {
+                return std::optional<Value>(Value::from_long(-1));
+            }
+            if (!info->directory) {
+                return fail_java("java/io/IOException",
+                                 "FileConnection does not name a directory");
+            }
+            auto size = machine.filesystem().directory_size(
+                state->path, *include_subdirectories != 0);
+            if (!size) return file_error(size.error());
+            return std::optional<Value>(Value::from_long(
+                clamp_java_long_size(*size)));
+        });
+
+    const auto register_storage_size = [&registry](
+        const char* name,
+        auto selector) {
+        add(registry, owner, name, "()J",
+            [selector](Machine& machine,
+                       std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto state = connection_state(machine, arguments, true);
+                if (!state) return std::unexpected(state.error());
+                auto info = machine.filesystem().storage_info();
+                if (!info) return file_error(info.error());
+                return std::optional<Value>(Value::from_long(
+                    clamp_java_long_size(selector(*info))));
+            });
+    };
+    register_storage_size("availableSize",
+                          [](const filesystem::StorageInfo& info) {
+                              return info.available;
+                          });
+    register_storage_size("totalSize",
+                          [](const filesystem::StorageInfo& info) {
+                              return info.total;
+                          });
+    register_storage_size("usedSize",
+                          [](const filesystem::StorageInfo& info) {
+                              return info.used;
+                          });
+
     add(registry, owner, "lastModified", "()J",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            auto state = connection_state(machine, arguments);
+            auto state = connection_state(machine, arguments, true);
             if (!state) return std::unexpected(state.error());
             auto info = machine.filesystem().stat(state->path);
             if (!info) return file_error(info.error());
@@ -831,17 +1055,112 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
                 return std::optional<Value>(Value::from_reference(*text));
             });
     };
-    register_string_property("getName", [](const std::string& path) {
-        return leaf_name(path);
-    });
+    add(registry, owner, "getName", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments);
+            if (!state) return std::unexpected(state.error());
+            auto info = machine.filesystem().stat(state->path);
+            if (!info) return file_error(info.error());
+            std::string name = leaf_name(state->path);
+            if (info->exists && info->directory && !name.empty()) {
+                name.push_back('/');
+            }
+            auto text = create_string(machine, name);
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
     register_string_property("getPath", [](const std::string& path) {
         const std::string parent = parent_path(path);
         return parent.empty() ? std::string("/")
                               : "/" + parent + "/";
     });
-    register_string_property("getURL", [](const std::string& path) {
-        return "file:///" + path;
-    });
+    add(registry, owner, "getURL", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments);
+            if (!state) return std::unexpected(state.error());
+            auto info = machine.filesystem().stat(state->path);
+            if (!info) return file_error(info.error());
+            std::string url = file_resource_uri(state->path);
+            if (info->exists && info->directory && !url.ends_with('/')) {
+                url.push_back('/');
+            }
+            auto text = create_string(machine, url);
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
+
+    const auto register_permission_mutation = [&registry](
+        const char* name,
+        auto operation) {
+        add(registry, owner, name, "(Z)V",
+            [operation](Machine& machine,
+                        std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto state = connection_state(machine, arguments,
+                                              false, true);
+                auto enabled = arguments[1].as_int();
+                if (!state) return std::unexpected(state.error());
+                if (!enabled) return std::unexpected(enabled.error());
+                auto status = operation(machine.filesystem(), state->path,
+                                        *enabled != 0);
+                if (!status) return file_error(status.error());
+                return std::optional<Value> {};
+            });
+    };
+    register_permission_mutation(
+        "setReadable",
+        [](filesystem::FileSystem& files,
+           const std::string& path,
+           bool readable) {
+            return files.set_readable(path, readable);
+        });
+    register_permission_mutation(
+        "setWritable",
+        [](filesystem::FileSystem& files,
+           const std::string& path,
+           bool writable) {
+            return files.set_writable(path, writable);
+        });
+
+    add(registry, owner, "setHidden", "(Z)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments, false, true);
+            auto requested = arguments[1].as_int();
+            if (!state) return std::unexpected(state.error());
+            if (!requested) return std::unexpected(requested.error());
+            std::string name = leaf_name(state->path);
+            if (name.empty()) return std::optional<Value> {};
+            const bool hidden = name.front() == '.';
+            if (hidden == (*requested != 0)) {
+                return std::optional<Value> {};
+            }
+            if (*requested != 0) {
+                name.insert(name.begin(), '.');
+            } else {
+                name.erase(name.begin());
+                if (name.empty()) {
+                    return fail_java("java/io/IOException",
+                                     "hidden file name cannot become empty");
+                }
+            }
+            std::string destination = parent_path(state->path);
+            if (!destination.empty()) destination.push_back('/');
+            destination.append(name);
+            auto closed = close_connection_streams(machine, state->object);
+            if (!closed) return std::unexpected(closed.error());
+            auto renamed = machine.filesystem().rename(state->path,
+                                                       destination);
+            if (!renamed) return file_error(renamed.error());
+            auto string = create_string(machine, destination);
+            if (!string) return std::unexpected(string.error());
+            auto stored = set_reference_field(machine, state->object,
+                                              kConnectionPathField, *string);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
 
     const auto register_mutation = [&registry](const char* name,
                                                auto operation) {
@@ -865,10 +1184,18 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
                                    const std::string& path) {
         return files.create_directory(path);
     });
-    register_mutation("delete", [](filesystem::FileSystem& files,
-                                    const std::string& path) {
-        return files.remove(path, false);
-    });
+
+    add(registry, owner, "delete", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments, false, true);
+            if (!state) return std::unexpected(state.error());
+            auto closed = close_connection_streams(machine, state->object);
+            if (!closed) return std::unexpected(closed.error());
+            auto removed = machine.filesystem().remove(state->path, false);
+            if (!removed) return file_error(removed.error());
+            return std::optional<Value> {};
+        });
 
     add(registry, owner, "truncate", "(J)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -880,6 +1207,17 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             if (*length < 0) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "truncate length is negative");
+            }
+            auto flushed = flush_connection_output(machine, state->object);
+            if (!flushed) return std::unexpected(flushed.error());
+            auto info = machine.filesystem().stat(state->path);
+            if (!info) return file_error(info.error());
+            if (!info->exists || info->directory) {
+                return fail_java("java/io/IOException",
+                                 "truncate requires an existing file");
+            }
+            if (static_cast<u64>(*length) >= info->size) {
+                return std::optional<Value> {};
             }
             auto status = machine.filesystem().truncate(
                 state->path, static_cast<u64>(*length));
@@ -907,6 +1245,8 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             std::string destination = parent_path(state->path);
             if (!destination.empty()) destination.push_back('/');
             destination.append(*name);
+            auto closed = close_connection_streams(machine, state->object);
+            if (!closed) return std::unexpected(closed.error());
             auto renamed = machine.filesystem().rename(state->path,
                                                        destination);
             if (!renamed) return file_error(renamed.error());
@@ -939,6 +1279,14 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
                     if (!hidden) return std::unexpected(hidden.error());
                     auto parsed = utf8_text(machine, *filter_object);
                     if (!parsed) return std::unexpected(parsed.error());
+                    if (parsed->empty() ||
+                        parsed->find('/') != std::string::npos ||
+                        parsed->find('\\') != std::string::npos ||
+                        *parsed == "." || *parsed == "..") {
+                        return fail_java(
+                            "java/lang/IllegalArgumentException",
+                            "file listing filter contains a path component");
+                    }
                     filter = std::move(*parsed);
                     include_hidden = *hidden != 0;
                 }
@@ -964,7 +1312,8 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto state = connection_state(machine, arguments, true);
             if (!state) return std::unexpected(state.error());
-            auto stream = create_file_input_stream(machine, state->path);
+            auto stream = create_file_input_stream(
+                machine, state->path, state->object);
             if (!stream) return std::unexpected(stream.error());
             return std::optional<Value>(Value::from_reference(*stream));
         });
@@ -974,10 +1323,14 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto state = connection_state(machine, arguments, true);
             if (!state) return std::unexpected(state.error());
-            auto input = create_file_input_stream(machine, state->path);
+            auto input = create_file_input_stream(
+                machine, state->path, state->object);
             if (!input) return std::unexpected(input.error());
             auto stream = wrap_data_input(machine, *input);
-            if (!stream) return std::unexpected(stream.error());
+            if (!stream) {
+                static_cast<void>(file_input_close(machine, *input));
+                return std::unexpected(stream.error());
+            }
             return std::optional<Value>(Value::from_reference(*stream));
         });
     add(registry, owner, "openOutputStream", "()Ljava/io/OutputStream;",
@@ -985,8 +1338,8 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto state = connection_state(machine, arguments, false, true);
             if (!state) return std::unexpected(state.error());
-            auto stream = create_file_output_stream(machine, state->path,
-                                                    false);
+            auto stream = create_file_output_stream(
+                machine, state->path, std::nullopt, state->object);
             if (!stream) return std::unexpected(stream.error());
             return std::optional<Value>(Value::from_reference(*stream));
         });
@@ -997,8 +1350,8 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             auto offset = arguments[1].as_long();
             if (!state) return std::unexpected(state.error());
             if (!offset) return std::unexpected(offset.error());
-            auto stream = create_file_output_stream(machine, state->path,
-                                                    false, *offset);
+            auto stream = create_file_output_stream(
+                machine, state->path, *offset, state->object);
             if (!stream) return std::unexpected(stream.error());
             return std::optional<Value>(Value::from_reference(*stream));
         });
@@ -1008,11 +1361,14 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto state = connection_state(machine, arguments, false, true);
             if (!state) return std::unexpected(state.error());
-            auto output = create_file_output_stream(machine, state->path,
-                                                     false);
+            auto output = create_file_output_stream(
+                machine, state->path, std::nullopt, state->object);
             if (!output) return std::unexpected(output.error());
             auto stream = wrap_data_output(machine, *output);
-            if (!stream) return std::unexpected(stream.error());
+            if (!stream) {
+                static_cast<void>(file_output_close(machine, *output));
+                return std::unexpected(stream.error());
+            }
             return std::optional<Value>(Value::from_reference(*stream));
         });
 }
@@ -1047,13 +1403,22 @@ Result<std::optional<ObjectRef>> try_open_file_connection_stream(
     auto state = connection_state(machine, arguments, input, !input);
     if (!state) return std::unexpected(state.error());
     Result<ObjectRef> stream = input
-        ? create_file_input_stream(machine, state->path)
-        : create_file_output_stream(machine, state->path, false);
+        ? create_file_input_stream(machine, state->path, state->object)
+        : create_file_output_stream(machine, state->path, std::nullopt,
+                                    state->object);
     if (!stream) return std::unexpected(stream.error());
     if (data) {
-        stream = input ? wrap_data_input(machine, *stream)
-                       : wrap_data_output(machine, *stream);
-        if (!stream) return std::unexpected(stream.error());
+        const ObjectRef raw_stream = *stream;
+        stream = input ? wrap_data_input(machine, raw_stream)
+                       : wrap_data_output(machine, raw_stream);
+        if (!stream) {
+            if (input) {
+                static_cast<void>(file_input_close(machine, raw_stream));
+            } else {
+                static_cast<void>(file_output_close(machine, raw_stream));
+            }
+            return std::unexpected(stream.error());
+        }
     }
     return std::optional<ObjectRef>(*stream);
 }
@@ -1065,7 +1430,12 @@ Result<std::optional<bool>> try_close_file_connection(
         connection, "javax/microedition/io/file/FileConnection");
     if (!is_file) return std::unexpected(is_file.error());
     if (!*is_file) return std::optional<bool> {};
+    auto open = int_field(machine, connection, kConnectionOpenField);
+    if (!open) return std::unexpected(open.error());
+    if (*open == 0) return std::optional<bool>(true);
+    auto streams_closed = close_connection_streams(machine, connection);
     auto closed = set_int_field(machine, connection, kConnectionOpenField, 0);
+    if (!streams_closed) return std::unexpected(streams_closed.error());
     if (!closed) return std::unexpected(closed.error());
     return std::optional<bool>(true);
 }

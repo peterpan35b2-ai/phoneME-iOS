@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cctype>
 #include <exception>
 #include <limits>
 #include <string>
@@ -27,7 +28,24 @@ constexpr usize kByteInputCountField = 3;
 constexpr usize kByteOutputBufferField = 0;
 constexpr usize kByteOutputCountField = 1;
 constexpr usize kDataOutputWrittenField = 1;
+constexpr usize kReaderLockField = 0;
+constexpr usize kReaderInputField = 1;
+constexpr usize kReaderCharsetField = 2;
+constexpr usize kReaderPendingField = 3;
+constexpr usize kReaderClosedField = 4;
+constexpr usize kWriterLockField = 0;
+constexpr usize kWriterOutputField = 1;
+constexpr usize kWriterCharsetField = 2;
+constexpr usize kWriterPendingField = 3;
+constexpr usize kWriterClosedField = 4;
 constexpr usize kMaximumStreamDepth = 64;
+
+enum class StreamCharset : i32 {
+    utf8 = 1,
+    latin1 = 2,
+    ascii = 3,
+    utf16be = 4,
+};
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -158,6 +176,100 @@ void add(NativeMethodRegistry& registry,
     return *object;
 }
 
+[[nodiscard]] Result<usize> char_array_length(Machine& machine,
+                                              ObjectRef array) {
+    if (array.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "char array is null");
+    }
+    auto class_name = machine.heap().class_name(array);
+    if (!class_name || *class_name != "[C") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "value is not char[]");
+    }
+    return machine.heap().array_length(array);
+}
+
+[[nodiscard]] Result<char16_t> char_array_value(Machine& machine,
+                                                ObjectRef array,
+                                                usize index) {
+    auto value = machine.heap().element(array, index);
+    if (!value) return std::unexpected(value.error());
+    auto integer = value->as_int();
+    if (!integer) return std::unexpected(integer.error());
+    return static_cast<char16_t>(static_cast<u16>(*integer));
+}
+
+[[nodiscard]] Status set_char_array_value(Machine& machine,
+                                          ObjectRef array,
+                                          usize index,
+                                          char16_t value) {
+    return machine.heap().set_element(
+        array, index, Value::from_int(static_cast<i32>(value)));
+}
+
+[[nodiscard]] Status validate_char_range(usize array_length,
+                                         i32 offset,
+                                         i32 length) {
+    if (offset < 0 || length < 0 ||
+        static_cast<usize>(offset) > array_length ||
+        static_cast<usize>(length) >
+            array_length - static_cast<usize>(offset)) {
+        return fail_java("java/lang/IndexOutOfBoundsException",
+                         "char array range is invalid");
+    }
+    return {};
+}
+
+[[nodiscard]] Result<StreamCharset> resolve_stream_charset(
+    Machine& machine,
+    ObjectRef name) {
+    if (name.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "charset name is null");
+    }
+    auto text = machine.heap().string_value(name);
+    if (!text) return std::unexpected(text.error());
+    std::string normalized;
+    normalized.reserve(text->size());
+    for (const char16_t character : *text) {
+        if (character > 0x7FU) {
+            return fail_java("java/io/UnsupportedEncodingException",
+                             "charset name is not ASCII");
+        }
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte == '-' || byte == '_' || std::isspace(byte) != 0) continue;
+        normalized.push_back(static_cast<char>(std::toupper(byte)));
+    }
+    if (normalized == "UTF8") return StreamCharset::utf8;
+    if (normalized == "ISO88591" || normalized == "LATIN1") {
+        return StreamCharset::latin1;
+    }
+    if (normalized == "USASCII" || normalized == "ASCII") {
+        return StreamCharset::ascii;
+    }
+    if (normalized == "UTF16BE" ||
+        normalized == "UNICODEBIGUNMARKED") {
+        return StreamCharset::utf16be;
+    }
+    return fail_java("java/io/UnsupportedEncodingException",
+                     "unsupported reader/writer charset");
+}
+
+[[nodiscard]] std::u16string charset_display_name(StreamCharset charset) {
+    switch (charset) {
+    case StreamCharset::utf8:
+        return u"UTF-8";
+    case StreamCharset::latin1:
+        return u"ISO-8859-1";
+    case StreamCharset::ascii:
+        return u"US-ASCII";
+    case StreamCharset::utf16be:
+        return u"UTF-16BE";
+    }
+    return u"UTF-8";
+}
+
 [[nodiscard]] Result<i32> stream_read_one(Machine& machine,
                                           ObjectRef stream,
                                           usize depth);
@@ -196,6 +308,29 @@ void add(NativeMethodRegistry& registry,
     if (depth >= kMaximumStreamDepth) {
         return fail_java("java/io/IOException",
                          "input stream filter chain is too deep");
+    }
+    auto runtime_class = machine.heap().class_name(stream);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    auto read_method = machine.classes().resolve_method(
+        *runtime_class, "read", "()I");
+    if (read_method && read_method->owner != nullptr &&
+        read_method->owner->name() != "java/io/InputStream" &&
+        read_method->owner->name() != "java/io/FilterInputStream" &&
+        read_method->owner->name() != "java/io/ByteArrayInputStream" &&
+        read_method->owner->name() != "java/io/FileInputStream") {
+        auto invoked = machine.invoke_instance(stream, *runtime_class,
+                                               "read", "()I");
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "custom InputStream.read threw");
+        }
+        if (!invoked->return_value.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        "custom InputStream.read returned no value");
+        }
+        return invoked->return_value->as_int();
     }
     auto byte_array = is_instance(machine, stream,
                                   "java/io/ByteArrayInputStream");
@@ -424,6 +559,29 @@ void add(NativeMethodRegistry& registry,
     if (depth >= kMaximumStreamDepth) {
         return fail_java("java/io/IOException",
                          "output stream filter chain is too deep");
+    }
+    auto runtime_class = machine.heap().class_name(stream);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    auto write_method = machine.classes().resolve_method(
+        *runtime_class, "write", "(I)V");
+    if (write_method && write_method->owner != nullptr &&
+        write_method->owner->name() != "java/io/OutputStream" &&
+        write_method->owner->name() != "java/io/FilterOutputStream" &&
+        write_method->owner->name() != "java/io/ByteArrayOutputStream" &&
+        write_method->owner->name() != "java/io/DataOutputStream" &&
+        write_method->owner->name() != "java/io/PrintStream" &&
+        write_method->owner->name() != "java/io/FileOutputStream") {
+        const Value argument = Value::from_int(static_cast<i32>(byte));
+        auto invoked = machine.invoke_instance(
+            stream, *runtime_class, "write", "(I)V",
+            std::span<const Value>(&argument, 1U));
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "custom OutputStream.write threw");
+        }
+        return {};
     }
     auto byte_array = is_instance(machine, stream,
                                   "java/io/ByteArrayOutputStream");
@@ -782,21 +940,31 @@ void register_base_streams(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_int(*byte_array ? 1 : 0));
         });
 
-    add(registry, "java/io/OutputStream", "write", "([B)V",
-        [](Machine& machine, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto output = receiver(arguments);
-            auto source = arguments[1].as_reference();
-            if (!output) return std::unexpected(output.error());
-            if (!source) return std::unexpected(source.error());
-            auto length = byte_array_length(machine, *source);
-            if (!length) return std::unexpected(length.error());
-            auto written = stream_write_bytes(
-                machine, *output, *source, 0,
-                static_cast<i32>(*length));
-            if (!written) return std::unexpected(written.error());
-            return std::optional<Value> {};
-        });
+    const auto output_write_array = [&registry](std::string owner) {
+        add(registry, std::move(owner), "write", "([B)V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto output = receiver(arguments);
+                if (arguments.size() < 2U) {
+                    return fail(ErrorCode::invalid_argument,
+                                "OutputStream.write byte[] is missing");
+                }
+                auto source = arguments[1].as_reference();
+                if (!output) return std::unexpected(output.error());
+                if (!source) return std::unexpected(source.error());
+                auto length = byte_array_length(machine, *source);
+                if (!length) return std::unexpected(length.error());
+                auto written = stream_write_bytes(
+                    machine, *output, *source, 0,
+                    static_cast<i32>(*length));
+                if (!written) return std::unexpected(written.error());
+                return std::optional<Value> {};
+            });
+    };
+    output_write_array("java/io/OutputStream");
+    output_write_array("java/io/FilterOutputStream");
+    output_write_array("java/io/DataOutputStream");
+    output_write_array("java/io/ByteArrayOutputStream");
     const auto output_write_range = [&registry](std::string owner) {
         add(registry, std::move(owner), "write", "([BII)V",
             [](Machine& machine, std::span<const Value> arguments)
@@ -1277,6 +1445,830 @@ void register_data_input(NativeMethodRegistry& registry) {
         });
 }
 
+[[nodiscard]] Result<StreamCharset> object_charset(Machine& machine,
+                                                   ObjectRef object,
+                                                   usize field) {
+    auto value = int_field(machine, object, field);
+    if (!value) return std::unexpected(value.error());
+    switch (static_cast<StreamCharset>(*value)) {
+    case StreamCharset::utf8:
+    case StreamCharset::latin1:
+    case StreamCharset::ascii:
+    case StreamCharset::utf16be:
+        return static_cast<StreamCharset>(*value);
+    }
+    return fail(ErrorCode::invalid_state,
+                "reader/writer charset state is invalid");
+}
+
+[[nodiscard]] Status require_open(Machine& machine,
+                                  ObjectRef object,
+                                  usize closed_field,
+                                  std::string_view kind) {
+    auto closed = int_field(machine, object, closed_field);
+    if (!closed) return std::unexpected(closed.error());
+    if (*closed != 0) {
+        return fail_java("java/io/IOException",
+                         std::string(kind) + " is closed");
+    }
+    return {};
+}
+
+[[nodiscard]] Result<i32> reader_read_character(Machine& machine,
+                                                ObjectRef reader) {
+    auto opened = require_open(machine, reader, kReaderClosedField,
+                               "InputStreamReader");
+    if (!opened) return std::unexpected(opened.error());
+    auto pending = int_field(machine, reader, kReaderPendingField);
+    if (!pending) return std::unexpected(pending.error());
+    if (*pending >= 0) {
+        auto cleared = set_int_field(machine, reader,
+                                     kReaderPendingField, -1);
+        if (!cleared) return std::unexpected(cleared.error());
+        return *pending;
+    }
+    auto input = reference_field(machine, reader, kReaderInputField);
+    auto charset = object_charset(machine, reader, kReaderCharsetField);
+    if (!input) return std::unexpected(input.error());
+    if (!charset) return std::unexpected(charset.error());
+
+    auto first_value = stream_read_one(machine, *input, 0U);
+    if (!first_value) return std::unexpected(first_value.error());
+    if (*first_value < 0) return -1;
+    const u8 first = static_cast<u8>(*first_value);
+    if (*charset == StreamCharset::latin1) return static_cast<i32>(first);
+    if (*charset == StreamCharset::ascii) {
+        return first <= 0x7FU ? static_cast<i32>(first)
+                              : static_cast<i32>(0xFFFDU);
+    }
+    if (*charset == StreamCharset::utf16be) {
+        auto second = stream_read_one(machine, *input, 0U);
+        if (!second) return std::unexpected(second.error());
+        if (*second < 0) return 0xFFFDU;
+        return static_cast<i32>((static_cast<u16>(first) << 8U) |
+                                static_cast<u16>(static_cast<u8>(*second)));
+    }
+    if (first <= 0x7FU) return static_cast<i32>(first);
+
+    u32 code_point = 0U;
+    usize continuation_count = 0U;
+    u32 minimum = 0U;
+    if ((first & 0xE0U) == 0xC0U) {
+        code_point = first & 0x1FU;
+        continuation_count = 1U;
+        minimum = 0x80U;
+    } else if ((first & 0xF0U) == 0xE0U) {
+        code_point = first & 0x0FU;
+        continuation_count = 2U;
+        minimum = 0x800U;
+    } else if ((first & 0xF8U) == 0xF0U) {
+        code_point = first & 0x07U;
+        continuation_count = 3U;
+        minimum = 0x10000U;
+    } else {
+        return 0xFFFDU;
+    }
+    for (usize index = 0U; index < continuation_count; ++index) {
+        auto next = stream_read_one(machine, *input, 0U);
+        if (!next) return std::unexpected(next.error());
+        if (*next < 0 || (static_cast<u8>(*next) & 0xC0U) != 0x80U) {
+            return 0xFFFDU;
+        }
+        code_point = (code_point << 6U) |
+                     (static_cast<u8>(*next) & 0x3FU);
+    }
+    if (code_point < minimum || code_point > 0x10FFFFU ||
+        (code_point >= 0xD800U && code_point <= 0xDFFFU)) {
+        return 0xFFFDU;
+    }
+    if (code_point <= 0xFFFFU) return static_cast<i32>(code_point);
+    code_point -= 0x10000U;
+    const i32 high = static_cast<i32>(0xD800U | (code_point >> 10U));
+    const i32 low = static_cast<i32>(0xDC00U | (code_point & 0x3FFU));
+    auto stored = set_int_field(machine, reader, kReaderPendingField, low);
+    if (!stored) return std::unexpected(stored.error());
+    return high;
+}
+
+[[nodiscard]] Status write_utf8_code_point(Machine& machine,
+                                           ObjectRef output,
+                                           u32 code_point) {
+    u8 bytes[4] {};
+    usize count = 0U;
+    if (code_point <= 0x7FU) {
+        bytes[0] = static_cast<u8>(code_point);
+        count = 1U;
+    } else if (code_point <= 0x7FFU) {
+        bytes[0] = static_cast<u8>(0xC0U | (code_point >> 6U));
+        bytes[1] = static_cast<u8>(0x80U | (code_point & 0x3FU));
+        count = 2U;
+    } else if (code_point <= 0xFFFFU) {
+        bytes[0] = static_cast<u8>(0xE0U | (code_point >> 12U));
+        bytes[1] = static_cast<u8>(0x80U | ((code_point >> 6U) & 0x3FU));
+        bytes[2] = static_cast<u8>(0x80U | (code_point & 0x3FU));
+        count = 3U;
+    } else {
+        bytes[0] = static_cast<u8>(0xF0U | (code_point >> 18U));
+        bytes[1] = static_cast<u8>(0x80U | ((code_point >> 12U) & 0x3FU));
+        bytes[2] = static_cast<u8>(0x80U | ((code_point >> 6U) & 0x3FU));
+        bytes[3] = static_cast<u8>(0x80U | (code_point & 0x3FU));
+        count = 4U;
+    }
+    for (usize index = 0U; index < count; ++index) {
+        auto written = stream_write_one(machine, output, bytes[index], 0U);
+        if (!written) return written;
+    }
+    return {};
+}
+
+[[nodiscard]] Status writer_write_character(Machine& machine,
+                                            ObjectRef writer,
+                                            char16_t character) {
+    auto opened = require_open(machine, writer, kWriterClosedField,
+                               "OutputStreamWriter");
+    if (!opened) return opened;
+    auto output = reference_field(machine, writer, kWriterOutputField);
+    auto charset = object_charset(machine, writer, kWriterCharsetField);
+    if (!output) return std::unexpected(output.error());
+    if (!charset) return std::unexpected(charset.error());
+    const u32 value = static_cast<u16>(character);
+    if (*charset == StreamCharset::latin1) {
+        return stream_write_one(machine, *output,
+                                value <= 0xFFU ? static_cast<u8>(value)
+                                               : static_cast<u8>('?'),
+                                0U);
+    }
+    if (*charset == StreamCharset::ascii) {
+        return stream_write_one(machine, *output,
+                                value <= 0x7FU ? static_cast<u8>(value)
+                                               : static_cast<u8>('?'),
+                                0U);
+    }
+    if (*charset == StreamCharset::utf16be) {
+        auto high = stream_write_one(machine, *output,
+                                     static_cast<u8>(value >> 8U), 0U);
+        if (!high) return high;
+        return stream_write_one(machine, *output,
+                                static_cast<u8>(value), 0U);
+    }
+
+    auto pending = int_field(machine, writer, kWriterPendingField);
+    if (!pending) return std::unexpected(pending.error());
+    if (*pending >= 0) {
+        const u32 high = static_cast<u32>(*pending);
+        auto cleared = set_int_field(machine, writer,
+                                     kWriterPendingField, -1);
+        if (!cleared) return cleared;
+        if (value >= 0xDC00U && value <= 0xDFFFU) {
+            const u32 code_point = 0x10000U +
+                ((high - 0xD800U) << 10U) + (value - 0xDC00U);
+            return write_utf8_code_point(machine, *output, code_point);
+        }
+        auto replacement = write_utf8_code_point(machine, *output, 0xFFFDU);
+        if (!replacement) return replacement;
+    }
+    if (value >= 0xD800U && value <= 0xDBFFU) {
+        return set_int_field(machine, writer, kWriterPendingField,
+                             static_cast<i32>(value));
+    }
+    if (value >= 0xDC00U && value <= 0xDFFFU) {
+        return write_utf8_code_point(machine, *output, 0xFFFDU);
+    }
+    return write_utf8_code_point(machine, *output, value);
+}
+
+[[nodiscard]] Status writer_flush_pending(Machine& machine,
+                                          ObjectRef writer) {
+    auto charset = object_charset(machine, writer, kWriterCharsetField);
+    auto pending = int_field(machine, writer, kWriterPendingField);
+    auto output = reference_field(machine, writer, kWriterOutputField);
+    if (!charset) return std::unexpected(charset.error());
+    if (!pending) return std::unexpected(pending.error());
+    if (!output) return std::unexpected(output.error());
+    if (*charset == StreamCharset::utf8 && *pending >= 0) {
+        auto cleared = set_int_field(machine, writer,
+                                     kWriterPendingField, -1);
+        if (!cleared) return cleared;
+        return write_utf8_code_point(machine, *output, 0xFFFDU);
+    }
+    return {};
+}
+
+[[nodiscard]] Status writer_write_text(Machine& machine,
+                                       ObjectRef writer,
+                                       std::u16string_view text,
+                                       usize offset,
+                                       usize length) {
+    for (usize index = 0U; index < length; ++index) {
+        auto written = writer_write_character(machine, writer,
+                                              text[offset + index]);
+        if (!written) return written;
+    }
+    return {};
+}
+
+void register_reader_writer(NativeMethodRegistry& registry) {
+    const auto initialize_lock = [](Machine& machine,
+                                    ObjectRef object,
+                                    ObjectRef lock,
+                                    usize field) -> Status {
+        return set_reference_field(machine, object, field,
+                                   lock.is_null() ? object : lock);
+    };
+    add(registry, "java/io/Reader", "<init>", "()V",
+        [initialize_lock](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto stored = initialize_lock(machine, *object, {}, kReaderLockField);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/Reader", "<init>", "(Ljava/lang/Object;)V",
+        [initialize_lock](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto lock = arguments[1].as_reference();
+            if (!object) return std::unexpected(object.error());
+            if (!lock || lock->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Reader lock is null");
+            }
+            auto stored = initialize_lock(machine, *object, *lock,
+                                          kReaderLockField);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/Writer", "<init>", "()V",
+        [initialize_lock](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto stored = initialize_lock(machine, *object, {}, kWriterLockField);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/Writer", "<init>", "(Ljava/lang/Object;)V",
+        [initialize_lock](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto lock = arguments[1].as_reference();
+            if (!object) return std::unexpected(object.error());
+            if (!lock || lock->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Writer lock is null");
+            }
+            auto stored = initialize_lock(machine, *object, *lock,
+                                          kWriterLockField);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    const auto initialize_reader = [](Machine& machine,
+                                      std::span<const Value> arguments,
+                                      bool named)
+        -> Result<std::optional<Value>> {
+        auto object = receiver(arguments);
+        auto input = arguments[1].as_reference();
+        if (!object) return std::unexpected(object.error());
+        if (!input || input->is_null()) {
+            return fail_java("java/lang/NullPointerException",
+                             "InputStreamReader input is null");
+        }
+        StreamCharset charset = StreamCharset::utf8;
+        if (named) {
+            auto name = arguments[2].as_reference();
+            if (!name) return std::unexpected(name.error());
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
+            charset = *resolved;
+        }
+        auto lock = set_reference_field(machine, *object, kReaderLockField,
+                                        *object);
+        auto stored_input = set_reference_field(machine, *object,
+                                                kReaderInputField, *input);
+        auto stored_charset = set_int_field(
+            machine, *object, kReaderCharsetField,
+            static_cast<i32>(charset));
+        auto stored_pending = set_int_field(machine, *object,
+                                            kReaderPendingField, -1);
+        auto stored_closed = set_int_field(machine, *object,
+                                           kReaderClosedField, 0);
+        if (!lock) return std::unexpected(lock.error());
+        if (!stored_input) return std::unexpected(stored_input.error());
+        if (!stored_charset) return std::unexpected(stored_charset.error());
+        if (!stored_pending) return std::unexpected(stored_pending.error());
+        if (!stored_closed) return std::unexpected(stored_closed.error());
+        return std::optional<Value> {};
+    };
+    add(registry, "java/io/InputStreamReader", "<init>",
+        "(Ljava/io/InputStream;)V",
+        [initialize_reader](Machine& machine, std::span<const Value> arguments) {
+            return initialize_reader(machine, arguments, false);
+        });
+    add(registry, "java/io/InputStreamReader", "<init>",
+        "(Ljava/io/InputStream;Ljava/lang/String;)V",
+        [initialize_reader](Machine& machine, std::span<const Value> arguments) {
+            return initialize_reader(machine, arguments, true);
+        });
+    add(registry, "java/io/InputStreamReader", "read", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = reader_read_character(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(*value));
+        });
+    add(registry, "java/io/InputStreamReader", "read", "([CII)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto array = arguments[1].as_reference();
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!object || !array || !offset || !length) {
+                return fail(ErrorCode::invalid_argument,
+                            "InputStreamReader.read arguments are invalid");
+            }
+            auto array_length = char_array_length(machine, *array);
+            if (!array_length) return std::unexpected(array_length.error());
+            auto range = validate_char_range(*array_length, *offset, *length);
+            if (!range) return std::unexpected(range.error());
+            if (*length == 0) return std::optional<Value>(Value::from_int(0));
+            i32 count = 0;
+            while (count < *length) {
+                auto value = reader_read_character(machine, *object);
+                if (!value) return std::unexpected(value.error());
+                if (*value < 0) break;
+                auto stored = set_char_array_value(
+                    machine, *array, static_cast<usize>(*offset + count),
+                    static_cast<char16_t>(static_cast<u16>(*value)));
+                if (!stored) return std::unexpected(stored.error());
+                ++count;
+            }
+            return std::optional<Value>(Value::from_int(
+                count == 0 ? -1 : count));
+        });
+    add(registry, "java/io/InputStreamReader", "ready", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto opened = require_open(machine, *object,
+                                       kReaderClosedField,
+                                       "InputStreamReader");
+            if (!opened) return std::unexpected(opened.error());
+            auto pending = int_field(machine, *object, kReaderPendingField);
+            auto input = reference_field(machine, *object, kReaderInputField);
+            if (!pending || !input) {
+                return fail(ErrorCode::invalid_state,
+                            "InputStreamReader state is invalid");
+            }
+            auto available = stream_available(machine, *input, 0U);
+            if (!available) return std::unexpected(available.error());
+            return std::optional<Value>(Value::from_int(
+                *pending >= 0 || *available > 0 ? 1 : 0));
+        });
+    add(registry, "java/io/InputStreamReader", "getEncoding",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto closed = int_field(machine, *object, kReaderClosedField);
+            if (!closed) return std::unexpected(closed.error());
+            if (*closed != 0) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto charset = object_charset(machine, *object,
+                                          kReaderCharsetField);
+            if (!charset) return std::unexpected(charset.error());
+            auto name = create_string(machine, charset_display_name(*charset));
+            if (!name) return std::unexpected(name.error());
+            return std::optional<Value>(Value::from_reference(*name));
+        });
+    add(registry, "java/io/InputStreamReader", "close", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto closed = int_field(machine, *object, kReaderClosedField);
+            if (!closed) return std::unexpected(closed.error());
+            if (*closed == 0) {
+                auto input = reference_field(machine, *object,
+                                             kReaderInputField);
+                if (!input) return std::unexpected(input.error());
+                auto status = stream_close_input(machine, *input, 0U);
+                if (!status) return std::unexpected(status.error());
+                auto stored = set_int_field(machine, *object,
+                                            kReaderClosedField, 1);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, "java/io/Reader", "read", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto array = machine.heap().allocate_array(
+                "[C", 1U, Value::from_int(0));
+            if (!array) return std::unexpected(array.error());
+            auto root = machine.pin_native_root(*array);
+            if (!root) return std::unexpected(root.error());
+            const Value call_arguments[] {
+                Value::from_reference(*array),
+                Value::from_int(0),
+                Value::from_int(1),
+            };
+            auto runtime = machine.heap().class_name(*object);
+            if (!runtime) return std::unexpected(runtime.error());
+            auto invoked = machine.invoke_instance(
+                *object, *runtime, "read", "([CII)I", call_arguments);
+            if (!invoked) return std::unexpected(invoked.error());
+            if (invoked->throwable.has_value()) {
+                auto thrown = machine.heap().class_name(*invoked->throwable);
+                if (!thrown) return std::unexpected(thrown.error());
+                return fail_java(*thrown, "Reader.read override threw");
+            }
+            if (!invoked->return_value.has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Reader.read override returned no value");
+            }
+            auto count = invoked->return_value->as_int();
+            if (!count) return std::unexpected(count.error());
+            if (*count < 0) return std::optional<Value>(Value::from_int(-1));
+            auto character = char_array_value(machine, *array, 0U);
+            if (!character) return std::unexpected(character.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(*character)));
+        });
+    add(registry, "java/io/Reader", "read", "([C)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto array = arguments[1].as_reference();
+            if (!object || !array) {
+                return fail(ErrorCode::invalid_argument,
+                            "Reader.read arguments are invalid");
+            }
+            auto length = char_array_length(machine, *array);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail_java("java/lang/OutOfMemoryError",
+                                 "char array exceeds int range");
+            }
+            const Value call_arguments[] {
+                Value::from_reference(*array),
+                Value::from_int(0),
+                Value::from_int(static_cast<i32>(*length)),
+            };
+            auto runtime = machine.heap().class_name(*object);
+            if (!runtime) return std::unexpected(runtime.error());
+            auto invoked = machine.invoke_instance(
+                *object, *runtime, "read", "([CII)I", call_arguments);
+            if (!invoked) return std::unexpected(invoked.error());
+            if (invoked->throwable.has_value()) {
+                auto thrown = machine.heap().class_name(*invoked->throwable);
+                if (!thrown) return std::unexpected(thrown.error());
+                return fail_java(*thrown, "Reader.read override threw");
+            }
+            return invoked->return_value;
+        });
+    add(registry, "java/io/Reader", "skip", "(J)J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto requested = arguments[1].as_long();
+            if (!object) return std::unexpected(object.error());
+            if (!requested) return std::unexpected(requested.error());
+            if (*requested < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Reader.skip count is negative");
+            }
+            i64 skipped = 0;
+            while (skipped < *requested) {
+                auto runtime = machine.heap().class_name(*object);
+                if (!runtime) return std::unexpected(runtime.error());
+                auto invoked = machine.invoke_instance(*object, *runtime,
+                                                       "read", "()I");
+                if (!invoked) return std::unexpected(invoked.error());
+                if (invoked->throwable.has_value()) {
+                    auto thrown = machine.heap().class_name(*invoked->throwable);
+                    if (!thrown) return std::unexpected(thrown.error());
+                    return fail_java(*thrown, "Reader.read override threw");
+                }
+                if (!invoked->return_value.has_value()) break;
+                auto value = invoked->return_value->as_int();
+                if (!value) return std::unexpected(value.error());
+                if (*value < 0) break;
+                ++skipped;
+            }
+            return std::optional<Value>(Value::from_long(skipped));
+        });
+    add(registry, "java/io/Reader", "ready", "()Z",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(Value::from_int(0));
+        });
+    add(registry, "java/io/Reader", "markSupported", "()Z",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(Value::from_int(0));
+        });
+    add(registry, "java/io/Reader", "mark", "(I)V",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return fail_java("java/io/IOException",
+                             "mark is not supported");
+        });
+    add(registry, "java/io/Reader", "reset", "()V",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return fail_java("java/io/IOException",
+                             "reset is not supported");
+        });
+
+    const auto initialize_writer = [](Machine& machine,
+                                      std::span<const Value> arguments,
+                                      bool named)
+        -> Result<std::optional<Value>> {
+        auto object = receiver(arguments);
+        auto output = arguments[1].as_reference();
+        if (!object) return std::unexpected(object.error());
+        if (!output || output->is_null()) {
+            return fail_java("java/lang/NullPointerException",
+                             "OutputStreamWriter output is null");
+        }
+        StreamCharset charset = StreamCharset::utf8;
+        if (named) {
+            auto name = arguments[2].as_reference();
+            if (!name) return std::unexpected(name.error());
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
+            charset = *resolved;
+        }
+        auto lock = set_reference_field(machine, *object, kWriterLockField,
+                                        *object);
+        auto stored_output = set_reference_field(machine, *object,
+                                                 kWriterOutputField, *output);
+        auto stored_charset = set_int_field(
+            machine, *object, kWriterCharsetField,
+            static_cast<i32>(charset));
+        auto stored_pending = set_int_field(machine, *object,
+                                            kWriterPendingField, -1);
+        auto stored_closed = set_int_field(machine, *object,
+                                           kWriterClosedField, 0);
+        if (!lock) return std::unexpected(lock.error());
+        if (!stored_output) return std::unexpected(stored_output.error());
+        if (!stored_charset) return std::unexpected(stored_charset.error());
+        if (!stored_pending) return std::unexpected(stored_pending.error());
+        if (!stored_closed) return std::unexpected(stored_closed.error());
+        return std::optional<Value> {};
+    };
+    add(registry, "java/io/OutputStreamWriter", "<init>",
+        "(Ljava/io/OutputStream;)V",
+        [initialize_writer](Machine& machine, std::span<const Value> arguments) {
+            return initialize_writer(machine, arguments, false);
+        });
+    add(registry, "java/io/OutputStreamWriter", "<init>",
+        "(Ljava/io/OutputStream;Ljava/lang/String;)V",
+        [initialize_writer](Machine& machine, std::span<const Value> arguments) {
+            return initialize_writer(machine, arguments, true);
+        });
+    add(registry, "java/io/OutputStreamWriter", "write", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto character = arguments[1].as_int();
+            if (!object) return std::unexpected(object.error());
+            if (!character) return std::unexpected(character.error());
+            auto written = writer_write_character(
+                machine, *object,
+                static_cast<char16_t>(static_cast<u16>(*character)));
+            if (!written) return std::unexpected(written.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/OutputStreamWriter", "write", "([CII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto array = arguments[1].as_reference();
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!object || !array || !offset || !length) {
+                return fail(ErrorCode::invalid_argument,
+                            "OutputStreamWriter.write arguments are invalid");
+            }
+            auto array_length = char_array_length(machine, *array);
+            if (!array_length) return std::unexpected(array_length.error());
+            auto range = validate_char_range(*array_length, *offset, *length);
+            if (!range) return std::unexpected(range.error());
+            for (i32 index = 0; index < *length; ++index) {
+                auto character = char_array_value(
+                    machine, *array, static_cast<usize>(*offset + index));
+                if (!character) return std::unexpected(character.error());
+                auto written = writer_write_character(machine, *object,
+                                                      *character);
+                if (!written) return std::unexpected(written.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/OutputStreamWriter", "write",
+        "(Ljava/lang/String;II)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto string = arguments[1].as_reference();
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!object || !string || !offset || !length) {
+                return fail(ErrorCode::invalid_argument,
+                            "OutputStreamWriter.write arguments are invalid");
+            }
+            if (string->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Writer string is null");
+            }
+            auto text = machine.heap().string_value(*string);
+            if (!text) return std::unexpected(text.error());
+            auto range = validate_char_range(text->size(), *offset, *length);
+            if (!range) return std::unexpected(range.error());
+            auto written = writer_write_text(
+                machine, *object, *text, static_cast<usize>(*offset),
+                static_cast<usize>(*length));
+            if (!written) return std::unexpected(written.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/OutputStreamWriter", "getEncoding",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto closed = int_field(machine, *object, kWriterClosedField);
+            if (!closed) return std::unexpected(closed.error());
+            if (*closed != 0) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto charset = object_charset(machine, *object,
+                                          kWriterCharsetField);
+            if (!charset) return std::unexpected(charset.error());
+            auto name = create_string(machine, charset_display_name(*charset));
+            if (!name) return std::unexpected(name.error());
+            return std::optional<Value>(Value::from_reference(*name));
+        });
+    add(registry, "java/io/OutputStreamWriter", "flush", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto opened = require_open(machine, *object,
+                                       kWriterClosedField,
+                                       "OutputStreamWriter");
+            if (!opened) return std::unexpected(opened.error());
+            auto pending = writer_flush_pending(machine, *object);
+            if (!pending) return std::unexpected(pending.error());
+            auto output = reference_field(machine, *object,
+                                          kWriterOutputField);
+            if (!output) return std::unexpected(output.error());
+            auto flushed = stream_flush(machine, *output, 0U);
+            if (!flushed) return std::unexpected(flushed.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/OutputStreamWriter", "close", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto closed = int_field(machine, *object, kWriterClosedField);
+            if (!closed) return std::unexpected(closed.error());
+            if (*closed == 0) {
+                auto pending = writer_flush_pending(machine, *object);
+                if (!pending) return std::unexpected(pending.error());
+                auto output = reference_field(machine, *object,
+                                              kWriterOutputField);
+                if (!output) return std::unexpected(output.error());
+                auto flushed = stream_flush(machine, *output, 0U);
+                if (!flushed) return std::unexpected(flushed.error());
+                auto status = stream_close_output(machine, *output, 0U);
+                if (!status) return std::unexpected(status.error());
+                auto stored = set_int_field(machine, *object,
+                                            kWriterClosedField, 1);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    const auto invoke_writer_range = [](Machine& machine,
+                                        ObjectRef object,
+                                        ObjectRef array,
+                                        i32 offset,
+                                        i32 length)
+        -> Result<std::optional<Value>> {
+        const Value call_arguments[] {
+            Value::from_reference(array),
+            Value::from_int(offset),
+            Value::from_int(length),
+        };
+        auto runtime = machine.heap().class_name(object);
+        if (!runtime) return std::unexpected(runtime.error());
+        auto invoked = machine.invoke_instance(
+            object, *runtime, "write", "([CII)V", call_arguments);
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "Writer.write override threw");
+        }
+        return invoked->return_value;
+    };
+    add(registry, "java/io/Writer", "write", "(I)V",
+        [invoke_writer_range](Machine& machine,
+                              std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto character = arguments[1].as_int();
+            if (!object) return std::unexpected(object.error());
+            if (!character) return std::unexpected(character.error());
+            auto array = machine.heap().allocate_array(
+                "[C", 1U, Value::from_int(*character & 0xFFFF));
+            if (!array) return std::unexpected(array.error());
+            auto root = machine.pin_native_root(*array);
+            if (!root) return std::unexpected(root.error());
+            return invoke_writer_range(machine, *object, *array, 0, 1);
+        });
+    add(registry, "java/io/Writer", "write", "([C)V",
+        [invoke_writer_range](Machine& machine,
+                              std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto array = arguments[1].as_reference();
+            if (!object || !array) {
+                return fail(ErrorCode::invalid_argument,
+                            "Writer.write arguments are invalid");
+            }
+            auto length = char_array_length(machine, *array);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail_java("java/lang/OutOfMemoryError",
+                                 "char array exceeds int range");
+            }
+            return invoke_writer_range(machine, *object, *array, 0,
+                                       static_cast<i32>(*length));
+        });
+    const auto write_string = [&registry, invoke_writer_range](
+        const char* descriptor,
+        bool ranged) {
+        add(registry, "java/io/Writer", "write", descriptor,
+            [ranged, invoke_writer_range](
+                Machine& machine,
+                std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto string = arguments[1].as_reference();
+                if (!object) return std::unexpected(object.error());
+                if (!string || string->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "Writer string is null");
+                }
+                auto text = machine.heap().string_value(*string);
+                if (!text) return std::unexpected(text.error());
+                i32 offset = 0;
+                i32 length = static_cast<i32>(text->size());
+                if (ranged) {
+                    auto parsed_offset = arguments[2].as_int();
+                    auto parsed_length = arguments[3].as_int();
+                    if (!parsed_offset || !parsed_length) {
+                        return fail(ErrorCode::invalid_argument,
+                                    "Writer string range is invalid");
+                    }
+                    offset = *parsed_offset;
+                    length = *parsed_length;
+                }
+                auto range = validate_char_range(text->size(), offset, length);
+                if (!range) return std::unexpected(range.error());
+                auto array = machine.heap().allocate_array(
+                    "[C", static_cast<usize>(length), Value::from_int(0));
+                if (!array) return std::unexpected(array.error());
+                auto root = machine.pin_native_root(*array);
+                if (!root) return std::unexpected(root.error());
+                for (i32 index = 0; index < length; ++index) {
+                    auto stored = set_char_array_value(
+                        machine, *array, static_cast<usize>(index),
+                        (*text)[static_cast<usize>(offset + index)]);
+                    if (!stored) return std::unexpected(stored.error());
+                }
+                return invoke_writer_range(machine, *object, *array,
+                                           0, length);
+            });
+    };
+    write_string("(Ljava/lang/String;)V", false);
+    write_string("(Ljava/lang/String;II)V", true);
+}
+
 void register_data_output(NativeMethodRegistry& registry) {
     const auto add_integer_write = [&registry](const char* name,
                                                const char* descriptor,
@@ -1420,10 +2412,33 @@ void register_data_output(NativeMethodRegistry& registry) {
 
 } // namespace
 
+Result<std::vector<u8>> read_input_stream_all(Machine& machine,
+                                              ObjectRef stream,
+                                              usize maximum_bytes) {
+    if (stream.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "Image input stream is null");
+    }
+    std::vector<u8> bytes;
+    bytes.reserve(std::min<usize>(maximum_bytes, 16U * 1024U));
+    while (true) {
+        auto value = stream_read_one(machine, stream, 0U);
+        if (!value) return std::unexpected(value.error());
+        if (*value < 0) break;
+        if (bytes.size() >= maximum_bytes) {
+            return fail(ErrorCode::overflow,
+                        "input stream exceeds the graphics decode budget");
+        }
+        bytes.push_back(static_cast<u8>(*value));
+    }
+    return bytes;
+}
+
 void register_io_natives(NativeMethodRegistry& registry) {
     register_base_streams(registry);
     register_byte_array_streams(registry);
     register_filter_streams(registry);
+    register_reader_writer(registry);
     register_data_input(registry);
     register_data_output(registry);
 }

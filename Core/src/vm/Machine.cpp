@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -30,6 +31,14 @@ namespace phoneme::vm
     constexpr u16 kAccAbstract = 0x0400U;
     constexpr usize kMaximumCallDepth = 1'024;
     constexpr u64 kSchedulerQuantum = 10'000U;
+
+    [[nodiscard]] constexpr usize heap_capacity_with_emergency_reserve(
+        usize requested) noexcept
+    {
+      const usize hard_limit =
+          static_cast<usize>(std::numeric_limits<u32>::max()) - 1U;
+      return requested < hard_limit ? requested + 1U : hard_limit;
+    }
 
     thread_local Machine* g_execution_machine = nullptr;
     thread_local u32 g_execution_lock_depth = 0U;
@@ -771,49 +780,76 @@ namespace phoneme::vm
       return kind == ValueKind::reference;
     }
 
-    [[nodiscard]] bool array_load_kind_matches(u8 opcode,
-                                               ValueKind kind) noexcept
+    [[nodiscard]] bool reference_array_descriptor(
+        std::string_view descriptor) noexcept
+    {
+      return descriptor.starts_with("[L") || descriptor.starts_with("[[");
+    }
+
+    [[nodiscard]] bool array_load_class_matches(
+        u8 opcode,
+        std::string_view descriptor) noexcept
     {
       switch (opcode)
       {
-      case 0x2E:
-      case 0x33:
-      case 0x34:
-      case 0x35:
-        return kind == ValueKind::int32;
-      case 0x2F:
-        return kind == ValueKind::int64;
-      case 0x30:
-        return kind == ValueKind::float32;
-      case 0x31:
-        return kind == ValueKind::float64;
-      case 0x32:
-        return kind == ValueKind::reference;
-      default:
-        return false;
+      case 0x2E: return descriptor == "[I";
+      case 0x2F: return descriptor == "[J";
+      case 0x30: return descriptor == "[F";
+      case 0x31: return descriptor == "[D";
+      case 0x32: return reference_array_descriptor(descriptor);
+      case 0x33: return descriptor == "[B" || descriptor == "[Z";
+      case 0x34: return descriptor == "[C";
+      case 0x35: return descriptor == "[S";
+      default: return false;
       }
     }
 
-    [[nodiscard]] bool array_store_kind_matches(u8 opcode,
-                                                ValueKind kind) noexcept
+    [[nodiscard]] bool array_store_class_matches(
+        u8 opcode,
+        std::string_view descriptor) noexcept
     {
       switch (opcode)
       {
-      case 0x4F:
-      case 0x54:
-      case 0x55:
-      case 0x56:
-        return kind == ValueKind::int32;
-      case 0x50:
-        return kind == ValueKind::int64;
-      case 0x51:
-        return kind == ValueKind::float32;
-      case 0x52:
-        return kind == ValueKind::float64;
-      case 0x53:
-        return kind == ValueKind::reference;
+      case 0x4F: return descriptor == "[I";
+      case 0x50: return descriptor == "[J";
+      case 0x51: return descriptor == "[F";
+      case 0x52: return descriptor == "[D";
+      case 0x53: return reference_array_descriptor(descriptor);
+      case 0x54: return descriptor == "[B" || descriptor == "[Z";
+      case 0x55: return descriptor == "[C";
+      case 0x56: return descriptor == "[S";
+      default: return false;
+      }
+    }
+
+    [[nodiscard]] Result<Value> array_default_value(
+        std::string_view descriptor)
+    {
+      if (descriptor.size() < 2U || descriptor.front() != '[')
+      {
+        return fail(ErrorCode::malformed_class,
+                    "array descriptor has no component type");
+      }
+      switch (descriptor[1])
+      {
+      case 'Z':
+      case 'B':
+      case 'C':
+      case 'S':
+      case 'I':
+        return Value::from_int(0);
+      case 'J':
+        return Value::from_long(0);
+      case 'F':
+        return Value::from_float(0.0F);
+      case 'D':
+        return Value::from_double(0.0);
+      case 'L':
+      case '[':
+        return Value::from_reference({});
       default:
-        return false;
+        return fail(ErrorCode::malformed_class,
+                    "array descriptor has an invalid component type");
       }
     }
 
@@ -847,9 +883,38 @@ namespace phoneme::vm
   } // namespace
 
   Machine::Machine(ClassRepository &classes, usize maximum_heap_objects)
-      : classes_(classes), states_(classes), heap_(maximum_heap_objects),
-        permission_policy_(std::make_shared<security::PermissionPolicy>())
+      : classes_(classes), states_(classes),
+        heap_(heap_capacity_with_emergency_reserve(maximum_heap_objects)),
+        permission_policy_(std::make_shared<security::PermissionPolicy>()),
+        timers_(*this), media_events_(*this)
   {
+    auto security_configured = permission_policy_->configure(
+        security::PermissionPolicyConfig {
+            .suite_id = SuiteId {1},
+            .trust = security::SuiteTrust::trusted,
+            .trusted_default_allow = true,
+        });
+    if (!security_configured)
+      std::abort();
+
+    connections_.set_blocking_hooks(network::NetworkBlockingHooks {
+        .before_block = [this] {
+          scheduler_.set_current_state(JavaThreadState::blocked_io);
+          return suspend_execution_for_blocking();
+        },
+        .after_block = [this](u32 depth) {
+          resume_execution_after_blocking(depth);
+          scheduler_.set_current_state(JavaThreadState::running);
+        },
+        .poll_cancellation = [this]() -> std::optional<Error> {
+          if (!scheduler_.consume_current_interrupt())
+            return std::nullopt;
+          return Error::make_java(
+              "java/io/InterruptedIOException",
+              "network operation was interrupted");
+        },
+    });
+
     register_core_natives(natives_);
 
     // CLDC bootstrap classes are initialized by the VM before application
@@ -864,12 +929,27 @@ namespace phoneme::vm
     initialized_classes_.insert("java/lang/Float");
     initialized_classes_.insert("java/lang/Double");
     initialized_classes_.insert("java/lang/Math");
+
+    auto emergency = states_.allocate_instance(
+        heap_, "java/lang/OutOfMemoryError");
+    if (!emergency)
+      std::abort();
+    emergency_out_of_memory_error_ = *emergency;
   }
 
   Machine::~Machine()
   {
-    monitors_.clear();
+    shutdown();
+  }
+
+  void Machine::shutdown() noexcept
+  {
+    if (shutdown_started_.exchange(true, std::memory_order_acq_rel))
+      return;
+    media_events_.shutdown();
+    timers_.shutdown();
     scheduler_.shutdown();
+    monitors_.clear();
   }
 
   Result<ObjectRef> Machine::current_java_thread()
@@ -1049,6 +1129,23 @@ namespace phoneme::vm
         });
   }
 
+  Result<NativeRootScope> Machine::allocate_pinned_instance(
+      std::string_view class_name)
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    auto object = states_.allocate_instance(heap_, class_name);
+    if (!object && object.error().code == ErrorCode::overflow)
+    {
+      auto collected = collect_garbage();
+      if (!collected)
+        return std::unexpected(collected.error());
+      object = states_.allocate_instance(heap_, class_name);
+    }
+    if (!object)
+      return std::unexpected(object.error());
+    return pin_native_root(*object);
+  }
+
   Status Machine::collect_garbage()
   {
     std::scoped_lock execution_lock(execution_mutex_);
@@ -1056,6 +1153,8 @@ namespace phoneme::vm
     roots.reserve(interned_strings_.size() + class_mirrors_.size() +
                   ui_components_.size() + 16U);
     states_.append_reference_roots(roots);
+    if (!emergency_out_of_memory_error_.is_null())
+      roots.push_back(emergency_out_of_memory_error_);
     for (const auto &[value, reference] : interned_strings_)
     {
       (void)value;
@@ -1077,7 +1176,9 @@ namespace phoneme::vm
     if (canvas_bridge_ != nullptr)
       canvas_bridge_->append_reference_roots(roots);
     monitors_.append_reference_roots(roots);
+    timers_.append_reference_roots(roots);
     scheduler_.append_reference_roots(roots);
+    native_roots_.append_reference_roots(roots);
     auto collected = heap_.collect(roots);
     if (collected)
     {
@@ -1214,6 +1315,72 @@ namespace phoneme::vm
       return;
     event.generation = ++ui_generation_;
     ui_event_sink_(std::move(event));
+  }
+
+  Status Machine::enqueue_serial_callback(ObjectRef runnable)
+  {
+    if (runnable.is_null())
+    {
+      return fail(ErrorCode::invalid_argument,
+                  "LCDUI serial callback is null");
+    }
+    auto root = pin_native_root(runnable);
+    if (!root)
+      return std::unexpected(root.error());
+
+    constexpr usize kMaximumQueuedCallbacks = 4'096U;
+    std::scoped_lock lock(serial_callbacks_mutex_);
+    if (serial_callbacks_.size() >= kMaximumQueuedCallbacks)
+    {
+      return fail(ErrorCode::overflow,
+                  "LCDUI serial callback queue is full");
+    }
+    serial_callbacks_.push_back(std::move(*root));
+    return {};
+  }
+
+  Status Machine::pump_serial_callbacks(usize maximum_callbacks)
+  {
+    for (usize delivered = 0U; delivered < maximum_callbacks; ++delivered)
+    {
+      NativeRootScope callback;
+      {
+        std::scoped_lock lock(serial_callbacks_mutex_);
+        if (serial_callbacks_.empty())
+          return {};
+        callback = std::move(serial_callbacks_.front());
+        serial_callbacks_.pop_front();
+      }
+
+      auto runnable = callback.get();
+      if (!runnable)
+        return std::unexpected(runnable.error());
+      auto result = invoke_instance(*runnable,
+                                    "java/lang/Runnable",
+                                    "run",
+                                    "()V");
+      if (!result)
+        return std::unexpected(result.error());
+      if (result->completed_normally())
+        continue;
+      if (!result->throwable.has_value())
+      {
+        return fail(ErrorCode::internal_error,
+                    "LCDUI serial callback failed without throwable");
+      }
+      auto throwable = heap_.class_name(*result->throwable);
+      if (!throwable)
+        return std::unexpected(throwable.error());
+      return fail(ErrorCode::java_exception,
+                  "LCDUI serial callback threw " + *throwable);
+    }
+    return {};
+  }
+
+  usize Machine::pending_serial_callbacks() const noexcept
+  {
+    std::scoped_lock lock(serial_callbacks_mutex_);
+    return serial_callbacks_.size();
   }
 
   Status Machine::register_ui_component(i32 component_id,
@@ -1617,6 +1784,42 @@ namespace phoneme::vm
         if (!stored)
           return std::unexpected(stored.error());
       }
+    }
+    if (canonical_name == "java/lang/Boolean")
+    {
+      const auto initialize_boolean_singleton =
+          [this, &canonical_name](std::string_view field_name,
+                                  bool value) -> Status
+      {
+        auto field = states_.resolve_field(
+            canonical_name, field_name, "Ljava/lang/Boolean;", true);
+        if (!field)
+          return std::unexpected(field.error());
+        auto current = states_.static_field(*field);
+        if (!current)
+          return std::unexpected(current.error());
+        auto reference = current->as_reference();
+        if (!reference)
+          return std::unexpected(reference.error());
+        if (!reference->is_null())
+          return {};
+
+        auto singleton = states_.allocate_instance(heap_, canonical_name);
+        if (!singleton)
+          return std::unexpected(singleton.error());
+        auto stored_value = heap_.set_field(
+            *singleton, 0U, Value::from_int(value ? 1 : 0));
+        if (!stored_value)
+          return std::unexpected(stored_value.error());
+        return states_.set_static_field(
+            *field, Value::from_reference(*singleton));
+      };
+      auto true_value = initialize_boolean_singleton("TRUE", true);
+      if (!true_value)
+        return std::unexpected(true_value.error());
+      auto false_value = initialize_boolean_singleton("FALSE", false);
+      if (!false_value)
+        return std::unexpected(false_value.error());
     }
     if (canonical_name == "java/lang/System" &&
         !system_streams_initialized_)
@@ -2304,6 +2507,13 @@ namespace phoneme::vm
 
   Result<ObjectRef> Machine::create_throwable(std::string_view class_name)
   {
+    if (class_name == "java/lang/OutOfMemoryError" &&
+        !emergency_out_of_memory_error_.is_null())
+    {
+      auto emergency_class = heap_.class_name(emergency_out_of_memory_error_);
+      if (emergency_class && *emergency_class == class_name)
+        return emergency_out_of_memory_error_;
+    }
     auto throwable_class = classes_.load(class_name);
     if (!throwable_class)
     {
@@ -2385,13 +2595,17 @@ namespace phoneme::vm
     scheduler_.set_current_state(JavaThreadState::running);
     const u32 invocation_depth = g_execution_lock_depth;
     const JavaThreadId invocation_thread = scheduler_.current_thread_id();
+    const HeapAccessContext previous_heap_context =
+        current_heap_access_context();
     u64 accounted_instructions = 0U;
     auto cleanup = [invocation_depth,
                     invocation_thread,
+                    previous_heap_context,
                     &accounted_instructions](Machine* machine) {
       machine->scheduler_.add_current_executed_instructions(
           accounted_instructions);
       machine->clear_execution_roots(invocation_depth);
+      set_heap_access_context(previous_heap_context);
       if (g_execution_lock_depth == 1U)
         machine->monitors_.release_all(invocation_thread);
       --g_execution_lock_depth;
@@ -2419,6 +2633,13 @@ namespace phoneme::vm
       return fail(ErrorCode::internal_error,
                   "VM invocation has no resolved method");
     }
+    set_heap_access_context(HeapAccessContext {
+        .owner = invocation.method.owner != nullptr
+            ? invocation.method.owner->name() : std::string_view {},
+        .method = invocation.method.method->name,
+        .descriptor = invocation.method.method->descriptor,
+        .bytecode_pc = 0U,
+    });
     if ((invocation.method.method->access_flags & kAccAbstract) != 0U)
     {
       auto throwable = create_throwable("java/lang/AbstractMethodError");
@@ -2535,6 +2756,8 @@ namespace phoneme::vm
       }
       publish_execution_roots(invocation_depth, roots);
       states_.append_reference_roots(roots);
+      if (!emergency_out_of_memory_error_.is_null())
+        roots.push_back(emergency_out_of_memory_error_);
       for (const auto &[value, reference] : interned_strings_)
       {
         (void)value;
@@ -2556,7 +2779,9 @@ namespace phoneme::vm
       if (canvas_bridge_ != nullptr)
         canvas_bridge_->append_reference_roots(roots);
       monitors_.append_reference_roots(roots);
+      timers_.append_reference_roots(roots);
       scheduler_.append_reference_roots(roots);
+      native_roots_.append_reference_roots(roots);
       if (extra_root.has_value() && !extra_root->is_null())
       {
         roots.push_back(*extra_root);
@@ -2750,6 +2975,12 @@ namespace phoneme::vm
 
     while (!frames.empty())
     {
+      if (scheduler_.current_stop_requested())
+      {
+        return fail(ErrorCode::invalid_state,
+                    "VM execution was cancelled by scheduler shutdown");
+      }
+
       const bool quantum_boundary =
           executed != 0U && (executed % kSchedulerQuantum) == 0U;
       const bool collect_requested =
@@ -2787,6 +3018,12 @@ namespace phoneme::vm
       ExecutionFrame &frame = frames.back();
       const usize opcode_pc = frame.pc();
       frame.begin_instruction(opcode_pc);
+      set_heap_access_context(HeapAccessContext {
+          .owner = frame.owner().name(),
+          .method = frame.method().name,
+          .descriptor = frame.method().descriptor,
+          .bytecode_pc = opcode_pc,
+      });
       auto opcode_result = frame.read_u8();
       if (!opcode_result)
       {
@@ -2979,14 +3216,18 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
+        auto array_class = heap_.class_name(*array);
+        if (!array_class)
+          return std::unexpected(array_class.error());
+        if (!array_load_class_matches(opcode, *array_class))
+        {
+          return fail(ErrorCode::malformed_class,
+                      "array load opcode does not match array descriptor: " +
+                          *array_class);
+        }
         auto value = heap_.element(*array, static_cast<usize>(*index));
         if (!value)
           return std::unexpected(value.error());
-        if (!array_load_kind_matches(opcode, value->kind()))
-        {
-          return fail(ErrorCode::malformed_class,
-                      "array load opcode does not match element type");
-        }
         if (opcode == 0x33 || opcode == 0x34 || opcode == 0x35)
         {
           auto integer = value->as_int();
@@ -2994,9 +3235,6 @@ namespace phoneme::vm
             return std::unexpected(integer.error());
           if (opcode == 0x33)
           {
-            auto array_class = heap_.class_name(*array);
-            if (!array_class)
-              return std::unexpected(array_class.error());
             if (*array_class == "[Z")
             {
               value = Value::from_int(*integer == 0 ? 0 : 1);
@@ -3125,10 +3363,14 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
-        if (!array_store_kind_matches(opcode, value->kind()))
+        auto array_class = heap_.class_name(*array);
+        if (!array_class)
+          return std::unexpected(array_class.error());
+        if (!array_store_class_matches(opcode, *array_class))
         {
           return fail(ErrorCode::malformed_class,
-                      "array store opcode does not match element type");
+                      "array store opcode does not match array descriptor: " +
+                          *array_class);
         }
         if (opcode == 0x54 || opcode == 0x55 || opcode == 0x56)
         {
@@ -3137,9 +3379,6 @@ namespace phoneme::vm
             return std::unexpected(integer.error());
           if (opcode == 0x54)
           {
-            auto array_class = heap_.class_name(*array);
-            if (!array_class)
-              return std::unexpected(array_class.error());
             if (*array_class == "[Z")
             {
               value = Value::from_int((*integer & 1) == 0 ? 0 : 1);
@@ -3175,11 +3414,6 @@ namespace phoneme::vm
           }
           if (!stored_reference->is_null())
           {
-            auto array_class = heap_.class_name(*array);
-            if (!array_class)
-            {
-              return std::unexpected(array_class.error());
-            }
             std::string component_class;
             if (array_class->starts_with("[L") &&
                 array_class->ends_with(';'))
@@ -5312,10 +5546,13 @@ namespace phoneme::vm
           break;
         }
 
+        auto root_default = array_default_value(*array_class);
+        if (!root_default)
+          return std::unexpected(root_default.error());
         auto root = allocate_array_with_gc(
             *array_class,
             static_cast<usize>(lengths.front()),
-            Value::from_reference({}));
+            *root_default);
         if (!root)
         {
           if (root.error().code == ErrorCode::overflow)
@@ -5352,6 +5589,9 @@ namespace phoneme::vm
               array_class->substr(child_level);
           const usize child_count =
               static_cast<usize>(lengths[child_level]);
+          auto child_default = array_default_value(child_descriptor);
+          if (!child_default)
+            return std::unexpected(child_default.error());
           const usize parent_length =
               static_cast<usize>(lengths[current.level]);
           for (usize element = 0; element < parent_length; ++element)
@@ -5359,7 +5599,7 @@ namespace phoneme::vm
             auto child = allocate_array_with_gc(
                 child_descriptor,
                 child_count,
-                Value::from_reference({}),
+                *child_default,
                 *root);
             if (!child)
             {

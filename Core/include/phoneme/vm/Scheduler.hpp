@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,6 +30,9 @@ struct SchedulerSnapshot final {
     std::vector<JavaThreadId> sleeping;
 };
 
+using SchedulerNativeTask =
+    std::function<Result<std::optional<ObjectRef>>(std::stop_token)>;
+
 class Scheduler final {
 public:
     Scheduler();
@@ -45,6 +49,10 @@ public:
                                          ObjectRef runnable_target);
     [[nodiscard]] Status start_thread(Machine& machine,
                                       ObjectRef thread_object);
+    [[nodiscard]] Status start_native_thread(
+        Machine& machine,
+        ObjectRef thread_object,
+        SchedulerNativeTask task);
     [[nodiscard]] Result<ObjectRef> runnable_target(
         ObjectRef thread_object) const;
 
@@ -59,6 +67,7 @@ public:
 
     [[nodiscard]] Status interrupt(ObjectRef thread_object);
     [[nodiscard]] bool current_is_interrupted() const noexcept;
+    [[nodiscard]] bool current_stop_requested() const noexcept;
     [[nodiscard]] bool consume_current_interrupt() noexcept;
     [[nodiscard]] Result<bool> is_interrupted(ObjectRef thread_object) const;
     [[nodiscard]] Result<bool> is_alive(ObjectRef thread_object) const;

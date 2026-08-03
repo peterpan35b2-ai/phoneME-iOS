@@ -50,6 +50,22 @@ using namespace builtin;
                           kOrdinary, {},
                           {method(kPublic, "<init>", "()V")});
     }
+    if (name == "javax/microedition/io/file/ConnectionClosedException") {
+        return make_class("javax/microedition/io/file/ConnectionClosedException",
+                          "java/lang/RuntimeException", kOrdinary, {},
+                          {
+                              method(kPublic, "<init>", "()V"),
+                              method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                          });
+    }
+    if (name == "javax/microedition/io/file/IllegalModeException") {
+        return make_class("javax/microedition/io/file/IllegalModeException",
+                          "java/lang/RuntimeException", kOrdinary, {},
+                          {
+                              method(kPublic, "<init>", "()V"),
+                              method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                          });
+    }
     if (name == "javax/microedition/io/Connection") {
         return make_class("javax/microedition/io/Connection", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {},
@@ -91,6 +107,7 @@ using namespace builtin;
                               field(kPublic | kStatic | kFinal, "READ_WRITE", "I"),
                           },
                           {
+                              method(kStatic, "<clinit>", "()V"),
                               method(kPublic | kStatic, "open", "(Ljava/lang/String;)Ljavax/microedition/io/Connection;"),
                               method(kPublic | kStatic, "open", "(Ljava/lang/String;I)Ljavax/microedition/io/Connection;"),
                               method(kPublic | kStatic, "open", "(Ljava/lang/String;IZ)Ljavax/microedition/io/Connection;"),
@@ -106,9 +123,17 @@ using namespace builtin;
                           kPublic | kInterface | kAbstract, {},
                           {
                               method(kPublic | kAbstract, "fileSize", "()J"),
+                              method(kPublic | kAbstract, "directorySize", "(Z)J"),
+                              method(kPublic | kAbstract, "availableSize", "()J"),
+                              method(kPublic | kAbstract, "totalSize", "()J"),
+                              method(kPublic | kAbstract, "usedSize", "()J"),
+                              method(kPublic | kAbstract, "isOpen", "()Z"),
                               method(kPublic | kAbstract, "canRead", "()Z"),
                               method(kPublic | kAbstract, "canWrite", "()Z"),
+                              method(kPublic | kAbstract, "setReadable", "(Z)V"),
+                              method(kPublic | kAbstract, "setWritable", "(Z)V"),
                               method(kPublic | kAbstract, "isHidden", "()Z"),
+                              method(kPublic | kAbstract, "setHidden", "(Z)V"),
                               method(kPublic | kAbstract, "getName", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getPath", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getURL", "()Ljava/lang/String;"),
@@ -138,12 +163,22 @@ using namespace builtin;
                               field(kPrivate, "path", "Ljava/lang/String;"),
                               field(kPrivate, "mode", "I"),
                               field(kPrivate, "open", "Z"),
+                              field(kPrivate, "input", "Ljava/io/FileInputStream;"),
+                              field(kPrivate, "output", "Ljava/io/FileOutputStream;"),
                           },
                           {
                               method(kPublic, "fileSize", "()J"),
+                              method(kPublic, "directorySize", "(Z)J"),
+                              method(kPublic, "availableSize", "()J"),
+                              method(kPublic, "totalSize", "()J"),
+                              method(kPublic, "usedSize", "()J"),
+                              method(kPublic, "isOpen", "()Z"),
                               method(kPublic, "canRead", "()Z"),
                               method(kPublic, "canWrite", "()Z"),
+                              method(kPublic, "setReadable", "(Z)V"),
+                              method(kPublic, "setWritable", "(Z)V"),
                               method(kPublic, "isHidden", "()Z"),
+                              method(kPublic, "setHidden", "(Z)V"),
                               method(kPublic, "getName", "()Ljava/lang/String;"),
                               method(kPublic, "getPath", "()Ljava/lang/String;"),
                               method(kPublic, "getURL", "()Ljava/lang/String;"),

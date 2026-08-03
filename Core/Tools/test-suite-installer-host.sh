@@ -3,7 +3,34 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-source "$SCRIPT_DIR/lib/common-test-root.sh"
+if [[ -f "$SCRIPT_DIR/lib/common-test-root.sh" ]]; then
+  source "$SCRIPT_DIR/lib/common-test-root.sh"
+else
+  # Item 05 must remain testable before item 18's shared tooling lands.
+  phoneme_make_isolated_root() {
+    local core_root="$1"
+    local label="$2"
+    local override="${3:-}"
+    local base="${override:-${TMPDIR:-/tmp}}"
+    mkdir -p "$base"
+    mktemp -d "$base/${label}.$$.XXXXXX"
+  }
+  phoneme_register_cleanup() {
+    local root="$1"
+    trap 'rm -rf -- '"'"'$root'"'"'' EXIT
+  }
+  phoneme_configure_sanitizers() {
+    if [[ "${PHONEME_SANITIZE:-0}" == "1" ]]; then
+      PHONEME_SANITIZER_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+    else
+      PHONEME_SANITIZER_FLAGS=""
+    fi
+  }
+  phoneme_run_with_timeout() {
+    shift
+    "$@"
+  }
+fi
 TEST_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "suite-installer-host-tests" "${PHONEME_SUITE_INSTALLER_TEST_ROOT:-}")"
 phoneme_register_cleanup "$TEST_ROOT"
 STUB_CLASSES="$TEST_ROOT/stub-classes"

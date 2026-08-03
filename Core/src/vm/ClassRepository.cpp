@@ -6,6 +6,7 @@
 
 #include "phoneme/filesystem/ResourceLoader.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
+#include "phoneme/vm/Descriptor.hpp"
 #include "phoneme/vm/Verifier.hpp"
 
 namespace phoneme::vm
@@ -145,7 +146,9 @@ namespace phoneme::vm
     }
 
     return fail(ErrorCode::method_not_found,
-                "method was not found in the class hierarchy");
+                "method was not found in the class hierarchy: " +
+                    normalize_name(binary_name) + "." +
+                    std::string(method_name) + std::string(descriptor));
   }
 
   Result<ResolvedMethod> ClassRepository::resolve_declared_method(
@@ -168,7 +171,9 @@ namespace phoneme::vm
     if (method == nullptr)
     {
       return fail(ErrorCode::method_not_found,
-                  "method was not declared by the requested class");
+                  "method was not declared by the requested class: " +
+                      normalize_name(binary_name) + "." +
+                      std::string(method_name) + std::string(descriptor));
     }
     return ResolvedMethod{
         .owner = *loaded,
@@ -308,6 +313,25 @@ namespace phoneme::vm
   Result<std::shared_ptr<const classfile::ClassFile>>
   ClassRepository::load_uncached(std::string_view internal_name) const
   {
+    if (!internal_name.empty() && internal_name.front() == '[')
+    {
+      auto descriptor = parse_field_descriptor(internal_name);
+      if (!descriptor || descriptor->kind != JavaTypeKind::array)
+      {
+        return fail(ErrorCode::malformed_class,
+                    "invalid array class descriptor: " +
+                        std::string(internal_name));
+      }
+      constexpr u16 kArrayFlags = 0x0001U | 0x0010U | 0x0400U;
+      return std::make_shared<const classfile::ClassFile>(
+          classfile::ClassFile::builtin(
+              std::string(internal_name),
+              "java/lang/Object",
+              kArrayFlags,
+              {},
+              {},
+              {"java/lang/Cloneable", "java/io/Serializable"}));
+    }
     if (auto builtin = load_builtin_class(internal_name); builtin)
     {
       return builtin;

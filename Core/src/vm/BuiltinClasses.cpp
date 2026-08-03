@@ -21,6 +21,8 @@ namespace {
         register_rms_classes(result);
         register_security_classes(result);
         register_lcdui_classes(result);
+        register_game_classes(result);
+        register_m3g_classes(result);
         return result;
     }();
     return registry;

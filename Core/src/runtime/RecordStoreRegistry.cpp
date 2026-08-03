@@ -211,6 +211,17 @@ constexpr usize kMaximumStoreNameBytes = 128;
     return false;
 }
 
+[[nodiscard]] bool is_delete_tombstone_candidate(
+    const std::filesystem::path& path) {
+    const std::string filename = path.filename().string();
+    const usize marker = filename.find(".delete-");
+    if (marker == std::string::npos || marker + 8U >= filename.size()) {
+        return false;
+    }
+    std::string ignored;
+    return is_store_candidate(filename.substr(0, marker), ignored);
+}
+
 } // namespace
 
 Status RecordStoreRegistry::configure(std::string root_directory) {
@@ -241,7 +252,13 @@ Status RecordStoreRegistry::configure(std::string root_directory) {
                         "cannot reconfigure RMS while stores are open");
         }
     }
+    const std::string previous_root = root_directory_;
     root_directory_ = canonical.string();
+    auto scavenged = scavenge_delete_tombstones_unlocked();
+    if (!scavenged) {
+        root_directory_ = previous_root;
+        return scavenged;
+    }
     stores_.clear();
     return {};
 }
@@ -440,13 +457,20 @@ Status RecordStoreRegistry::delete_store(std::string_view name) {
     if (!synchronized) return rollback(synchronized.error());
 
     stores_.erase(std::string(name));
+
+    // The directory sync above is the deletion commit point. Tombstone removal
+    // is post-commit garbage collection: failure must not report that the
+    // already committed delete rolled back. Any leftovers are retried during
+    // the next configure() by scavenge_delete_tombstones_unlocked().
     bool cleaned = false;
     for (const auto& entry : moved) {
         if (::unlink(entry.tombstone.c_str()) == 0) {
             cleaned = true;
         }
     }
-    if (cleaned) (void)sync_directory_unlocked(false);
+    if (cleaned) {
+        (void)sync_directory_unlocked(false);
+    }
     return {};
 }
 
@@ -1144,6 +1168,53 @@ Status RecordStoreRegistry::sync_directory_unlocked(bool inject_fault) const {
         if (!injected) return injected;
     }
     return {};
+}
+
+Status RecordStoreRegistry::scavenge_delete_tombstones_unlocked() const {
+    if (root_directory_.empty()) {
+        return fail(ErrorCode::not_configured,
+                    "RMS registry is not configured");
+    }
+
+    std::error_code error;
+    std::filesystem::directory_iterator iterator(root_directory_, error);
+    const std::filesystem::directory_iterator end;
+    if (error) {
+        return fail(ErrorCode::io_error,
+                    "failed to inspect RMS delete tombstones: " +
+                        error.message());
+    }
+
+    bool removed = false;
+    for (; iterator != end; iterator.increment(error)) {
+        if (error) {
+            return fail(ErrorCode::io_error,
+                        "failed while inspecting RMS delete tombstones: " +
+                            error.message());
+        }
+        if (!is_delete_tombstone_candidate(iterator->path())) continue;
+
+        std::error_code status_error;
+        const auto status = iterator->symlink_status(status_error);
+        if (status_error) {
+            return fail(ErrorCode::io_error,
+                        "failed to inspect RMS delete tombstone: " +
+                            status_error.message());
+        }
+        if (!std::filesystem::is_regular_file(status) &&
+            !std::filesystem::is_symlink(status)) {
+            continue;
+        }
+
+        const std::string path = iterator->path().string();
+        if (::unlink(path.c_str()) == 0) {
+            removed = true;
+        } else if (errno != ENOENT) {
+            return fail(ErrorCode::io_error,
+                        "failed to remove stale RMS delete tombstone");
+        }
+    }
+    return removed ? sync_directory_unlocked(false) : Status {};
 }
 
 Result<usize> RecordStoreRegistry::suite_used_bytes_unlocked() const {

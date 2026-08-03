@@ -8,6 +8,49 @@ namespace {
 using namespace builtin;
 
 [[nodiscard]] ClassPtr build_media_class(std::string_view name) {
+    if (name == "com/nokia/mid/sound/SoundListener") {
+        return make_class(
+            "com/nokia/mid/sound/SoundListener",
+            "java/lang/Object",
+            kPublic | kInterface | kAbstract,
+            {},
+            {method(kPublic | kAbstract,
+                    "soundStateChanged",
+                    "(Lcom/nokia/mid/sound/Sound;I)V")});
+    }
+    if (name == "com/nokia/mid/sound/Sound") {
+        return make_class(
+            "com/nokia/mid/sound/Sound",
+            "java/lang/Object",
+            kOrdinary,
+            {
+                field(kPrivate, "nativeId", "I"),
+                field(kPrivate, "state", "I"),
+                field(kPrivate, "gain", "I"),
+                field(kPrivate, "listener",
+                      "Lcom/nokia/mid/sound/SoundListener;"),
+                field(kPrivate, "format", "I"),
+                field(kPrivate, "toneFrequency", "I"),
+                field(kPrivate, "toneDuration", "J"),
+            },
+            {
+                method(kPublic, "<init>", "([BI)V"),
+                method(kPublic, "<init>", "(IJ)V"),
+                method(kPublic | kStatic, "getSupportedFormats", "()[I"),
+                method(kPublic | kStatic, "getConcurrentSoundCount", "(I)I"),
+                method(kPublic | kSynchronized, "init", "([BI)V"),
+                method(kPublic | kSynchronized, "init", "(IJ)V"),
+                method(kPublic, "play", "(I)V"),
+                method(kPublic | kSynchronized, "stop", "()V"),
+                method(kPublic | kSynchronized, "resume", "()V"),
+                method(kPublic | kSynchronized, "release", "()V"),
+                method(kPublic | kSynchronized, "getState", "()I"),
+                method(kPublic | kSynchronized, "setGain", "(I)V"),
+                method(kPublic | kSynchronized, "getGain", "()I"),
+                method(kPublic | kSynchronized, "setSoundListener",
+                       "(Lcom/nokia/mid/sound/SoundListener;)V"),
+            });
+    }
     if (name == "javax/microedition/media/MediaException") {
         return make_class("javax/microedition/media/MediaException",
                           "java/lang/Exception", kOrdinary, {}, {

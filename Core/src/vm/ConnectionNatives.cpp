@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "phoneme/network/ConnectionRegistry.hpp"
+#include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/ModifiedUtf8.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
@@ -56,6 +57,8 @@ constexpr std::string_view kSecurityInfoClass =
     "javax/microedition/io/NativeSecurityInfo";
 constexpr std::string_view kCertificateClass =
     "javax/microedition/pki/NativeCertificate";
+constexpr std::string_view kCertificateExceptionClass =
+    "javax/microedition/pki/CertificateException";
 
 constexpr usize kSecurityCertificateField = 0;
 constexpr usize kSecurityProtocolNameField = 1;
@@ -67,6 +70,51 @@ constexpr usize kCertificateIssuerField = 1;
 constexpr usize kCertificateSerialField = 2;
 constexpr usize kCertificateNotBeforeField = 3;
 constexpr usize kCertificateNotAfterField = 4;
+
+constexpr usize kThrowableMessageField = 0;
+constexpr usize kThrowableCauseField = 1;
+constexpr usize kThrowableCauseInitializedField = 2;
+constexpr usize kCertificateExceptionCertificateField = 3;
+constexpr usize kCertificateExceptionReasonField = 4;
+
+[[nodiscard]] std::string certificate_exception_message(i32 reason) {
+    switch (reason) {
+    case 1:
+        return "Certificate has unrecognized critical extensions";
+    case 2:
+        return "Server certificate chain exceeds the length allowed by an "
+               "issuer's policy";
+    case 3:
+        return "Certificate is expired";
+    case 4:
+        return "Intermediate certificate in the chain does not have the "
+               "authority to be an intermediate CA";
+    case 5:
+        return "Certificate object does not contain a signature";
+    case 6:
+        return "Certificate is not yet valid";
+    case 7:
+        return "Certificate does not contain the correct site name";
+    case 8:
+        return "Certificate was issued by an unrecognized entity";
+    case 9:
+        return "Certificate was signed using an unsupported algorithm";
+    case 10:
+        return "Certificate's public key has been used in a way deemed "
+               "inappropriate by the issuer";
+    case 11:
+        return "Certificate in a chain was not issued by the next authority "
+               "in the chain";
+    case 12:
+        return "Root CA's public key is expired";
+    case 13:
+        return "Certificate has a public key that is not a supported type";
+    case 14:
+        return "Certificate failed verification";
+    default:
+        return "Unknown reason (" + std::to_string(reason) + ")";
+    }
+}
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -315,6 +363,41 @@ template <typename T>
     return create_string(machine, std::move(*text));
 }
 
+[[nodiscard]] Status set_static_int(Machine& machine,
+                                    std::string_view owner,
+                                    std::string_view name,
+                                    i32 value) {
+    auto field = machine.class_states().resolve_field(
+        owner, name, "I", true);
+    if (!field) return std::unexpected(field.error());
+    return machine.class_states().set_static_field(
+        *field, Value::from_int(value));
+}
+
+[[nodiscard]] Status set_static_byte(Machine& machine,
+                                     std::string_view owner,
+                                     std::string_view name,
+                                     i32 value) {
+    auto field = machine.class_states().resolve_field(
+        owner, name, "B", true);
+    if (!field) return std::unexpected(field.error());
+    return machine.class_states().set_static_field(
+        *field, Value::from_int(value));
+}
+
+[[nodiscard]] Status set_static_string(Machine& machine,
+                                       std::string_view owner,
+                                       std::string_view name,
+                                       std::string_view value) {
+    auto string = create_string(machine, value);
+    if (!string) return std::unexpected(string.error());
+    auto field = machine.class_states().resolve_field(
+        owner, name, "Ljava/lang/String;", true);
+    if (!field) return std::unexpected(field.error());
+    return machine.class_states().set_static_field(
+        *field, Value::from_reference(*string));
+}
+
 [[nodiscard]] Result<std::optional<Value>> optional_string(
     Machine& machine,
     const std::optional<std::string>& text) {
@@ -517,6 +600,37 @@ template <typename T>
     return *object;
 }
 
+[[nodiscard]] Status require_network_permission(
+    Machine& machine,
+    std::string_view url) {
+    auto parsed = network::Url::parse(url);
+    if (!parsed) return {};
+
+    std::string_view permission;
+    switch (parsed->scheme) {
+    case network::Scheme::socket:
+        permission = parsed->server_endpoint
+            ? security::permissions::connector_server_socket
+            : security::permissions::connector_socket;
+        break;
+    case network::Scheme::server_socket:
+        permission = security::permissions::connector_server_socket;
+        break;
+    case network::Scheme::datagram:
+        permission = parsed->server_endpoint
+            ? security::permissions::connector_datagram_receiver
+            : security::permissions::connector_datagram;
+        break;
+    case network::Scheme::http:
+        permission = security::permissions::connector_http;
+        break;
+    case network::Scheme::https:
+        permission = security::permissions::connector_https;
+        break;
+    }
+    return machine.permission_policy().require(permission, std::string(url));
+}
+
 [[nodiscard]] Result<ObjectRef> open_connection(
     Machine& machine,
     ObjectRef url,
@@ -528,6 +642,8 @@ template <typename T>
 
     auto text = utf8_text(machine, url);
     if (!text) return std::unexpected(text.error());
+    auto permitted = require_network_permission(machine, *text);
+    if (!permitted) return std::unexpected(permitted.error());
     auto opened = java_network_result(machine.connections().open(
         *text, static_cast<network::ConnectionMode>(mode), timeouts));
     if (!opened) return std::unexpected(opened.error());
@@ -2461,6 +2577,144 @@ void register_http_connection(NativeMethodRegistry& registry) {
         });
 }
 
+void register_connection_constants(NativeMethodRegistry& registry) {
+    add(registry, "javax/microedition/io/Connector",
+        "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            static constexpr std::array<std::pair<std::string_view, i32>, 3>
+                constants {{
+                    {"READ", 1},
+                    {"WRITE", 2},
+                    {"READ_WRITE", 3},
+                }};
+            for (const auto& [name, value] : constants) {
+                auto stored = set_static_int(
+                    machine, "javax/microedition/io/Connector",
+                    name, value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, "javax/microedition/io/SocketConnection",
+        "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            static constexpr std::array<std::pair<std::string_view, i32>, 5>
+                constants {{
+                    {"DELAY", 0},
+                    {"LINGER", 1},
+                    {"KEEPALIVE", 2},
+                    {"RCVBUF", 3},
+                    {"SNDBUF", 4},
+                }};
+            for (const auto& [name, value] : constants) {
+                auto stored = set_static_byte(
+                    machine, "javax/microedition/io/SocketConnection",
+                    name, value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kCertificateExceptionClass),
+        "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            static constexpr std::array<std::pair<std::string_view, i32>, 14>
+                constants {{
+                    {"BAD_EXTENSIONS", 1},
+                    {"CERTIFICATE_CHAIN_TOO_LONG", 2},
+                    {"EXPIRED", 3},
+                    {"UNAUTHORIZED_INTERMEDIATE_CA", 4},
+                    {"MISSING_SIGNATURE", 5},
+                    {"NOT_YET_VALID", 6},
+                    {"SITENAME_MISMATCH", 7},
+                    {"UNRECOGNIZED_ISSUER", 8},
+                    {"UNSUPPORTED_SIGALG", 9},
+                    {"INAPPROPRIATE_KEY_USAGE", 10},
+                    {"BROKEN_CHAIN", 11},
+                    {"ROOT_CA_EXPIRED", 12},
+                    {"UNSUPPORTED_PUBLIC_KEY_TYPE", 13},
+                    {"VERIFICATION_FAILED", 14},
+                }};
+            for (const auto& [name, value] : constants) {
+                auto stored = set_static_byte(
+                    machine, kCertificateExceptionClass, name, value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, "javax/microedition/io/HttpConnection",
+        "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            static constexpr std::array<std::pair<std::string_view,
+                                                  std::string_view>, 3>
+                methods {{
+                    {"HEAD", "HEAD"},
+                    {"GET", "GET"},
+                    {"POST", "POST"},
+                }};
+            for (const auto& [name, value] : methods) {
+                auto stored = set_static_string(
+                    machine, "javax/microedition/io/HttpConnection",
+                    name, value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            static constexpr std::array<std::pair<std::string_view, i32>, 38>
+                statuses {{
+                    {"HTTP_OK", 200},
+                    {"HTTP_CREATED", 201},
+                    {"HTTP_ACCEPTED", 202},
+                    {"HTTP_NOT_AUTHORITATIVE", 203},
+                    {"HTTP_NO_CONTENT", 204},
+                    {"HTTP_RESET", 205},
+                    {"HTTP_PARTIAL", 206},
+                    {"HTTP_MULT_CHOICE", 300},
+                    {"HTTP_MOVED_PERM", 301},
+                    {"HTTP_MOVED_TEMP", 302},
+                    {"HTTP_SEE_OTHER", 303},
+                    {"HTTP_NOT_MODIFIED", 304},
+                    {"HTTP_USE_PROXY", 305},
+                    {"HTTP_TEMP_REDIRECT", 307},
+                    {"HTTP_BAD_REQUEST", 400},
+                    {"HTTP_UNAUTHORIZED", 401},
+                    {"HTTP_PAYMENT_REQUIRED", 402},
+                    {"HTTP_FORBIDDEN", 403},
+                    {"HTTP_NOT_FOUND", 404},
+                    {"HTTP_BAD_METHOD", 405},
+                    {"HTTP_NOT_ACCEPTABLE", 406},
+                    {"HTTP_PROXY_AUTH", 407},
+                    {"HTTP_CLIENT_TIMEOUT", 408},
+                    {"HTTP_CONFLICT", 409},
+                    {"HTTP_GONE", 410},
+                    {"HTTP_LENGTH_REQUIRED", 411},
+                    {"HTTP_PRECON_FAILED", 412},
+                    {"HTTP_ENTITY_TOO_LARGE", 413},
+                    {"HTTP_REQ_TOO_LONG", 414},
+                    {"HTTP_UNSUPPORTED_TYPE", 415},
+                    {"HTTP_UNSUPPORTED_RANGE", 416},
+                    {"HTTP_EXPECT_FAILED", 417},
+                    {"HTTP_INTERNAL_ERROR", 500},
+                    {"HTTP_NOT_IMPLEMENTED", 501},
+                    {"HTTP_BAD_GATEWAY", 502},
+                    {"HTTP_UNAVAILABLE", 503},
+                    {"HTTP_GATEWAY_TIMEOUT", 504},
+                    {"HTTP_VERSION", 505},
+                }};
+            for (const auto& [name, value] : statuses) {
+                auto stored = set_static_int(
+                    machine, "javax/microedition/io/HttpConnection",
+                    name, value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+}
+
 void register_security_objects(NativeMethodRegistry& registry) {
     const auto reference_getter = [&registry](std::string owner,
                                               std::string method,
@@ -2532,6 +2786,105 @@ void register_security_objects(NativeMethodRegistry& registry) {
     };
     long_getter("getNotBefore", kCertificateNotBeforeField);
     long_getter("getNotAfter", kCertificateNotAfterField);
+
+    const auto certificate_exception_constructor =
+        [&registry](std::string descriptor,
+                    std::optional<usize> message_argument,
+                    usize certificate_argument,
+                    usize reason_argument) {
+            add(registry, std::string(kCertificateExceptionClass), "<init>",
+                std::move(descriptor),
+                [message_argument, certificate_argument, reason_argument](
+                    Machine& machine, std::span<const Value> arguments)
+                    -> Result<std::optional<Value>> {
+                    auto object = receiver(
+                        arguments, "CertificateException constructor");
+                    if (!object) return std::unexpected(object.error());
+                    auto certificate = reference_argument(
+                        arguments, certificate_argument,
+                        "CertificateException certificate", true);
+                    auto reason = int_argument(
+                        arguments, reason_argument,
+                        "CertificateException reason");
+                    if (!certificate) {
+                        return std::unexpected(certificate.error());
+                    }
+                    if (!reason) return std::unexpected(reason.error());
+
+                    ObjectRef message;
+                    if (message_argument.has_value()) {
+                        auto supplied = reference_argument(
+                            arguments, *message_argument,
+                            "CertificateException message", true);
+                        if (!supplied) {
+                            return std::unexpected(supplied.error());
+                        }
+                        message = *supplied;
+                    } else {
+                        auto generated = create_string(
+                            machine, certificate_exception_message(*reason));
+                        if (!generated) {
+                            return std::unexpected(generated.error());
+                        }
+                        message = *generated;
+                    }
+
+                    auto stored_message = machine.heap().set_field(
+                        *object, kThrowableMessageField,
+                        Value::from_reference(message));
+                    auto stored_cause = machine.heap().set_field(
+                        *object, kThrowableCauseField,
+                        Value::from_reference(ObjectRef {}));
+                    auto stored_cause_initialized = machine.heap().set_field(
+                        *object, kThrowableCauseInitializedField,
+                        Value::from_int(0));
+                    auto stored_certificate = machine.heap().set_field(
+                        *object, kCertificateExceptionCertificateField,
+                        Value::from_reference(*certificate));
+                    auto stored_reason = machine.heap().set_field(
+                        *object, kCertificateExceptionReasonField,
+                        Value::from_int(*reason));
+                    if (!stored_message) {
+                        return std::unexpected(stored_message.error());
+                    }
+                    if (!stored_cause) {
+                        return std::unexpected(stored_cause.error());
+                    }
+                    if (!stored_cause_initialized) {
+                        return std::unexpected(
+                            stored_cause_initialized.error());
+                    }
+                    if (!stored_certificate) {
+                        return std::unexpected(stored_certificate.error());
+                    }
+                    if (!stored_reason) {
+                        return std::unexpected(stored_reason.error());
+                    }
+                    return std::optional<Value> {};
+                });
+        };
+    certificate_exception_constructor(
+        "(Ljavax/microedition/pki/Certificate;B)V", std::nullopt, 1U, 2U);
+    certificate_exception_constructor(
+        "(Ljava/lang/String;Ljavax/microedition/pki/Certificate;B)V",
+        1U, 2U, 3U);
+
+    reference_getter(std::string(kCertificateExceptionClass),
+                     "getCertificate",
+                     "()Ljavax/microedition/pki/Certificate;",
+                     kCertificateExceptionCertificateField);
+    add(registry, std::string(kCertificateExceptionClass), "getReason", "()B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "CertificateException.getReason");
+            if (!object) return std::unexpected(object.error());
+            auto value = machine.heap().field(
+                *object, kCertificateExceptionReasonField);
+            if (!value) return std::unexpected(value.error());
+            auto reason = value->as_int();
+            if (!reason) return std::unexpected(reason.error());
+            return std::optional<Value>(Value::from_int(*reason));
+        });
 }
 
 } // namespace
@@ -2612,6 +2965,7 @@ Result<std::optional<bool>> connection_stream_close_output(
 }
 
 void register_connection_natives(NativeMethodRegistry& registry) {
+    register_connection_constants(registry);
     register_connector(registry);
     register_stream_connections(registry);
     register_native_streams(registry);
