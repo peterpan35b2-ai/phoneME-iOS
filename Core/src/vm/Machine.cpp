@@ -1079,6 +1079,29 @@ namespace phoneme::vm
     return g_execution_machine == this && g_execution_lock_depth != 0U;
   }
 
+  Status Machine::enter_external_execution()
+  {
+    if (g_execution_machine != nullptr && g_execution_machine != this)
+    {
+      return fail(ErrorCode::invalid_state,
+                  "a host thread cannot execute two Machine instances recursively");
+    }
+    execution_mutex_.lock();
+    g_execution_machine = this;
+    ++g_execution_lock_depth;
+    return {};
+  }
+
+  void Machine::leave_external_execution() noexcept
+  {
+    if (g_execution_machine != this || g_execution_lock_depth == 0U)
+      std::abort();
+    --g_execution_lock_depth;
+    execution_mutex_.unlock();
+    if (g_execution_lock_depth == 0U)
+      g_execution_machine = nullptr;
+  }
+
   void Machine::request_garbage_collection() noexcept
   {
     gc_requested_.store(true, std::memory_order_release);

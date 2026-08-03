@@ -250,6 +250,17 @@ void apply_legacy_property_defaults(vm::Machine& machine,
            S_ISREG(status.st_mode);
 }
 
+void append_ascii_console(vm::Machine& machine, std::string_view text) {
+    std::u16string utf16;
+    utf16.reserve(text.size() + 1U);
+    for (const char character : text) {
+        utf16.push_back(static_cast<char16_t>(
+            static_cast<unsigned char>(character)));
+    }
+    if (utf16.empty() || utf16.back() != u'\n') utf16.push_back(u'\n');
+    machine.append_console(utf16);
+}
+
 void append_utf8(std::string& output, std::u16string_view text) {
     for (usize index = 0; index < text.size(); ++index) {
         u32 code_point = static_cast<u16>(text[index]);
@@ -751,6 +762,11 @@ Status Runtime::start_midlet(SuiteId suite_id,
 
     const vm::MidletSignal launch_signal =
         application_vm->machine.consume_midlet_signal();
+    std::string launch_console;
+    if (launch_signal == vm::MidletSignal::destroyed) {
+        append_utf8(launch_console,
+                    application_vm->machine.console_output());
+    }
     std::shared_ptr<ApplicationVM> previous_vm;
     AppId previous_id;
     {
@@ -775,6 +791,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         if (!hidden) return fail_start(hidden.error());
         auto pumped = previous_vm->canvas.pump();
         if (!pumped) return fail_start(pumped.error());
+        previous_vm->machine.media().suspend();
         previous_vm->machine.scheduler().set_host_foreground(false);
     }
     if (launch_signal == vm::MidletSignal::paused) {
@@ -804,6 +821,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         app->lifecycle_busy = false;
         if (launch_signal == vm::MidletSignal::destroyed) {
             app->state = AppState::destroyed;
+            app->console_output = std::move(launch_console);
             app->vm.reset();
         } else if (launch_signal == vm::MidletSignal::paused) {
             app->state = AppState::paused;
@@ -883,6 +901,7 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
             if (!hidden) return fail_hide(hidden.error());
             auto pumped = hidden_vm->canvas.pump();
             if (!pumped) return fail_hide(pumped.error());
+            hidden_vm->machine.media().suspend();
             hidden_vm->machine.scheduler().set_host_foreground(false);
         }
 
@@ -910,6 +929,7 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     AppId previous_id;
     u64 target_token = 0;
     u64 previous_token = 0;
+    bool target_media_active = false;
     {
         std::unique_lock lock(mutex_);
         auto running = require_running_unlocked();
@@ -927,6 +947,7 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
         app->lifecycle_busy = true;
         target_token = app->lifecycle_token = ++sequence_;
         target_vm = app->vm;
+        target_media_active = app->state == AppState::active;
 
         if (foreground_app_id_.valid() && foreground_app_id_ != app_id) {
             previous_id = foreground_app_id_;
@@ -978,9 +999,15 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
         if (!hidden) return finish_failure(hidden.error(), true);
         auto pumped = previous_vm->canvas.pump();
         if (!pumped) return finish_failure(pumped.error(), true);
+        previous_vm->machine.media().suspend();
         previous_vm->machine.scheduler().set_host_foreground(false);
     }
     target_vm->machine.scheduler().set_host_foreground(true);
+    if (target_media_active) {
+        target_vm->machine.media().resume();
+    } else {
+        target_vm->machine.media().suspend();
+    }
     auto canvas_resized = target_vm->canvas.set_dimensions(dimensions);
     if (!canvas_resized) {
         return finish_failure(canvas_resized.error(), false);
@@ -1236,9 +1263,19 @@ Status Runtime::destroy_midlet(AppId app_id) {
     std::scoped_lock vm_operation(vm->operation_mutex);
     if (was_foreground) {
         auto hidden = vm->canvas.set_host_foreground(false);
-        if (!hidden) return fail_lifecycle(hidden.error());
+        if (!hidden) {
+            append_ascii_console(
+                vm->machine,
+                "[Lifecycle] forced destroy ignored foreground hide failure: " +
+                    hidden.error().message);
+        }
         auto pumped = vm->canvas.pump();
-        if (!pumped) return fail_lifecycle(pumped.error());
+        if (!pumped) {
+            append_ascii_console(
+                vm->machine,
+                "[Lifecycle] forced destroy ignored Canvas callback failure: " +
+                    pumped.error().message);
+        }
         vm->machine.scheduler().set_host_foreground(false);
     }
 
@@ -1266,15 +1303,11 @@ Status Runtime::destroy_midlet(AppId app_id) {
         if (!destroyed->exception_context.empty()) {
             diagnostic += " from " + destroyed->exception_context;
         }
-        diagnostic.push_back('\n');
-        std::u16string utf16;
-        utf16.reserve(diagnostic.size());
-        for (const char character : diagnostic) {
-            utf16.push_back(static_cast<char16_t>(
-                static_cast<unsigned char>(character)));
-        }
-        vm->machine.append_console(utf16);
+        append_ascii_console(vm->machine, diagnostic);
     }
+
+    std::string console_output;
+    append_utf8(console_output, vm->machine.console_output());
 
     std::unique_lock lock(mutex_);
     App* app = find_app_unlocked(app_id);
@@ -1286,6 +1319,7 @@ Status Runtime::destroy_midlet(AppId app_id) {
     app->state = AppState::destroyed;
     app->lifecycle_busy = false;
     app->generation = ++sequence_;
+    app->console_output = std::move(console_output);
     app->vm.reset();
     if (foreground_app_id_ == app_id) {
         foreground_app_id_ = {};
@@ -1471,13 +1505,15 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
 
 std::string Runtime::app_console_output(AppId app_id) const {
     std::shared_ptr<ApplicationVM> application_vm;
+    std::string retained_console;
     {
         std::scoped_lock lock(mutex_);
         const App* app = find_app_unlocked(app_id);
         if (app == nullptr) return {};
         application_vm = app->vm;
+        retained_console = app->console_output;
     }
-    if (application_vm == nullptr) return {};
+    if (application_vm == nullptr) return retained_console;
 
     std::u16string console;
     {
@@ -1606,7 +1642,11 @@ void Runtime::resume() noexcept {
 
     for (const auto& vm : active_vms) {
         std::scoped_lock vm_operation(vm->operation_mutex);
-        vm->machine.media().resume();
+        if (vm == foreground_vm) {
+            vm->machine.media().resume();
+        } else {
+            vm->machine.media().suspend();
+        }
     }
     if (foreground_vm != nullptr) {
         std::scoped_lock foreground_operation(foreground_vm->operation_mutex);

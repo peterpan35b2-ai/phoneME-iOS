@@ -622,6 +622,28 @@ void add(NativeMethodRegistry& registry,
     return std::optional<Value>(Value::from_int(value ? 1 : 0));
 }
 
+[[nodiscard]] graphics::Pixel phone_me_opaque_color(u8 red,
+                                                    u8 green,
+                                                    u8 blue) noexcept {
+    const u8 red5 = static_cast<u8>(red >> 3U);
+    const u8 green6 = static_cast<u8>(green >> 2U);
+    const u8 blue5 = static_cast<u8>(blue >> 3U);
+    const u8 expanded_red = static_cast<u8>((red5 << 3U) | (red5 >> 2U));
+    const u8 expanded_green = static_cast<u8>(
+        (green6 << 2U) | (green6 >> 4U));
+    const u8 expanded_blue = static_cast<u8>(
+        (blue5 << 3U) | (blue5 >> 2U));
+    return graphics::argb(255U, expanded_red, expanded_green,
+                          expanded_blue);
+}
+
+[[nodiscard]] graphics::Pixel phone_me_opaque_color(u32 rgb) noexcept {
+    return phone_me_opaque_color(
+        static_cast<u8>((rgb >> 16U) & 0xFFU),
+        static_cast<u8>((rgb >> 8U) & 0xFFU),
+        static_cast<u8>(rgb & 0xFFU));
+}
+
 } // namespace
 
 void register_graphics_natives(NativeMethodRegistry& registry) {
@@ -637,8 +659,8 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto rgb = int_argument(arguments, 1U, "Graphics.setColor");
             if (!bound) return std::unexpected(bound.error());
             if (!rgb) return std::unexpected(rgb.error());
-            bound->context->color = 0xFF000000U |
-                (static_cast<u32>(*rgb) & 0x00FFFFFFU);
+            bound->context->color = phone_me_opaque_color(
+                static_cast<u32>(*rgb));
             return std::optional<Value> {};
         });
 
@@ -659,8 +681,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "Graphics color components must be 0..255");
             }
-            bound->context->color = graphics::argb(
-                255U,
+            bound->context->color = phone_me_opaque_color(
                 static_cast<u8>(*red),
                 static_cast<u8>(*green),
                 static_cast<u8>(*blue));
@@ -707,8 +728,8 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                                  "gray scale must be 0..255");
             }
             const u8 component = static_cast<u8>(*value);
-            bound->context->color = graphics::argb(
-                255U, component, component, component);
+            bound->context->color = phone_me_opaque_color(
+                component, component, component);
             return std::optional<Value> {};
         });
 
@@ -1231,6 +1252,22 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!arguments.empty()) {
                 return fail(ErrorCode::invalid_argument,
                             "Font.getDefaultFont expects no arguments");
+            }
+            auto object = create_font_object(
+                machine, graphics::Font::default_font());
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+
+    add(registry, font_owner, "getFont",
+        "(I)Ljavax/microedition/lcdui/Font;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto specifier = int_argument(arguments, 0U, "Font.getFont");
+            if (!specifier) return std::unexpected(specifier.error());
+            if (*specifier != 0 && *specifier != 1) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Font specifier is invalid");
             }
             auto object = create_font_object(
                 machine, graphics::Font::default_font());

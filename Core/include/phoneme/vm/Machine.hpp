@@ -33,6 +33,11 @@
 #include "phoneme/vm/Scheduler.hpp"
 #include "phoneme/vm/TimerService.hpp"
 
+namespace phoneme::runtime
+{
+  class CanvasRuntime;
+}
+
 namespace phoneme::vm
 {
 
@@ -222,6 +227,7 @@ namespace phoneme::vm
 
   private:
     friend class Scheduler;
+    friend class runtime::CanvasRuntime;
 
     struct Invocation final
     {
@@ -277,6 +283,8 @@ namespace phoneme::vm
     [[nodiscard]] Status release_synchronized_monitor(
         std::optional<ObjectRef> monitor);
     [[nodiscard]] Status enter_monitor(ObjectRef monitor);
+    [[nodiscard]] Status enter_external_execution();
+    void leave_external_execution() noexcept;
     [[nodiscard]] u32 suspend_execution_for_blocking() noexcept;
     void resume_execution_after_blocking(u32 depth) noexcept;
     void publish_execution_roots(u32 invocation_depth,

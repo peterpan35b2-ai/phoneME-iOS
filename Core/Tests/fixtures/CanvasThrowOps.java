@@ -19,5 +19,9 @@ public final class CanvasThrowOps extends MIDlet {
         protected void pointerPressed(int x, int y) {
             throw new RuntimeException("canvas callback failure");
         }
+
+        protected void hideNotify() {
+            throw new RuntimeException("hide callback failure");
+        }
     }
 }

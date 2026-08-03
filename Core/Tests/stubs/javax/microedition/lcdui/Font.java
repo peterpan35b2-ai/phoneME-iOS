@@ -11,11 +11,14 @@ public final class Font {
     public static final int SIZE_MEDIUM = 0;
     public static final int SIZE_SMALL = 8;
     public static final int SIZE_LARGE = 16;
+    public static final int FONT_STATIC_TEXT = 0;
+    public static final int FONT_INPUT_TEXT = 1;
 
     private Font() {
     }
 
     public static Font getDefaultFont() { return null; }
+    public static Font getFont(int fontSpecifier) { return null; }
     public static Font getFont(int face, int style, int size) { return null; }
     public int getFace() { return 0; }
     public int getStyle() { return 0; }

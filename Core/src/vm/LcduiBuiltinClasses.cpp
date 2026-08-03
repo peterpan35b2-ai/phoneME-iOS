@@ -31,6 +31,10 @@ using namespace builtin;
         method(kPublic, "setSelectedFlags", "([Z)V"),
         method(kPublic, "setFitPolicy", "(I)V"),
         method(kPublic, "getFitPolicy", "()I"),
+        method(kPublic, "setFont",
+               "(ILjavax/microedition/lcdui/Font;)V"),
+        method(kPublic, "getFont",
+               "(I)Ljavax/microedition/lcdui/Font;"),
     };
 }
 
@@ -57,6 +61,10 @@ using namespace builtin;
             method(kPublic | kAbstract, "setSelectedFlags", "([Z)V"),
             method(kPublic | kAbstract, "setFitPolicy", "(I)V"),
             method(kPublic | kAbstract, "getFitPolicy", "()I"),
+            method(kPublic | kAbstract, "setFont",
+                   "(ILjavax/microedition/lcdui/Font;)V"),
+            method(kPublic | kAbstract, "getFont",
+                   "(I)Ljavax/microedition/lcdui/Font;"),
         });
     }
     if (name == "javax/microedition/lcdui/Image") {
@@ -278,6 +286,8 @@ using namespace builtin;
                    "()Ljavax/microedition/lcdui/Font;"),
             method(kPublic | kStatic, "getFont",
                    "(III)Ljavax/microedition/lcdui/Font;"),
+            method(kPublic | kStatic, "getFont",
+                   "(I)Ljavax/microedition/lcdui/Font;"),
             method(kPublic, "getFace", "()I"),
             method(kPublic, "getStyle", "()I"),
             method(kPublic, "getSize", "()I"),
@@ -349,6 +359,7 @@ using namespace builtin;
             method(kPublic, "getWidth", "()I"),
             method(kPublic, "getHeight", "()I"),
             method(kPublic, "isShown", "()Z"),
+            method(kProtected, "sizeChanged", "(II)V"),
         });
     }
     if (name == "javax/microedition/lcdui/Screen") {
@@ -369,6 +380,15 @@ using namespace builtin;
             field(kPublic | kStatic | kFinal, "CHOICE_GROUP_ELEMENT", "I"),
             field(kPublic | kStatic | kFinal, "ALERT", "I"),
             field(kPublic | kStatic | kFinal, "TAB", "I"),
+            field(kPublic | kStatic | kFinal, "COLOR_BACKGROUND", "I"),
+            field(kPublic | kStatic | kFinal, "COLOR_FOREGROUND", "I"),
+            field(kPublic | kStatic | kFinal,
+                  "COLOR_HIGHLIGHTED_BACKGROUND", "I"),
+            field(kPublic | kStatic | kFinal,
+                  "COLOR_HIGHLIGHTED_FOREGROUND", "I"),
+            field(kPublic | kStatic | kFinal, "COLOR_BORDER", "I"),
+            field(kPublic | kStatic | kFinal,
+                  "COLOR_HIGHLIGHTED_BORDER", "I"),
         }, {
             method(kStatic, "<clinit>", "()V"),
             method(kPrivate, "<init>", "()V"),
@@ -382,6 +402,10 @@ using namespace builtin;
             method(kPublic, "setCurrent",
                    "(Ljavax/microedition/lcdui/Alert;"
                    "Ljavax/microedition/lcdui/Displayable;)V"),
+            method(kPublic, "setCurrentItem",
+                   "(Ljavax/microedition/lcdui/Item;)V"),
+            method(kPublic, "getColor", "(I)I"),
+            method(kPublic, "getBorderStyle", "(Z)I"),
             method(kPublic, "isColor", "()Z"),
             method(kPublic, "numColors", "()I"),
             method(kPublic, "numAlphaLevels", "()I"),
@@ -481,6 +505,7 @@ using namespace builtin;
             field(kPrivate, "selected", "[Z"),
             field(kPrivate, "choiceCount", "I"),
             field(kPrivate, "fitPolicy", "I"),
+            field(kPrivate, "fonts", "[Ljavax/microedition/lcdui/Font;"),
         }, choice_methods("(Ljava/lang/String;I)V",
                           "(Ljava/lang/String;I[Ljava/lang/String;"
                           "[Ljavax/microedition/lcdui/Image;)V"),
@@ -505,6 +530,7 @@ using namespace builtin;
             field(kPrivate, "fitPolicy", "I"),
             field(kPrivate, "selectCommand",
                   "Ljavax/microedition/lcdui/Command;"),
+            field(kPrivate, "fonts", "[Ljavax/microedition/lcdui/Font;"),
             field(kPublic | kStatic | kFinal, "SELECT_COMMAND",
                   "Ljavax/microedition/lcdui/Command;"),
         }, std::move(methods), {"javax/microedition/lcdui/Choice"});
@@ -514,6 +540,7 @@ using namespace builtin;
                           "javax/microedition/lcdui/Item", kOrdinary, {
             field(kPrivate, "text", "Ljava/lang/String;"),
             field(kPrivate, "appearanceMode", "I"),
+            field(kPrivate, "font", "Ljavax/microedition/lcdui/Font;"),
         }, {
             method(kPublic, "<init>",
                    "(Ljava/lang/String;Ljava/lang/String;)V"),
@@ -522,6 +549,10 @@ using namespace builtin;
             method(kPublic, "getText", "()Ljava/lang/String;"),
             method(kPublic, "setText", "(Ljava/lang/String;)V"),
             method(kPublic, "getAppearanceMode", "()I"),
+            method(kPublic, "getFont",
+                   "()Ljavax/microedition/lcdui/Font;"),
+            method(kPublic, "setFont",
+                   "(Ljavax/microedition/lcdui/Font;)V"),
         });
     }
     if (name == "javax/microedition/lcdui/TextField") {
@@ -537,6 +568,11 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;II)V"),
             method(kPublic, "getString", "()Ljava/lang/String;"),
             method(kPublic, "setString", "(Ljava/lang/String;)V"),
+            method(kPublic, "getChars", "([C)I"),
+            method(kPublic, "setChars", "([CII)V"),
+            method(kPublic, "insert", "(Ljava/lang/String;I)V"),
+            method(kPublic, "insert", "([CIII)V"),
+            method(kPublic, "delete", "(II)V"),
             method(kPublic, "getMaxSize", "()I"),
             method(kPublic, "setMaxSize", "(I)I"),
             method(kPublic, "size", "()I"),
@@ -716,6 +752,7 @@ using namespace builtin;
             field(kPrivate, "nextDisplayable",
                   "Ljavax/microedition/lcdui/Displayable;"),
             field(kPrivate, "imageGeneration", "I"),
+            field(kPrivate, "indicator", "Ljavax/microedition/lcdui/Gauge;"),
             field(kPublic | kStatic | kFinal, "FOREVER", "I"),
             field(kPublic | kStatic | kFinal, "DISMISS_COMMAND",
                   "Ljavax/microedition/lcdui/Command;"),
@@ -739,6 +776,10 @@ using namespace builtin;
             method(kPublic, "getTimeout", "()I"),
             method(kPublic, "setTimeout", "(I)V"),
             method(kPublic, "getDefaultTimeout", "()I"),
+            method(kPublic, "getIndicator",
+                   "()Ljavax/microedition/lcdui/Gauge;"),
+            method(kPublic, "setIndicator",
+                   "(Ljavax/microedition/lcdui/Gauge;)V"),
         });
     }
 

@@ -17,4 +17,6 @@ public class Alert extends Screen {
     public int getTimeout() { return 0; }
     public void setTimeout(int timeout) {}
     public int getDefaultTimeout() { return 0; }
+    public Gauge getIndicator() { return null; }
+    public void setIndicator(Gauge indicator) { }
 }

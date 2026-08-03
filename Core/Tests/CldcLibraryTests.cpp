@@ -63,6 +63,21 @@ int main(int argc, char** argv) {
     require_java_zero(machine, "corefixture/CldcLibraryOps", "runAll");
     require_java_zero(machine, "corefixture/TimerOps", "run");
 
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "explicitClear");
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "createWeakOnly");
+    auto weak_collection = machine.collect_garbage();
+    require(weak_collection.has_value(), "weak-reference collection failed");
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "expectCleared");
+
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "createStrong");
+    auto strong_collection = machine.collect_garbage();
+    require(strong_collection.has_value(), "strong-reference collection failed");
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "expectStrong");
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "releaseStrong");
+    auto released_collection = machine.collect_garbage();
+    require(released_collection.has_value(), "released-reference collection failed");
+    require_java_zero(machine, "corefixture/WeakReferenceOps", "expectCleared");
+
     std::cout << "CldcLibraryTests passed\n";
     return 0;
 }

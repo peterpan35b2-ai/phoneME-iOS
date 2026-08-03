@@ -574,7 +574,10 @@ template <typename Number>
         std::u16string_view value;
     };
     static constexpr std::array<Property, 13> properties {{
-        {u"microedition.platform", u"iPhone"},
+        // Legacy games commonly slice at least the first nine characters to
+        // select a device profile. Keep the iOS identity, but expose a stable
+        // phoneME-compatible value long enough for those probes.
+        {u"microedition.platform", u"iPhone-iOS"},
         {u"microedition.profiles", u"MIDP-2.0"},
         {u"microedition.configuration", u"CLDC-1.1"},
         {u"microedition.locale", u"en-US"},

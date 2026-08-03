@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <memory>
 #include <utility>
 
 #include "phoneme/vm/Machine.hpp"
@@ -184,6 +185,18 @@ void CanvasRuntime::enqueue_pointer(i32 x,
 }
 
 Status CanvasRuntime::pump() {
+    // Canvas state is also mutated by LCDUI/GameCanvas natives running on Java
+    // worker threads. Serialize the complete host pump with bytecode execution;
+    // otherwise repaint traversal can race a Java-side repaint/flush and corrupt
+    // the stored render-hook function objects.
+    auto entered = machine_.enter_external_execution();
+    if (!entered) return entered;
+    const auto leave_execution = [](vm::Machine* machine) noexcept {
+        machine->leave_external_execution();
+    };
+    std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
+        &machine_, leave_execution);
+
     if (pumping_) {
         return {};
     }

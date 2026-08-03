@@ -21,6 +21,11 @@ public class TextField extends Item {
 
     public String getString() { return null; }
     public void setString(String text) { }
+    public int getChars(char[] data) { return 0; }
+    public void setChars(char[] data, int offset, int length) { }
+    public void insert(String source, int position) { }
+    public void insert(char[] data, int offset, int length, int position) { }
+    public void delete(int offset, int length) { }
     public int getMaxSize() { return 0; }
     public int setMaxSize(int maxSize) { return 0; }
     public int size() { return 0; }

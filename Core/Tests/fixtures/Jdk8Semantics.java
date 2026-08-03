@@ -826,6 +826,8 @@ public final class Jdk8Semantics {
         if ("fallback".equals(
                 System.getProperty("phoneME.missing", "fallback"))) result |= 8;
         if ("\n".equals(System.getProperty("line.separator"))) result |= 16;
+        String platform = System.getProperty("microedition.platform");
+        if (platform != null && platform.length() >= 9) result |= 256;
         Runtime first = Runtime.getRuntime();
         Runtime second = Runtime.getRuntime();
         if (first == second) result |= 32;

@@ -32,6 +32,7 @@ void register_m3g_natives(NativeMethodRegistry&) {}
 void register_math_natives(NativeMethodRegistry&) {}
 void register_media_natives(NativeMethodRegistry&) {}
 void register_push_natives(NativeMethodRegistry&) {}
+void register_reference_natives(NativeMethodRegistry&) {}
 void register_rms_natives(NativeMethodRegistry&) {}
 void register_security_natives(NativeMethodRegistry&) {}
 void register_string_encoding_natives(NativeMethodRegistry&) {}
@@ -219,7 +220,7 @@ int main(int argc, char** argv) {
         std::cout << "Hidden two-thread pacing: wall=" << hidden_wall_seconds
                   << "s cpu=" << hidden_cpu_seconds << "s\n";
         if (performance_gate_enabled) {
-            require(hidden_cpu_seconds < hidden_wall_seconds * 0.25,
+            require(hidden_cpu_seconds < hidden_wall_seconds * 0.10,
                     "hidden VM shares one low-duty CPU gate across threads");
         }
         busy_machine.scheduler().set_host_foreground(true);

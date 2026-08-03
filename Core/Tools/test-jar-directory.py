@@ -532,6 +532,8 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
                 "CoreGraphics",
                 "-framework",
                 "CoreFoundation",
+                "-framework",
+                "ImageIO",
             ]
         )
     command.extend(["-o", str(binary)])

@@ -32,74 +32,30 @@ Font Font::default_font() noexcept {
 }
 
 i32 Font::height() const noexcept {
-    if (auto metrics = platform_font_metrics(*this)) {
-        return metrics->height;
-    }
-    switch (size_) {
-    case FontSize::small:
-        return 12;
-    case FontSize::large:
-        return 20;
-    case FontSize::medium:
-        return 16;
-    }
-    return 16;
+    // The phoneME putpixel port used by the reference runtime exposes the
+    // bundled 9x14 bitmap font for every logical MIDP face/style/size.
+    // Keep Java-visible metrics deterministic instead of leaking CoreText
+    // device/font-version differences into game layout calculations.
+    return 14;
 }
 
 i32 Font::baseline() const noexcept {
-    if (auto metrics = platform_font_metrics(*this)) {
-        return metrics->baseline;
-    }
-    return height() - std::max(2, height() / 5);
+    return 11;
 }
 
 i32 Font::char_width(char32_t character) const noexcept {
-    const char32_t single[] {character};
-    if (auto width = platform_text_width(*this, single)) {
-        return *width;
-    }
-    i32 base = 8;
-    switch (size_) {
-    case FontSize::small:
-        base = 6;
-        break;
-    case FontSize::large:
-        base = 10;
-        break;
-    case FontSize::medium:
-        base = 8;
-        break;
-    }
-    if (face_ == FontFace::monospace) {
-        return base + (is_bold() ? 1 : 0);
-    }
-    if (character == U' ' || character == U'\t') {
-        return std::max(2, base / 2);
-    }
-    if (character == U'i' || character == U'l' || character == U'I' ||
-        character == U'!' || character == U'.' || character == U',' ||
-        character == U':' || character == U';' || character == U'|') {
-        return std::max(2, base / 2) + (is_bold() ? 1 : 0);
-    }
-    if (character == U'm' || character == U'w' || character == U'M' ||
-        character == U'W' || character >= 0x2E80U) {
-        return base + std::max(1, base / 4) + (is_bold() ? 1 : 0);
-    }
-    return base + (is_bold() ? 1 : 0);
+    static_cast<void>(character);
+    return 9;
 }
 
 i32 Font::chars_width(std::span<const char32_t> characters) const noexcept {
-    if (auto width = platform_text_width(*this, characters)) {
-        return *width;
+    constexpr i64 glyph_width = 9;
+    if (characters.size() > static_cast<usize>(
+            std::numeric_limits<i32>::max() / glyph_width)) {
+        return std::numeric_limits<i32>::max();
     }
-    i64 total = 0;
-    for (char32_t character : characters) {
-        total += char_width(character);
-        if (total > std::numeric_limits<i32>::max()) {
-            return std::numeric_limits<i32>::max();
-        }
-    }
-    return static_cast<i32>(total);
+    return static_cast<i32>(characters.size() *
+                            static_cast<usize>(glyph_width));
 }
 
 } // namespace phoneme::graphics

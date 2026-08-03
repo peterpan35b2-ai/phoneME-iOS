@@ -761,7 +761,15 @@ void append_utf8(std::string& output, u32 code_point) {
                          "unsupported or unknown media content type");
     }
     auto native_id = machine.media().create_data(std::move(*data), type);
-    if (!native_id) return map_media_error(native_id.error());
+    if (!native_id) {
+        // Manager.createPlayer(InputStream, type) is specified to surface
+        // player-construction failures as MediaException. Platform adapters
+        // use invalid_argument for malformed/empty payloads internally, but
+        // exposing that as IllegalArgumentException breaks legacy games that
+        // correctly catch MediaException and continue without sound.
+        return fail_java("javax/microedition/media/MediaException",
+                         native_id.error().message);
+    }
     auto player = create_player_object(machine, *native_id, type);
     if (!player) {
         (void)machine.media().close(*native_id);

@@ -64,6 +64,7 @@ struct App final {
     u64 lifecycle_token {0};
     bool lifecycle_busy {false};
     std::shared_ptr<ApplicationVM> vm;
+    std::string console_output;
 };
 
 class Runtime final {

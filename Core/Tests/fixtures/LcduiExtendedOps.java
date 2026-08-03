@@ -13,6 +13,7 @@ import javax.microedition.lcdui.DateField;
 import javax.microedition.lcdui.Display;
 import javax.microedition.lcdui.Displayable;
 import javax.microedition.lcdui.Form;
+import javax.microedition.lcdui.Font;
 import javax.microedition.lcdui.Gauge;
 import javax.microedition.lcdui.Graphics;
 import javax.microedition.lcdui.Image;
@@ -35,7 +36,9 @@ public final class LcduiExtendedOps extends MIDlet
     private static Ticker ticker;
     private static TextField textField;
     private static TextField numericField;
+    private static StringItem styledItem;
     private static Gauge gauge;
+    private static Gauge indicator;
     private static ChoiceGroup choice;
     private static DateField dateField;
     private static DateField dateOnly;
@@ -55,6 +58,10 @@ public final class LcduiExtendedOps extends MIDlet
     private static int listenerMutations;
     private static int ephemeralIndex;
     private static boolean foreverAccepted;
+    private static boolean textFieldCharOpsPassed;
+    private static boolean displayCapabilitiesPassed;
+    private static boolean choiceFontPassed;
+    private static Font customFont;
 
     protected void startApp() {}
     protected void pauseApp() {}
@@ -71,9 +78,18 @@ public final class LcduiExtendedOps extends MIDlet
         textField = new TextField("Text", "old", 32, TextField.ANY);
         numericField = new TextField("Numeric", "12", 8,
                 TextField.NUMERIC | TextField.PASSWORD);
+        customFont = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_BOLD,
+                                  Font.SIZE_SMALL);
+        styledItem = new StringItem("Styled", "font");
+        styledItem.setFont(customFont);
         gauge = new Gauge("Gauge", true, 10, 1);
         choice = new ChoiceGroup("Choice", Choice.MULTIPLE,
                                  new String[] {"zero", "one"}, null);
+        choice.setFont(1, customFont);
+        choice.insert(0, "inserted", null);
+        choiceFontPassed = choice.getFont(2) == customFont;
+        choice.delete(0);
+        choiceFontPassed = choiceFontPassed && choice.getFont(1) == customFont;
         dateField = new DateField("DateTime", DateField.DATE_TIME,
                                   TimeZone.getTimeZone("GMT+07:00"));
         dateOnly = new DateField("Date", DateField.DATE);
@@ -90,6 +106,7 @@ public final class LcduiExtendedOps extends MIDlet
 
         form.append(textField);
         form.append(numericField);
+        form.append(styledItem);
         form.append(gauge);
         form.append(choice);
         form.append(dateField);
@@ -108,6 +125,38 @@ public final class LcduiExtendedOps extends MIDlet
         form.addCommand(staleCommand);
         form.setCommandListener(app);
         display.setCurrent(form);
+        display.setCurrentItem(styledItem);
+        boolean badColorRejected = false;
+        try {
+            display.getColor(99);
+        } catch (IllegalArgumentException expected) {
+            badColorRejected = true;
+        }
+        boolean badFontRejected = false;
+        try {
+            Font.getFont(99);
+        } catch (IllegalArgumentException expected) {
+            badFontRejected = true;
+        }
+        displayCapabilitiesPassed = display.getCurrent() == form &&
+                display.getColor(Display.COLOR_BACKGROUND) >= 0 &&
+                display.getColor(Display.COLOR_FOREGROUND) >= 0 &&
+                display.getBorderStyle(false) == Graphics.SOLID &&
+                Font.getFont(Font.FONT_STATIC_TEXT) != null &&
+                Font.getFont(Font.FONT_INPUT_TEXT) != null &&
+                badColorRejected && badFontRejected;
+
+        char[] fieldChars = new char[] {'a', 'b', 'c'};
+        textField.setChars(fieldChars, 0, fieldChars.length);
+        textField.insert("X", 1);
+        char[] fieldInsert = new char[] {'Y', 'Z'};
+        textField.insert(fieldInsert, 1, 1, 4);
+        textField.delete(1, 2);
+        char[] fieldCopy = new char[4];
+        textFieldCharOpsPassed = "acZ".equals(textField.getString()) &&
+                textField.getChars(fieldCopy) == 3 &&
+                fieldCopy[0] == 'a' && fieldCopy[1] == 'c' &&
+                fieldCopy[2] == 'Z' && textField.getCaretPosition() == 1;
 
         textBox = new TextBox("Box", "start", 32, 0);
         char[] first = new char[] {'a', 'b', 'c'};
@@ -130,6 +179,17 @@ public final class LcduiExtendedOps extends MIDlet
         foreverAlert = new Alert("Alert", "Alert body", image,
                                  AlertType.INFO);
         foreverAlert.setTimeout(Alert.FOREVER);
+        indicator = new Gauge(null, false, 10, 3);
+        foreverAlert.setIndicator(indicator);
+        boolean interactiveRejected = false;
+        try {
+            foreverAlert.setIndicator(gauge);
+        } catch (IllegalArgumentException expected) {
+            interactiveRejected = true;
+        }
+        if (!interactiveRejected || foreverAlert.getIndicator() != indicator) {
+            return 92;
+        }
         foreverAccepted = foreverAlert.getTimeout() == Alert.FOREVER;
         foreverAlert.setCommandListener(app);
         alert = foreverAlert;
@@ -157,6 +217,11 @@ public final class LcduiExtendedOps extends MIDlet
                 alert.isShown() || foreverAlert.getImage() == null ||
                 foreverAlert.getImage().getWidth() != 2 ||
                 foreverAlert.getImage().getHeight() != 3) return 5;
+        if (!textFieldCharOpsPassed || !displayCapabilitiesPassed ||
+                !choiceFontPassed || styledItem.getFont() != customFont ||
+                foreverAlert.getIndicator() != indicator) return 13;
+        styledItem.setFont(null);
+        if (styledItem.getFont() == null) return 14;
         if (!"native-text".equals(textField.getString()) ||
                 !"-42".equals(numericField.getString()) ||
                 numericField.getConstraints() !=
@@ -181,7 +246,7 @@ public final class LcduiExtendedOps extends MIDlet
                 customItem.keyPressCalls != 1 ||
                 customItem.keyReleaseCalls != 1 ||
                 customItem.keyRepeatCalls != 1) return 9;
-        if (form.size() != 12 || !"listener-mutated".equals(textField.getLabel())) {
+        if (form.size() != 13 || !"listener-mutated".equals(textField.getLabel())) {
             return 10;
         }
         if (spacer.getMinimumWidth() != 4 || spacer.getMinimumHeight() != 5) {

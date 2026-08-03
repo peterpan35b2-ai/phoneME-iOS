@@ -409,6 +409,24 @@ int main(int argc, char** argv) {
     require(runtime.destroy_midlet(suppress_app_id).has_value(),
             "destroy suppressing GameCanvas fixture");
 
+    constexpr phoneme::AppId race_app_id {434};
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.CanvasRaceOps",
+                                 race_app_id,
+                                 phoneme::Dimensions {320, 240}).has_value(),
+            "start concurrent Canvas repaint fixture");
+    for (int iteration = 0; iteration < 2'000; ++iteration) {
+        (void)runtime.frame_snapshot();
+        if ((iteration & 31) == 0) {
+            std::this_thread::yield();
+        }
+    }
+    require(runtime.app_state(race_app_id) ==
+                phoneme::runtime::AppState::active,
+            "Java repaint thread and host frame pump remain synchronized");
+    require(runtime.destroy_midlet(race_app_id).has_value(),
+            "destroy concurrent Canvas repaint fixture");
+
     constexpr phoneme::AppId throw_app_id {435};
     require(runtime.start_midlet(*suite_id,
                                  "corefixture.CanvasThrowOps",
@@ -419,6 +437,11 @@ int main(int argc, char** argv) {
     runtime.send_pointer(1, 2, 1);
     require(runtime.app_state(throw_app_id) == phoneme::runtime::AppState::error,
             "uncaught Canvas callback exception is isolated to the MIDlet");
+    require(runtime.destroy_midlet(throw_app_id).has_value(),
+            "forced destroy ignores hideNotify exceptions");
+    require(runtime.app_state(throw_app_id) ==
+                phoneme::runtime::AppState::destroyed,
+            "forced destroy releases a callback-failed MIDlet");
 
     std::cout << "Canvas graphics runtime tests passed\n";
     return 0;

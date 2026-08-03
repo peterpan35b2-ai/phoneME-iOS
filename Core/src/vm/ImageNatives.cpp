@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "GraphicsNativeSupport.hpp"
-#include "phoneme/graphics/PngDecoder.hpp"
+#include "phoneme/graphics/ImageDecoder.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
 namespace phoneme::vm {
@@ -84,10 +84,10 @@ void add(NativeMethodRegistry& registry,
     return *payload;
 }
 
-[[nodiscard]] Result<graphics::Image> decode_png_bytes(
+[[nodiscard]] Result<graphics::Image> decode_image_bytes(
     std::span<const u8> bytes,
     std::string_view exception_class) {
-    auto decoded = graphics::decode_png(bytes);
+    auto decoded = graphics::decode_image(bytes);
     if (!decoded) {
         return graphics_error(decoded.error(), exception_class);
     }
@@ -241,7 +241,7 @@ void register_image_natives(NativeMethodRegistry& registry) {
             if (!bytes) {
                 return fail_java("java/io/IOException", bytes.error().message);
             }
-            auto image = decode_png_bytes(*bytes, "java/io/IOException");
+            auto image = decode_image_bytes(*bytes, "java/io/IOException");
             if (!image) return std::unexpected(image.error());
             auto object = create_image_object(machine, std::move(*image));
             if (!object) return std::unexpected(object.error());
@@ -264,7 +264,7 @@ void register_image_natives(NativeMethodRegistry& registry) {
             }
             auto bytes = read_input_stream(machine, *input);
             if (!bytes) return std::unexpected(bytes.error());
-            auto image = decode_png_bytes(*bytes, "java/io/IOException");
+            auto image = decode_image_bytes(*bytes, "java/io/IOException");
             if (!image) return std::unexpected(image.error());
             auto object = create_image_object(machine, std::move(*image));
             if (!object) return std::unexpected(object.error());
@@ -287,8 +287,8 @@ void register_image_natives(NativeMethodRegistry& registry) {
             auto bytes = byte_array_slice(machine, *data, *offset, *length,
                                           "Image.createImage");
             if (!bytes) return std::unexpected(bytes.error());
-            auto image = decode_png_bytes(*bytes,
-                                          "java/lang/IllegalArgumentException");
+            auto image = decode_image_bytes(
+                *bytes, "java/lang/IllegalArgumentException");
             if (!image) return std::unexpected(image.error());
             auto object = create_image_object(machine, std::move(*image));
             if (!object) return std::unexpected(object.error());

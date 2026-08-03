@@ -32,6 +32,7 @@ if(APPLE)
         "-framework CoreText"
         "-framework CoreGraphics"
         "-framework CoreFoundation"
+        "-framework ImageIO"
     )
 endif()
 

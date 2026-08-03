@@ -167,46 +167,84 @@ constexpr double kPi = 3.14159265358979323846;
                                         i32 y1,
                                         i32 x2,
                                         i32 y2) {
-    auto clipped = clip_line(x1, y1, x2, y2, context.clip);
-    if (!clipped.has_value()) return {};
-    i64 current_x = (*clipped)[0];
-    i64 current_y = (*clipped)[1];
-    const i64 destination_x = (*clipped)[2];
-    const i64 destination_y = (*clipped)[3];
-    const i64 delta_x = std::llabs(destination_x - current_x);
-    const i64 step_x = current_x < destination_x ? 1 : -1;
-    const i64 delta_y = -std::llabs(destination_y - current_y);
-    const i64 step_y = current_y < destination_y ? 1 : -1;
-    i64 error = delta_x + delta_y;
-    const u64 skipped = std::max(
-        static_cast<u64>(std::llabs(current_x - x1)),
-        static_cast<u64>(std::llabs(current_y - y1)));
-    usize sample = static_cast<usize>(skipped);
+    if (empty(context.clip)) return {};
 
-    while (true) {
-        if (context.stroke_style == stroke_solid || (sample & 1U) == 0U) {
-            auto stored = put_pixel(target,
-                                    context,
-                                    static_cast<i32>(current_x),
-                                    static_cast<i32>(current_y),
-                                    context.color);
-            if (!stored) {
-                return stored;
-            }
+    const i64 start_x = x1;
+    const i64 start_y = y1;
+    const u64 delta_x = static_cast<u64>(std::llabs(
+        static_cast<i64>(x2) - start_x));
+    const u64 delta_y = static_cast<u64>(std::llabs(
+        static_cast<i64>(y2) - start_y));
+    const i64 step_x = x1 <= x2 ? 1 : -1;
+    const i64 step_y = y1 <= y2 ? 1 : -1;
+    const i64 clip_left = context.clip.x;
+    const i64 clip_top = context.clip.y;
+    const i64 clip_right = static_cast<i64>(context.clip.x) +
+                           context.clip.width - 1;
+    const i64 clip_bottom = static_cast<i64>(context.clip.y) +
+                            context.clip.height - 1;
+
+    const auto clipped_major_range = [](i64 start,
+                                        i64 step,
+                                        u64 length,
+                                        i64 lower,
+                                        i64 upper)
+        -> std::optional<std::pair<u64, u64>> {
+        i64 first = 0;
+        i64 last = static_cast<i64>(length);
+        if (step > 0) {
+            first = std::max<i64>(first, lower - start);
+            last = std::min<i64>(last, upper - start);
+        } else {
+            first = std::max<i64>(first, start - upper);
+            last = std::min<i64>(last, start - lower);
         }
-        if (current_x == destination_x && current_y == destination_y) {
-            break;
+        if (first > last || last < 0) return std::nullopt;
+        first = std::max<i64>(first, 0);
+        return std::pair<u64, u64> {
+            static_cast<u64>(first), static_cast<u64>(last)};
+    };
+
+    const auto rounded_minor = [](u64 major_step,
+                                  u64 minor_delta,
+                                  u64 major_delta) noexcept -> u64 {
+        if (major_delta == 0U || minor_delta == 0U) return 0U;
+        const u64 product = major_step * minor_delta;
+        const u64 quotient = product / major_delta;
+        const u64 remainder = product % major_delta;
+        return quotient + (remainder * 2U >= major_delta ? 1U : 0U);
+    };
+
+    const bool x_major = delta_x >= delta_y;
+    const u64 major_delta = x_major ? delta_x : delta_y;
+    const u64 minor_delta = x_major ? delta_y : delta_x;
+    auto range = x_major
+        ? clipped_major_range(start_x, step_x, major_delta,
+                              clip_left, clip_right)
+        : clipped_major_range(start_y, step_y, major_delta,
+                              clip_top, clip_bottom);
+    if (!range.has_value()) return {};
+
+    for (u64 sample = range->first; sample <= range->second; ++sample) {
+        const u64 minor = rounded_minor(sample, minor_delta, major_delta);
+        const i64 current_x = x_major
+            ? start_x + step_x * static_cast<i64>(sample)
+            : start_x + step_x * static_cast<i64>(minor);
+        const i64 current_y = x_major
+            ? start_y + step_y * static_cast<i64>(minor)
+            : start_y + step_y * static_cast<i64>(sample);
+        if (current_x >= clip_left && current_x <= clip_right &&
+            current_y >= clip_top && current_y <= clip_bottom &&
+            (context.stroke_style == stroke_solid ||
+             (sample & 1U) == 0U)) {
+            auto stored = target.set_pixel(
+                static_cast<i32>(current_x),
+                static_cast<i32>(current_y),
+                context.color,
+                true);
+            if (!stored) return stored;
         }
-        const i64 doubled = error * 2;
-        if (doubled >= delta_y) {
-            error += delta_y;
-            current_x += step_x;
-        }
-        if (doubled <= delta_x) {
-            error += delta_x;
-            current_y += step_y;
-        }
-        ++sample;
+        if (sample == range->second) break;
     }
     return {};
 }

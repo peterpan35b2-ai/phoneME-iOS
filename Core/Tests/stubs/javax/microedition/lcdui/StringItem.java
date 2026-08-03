@@ -16,4 +16,6 @@ public class StringItem extends Item {
     public String getText() { return null; }
     public void setText(String text) { }
     public int getAppearanceMode() { return 0; }
+    public Font getFont() { return null; }
+    public void setFont(Font font) { }
 }

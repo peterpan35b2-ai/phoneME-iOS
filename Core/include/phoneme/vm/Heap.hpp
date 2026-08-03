@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -59,6 +60,11 @@ public:
     [[nodiscard]] Result<std::u16string> string_value(
         ObjectRef reference) const;
 
+    [[nodiscard]] Status set_weak_referent(ObjectRef reference,
+                                           ObjectRef referent);
+    [[nodiscard]] Result<ObjectRef> weak_referent(ObjectRef reference) const;
+    [[nodiscard]] Status clear_weak_referent(ObjectRef reference);
+
     [[nodiscard]] Status collect(std::span<const ObjectRef> roots);
     void clear() noexcept;
     [[nodiscard]] HeapStats stats() const noexcept;
@@ -69,6 +75,7 @@ private:
         std::vector<Value> fields;
         std::vector<Value> elements;
         std::u16string string_payload;
+        std::optional<ObjectRef> weak_referent;
         bool is_array {false};
         bool is_string {false};
         bool marked {false};

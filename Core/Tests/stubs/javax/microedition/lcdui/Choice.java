@@ -24,4 +24,6 @@ public interface Choice {
     void setSelectedFlags(boolean[] flags);
     void setFitPolicy(int policy);
     int getFitPolicy();
+    void setFont(int index, Font font);
+    Font getFont(int index);
 }

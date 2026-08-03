@@ -1,5 +1,6 @@
 package compat.javame;
 
+import java.util.Calendar;
 import java.util.Date;
 import java.util.TimeZone;
 import javax.microedition.lcdui.Choice;
@@ -68,6 +69,12 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         emitInt("choice-group", new IntCall() {
             public int run() { return choiceGroupSemantics(); }
         });
+        emitInt("choice-selection", new IntCall() {
+            public int run() { return choiceSelectionSemantics(); }
+        });
+        emitInt("choice-strings", new IntCall() {
+            public int run() { return choiceStringSemantics(); }
+        });
         emitInt("list", new IntCall() {
             public int run() { return listSemantics(); }
         });
@@ -77,11 +84,68 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         emitInt("gauge-date-spacer", new IntCall() {
             public int run() { return gaugeDateSpacerSemantics(); }
         });
+        emitInt("gauge", new IntCall() {
+            public int run() { return gaugeSemantics(); }
+        });
+        emitLong("date-field", new LongCall() {
+            public long run() { return dateFieldSemantics(); }
+        });
+        emitLong("date-after-set", new LongCall() {
+            public long run() { return dateAfterSet(); }
+        });
+        emitLong("date-after-time-mode", new LongCall() {
+            public long run() { return dateAfterTimeMode(); }
+        });
+        emitLong("calendar-time-reset", new LongCall() {
+            public long run() { return calendarTimeReset(); }
+        });
+        emitInt("spacer-ticker", new IntCall() {
+            public int run() { return spacerTickerSemantics(); }
+        });
         emitInt("font", new IntCall() {
             public int run() { return fontSemantics(); }
         });
+        emitInt("font-properties", new IntCall() {
+            public int run() { return fontPropertySemantics(); }
+        });
+        emitInt("font-metrics", new IntCall() {
+            public int run() { return fontMetricSemantics(); }
+        });
+        emitInt("font-height", new IntCall() {
+            public int run() { return testFont().getHeight(); }
+        });
+        emitInt("font-baseline", new IntCall() {
+            public int run() { return testFont().getBaselinePosition(); }
+        });
+        emitInt("font-char-width", new IntCall() {
+            public int run() { return testFont().charWidth('W'); }
+        });
+        emitInt("font-string-width", new IntCall() {
+            public int run() { return testFont().stringWidth("Wiệt"); }
+        });
+        emitInt("font-substring-width", new IntCall() {
+            public int run() { return testFont().substringWidth("abcdef", 1, 3); }
+        });
         emitInt("image-graphics", new IntCall() {
             public int run() { return imageGraphicsSemantics(); }
+        });
+        emitInt("graphics-state", new IntCall() {
+            public int run() { return graphicsStateSemantics(); }
+        });
+        emitInt("graphics-base-fill", new IntCall() {
+            public int run() { return graphicsBaseFillSemantics(); }
+        });
+        emitInt("graphics-base-pixel", new IntCall() {
+            public int run() { return graphicsBasePixel(); }
+        });
+        emitInt("graphics-overlap-fill", new IntCall() {
+            public int run() { return graphicsOverlapFillSemantics(); }
+        });
+        emitInt("graphics-line", new IntCall() {
+            public int run() { return graphicsLineSemantics(); }
+        });
+        emitInt("graphics-line-mask", new IntCall() {
+            public int run() { return graphicsLineMask(); }
         });
         emitInt("sprite", new IntCall() {
             public int run() { return spriteSemantics(); }
@@ -160,6 +224,51 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         return result;
     }
 
+    public static int choiceSelectionSemantics() {
+        ChoiceGroup choice = new ChoiceGroup(
+                "Choice",
+                Choice.MULTIPLE,
+                new String[] {"one", "two", "three"},
+                null);
+        choice.setSelectedIndex(0, true);
+        choice.setSelectedIndex(2, true);
+        choice.setFitPolicy(Choice.TEXT_WRAP_ON);
+        choice.insert(1, "middle", null);
+        choice.set(2, "changed", null);
+        choice.delete(3);
+        boolean[] flags = new boolean[8];
+        int selected = choice.getSelectedFlags(flags);
+        int mask = 0;
+        for (int i = 0; i < flags.length; i++) {
+            if (flags[i]) mask |= 1 << i;
+        }
+        int result = choice.size();
+        result = checksum(result, selected);
+        result = checksum(result, choice.getSelectedIndex());
+        result = checksum(result, choice.getFitPolicy());
+        result = checksum(result, mask);
+        for (int i = 0; i < choice.size(); i++) {
+            result = checksum(result, choice.isSelected(i) ? 1 : 0);
+        }
+        return result;
+    }
+
+    public static int choiceStringSemantics() {
+        ChoiceGroup choice = new ChoiceGroup(
+                "Choice",
+                Choice.MULTIPLE,
+                new String[] {"one", "two", "three"},
+                null);
+        choice.insert(1, "middle", null);
+        choice.set(2, "changed", null);
+        choice.delete(3);
+        int result = choice.size();
+        for (int i = 0; i < choice.size(); i++) {
+            result = checksum(result, choice.getString(i));
+        }
+        return result;
+    }
+
     public static int listSemantics() {
         List list = new List(
                 "List",
@@ -230,11 +339,76 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         return result;
     }
 
-    public static int fontSemantics() {
-        Font font = Font.getFont(
+    public static int gaugeSemantics() {
+        Gauge gauge = new Gauge("Gauge", true, 10, 4);
+        gauge.setValue(30);
+        int result = gauge.getValue();
+        gauge.setMaxValue(6);
+        result = checksum(result, gauge.getMaxValue());
+        result = checksum(result, gauge.getValue());
+        result = checksum(result, gauge.isInteractive() ? 1 : 0);
+        return result;
+    }
+
+    public static long dateFieldSemantics() {
+        DateField date = new DateField(
+                "Date", DateField.DATE_TIME, TimeZone.getTimeZone("GMT"));
+        date.setDate(new Date(123456789L));
+        long result = date.getDate().getTime();
+        result = result * 31L + date.getInputMode();
+        date.setInputMode(DateField.TIME);
+        result = result * 31L + date.getInputMode();
+        result = result * 31L + date.getDate().getTime();
+        return result;
+    }
+
+    public static long dateAfterSet() {
+        DateField date = new DateField(
+                "Date", DateField.DATE_TIME, TimeZone.getTimeZone("GMT"));
+        date.setDate(new Date(123456789L));
+        return date.getDate().getTime();
+    }
+
+    public static long dateAfterTimeMode() {
+        DateField date = new DateField(
+                "Date", DateField.DATE_TIME, TimeZone.getTimeZone("GMT"));
+        date.setDate(new Date(123456789L));
+        date.setInputMode(DateField.TIME);
+        return date.getDate().getTime();
+    }
+
+    public static long calendarTimeReset() {
+        Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
+        calendar.setTime(new Date(123456789L));
+        calendar.set(Calendar.SECOND, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+        calendar.set(Calendar.YEAR, 1970);
+        calendar.set(Calendar.MONTH, Calendar.JANUARY);
+        calendar.set(Calendar.DATE, 1);
+        return calendar.getTime().getTime();
+    }
+
+    public static int spacerTickerSemantics() {
+        Spacer spacer = new Spacer(3, 5);
+        spacer.setMinimumSize(7, 11);
+        int result = spacer.getMinimumWidth();
+        result = checksum(result, spacer.getMinimumHeight());
+        Ticker ticker = new Ticker("tick");
+        result = checksum(result, ticker.getString());
+        ticker.setString("changed");
+        result = checksum(result, ticker.getString());
+        return result;
+    }
+
+    private static Font testFont() {
+        return Font.getFont(
                 Font.FACE_MONOSPACE,
                 Font.STYLE_BOLD | Font.STYLE_ITALIC,
                 Font.SIZE_SMALL);
+    }
+
+    public static int fontSemantics() {
+        Font font = testFont();
         int result = font.getFace();
         result = checksum(result, font.getStyle());
         result = checksum(result, font.getSize());
@@ -248,6 +422,95 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         result = checksum(result, font.stringWidth("Wiệt"));
         result = checksum(result, font.substringWidth("abcdef", 1, 3));
         return result;
+    }
+
+    public static int fontPropertySemantics() {
+        Font font = testFont();
+        int result = font.getFace();
+        result = checksum(result, font.getStyle());
+        result = checksum(result, font.getSize());
+        result = checksum(result, font.isPlain() ? 1 : 0);
+        result = checksum(result, font.isBold() ? 1 : 0);
+        result = checksum(result, font.isItalic() ? 1 : 0);
+        result = checksum(result, font.isUnderlined() ? 1 : 0);
+        return result;
+    }
+
+    public static int fontMetricSemantics() {
+        Font font = testFont();
+        int result = font.getHeight();
+        result = checksum(result, font.getBaselinePosition());
+        result = checksum(result, font.charWidth('W'));
+        result = checksum(result, font.stringWidth("Wiệt"));
+        result = checksum(result, font.substringWidth("abcdef", 1, 3));
+        return result;
+    }
+
+    private static int imageHash(Image image) {
+        int[] pixels = new int[image.getWidth() * image.getHeight()];
+        image.getRGB(pixels, 0, image.getWidth(), 0, 0,
+                     image.getWidth(), image.getHeight());
+        int result = 1;
+        for (int i = 0; i < pixels.length; i++) {
+            result = checksum(result, pixels[i]);
+        }
+        return result;
+    }
+
+    public static int graphicsStateSemantics() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setClip(1, 0, 3, 3);
+        graphics.translate(1, 1);
+        int result = graphics.getTranslateX();
+        result = checksum(result, graphics.getTranslateY());
+        result = checksum(result, graphics.getClipX());
+        result = checksum(result, graphics.getClipY());
+        result = checksum(result, graphics.getClipWidth());
+        result = checksum(result, graphics.getClipHeight());
+        return result;
+    }
+
+    public static int graphicsBaseFillSemantics() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setColor(0x112233);
+        graphics.fillRect(0, 0, 4, 3);
+        return imageHash(image);
+    }
+
+    public static int graphicsBasePixel() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setColor(0x112233);
+        graphics.fillRect(0, 0, 4, 3);
+        int[] pixels = new int[12];
+        image.getRGB(pixels, 0, 4, 0, 0, 4, 3);
+        return pixels[0];
+    }
+
+    public static int graphicsOverlapFillSemantics() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setColor(0x112233);
+        graphics.fillRect(0, 0, 4, 3);
+        graphics.setColor(0xAA5500);
+        graphics.fillRect(1, 1, 2, 1);
+        return imageHash(image);
+    }
+
+    public static int graphicsLineSemantics() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setColor(0x112233);
+        graphics.fillRect(0, 0, 4, 3);
+        graphics.setColor(0xAA5500);
+        graphics.fillRect(1, 1, 2, 1);
+        graphics.setClip(1, 0, 3, 3);
+        graphics.translate(1, 1);
+        graphics.setColor(0x0000FF);
+        graphics.drawLine(-1, -1, 2, 1);
+        return imageHash(image);
     }
 
     public static int imageGraphicsSemantics() {
@@ -278,6 +541,28 @@ public final class JavaMeDifferentialMIDlet extends MIDlet {
         result = checksum(result, graphics.getClipWidth());
         result = checksum(result, graphics.getClipHeight());
         return result;
+    }
+
+    public static int graphicsLineMask() {
+        Image image = Image.createImage(4, 3);
+        Graphics graphics = image.getGraphics();
+        graphics.setColor(0x112233);
+        graphics.fillRect(0, 0, 4, 3);
+        graphics.setColor(0xAA5500);
+        graphics.fillRect(1, 1, 2, 1);
+        graphics.setClip(1, 0, 3, 3);
+        graphics.translate(1, 1);
+        graphics.setColor(0x0000FF);
+        graphics.drawLine(-1, -1, 2, 1);
+        int[] pixels = new int[12];
+        image.getRGB(pixels, 0, 4, 0, 0, 4, 3);
+        int mask = 0;
+        for (int i = 0; i < pixels.length; i++) {
+            if (pixels[i] == 0xFF0000FF) {
+                mask |= 1 << i;
+            }
+        }
+        return mask;
     }
 
     public static int spriteSemantics() {

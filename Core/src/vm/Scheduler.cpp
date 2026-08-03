@@ -35,15 +35,15 @@ constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(10);
 // when a game has several Java threads that would otherwise take turns while
 // each individual thread is sleeping. A blocked socket/timer callback still
 // runs immediately until it reaches the next 10K-bytecode scheduler quantum.
-constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(25);
-constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(250);
+constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(50);
+constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(500);
 
 [[nodiscard]] std::chrono::steady_clock::duration background_interval(
     std::chrono::microseconds active_cpu_time) noexcept {
-    // Reserve roughly one execution slot for every ten units of interpreter
-    // time. This targets <=10% aggregate VM duty while adapting across Debug,
+    // Reserve roughly one execution slot for every twenty units of interpreter
+    // time. This targets <=5% aggregate VM duty while adapting across Debug,
     // Release and different device generations.
-    const auto target = active_cpu_time * 10;
+    const auto target = active_cpu_time * 20;
     return std::clamp(
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(target),
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(

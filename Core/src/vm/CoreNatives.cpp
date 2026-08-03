@@ -31,6 +31,7 @@
 #include "M3gNatives.hpp"
 #include "MediaNatives.hpp"
 #include "PushNatives.hpp"
+#include "ReferenceNatives.hpp"
 #include "RmsNatives.hpp"
 #include "SecurityNatives.hpp"
 #include "StringEncodingNatives.hpp"
@@ -1961,6 +1962,7 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_m3g_natives(registry);
     register_media_natives(registry);
     register_push_natives(registry);
+    register_reference_natives(registry);
     register_rms_natives(registry);
     register_security_natives(registry);
     register_string_encoding_natives(registry);

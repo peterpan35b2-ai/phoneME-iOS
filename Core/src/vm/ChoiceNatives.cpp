@@ -63,6 +63,7 @@ struct ChoiceLayout final {
     usize type {0};
     usize strings {0};
     usize images {0};
+    usize fonts {0};
     usize selected {0};
     usize count {0};
     usize fit_policy {0};
@@ -75,6 +76,7 @@ constexpr ChoiceLayout kGroupLayout {
     .type = 11,
     .strings = 12,
     .images = 13,
+    .fonts = 17,
     .selected = 14,
     .count = 15,
     .fit_policy = 16,
@@ -86,6 +88,7 @@ constexpr ChoiceLayout kListLayout {
     .type = 10,
     .strings = 11,
     .images = 12,
+    .fonts = 17,
     .selected = 13,
     .count = 14,
     .fit_policy = 15,
@@ -234,6 +237,19 @@ void append_utf8(std::string& output, u32 code_point) {
     return utf8(*value);
 }
 
+[[nodiscard]] Result<ObjectRef> create_default_font(Machine& machine) {
+    auto font = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/lcdui/Font");
+    if (!font) return std::unexpected(font.error());
+    auto face = set_int_field(machine, *font, 0U, 0);
+    auto style = set_int_field(machine, *font, 1U, 0);
+    auto size = set_int_field(machine, *font, 2U, 0);
+    if (!face) return std::unexpected(face.error());
+    if (!style) return std::unexpected(style.error());
+    if (!size) return std::unexpected(size.error());
+    return *font;
+}
+
 [[nodiscard]] Result<ObjectRef> create_string(Machine& machine,
                                               std::u16string text) {
     auto string = machine.class_states().allocate_instance(
@@ -367,10 +383,14 @@ void append_utf8(std::string& output, u32 code_point) {
     auto images = ensure_array(machine, object, layout.images,
                                "[Ljavax/microedition/lcdui/Image;", capacity,
                                Value::from_reference({}));
+    auto fonts = ensure_array(machine, object, layout.fonts,
+                              "[Ljavax/microedition/lcdui/Font;", capacity,
+                              Value::from_reference({}));
     auto selected = ensure_array(machine, object, layout.selected,
                                  "[Z", capacity, Value::from_int(0));
     if (!strings) return std::unexpected(strings.error());
     if (!images) return std::unexpected(images.error());
+    if (!fonts) return std::unexpected(fonts.error());
     if (!selected) return std::unexpected(selected.error());
     return {};
 }
@@ -452,6 +472,11 @@ void append_utf8(std::string& output, u32 code_point) {
 [[nodiscard]] Result<i32> selected_index(Machine& machine,
                                          ObjectRef object,
                                          const ChoiceLayout& layout) {
+    auto type = int_field(machine, object, layout.type);
+    if (!type) return std::unexpected(type.error());
+    // MIDP Choice.getSelectedIndex() is undefined for MULTIPLE choices and
+    // the reference implementation returns -1 even when flags are selected.
+    if (*type == kChoiceMultiple) return -1;
     auto count = choice_count(machine, object, layout);
     if (!count) return std::unexpected(count.error());
     for (i32 index = 0; index < *count; ++index) {
@@ -691,17 +716,24 @@ void append_utf8(std::string& output, u32 code_point) {
     auto images = ensure_array(machine, object, layout.images,
                                "[Ljavax/microedition/lcdui/Image;", needed,
                                Value::from_reference({}));
+    auto fonts = ensure_array(machine, object, layout.fonts,
+                              "[Ljavax/microedition/lcdui/Font;", needed,
+                              Value::from_reference({}));
     auto selected = ensure_array(machine, object, layout.selected,
                                  "[Z", needed, Value::from_int(0));
     if (!strings) return std::unexpected(strings.error());
     if (!images) return std::unexpected(images.error());
+    if (!fonts) return std::unexpected(fonts.error());
     if (!selected) return std::unexpected(selected.error());
     auto first = machine.heap().set_element(
         *strings, static_cast<usize>(*count), Value::from_reference(text));
     auto second = machine.heap().set_element(
         *images, static_cast<usize>(*count), Value::from_reference(image));
+    auto font_stored = machine.heap().set_element(
+        *fonts, static_cast<usize>(*count), Value::from_reference({}));
     if (!first) return std::unexpected(first.error());
     if (!second) return std::unexpected(second.error());
+    if (!font_stored) return std::unexpected(font_stored.error());
     auto choice_type = int_field(machine, object, layout.type);
     if (!choice_type) return std::unexpected(choice_type.error());
     const bool initially_selected =
@@ -738,41 +770,54 @@ void append_utf8(std::string& output, u32 code_point) {
     auto images = ensure_array(machine, object, layout.images,
                                "[Ljavax/microedition/lcdui/Image;", needed,
                                Value::from_reference({}));
+    auto fonts = ensure_array(machine, object, layout.fonts,
+                              "[Ljavax/microedition/lcdui/Font;", needed,
+                              Value::from_reference({}));
     auto selected = ensure_array(machine, object, layout.selected,
                                  "[Z", needed, Value::from_int(0));
     if (!strings) return std::unexpected(strings.error());
     if (!images) return std::unexpected(images.error());
+    if (!fonts) return std::unexpected(fonts.error());
     if (!selected) return std::unexpected(selected.error());
     for (i32 cursor = *count; cursor > index; --cursor) {
         auto previous_text = machine.heap().element(
             *strings, static_cast<usize>(cursor - 1));
         auto previous_image = machine.heap().element(
             *images, static_cast<usize>(cursor - 1));
+        auto previous_font = machine.heap().element(
+            *fonts, static_cast<usize>(cursor - 1));
         auto previous_selected = machine.heap().element(
             *selected, static_cast<usize>(cursor - 1));
         if (!previous_text) return std::unexpected(previous_text.error());
         if (!previous_image) return std::unexpected(previous_image.error());
+        if (!previous_font) return std::unexpected(previous_font.error());
         if (!previous_selected)
             return std::unexpected(previous_selected.error());
         auto first = machine.heap().set_element(
             *strings, static_cast<usize>(cursor), *previous_text);
         auto second = machine.heap().set_element(
             *images, static_cast<usize>(cursor), *previous_image);
+        auto font_stored = machine.heap().set_element(
+            *fonts, static_cast<usize>(cursor), *previous_font);
         auto third = machine.heap().set_element(
             *selected, static_cast<usize>(cursor), *previous_selected);
         if (!first) return first;
         if (!second) return second;
+        if (!font_stored) return font_stored;
         if (!third) return third;
     }
     auto first = machine.heap().set_element(
         *strings, static_cast<usize>(index), Value::from_reference(text));
     auto second = machine.heap().set_element(
         *images, static_cast<usize>(index), Value::from_reference(image));
+    auto font_stored = machine.heap().set_element(
+        *fonts, static_cast<usize>(index), Value::from_reference({}));
     auto third = machine.heap().set_element(
         *selected, static_cast<usize>(index), Value::from_int(0));
     auto fourth = set_int_field(machine, object, layout.count, *count + 1);
     if (!first) return first;
     if (!second) return second;
+    if (!font_stored) return font_stored;
     if (!third) return third;
     if (!fourth) return fourth;
     if (*count == 0) {
@@ -797,39 +842,50 @@ void append_utf8(std::string& output, u32 code_point) {
     if (!count) return std::unexpected(count.error());
     auto strings = reference_field(machine, object, layout.strings);
     auto images = reference_field(machine, object, layout.images);
+    auto fonts = reference_field(machine, object, layout.fonts);
     auto selected = reference_field(machine, object, layout.selected);
     if (!strings) return std::unexpected(strings.error());
     if (!images) return std::unexpected(images.error());
+    if (!fonts) return std::unexpected(fonts.error());
     if (!selected) return std::unexpected(selected.error());
     for (i32 cursor = index; cursor + 1 < *count; ++cursor) {
         auto next_text = machine.heap().element(
             *strings, static_cast<usize>(cursor + 1));
         auto next_image = machine.heap().element(
             *images, static_cast<usize>(cursor + 1));
+        auto next_font = machine.heap().element(
+            *fonts, static_cast<usize>(cursor + 1));
         auto next_selected = machine.heap().element(
             *selected, static_cast<usize>(cursor + 1));
         if (!next_text) return std::unexpected(next_text.error());
         if (!next_image) return std::unexpected(next_image.error());
+        if (!next_font) return std::unexpected(next_font.error());
         if (!next_selected) return std::unexpected(next_selected.error());
         auto first = machine.heap().set_element(
             *strings, static_cast<usize>(cursor), *next_text);
         auto second = machine.heap().set_element(
             *images, static_cast<usize>(cursor), *next_image);
+        auto font_stored = machine.heap().set_element(
+            *fonts, static_cast<usize>(cursor), *next_font);
         auto third = machine.heap().set_element(
             *selected, static_cast<usize>(cursor), *next_selected);
         if (!first) return first;
         if (!second) return second;
+        if (!font_stored) return font_stored;
         if (!third) return third;
     }
     auto first = machine.heap().set_element(
         *strings, static_cast<usize>(*count - 1), Value::from_reference({}));
     auto second = machine.heap().set_element(
         *images, static_cast<usize>(*count - 1), Value::from_reference({}));
+    auto font_cleared = machine.heap().set_element(
+        *fonts, static_cast<usize>(*count - 1), Value::from_reference({}));
     auto third = machine.heap().set_element(
         *selected, static_cast<usize>(*count - 1), Value::from_int(0));
     auto fourth = set_int_field(machine, object, layout.count, *count - 1);
     if (!first) return first;
     if (!second) return second;
+    if (!font_cleared) return font_cleared;
     if (!third) return third;
     if (!fourth) return fourth;
     auto type = int_field(machine, object, layout.type);
@@ -952,6 +1008,62 @@ void register_choice_methods(NativeMethodRegistry& registry,
             auto image = choice_image(machine, *object, layout, *index);
             if (!image) return std::unexpected(image.error());
             return std::optional<Value>(Value::from_reference(*image));
+        });
+    add(registry, owner, "getFont",
+        "(I)Ljavax/microedition/lcdui/Font;",
+        [layout](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            auto checked = check_index(machine, *object, layout, *index);
+            if (!checked) return std::unexpected(checked.error());
+            auto fonts = reference_field(machine, *object, layout.fonts);
+            if (!fonts) return std::unexpected(fonts.error());
+            auto value = machine.heap().element(
+                *fonts, static_cast<usize>(*index));
+            if (!value) return std::unexpected(value.error());
+            auto font = value->as_reference();
+            if (!font) return std::unexpected(font.error());
+            if (font->is_null()) {
+                auto fallback = create_default_font(machine);
+                if (!fallback) return std::unexpected(fallback.error());
+                font = *fallback;
+            }
+            return std::optional<Value>(Value::from_reference(*font));
+        });
+    add(registry, owner, "setFont",
+        "(ILjavax/microedition/lcdui/Font;)V",
+        [layout](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            auto font = reference_argument(arguments, 2U);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            if (!font) return std::unexpected(font.error());
+            auto checked = check_index(machine, *object, layout, *index);
+            if (!checked) return std::unexpected(checked.error());
+            if (!font->is_null()) {
+                auto valid = machine.object_is_instance(
+                    *font, "javax/microedition/lcdui/Font");
+                if (!valid) return std::unexpected(valid.error());
+                if (!*valid) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Choice font is invalid");
+                }
+            }
+            auto fonts = reference_field(machine, *object, layout.fonts);
+            if (!fonts) return std::unexpected(fonts.error());
+            auto stored = machine.heap().set_element(
+                *fonts, static_cast<usize>(*index),
+                Value::from_reference(*font));
+            if (!stored) return std::unexpected(stored.error());
+            auto emitted = emit_choice_element(machine, *object,
+                                               layout, *index);
+            if (!emitted) return std::unexpected(emitted.error());
+            return std::optional<Value> {};
         });
     add(registry, owner, "append",
         "(Ljava/lang/String;Ljavax/microedition/lcdui/Image;)I",

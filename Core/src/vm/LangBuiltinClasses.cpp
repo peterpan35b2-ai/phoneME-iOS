@@ -400,6 +400,22 @@ using namespace builtin;
             method(kPublic | kStatic, "random", "()D"),
         });
     }
+    if (name == "java/lang/ref/Reference") {
+        return make_class("java/lang/ref/Reference", "java/lang/Object",
+                          kOrdinary | kAbstract, {}, {
+            method(0U, "<init>", "(Ljava/lang/Object;)V"),
+            method(kPublic, "get", "()Ljava/lang/Object;"),
+            method(kPublic, "clear", "()V"),
+        });
+    }
+    if (name == "java/lang/ref/WeakReference") {
+        return make_class("java/lang/ref/WeakReference",
+                          "java/lang/ref/Reference", kOrdinary, {}, {
+            method(kPublic, "<init>", "(Ljava/lang/Object;)V"),
+            method(kPublic, "get", "()Ljava/lang/Object;"),
+            method(kPublic, "clear", "()V"),
+        });
+    }
     if (name == "java/lang/Runnable") {
         return make_class("java/lang/Runnable", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {}, {

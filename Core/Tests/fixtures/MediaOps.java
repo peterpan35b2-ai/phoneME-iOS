@@ -1,7 +1,9 @@
 package corefixture;
 
+import java.io.ByteArrayInputStream;
 import javax.microedition.media.Control;
 import javax.microedition.media.Manager;
+import javax.microedition.media.MediaException;
 import javax.microedition.media.Player;
 import javax.microedition.media.PlayerListener;
 import javax.microedition.media.TimeBase;
@@ -105,6 +107,14 @@ public final class MediaOps implements PlayerListener {
         }
 
         Manager.playTone(69, 1, 25);
+
+        try {
+            Manager.createPlayer(
+                new ByteArrayInputStream(new byte[0]), "audio/midi");
+            return -15;
+        } catch (MediaException expected) {
+            // phoneME reports malformed/empty stream payloads as MediaException.
+        }
         return events;
     }
 }

@@ -86,6 +86,7 @@ Result<ObjectRef> Heap::allocate_object(std::string class_name,
         .fields = std::vector<Value>(field_count),
         .elements = {},
         .string_payload = {},
+        .weak_referent = std::nullopt,
         .is_array = false,
         .is_string = false,
         .marked = false,
@@ -117,6 +118,7 @@ Result<ObjectRef> Heap::allocate_array(std::string class_name,
         .fields = {},
         .elements = std::vector<Value>(length, initial_value),
         .string_payload = {},
+        .weak_referent = std::nullopt,
         .is_array = true,
         .is_string = false,
         .marked = false,
@@ -272,6 +274,51 @@ Result<std::u16string> Heap::string_value(ObjectRef reference) const {
     return object.string_payload;
 }
 
+Status Heap::set_weak_referent(ObjectRef reference, ObjectRef referent) {
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.set_weak_referent", reference);
+    }
+    if (!referent.is_null()) {
+        auto referent_slot = resolve_slot_unlocked(referent);
+        if (!referent_slot) {
+            return heap_access_error(referent_slot.error(),
+                                     "Heap.set_weak_referent referent",
+                                     referent);
+        }
+    }
+    slots_[*slot].object.weak_referent = referent;
+    return {};
+}
+
+Result<ObjectRef> Heap::weak_referent(ObjectRef reference) const {
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.weak_referent", reference);
+    }
+    const auto referent = slots_[*slot].object.weak_referent;
+    if (!referent.has_value() || referent->is_null()) {
+        return ObjectRef {};
+    }
+    auto referent_slot = resolve_slot_unlocked(*referent);
+    if (!referent_slot) {
+        return ObjectRef {};
+    }
+    return *referent;
+}
+
+Status Heap::clear_weak_referent(ObjectRef reference) {
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.clear_weak_referent", reference);
+    }
+    slots_[*slot].object.weak_referent.reset();
+    return {};
+}
+
 Status Heap::collect(std::span<const ObjectRef> roots) {
     std::scoped_lock lock(mutex_);
     for (Slot& slot : slots_) {
@@ -292,6 +339,27 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         const ObjectRef reference = pending.back();
         pending.pop_back();
         mark_unlocked(reference, pending);
+    }
+
+    for (Slot& slot : slots_) {
+        if (!slot.occupied || !slot.object.weak_referent.has_value()) {
+            continue;
+        }
+        const ObjectRef referent = *slot.object.weak_referent;
+        if (referent.is_null() || referent.slot() == 0U) {
+            slot.object.weak_referent.reset();
+            continue;
+        }
+        const usize referent_index = static_cast<usize>(referent.slot() - 1U);
+        if (referent_index >= slots_.size()) {
+            slot.object.weak_referent.reset();
+            continue;
+        }
+        const Slot& target = slots_[referent_index];
+        if (!target.occupied || target.generation != referent.generation() ||
+            !target.object.marked) {
+            slot.object.weak_referent.reset();
+        }
     }
 
     for (usize index = 0; index < slots_.size(); ++index) {

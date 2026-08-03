@@ -1235,7 +1235,7 @@ private final class PhoneMEHardwareKeyboardHostView: UIView {
 
     private let suppressedSoftwareKeyboard = UIView(frame: .zero)
     private var heldKeyCodes = Set<Int32>()
-    private var hasRequestedFocus = false
+    private var focusRequestPending = false
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -1247,7 +1247,7 @@ private final class PhoneMEHardwareKeyboardHostView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil {
-            hasRequestedFocus = false
+            focusRequestPending = false
             releaseAllKeys()
         } else {
             requestFocusIfNeeded()
@@ -1259,10 +1259,14 @@ private final class PhoneMEHardwareKeyboardHostView: UIView {
     }
 
     func requestFocusIfNeeded() {
-        guard window != nil, !hasRequestedFocus else { return }
-        hasRequestedFocus = true
+        guard window != nil, !isFirstResponder, !focusRequestPending else {
+            return
+        }
+        focusRequestPending = true
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.window != nil else { return }
+            guard let self else { return }
+            self.focusRequestPending = false
+            guard self.window != nil, !self.isFirstResponder else { return }
             _ = self.becomeFirstResponder()
         }
     }

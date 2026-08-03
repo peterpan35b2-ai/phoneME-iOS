@@ -944,7 +944,7 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "Class.newInstance preserves reflection exceptions");
     require_jdk8_string_result("classExceptions", 3,
                                "Class.forName and missing resources preserve Java semantics");
-    require_jdk8_string_result("systemRuntimeApi", 255,
+    require_jdk8_string_result("systemRuntimeApi", 511,
                                "expose CLDC properties Runtime singleton and Object.toString");
 
     auto missing_native = machine.invoke_static("corefixture/Dispatch",
@@ -2364,7 +2364,8 @@ void test_runtime_canvas(const std::string& fixture_jar) {
             "Canvas Graphics renders through the agreed render contract");
 
     runtime.send_key(-1, true);
-    runtime.send_key(-1, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+    (void)runtime.frame_snapshot();
     runtime.send_key(-1, false);
     bool key_down = false;
     bool key_repeat = false;

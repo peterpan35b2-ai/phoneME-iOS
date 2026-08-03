@@ -25,5 +25,7 @@ public class List extends Screen implements Choice {
     public void setSelectedFlags(boolean[] flags) { }
     public void setFitPolicy(int policy) { }
     public int getFitPolicy() { return 0; }
+    public void setFont(int index, Font font) { }
+    public Font getFont(int index) { return null; }
     public void setSelectCommand(Command command) { }
 }
