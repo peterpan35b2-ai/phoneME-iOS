@@ -24,8 +24,15 @@ constexpr usize kCentralDirectoryHeaderSize = 46;
 constexpr usize kLocalFileHeaderSize = 30;
 constexpr u16 kEncryptedFlag = 1U << 0U;
 
-[[nodiscard]] bool safe_entry_name(std::string_view name) noexcept {
-    if (name.empty() || name.front() == '/' || name.front() == '\\' ||
+[[nodiscard]] std::string_view logical_entry_name(
+    std::string_view name) noexcept {
+    while (!name.empty() && name.front() == '/') name.remove_prefix(1U);
+    return name;
+}
+
+[[nodiscard]] bool safe_entry_name(std::string_view stored_name) noexcept {
+    const std::string_view name = logical_entry_name(stored_name);
+    if (name.empty() || name.front() == '\\' ||
         name.find('\\') != std::string_view::npos ||
         name.find('\0') != std::string_view::npos) {
         return false;
@@ -298,21 +305,25 @@ Status ZipArchive::parse_directory() {
         }
 
         const auto name_bytes = bytes.subspan(*fixed_end, name_length);
-        std::string name(reinterpret_cast<const char*>(name_bytes.data()),
-                         name_bytes.size());
-        if (name.size() > limits_.maximum_entry_name_bytes) {
+        std::string stored_name(
+            reinterpret_cast<const char*>(name_bytes.data()),
+            name_bytes.size());
+        if (stored_name.size() > limits_.maximum_entry_name_bytes) {
             return fail(ErrorCode::out_of_range,
                         "JAR entry name exceeds configured size limit");
         }
         const bool harmless_root_directory =
-            name == "./" && compressed_size == 0U && uncompressed_size == 0U;
-        if (limits_.reject_unsafe_paths && !safe_entry_name(name) &&
+            stored_name == "./" && compressed_size == 0U &&
+            uncompressed_size == 0U;
+        if (limits_.reject_unsafe_paths && !safe_entry_name(stored_name) &&
             !harmless_root_directory) {
             return fail(ErrorCode::malformed_archive,
-                        "JAR entry contains an unsafe path: " + name);
+                        "JAR entry contains an unsafe path: " + stored_name);
         }
+        const std::string name(logical_entry_name(stored_name));
         ZipEntry candidate {
             .name = name,
+            .stored_name = stored_name,
             .compression_method = method,
             .flags = flags,
             .crc32 = entry_crc,
@@ -439,7 +450,10 @@ Result<std::vector<u8>> ZipArchive::read(const ZipEntry& entry) const {
     const std::string_view local_name(
         reinterpret_cast<const char*>(local_name_bytes.data()),
         local_name_bytes.size());
-    if (local_name != entry.name) {
+    const std::string_view expected_stored_name =
+        entry.stored_name.empty() ? std::string_view(entry.name)
+                                  : std::string_view(entry.stored_name);
+    if (local_name != expected_stored_name) {
         return fail(ErrorCode::malformed_archive,
                     "ZIP local header name conflicts with central directory");
     }

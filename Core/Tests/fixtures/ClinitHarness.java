@@ -8,7 +8,9 @@ public final class ClinitHarness {
         try {
             return ClinitFailure.value();
         } catch (ExceptionInInitializerError error) {
-            return ClinitTracker.count();
+            return error.getException() instanceof IllegalStateException &&
+                   error.getCause() == error.getException()
+                ? ClinitTracker.count() : -1;
         }
     }
 

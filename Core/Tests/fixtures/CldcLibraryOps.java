@@ -83,6 +83,46 @@ public final class CldcLibraryOps {
                 "UTF-16BE");
         if (decoded.read() != 'A' || decoded.read() != 0x0110 ||
                 decoded.read() != -1) return 113;
+
+        InputStreamReader defaultReader = new InputStreamReader(
+                new ByteArrayInputStream(new byte[] {(byte) 0xE9}));
+        if (!"ISO-8859-1".equals(defaultReader.getEncoding()) ||
+                defaultReader.read() != 0x00E9 ||
+                defaultReader.read() != -1) return 114;
+        ByteArrayOutputStream defaultBytes = new ByteArrayOutputStream();
+        OutputStreamWriter defaultWriter = new OutputStreamWriter(defaultBytes);
+        if (!"ISO-8859-1".equals(defaultWriter.getEncoding())) return 115;
+        defaultWriter.write('\u00E9');
+        defaultWriter.close();
+        if (defaultBytes.toByteArray().length != 1 ||
+                (defaultBytes.toByteArray()[0] & 0xFF) != 0xE9) return 116;
+        if (!"ISO8859_1".equals(
+                System.getProperty("microedition.encoding"))) return 117;
+        return 0;
+    }
+
+    private static int stringSplitSemantics() {
+        String[] literal = "one_khoga_two_khoga_".split("_khoga_");
+        if (literal.length != 2 || !"one".equals(literal[0]) ||
+                !"two".equals(literal[1])) return 118;
+
+        String[] consecutive = "a,,b,".split(",");
+        if (consecutive.length != 3 || !"a".equals(consecutive[0]) ||
+                !"".equals(consecutive[1]) ||
+                !"b".equals(consecutive[2])) return 119;
+
+        String[] escaped = "a|b|".split("\\|");
+        if (escaped.length != 2 || !"a".equals(escaped[0]) ||
+                !"b".equals(escaped[1])) return 120;
+
+        String[] whitespace = " a\tb  c ".split("\\s+");
+        if (whitespace.length != 4 || !"".equals(whitespace[0]) ||
+                !"a".equals(whitespace[1]) ||
+                !"b".equals(whitespace[2]) ||
+                !"c".equals(whitespace[3])) return 121;
+
+        String[] unchanged = "plain".split(",");
+        if (unchanged.length != 1 || !"plain".equals(unchanged[0])) return 122;
         return 0;
     }
 
@@ -116,6 +156,20 @@ public final class CldcLibraryOps {
         return 0;
     }
 
+    private static int wrapperCompatibility() {
+        if (!Float.isNaN(Float.intBitsToFloat(0x7fc00000))) return 151;
+        if (Float.isNaN(1.0f)) return 152;
+        if (Integer.valueOf("7fffffff", 16).intValue() != 0x7fffffff) {
+            return 153;
+        }
+        try {
+            Integer.valueOf("xyz", 10);
+            return 154;
+        } catch (NumberFormatException expected) {
+        }
+        return 0;
+    }
+
     private static int throwableSemantics() throws Exception {
         IOException outer = new IOException("hỏng");
         Exception inner = new Exception("gốc");
@@ -142,9 +196,13 @@ public final class CldcLibraryOps {
             if (result != 0) return result;
             result = encodingAliases();
             if (result != 0) return result;
+            result = stringSplitSemantics();
+            if (result != 0) return result;
             result = customOutputDispatch();
             if (result != 0) return result;
             result = modifiedUtfRoundTrip();
+            if (result != 0) return result;
+            result = wrapperCompatibility();
             if (result != 0) return result;
             return throwableSemantics();
         } catch (Throwable failure) {

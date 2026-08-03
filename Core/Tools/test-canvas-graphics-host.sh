@@ -38,6 +38,7 @@ done < <(find "$CORE_ROOT/Tests/stubs" -type f -name '*.java' -print | LC_ALL=C 
   "$CORE_ROOT/Tests/fixtures/CanvasOps.java" \
   "$CORE_ROOT/Tests/fixtures/CanvasCopyAreaOps.java" \
   "$CORE_ROOT/Tests/fixtures/CanvasEventOps.java" \
+  "$CORE_ROOT/Tests/fixtures/CanvasSuppressOps.java" \
   "$CORE_ROOT/Tests/fixtures/CanvasThrowOps.java"
 "$JAR" cfm "$FIXTURE_JAR" \
   "$CORE_ROOT/Tests/fixtures/CanvasGraphics.MF" \

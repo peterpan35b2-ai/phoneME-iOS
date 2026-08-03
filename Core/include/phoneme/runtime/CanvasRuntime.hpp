@@ -166,6 +166,9 @@ private:
                                                  i32 x,
                                                  i32 y);
     [[nodiscard]] Status update_effective_visibility(CanvasState& state);
+    [[nodiscard]] bool suppresses_key_callback(
+        const CanvasState& state,
+        i32 key_code) const noexcept;
     [[nodiscard]] i32 key_state_mask(i32 key_code) const noexcept;
 
     vm::Machine& machine_;

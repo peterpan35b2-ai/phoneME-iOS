@@ -2,7 +2,10 @@
 
 #include <array>
 #include <span>
+#include <string>
+#include <vector>
 
+#include "M3gLoader.hpp"
 #include "M3gNativeSupport.hpp"
 
 namespace phoneme::vm {
@@ -343,27 +346,97 @@ void register_graphics3d(NativeMethodRegistry& registry) {
         });
 }
 
+[[nodiscard]] Result<std::string> loader_resource_name(
+    Machine& machine,
+    ObjectRef string) {
+    if (string.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "Loader resource name is null");
+    }
+    auto value = machine.heap().string_value(string);
+    if (!value) return std::unexpected(value.error());
+    std::string result;
+    result.reserve(value->size());
+    for (char16_t character : *value) {
+        if (static_cast<u16>(character) > 0x7FU) {
+            return fail_java("java/io/IOException",
+                             "M3G resource name is not ASCII");
+        }
+        result.push_back(static_cast<char>(character));
+    }
+    while (!result.empty() && result.front() == '/') {
+        result.erase(result.begin());
+    }
+    if (result.empty()) {
+        return fail_java("java/io/IOException",
+                         "M3G resource name is empty");
+    }
+    return result;
+}
+
+[[nodiscard]] Result<std::vector<u8>> loader_byte_array(
+    Machine& machine,
+    ObjectRef array,
+    i32 offset) {
+    if (array.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "Loader byte array is null");
+    }
+    auto class_name = machine.heap().class_name(array);
+    auto length = machine.heap().array_length(array);
+    if (!class_name) return std::unexpected(class_name.error());
+    if (!length) return std::unexpected(length.error());
+    if (*class_name != "[B" || offset < 0 ||
+        static_cast<usize>(offset) > *length) {
+        return fail_java("java/lang/IndexOutOfBoundsException",
+                         "Loader byte array offset is invalid");
+    }
+    std::vector<u8> result;
+    result.reserve(*length - static_cast<usize>(offset));
+    for (usize index = static_cast<usize>(offset); index < *length; ++index) {
+        auto value = machine.heap().element(array, index);
+        if (!value) return std::unexpected(value.error());
+        auto number = value->as_int();
+        if (!number) return std::unexpected(number.error());
+        result.push_back(static_cast<u8>(*number & 0xFF));
+    }
+    return result;
+}
+
 void register_loader(NativeMethodRegistry& registry) {
-    const auto register_load = [&registry](const char* descriptor) {
-        add(registry, "javax/microedition/m3g/Loader", "load", descriptor,
-            [](Machine& machine, std::span<const Value>)
-                -> Result<std::optional<Value>> {
-                auto world = allocate_instance(machine, kWorld);
-                if (!world) return std::unexpected(world.error());
-                auto initialized = initialize_group(machine, *world);
-                if (!initialized) return std::unexpected(initialized.error());
-                auto objects = allocate_array(
-                    machine, "[Ljavax/microedition/m3g/Object3D;", 1U,
-                    Value::from_reference({}));
-                if (!objects) return std::unexpected(objects.error());
-                auto stored = machine.heap().set_element(
-                    *objects, 0U, Value::from_reference(*world));
-                if (!stored) return std::unexpected(stored.error());
-                return std::optional<Value>(Value::from_reference(*objects));
-            });
-    };
-    register_load("(Ljava/lang/String;)[Ljavax/microedition/m3g/Object3D;");
-    register_load("([BI)[Ljavax/microedition/m3g/Object3D;");
+    add(registry, "javax/microedition/m3g/Loader", "load",
+        "(Ljava/lang/String;)[Ljavax/microedition/m3g/Object3D;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto name = reference_argument(arguments, 0U,
+                                            "Loader.load", false);
+            if (!name) return std::unexpected(name.error());
+            auto resource = loader_resource_name(machine, *name);
+            if (!resource) return std::unexpected(resource.error());
+            auto bytes = machine.classes().read_resource(*resource);
+            if (!bytes) {
+                return fail_java("java/io/IOException",
+                                 bytes.error().message);
+            }
+            auto objects = load_m3g(machine, *bytes);
+            if (!objects) return std::unexpected(objects.error());
+            return std::optional<Value>(Value::from_reference(*objects));
+        });
+    add(registry, "javax/microedition/m3g/Loader", "load",
+        "([BI)[Ljavax/microedition/m3g/Object3D;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto data = reference_argument(arguments, 0U,
+                                            "Loader.load", false);
+            auto offset = int_argument(arguments, 1U, "Loader.load");
+            if (!data) return std::unexpected(data.error());
+            if (!offset) return std::unexpected(offset.error());
+            auto bytes = loader_byte_array(machine, *data, *offset);
+            if (!bytes) return std::unexpected(bytes.error());
+            auto objects = load_m3g(machine, *bytes);
+            if (!objects) return std::unexpected(objects.error());
+            return std::optional<Value>(Value::from_reference(*objects));
+        });
 }
 
 } // namespace

@@ -94,6 +94,16 @@ public final class Exceptions {
         }
     }
 
+    public static int nativeExceptionMessage() {
+        try {
+            return "x".substring(0, -1).length();
+        } catch (StringIndexOutOfBoundsException exception) {
+            String message = exception.getMessage();
+            return message != null && message.indexOf("begin=0") >= 0 &&
+                   message.indexOf("end=-1") >= 0 ? 49 : 0;
+        }
+    }
+
     public static void uncaught() {
         throw new IllegalStateException();
     }

@@ -9,6 +9,8 @@ public final class ThreadOps {
     private static int interrupted;
     private static int rooted;
     private static int busyStarted;
+    private static Thread busyThread;
+    private static Thread additionalBusyThread;
 
     private static final class CounterTask implements Runnable {
         private final int iterations;
@@ -136,13 +138,37 @@ public final class ThreadOps {
 
     public static int startBusyThread() {
         busyStarted = 0;
-        Thread busy = new Thread(new BusyTask());
-        busy.start();
+        busyThread = new Thread(new BusyTask());
+        busyThread.start();
         long deadline = System.currentTimeMillis() + 1000L;
         while (busyStarted == 0 && System.currentTimeMillis() < deadline) {
             Thread.yield();
         }
         return busyStarted;
+    }
+
+    public static int busyThreadIsAlive() {
+        return busyThread != null && busyThread.isAlive() ? 1 : 0;
+    }
+
+    public static int startAdditionalBusyThread() {
+        busyStarted = 0;
+        additionalBusyThread = new Thread(new BusyTask());
+        additionalBusyThread.start();
+        long deadline = System.currentTimeMillis() + 1000L;
+        while (busyStarted == 0 && System.currentTimeMillis() < deadline) {
+            Thread.yield();
+        }
+        return busyStarted;
+    }
+
+    public static int busyMainThreadFor(int durationMillis) {
+        long deadline = System.currentTimeMillis() + durationMillis;
+        int spins = 0;
+        while (System.currentTimeMillis() < deadline) {
+            spins++;
+        }
+        return spins != 0 ? 1 : 0;
     }
 
     public static int run() {
@@ -359,6 +385,21 @@ public final class ThreadOps {
         }
         if (!rejected) {
             return 23;
+        }
+
+        int beforeNamed;
+        synchronized (LOCK) {
+            beforeNamed = counter;
+        }
+        Thread named = new Thread(new CounterTask(1), "named-worker");
+        named.start();
+        try {
+            named.join();
+        } catch (InterruptedException unexpected) {
+            return 24;
+        }
+        synchronized (LOCK) {
+            if (counter != beforeNamed + 1) return 25;
         }
 
         return 0;

@@ -11,7 +11,11 @@
 namespace phoneme::archive {
 
 struct ZipEntry final {
+    // `name` is the logical archive-root path used by J2ME resource lookup.
+    // `stored_name` preserves the exact ZIP header spelling for integrity
+    // checks (some legacy JARs prefix resource names with '/').
     std::string name;
+    std::string stored_name;
     u16 compression_method {0};
     u16 flags {0};
     u32 crc32 {0};

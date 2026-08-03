@@ -578,7 +578,7 @@ template <typename Number>
         {u"microedition.profiles", u"MIDP-2.0"},
         {u"microedition.configuration", u"CLDC-1.1"},
         {u"microedition.locale", u"en-US"},
-        {u"microedition.encoding", u"UTF-8"},
+        {u"microedition.encoding", u"ISO8859_1"},
         {u"file.separator", u"/"},
         {u"path.separator", u":"},
         {u"line.separator", u"\n"},

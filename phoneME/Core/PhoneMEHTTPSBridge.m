@@ -2,18 +2,28 @@
 #import <Security/Security.h>
 #import <Security/SecProtocolTypes.h>
 
+#include <float.h>
 #include <stdint.h>
 #include <string.h>
 
 static const NSUInteger kPhoneMEHTTPSDefaultMaximumResponseSize =
-    32U * 1024U * 1024U;
+    64U * 1024U * 1024U;
+static const NSTimeInterval kPhoneMEHTTPSNoTimeoutInterval = DBL_MAX;
 
 #if defined(PHONEME_HTTPS_TESTING)
 static NSUInteger gPhoneMEHTTPSMaximumResponseSize =
     kPhoneMEHTTPSDefaultMaximumResponseSize;
+static NSTimeInterval gPhoneMEHTTPSLastTimeoutInterval = 0.0;
+static BOOL gPhoneMEHTTPSLastWaitsForConnectivity = NO;
 void phoneme_ios_https_set_test_response_limit(int32_t bytes) {
     gPhoneMEHTTPSMaximumResponseSize = bytes > 0
         ? (NSUInteger)bytes : kPhoneMEHTTPSDefaultMaximumResponseSize;
+}
+double phoneme_ios_https_get_test_timeout_interval(void) {
+    return gPhoneMEHTTPSLastTimeoutInterval;
+}
+int32_t phoneme_ios_https_get_test_waits_for_connectivity(void) {
+    return gPhoneMEHTTPSLastWaitsForConnectivity ? 1 : 0;
 }
 static NSUInteger PhoneMEHTTPSMaximumResponseSize(void) {
     return gPhoneMEHTTPSMaximumResponseSize;
@@ -51,7 +61,7 @@ static NSString *PhoneMEHTTPSResponseLimitError(NSUInteger limit) {
 @property(nonatomic) int64_t certificateNotAfter;
 @property(nonatomic, copy) NSString *errorMessage;
 @property(nonatomic) NSInteger errorCode;
-@property(nonatomic, copy) NSData *body;
+@property(nonatomic, strong) NSData *body;
 @end
 
 @implementation PhoneMEHTTPSResult
@@ -596,8 +606,9 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         [self.responseBody setLength:0U];
     }
 
-    NSData *copiedBody = [self.responseBody copy];
-    self.result.body = copiedBody != nil ? copiedBody : [NSData data];
+    self.result.body = self.responseBody != nil
+        ? self.responseBody : [NSData data];
+    self.responseBody = nil;
     if (self.secureRequest && self.result.errorMessage == nil) {
         self.result.TLSProtocol = self.TLSProtocol != nil
             ? self.TLSProtocol : @"TLS";
@@ -849,7 +860,7 @@ int32_t phoneme_ios_https_execute_async(
 
     const BOOL secureRequest = [scheme isEqualToString:@"https"];
     result.finalURL = urlString;
-    NSTimeInterval timeout = 60.0;
+    NSTimeInterval timeout = kPhoneMEHTTPSNoTimeoutInterval;
     if (timeout_ms > 0) {
         timeout = (NSTimeInterval)timeout_ms / 1000.0;
         if (timeout < 1.0) timeout = 1.0;
@@ -873,7 +884,12 @@ int32_t phoneme_ios_https_execute_async(
     configuration.timeoutIntervalForResource = timeout;
     configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
     configuration.HTTPShouldSetCookies = YES;
-    configuration.waitsForConnectivity = NO;
+    configuration.waitsForConnectivity = timeout_ms <= 0;
+#if defined(PHONEME_HTTPS_TESTING)
+    gPhoneMEHTTPSLastTimeoutInterval = timeout;
+    gPhoneMEHTTPSLastWaitsForConnectivity =
+        configuration.waitsForConnectivity;
+#endif
 
     PhoneMEHTTPSCapture *capture = [[PhoneMEHTTPSCapture alloc] init];
     capture.allowedRedirectScheme = scheme;

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -62,6 +63,12 @@ namespace phoneme::vm
   class Machine final
   {
   public:
+    // Scheduler-owned Thread.run invocations are long-lived. They still yield
+    // every VM quantum and observe cancellation, but must not inherit the
+    // finite callback/lifecycle budget used to isolate buggy application code.
+    static constexpr u64 kLongLivedThreadInstructionBudget =
+        std::numeric_limits<u64>::max();
+
     explicit Machine(ClassRepository &classes,
                      usize maximum_heap_objects = 1'000'000);
     ~Machine();
@@ -258,6 +265,9 @@ namespace phoneme::vm
         std::string_view modified_utf8);
     [[nodiscard]] Result<ObjectRef> create_throwable(
         std::string_view class_name);
+    [[nodiscard]] Result<ObjectRef> create_throwable(
+        std::string_view class_name,
+        std::string_view message);
     [[nodiscard]] Result<Value> load_constant(
         const classfile::ClassFile &owner,
         u16 index,

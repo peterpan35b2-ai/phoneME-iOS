@@ -67,12 +67,16 @@ __attribute__((weak)) void phoneme_ios_https_close(int32_t) {}
 namespace phoneme::network {
 namespace {
 
-constexpr usize kMaximumHttpResponseBytes = 32U * 1024U * 1024U;
+constexpr usize kMaximumHttpResponseBytes = 64U * 1024U * 1024U;
 constexpr usize kMaximumHttpHeaderBytes = 64U * 1024U;
 constexpr usize kMaximumInterimResponses = 8U;
 constexpr usize kIoChunkSize = 16U * 1024U;
 constexpr i32 kCancellationPollMilliseconds = 50;
-constexpr usize kNetworkWorkerCount = 4U;
+// Socket reads and accepts may legitimately block for the lifetime of an
+// online MIDlet. Start small, then grow when every existing worker is occupied
+// so listener threads cannot starve writes, reconnects, DNS, or other MIDlets.
+constexpr usize kInitialNetworkWorkerCount = 8U;
+constexpr usize kMaximumNetworkWorkerCount = 32U;
 
 std::atomic<i32> g_address_resolution_delay_for_tests {0};
 
@@ -1529,12 +1533,9 @@ extern "C" void phoneme_apple_http_completed(i32 handle, void* opaque) {
 class PosixNetworkAdapter final : public AsyncNetworkAdapter {
 public:
     PosixNetworkAdapter() {
-        workers_.reserve(kNetworkWorkerCount);
-        for (usize index = 0; index < kNetworkWorkerCount; ++index) {
-            workers_.emplace_back(
-                [this](std::stop_token stop_token) {
-                    worker_loop(stop_token);
-                });
+        workers_.reserve(kMaximumNetworkWorkerCount);
+        for (usize index = 0; index < kInitialNetworkWorkerCount; ++index) {
+            spawn_worker_unlocked();
         }
     }
 
@@ -2174,6 +2175,7 @@ private:
             }
             operations_.insert_or_assign(operation.value, state);
             operation_queue_.push_back(std::move(task));
+            ensure_worker_capacity_unlocked();
         }
         operation_condition_.notify_one();
         return operation;
@@ -2186,6 +2188,26 @@ private:
         return start_async_with_cleanup<T>(
             std::move(completion), std::move(work),
             [](Result<T>&) {});
+    }
+
+    void spawn_worker_unlocked() {
+        workers_.emplace_back(
+            [this](std::stop_token stop_token) {
+                worker_loop(stop_token);
+            });
+    }
+
+    void ensure_worker_capacity_unlocked() {
+        if (stopping_ || workers_.size() >= kMaximumNetworkWorkerCount) return;
+        const usize idle_workers = workers_.size() > active_workers_
+            ? workers_.size() - active_workers_ : 0U;
+        if (operation_queue_.size() <= idle_workers) return;
+        const usize missing_workers = operation_queue_.size() - idle_workers;
+        const usize capacity = kMaximumNetworkWorkerCount - workers_.size();
+        const usize workers_to_add = std::min(missing_workers, capacity);
+        for (usize index = 0; index < workers_to_add; ++index) {
+            spawn_worker_unlocked();
+        }
     }
 
     void worker_loop(std::stop_token stop_token) noexcept {
@@ -2203,8 +2225,13 @@ private:
                 }
                 task = std::move(operation_queue_.front());
                 operation_queue_.pop_front();
+                ++active_workers_;
             }
             if (task) task();
+            {
+                std::scoped_lock lock(operation_mutex_);
+                if (active_workers_ != 0U) --active_workers_;
+            }
         }
     }
 
@@ -2297,6 +2324,7 @@ private:
     std::deque<AsyncTask> operation_queue_;
     std::unordered_map<u64, std::shared_ptr<OperationState>> operations_;
     std::vector<std::jthread> workers_;
+    usize active_workers_ {0U};
     bool stopping_ {false};
 
     mutable std::mutex mutex_;

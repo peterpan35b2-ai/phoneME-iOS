@@ -551,10 +551,11 @@ Result<Image> decode_png(std::span<const u8> bytes) {
         return fail(ErrorCode::malformed_archive,
                     "PNG is missing IHDR, IDAT or IEND");
     }
-    if (cursor != bytes.size()) {
-        return fail(ErrorCode::malformed_archive,
-                    "PNG contains trailing data after IEND");
-    }
+    // Reference phone decoders stop at IEND. Legacy JAR packers frequently
+    // append alignment bytes or concatenate asset payloads inside a larger
+    // byte array, and Image.createImage(byte[], offset, length) must still
+    // decode the first complete PNG. All chunks through IEND remain fully
+    // length/CRC validated above.
     if (header.color_type == 3U && palette.empty()) {
         return fail(ErrorCode::malformed_archive,
                     "indexed PNG is missing its palette");

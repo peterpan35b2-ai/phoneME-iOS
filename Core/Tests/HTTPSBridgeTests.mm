@@ -35,6 +35,8 @@ int32_t phoneme_ios_https_copy_body(
 void phoneme_ios_https_close(int32_t handle);
 void phoneme_ios_https_reset(void);
 void phoneme_ios_https_set_test_response_limit(int32_t bytes);
+double phoneme_ios_https_get_test_timeout_interval(void);
+int32_t phoneme_ios_https_get_test_waits_for_connectivity(void);
 }
 
 namespace {
@@ -166,9 +168,13 @@ void test_streaming_small_response() {
         "http://127.0.0.1:" + std::to_string(server.port) + "/small";
     const auto started = std::chrono::steady_clock::now();
     const int32_t handle = phoneme_ios_https_execute_async(
-        url.c_str(), "GET", "", nullptr, 0, 5'000, 0,
+        url.c_str(), "GET", "", nullptr, 0, 0, 0,
         &Completion::callback, &completion);
     require(handle > 0, "start streaming HTTP bridge request");
+    require(phoneme_ios_https_get_test_timeout_interval() > 86'400.0,
+            "disabled MIDP timeout is not replaced by URLSession 60-second default");
+    require(phoneme_ios_https_get_test_waits_for_connectivity() == 1,
+            "disabled MIDP timeout waits through transient connectivity loss");
     require(completion.wait_for(700ms),
             "Content-Length response completes before peer FIN");
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

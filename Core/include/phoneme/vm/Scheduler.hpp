@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -56,6 +57,9 @@ public:
     [[nodiscard]] Result<ObjectRef> runnable_target(
         ObjectRef thread_object) const;
 
+    void begin_execution_slice() noexcept;
+    void set_host_foreground(bool foreground) noexcept;
+    void cooperative_quantum(Machine& machine);
     void cooperative_yield(Machine& machine);
     [[nodiscard]] Result<SchedulerWaitResult> sleep_current(
         Machine& machine,
@@ -103,6 +107,7 @@ private:
                          JavaThreadId id) noexcept;
 
     mutable std::mutex mutex_;
+    std::condition_variable background_condition_;
     std::unordered_map<u64, std::shared_ptr<JavaThread>> by_object_;
     std::unordered_map<JavaThreadId, std::shared_ptr<JavaThread>> by_id_;
     std::deque<JavaThreadId> runnable_queue_;
@@ -110,10 +115,16 @@ private:
     std::deque<JavaThreadId> sleeping_queue_;
     JavaThreadId next_thread_id_ {2};
     bool deterministic_ {false};
+    bool host_foreground_ {true};
+    std::chrono::steady_clock::time_point background_resume_deadline_ {};
     bool shutting_down_ {false};
 
     static thread_local Scheduler* tls_scheduler_;
     static thread_local JavaThreadId tls_thread_id_;
+    static thread_local u32 tls_unblocked_quantum_count_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_quantum_resume_time_;
+    static thread_local bool tls_quantum_timing_valid_;
 };
 
 } // namespace phoneme::vm

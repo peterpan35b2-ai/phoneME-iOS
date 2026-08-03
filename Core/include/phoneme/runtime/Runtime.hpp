@@ -121,6 +121,7 @@ public:
     [[nodiscard]] AppState app_state(AppId app_id) const noexcept;
     [[nodiscard]] AppId foreground_app_id() const noexcept;
     [[nodiscard]] i64 app_used_memory(AppId app_id) const noexcept;
+    [[nodiscard]] std::string app_console_output(AppId app_id) const;
 
     void stop() noexcept;
     void suspend() noexcept;
@@ -133,6 +134,9 @@ public:
     void send_key(i32 key_code, bool pressed);
     void send_pointer(i32 x, i32 y, i32 action);
 
+    [[nodiscard]] FrameMetadata frame_metadata();
+    [[nodiscard]] FrameMetadata copy_current_frame_rgba(
+        std::span<u8> destination) const noexcept;
     [[nodiscard]] FrameSnapshot frame_snapshot();
     [[nodiscard]] std::optional<UiEvent> poll_ui_event();
 

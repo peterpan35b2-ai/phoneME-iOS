@@ -523,6 +523,34 @@ void register_integral_wrapper(NativeMethodRegistry& registry,
                 return std::optional<Value>(
                     Value::from_reference(*object));
             });
+        add(registry, spec.class_name, "valueOf",
+            "(Ljava/lang/String;I)Ljava/lang/Integer;",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                if (arguments.size() != 2U) {
+                    return fail(ErrorCode::invalid_argument,
+                                "Integer.valueOf expects String and radix");
+                }
+                auto string = arguments[0].as_reference();
+                auto radix = arguments[1].as_int();
+                if (!string || !radix) {
+                    return fail(ErrorCode::invalid_argument,
+                                "Integer.valueOf arguments are invalid");
+                }
+                auto text = string_ascii(machine, *string);
+                if (!text) return std::unexpected(text.error());
+                auto parsed = parse_signed(
+                    *text, *radix,
+                    std::numeric_limits<i32>::min(),
+                    std::numeric_limits<i32>::max());
+                if (!parsed) return std::unexpected(parsed.error());
+                auto object = allocate_box(
+                    machine, "java/lang/Integer",
+                    Value::from_int(static_cast<i32>(*parsed)));
+                if (!object) return std::unexpected(object.error());
+                return std::optional<Value>(
+                    Value::from_reference(*object));
+            });
         add(registry, spec.class_name, "compareTo",
             "(Ljava/lang/Integer;)I",
             [](Machine& machine, std::span<const Value> arguments)
@@ -837,6 +865,37 @@ void register_boolean_wrapper(NativeMethodRegistry& registry) {
             auto field = machine.class_states().resolve_field(
                 "java/lang/Boolean",
                 *value == 0 ? "FALSE" : "TRUE",
+                "Ljava/lang/Boolean;",
+                true);
+            if (!field) return std::unexpected(field.error());
+            auto object = machine.class_states().static_field(*field);
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(*object);
+        });
+    add(registry, "java/lang/Boolean", "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Boolean;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto string = arguments[0].as_reference();
+            bool equal = false;
+            if (string && !string->is_null()) {
+                auto text = machine.heap().string_value(*string);
+                if (text) {
+                    static constexpr std::u16string_view expected = u"true";
+                    equal = text->size() == expected.size();
+                    for (usize index = 0; equal && index < text->size(); ++index) {
+                        char16_t value = (*text)[index];
+                        if (value >= u'A' && value <= u'Z') {
+                            value = static_cast<char16_t>(
+                                value + (u'a' - u'A'));
+                        }
+                        equal = value == expected[index];
+                    }
+                }
+            }
+            auto field = machine.class_states().resolve_field(
+                "java/lang/Boolean",
+                equal ? "TRUE" : "FALSE",
                 "Ljava/lang/Boolean;",
                 true);
             if (!field) return std::unexpected(field.error());
@@ -1264,6 +1323,29 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(Value::from_double(*value));
         });
+    add(registry, class_name, "valueOf",
+        "(Ljava/lang/String;)" + object_descriptor,
+        [class_name, is_float](Machine& machine,
+                               std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto string = arguments[0].as_reference();
+            if (!string) return std::unexpected(string.error());
+            auto text = string_ascii(machine, *string);
+            if (!text) return std::unexpected(text.error());
+            Value boxed;
+            if (is_float) {
+                auto value = parse_floating<float>(*text);
+                if (!value) return std::unexpected(value.error());
+                boxed = Value::from_float(*value);
+            } else {
+                auto value = parse_floating<double>(*text);
+                if (!value) return std::unexpected(value.error());
+                boxed = Value::from_double(*value);
+            }
+            auto object = allocate_box(machine, class_name, boxed);
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
     add(registry, class_name, "hashCode", "()I",
         [read_number, is_float](Machine& machine,
                                 std::span<const Value> arguments)
@@ -1383,7 +1465,7 @@ constexpr usize kThrowableCauseInitializedField = 2U;
 }
 
 void register_throwable_natives(NativeMethodRegistry& registry) {
-    static constexpr std::array<std::string_view, 45U> classes {{
+    static constexpr std::array<std::string_view, 46U> classes {{
         "java/lang/Throwable",
         "java/lang/Exception",
         "java/lang/RuntimeException",
@@ -1428,6 +1510,7 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
         "java/io/InterruptedIOException",
         "java/io/UTFDataFormatException",
         "java/io/UnsupportedEncodingException",
+        "javax/wireless/messaging/SizeExceededException",
         "java/util/NoSuchElementException",
     }};
     for (const std::string_view class_name : classes) {
@@ -1455,6 +1538,33 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 return std::optional<Value> {};
             });
     }
+
+    add(registry, "java/lang/ExceptionInInitializerError", "<init>",
+        "(Ljava/lang/Throwable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto cause = arguments[1].as_reference();
+            if (!object || !cause) {
+                return fail(ErrorCode::invalid_argument,
+                            "ExceptionInInitializerError cause is invalid");
+            }
+            auto initialized = initialize_throwable(
+                machine, *object, {}, *cause, true);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/ExceptionInInitializerError", "getException",
+        "()Ljava/lang/Throwable;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto cause = throwable_reference_field(
+                machine, *object, kThrowableCauseField);
+            if (!cause) return std::unexpected(cause.error());
+            return std::optional<Value>(Value::from_reference(*cause));
+        });
 
     add(registry, "java/lang/Throwable", "<init>",
         "(Ljava/lang/String;Ljava/lang/Throwable;)V",

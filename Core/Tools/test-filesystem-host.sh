@@ -75,6 +75,7 @@ STUB_SOURCES=(
   "$CORE_ROOT/Tests/stubs/javax/microedition/io/StreamConnection.java"
   "$CORE_ROOT/Tests/stubs/javax/microedition/io/Connector.java"
   "$CORE_ROOT/Tests/stubs/javax/microedition/io/file/FileConnection.java"
+  "$CORE_ROOT/Tests/stubs/javax/microedition/io/file/FileSystemRegistry.java"
   "$CORE_ROOT/Tests/stubs/javax/microedition/io/file/ConnectionClosedException.java"
   "$CORE_ROOT/Tests/stubs/javax/microedition/io/file/IllegalModeException.java"
 )

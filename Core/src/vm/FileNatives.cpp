@@ -1520,6 +1520,21 @@ Status file_output_close(Machine& machine, ObjectRef stream) {
 void register_file_natives(NativeMethodRegistry& registry) {
     register_file_stream_natives(registry);
     register_file_connection_natives(registry);
+    add(registry,
+        "javax/microedition/io/file/FileSystemRegistry",
+        "listRoots",
+        "()Ljava/util/Enumeration;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "FileSystemRegistry.listRoots expects no arguments");
+            }
+            const std::vector<std::string> roots {"root/"};
+            auto enumeration = create_enumeration(machine, roots);
+            if (!enumeration) return std::unexpected(enumeration.error());
+            return std::optional<Value>(Value::from_reference(*enumeration));
+        });
 }
 
 } // namespace phoneme::vm

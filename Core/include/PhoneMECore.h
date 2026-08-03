@@ -182,7 +182,8 @@ int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,
     PhoneMEPermissionPromptCallback callback,
     void* context);
-/* Call after installation and before phoneme_start_system. */
+/* Call after installation and before starting a MIDlet from this suite.
+ * Trust may be assigned while unrelated MIDlets are running. */
 int32_t phoneme_set_suite_trust(PhoneMERuntimeRef runtime,
                                 int32_t suite_id,
                                 int32_t trust);
@@ -264,6 +265,9 @@ void phoneme_send_pointer(PhoneMERuntimeRef runtime,
                           int32_t x,
                           int32_t y,
                           int32_t action);
+/* Query with destination == NULL to pump the foreground Canvas and obtain
+ * dimensions/generation without copying pixels. Call again with storage to
+ * copy that latest complete framebuffer without a second VM pump. */
 int32_t phoneme_copy_frame_rgba(PhoneMERuntimeRef runtime,
                                 uint8_t* destination,
                                 int32_t capacity,

@@ -198,17 +198,15 @@ namespace phoneme::vm
 
       [[nodiscard]] Status read_switch_padding()
       {
+        // Legacy J2ME obfuscators sometimes leave arbitrary data in the
+        // alignment gap. The bytes are not executable; consume them while
+        // keeping the payload bounds checks strict.
         while ((pc_ & 3U) != 0U)
         {
           auto padding = read_u8();
           if (!padding)
           {
             return std::unexpected(padding.error());
-          }
-          if (*padding != 0)
-          {
-            return fail(ErrorCode::malformed_class,
-                        "switch padding byte is not zero");
           }
         }
         return {};
@@ -983,10 +981,13 @@ namespace phoneme::vm
       return std::unexpected(target.error());
     if (target->is_null())
       return std::optional<Value>{};
-    auto result = invoke_instance(*target,
-                                  "java/lang/Runnable",
-                                  "run",
-                                  "()V");
+    auto result = invoke_instance(
+        *target,
+        "java/lang/Runnable",
+        "run",
+        "()V",
+        {},
+        kLongLivedThreadInstructionBudget);
     if (!result)
       return std::unexpected(result.error());
     if (result->throwable.has_value())
@@ -1360,10 +1361,16 @@ namespace phoneme::vm
       auto runnable = callback.get();
       if (!runnable)
         return std::unexpected(runnable.error());
+      // callSerially is commonly used by Gameloft engines for one-time
+      // resource decoding, not only tiny UI closures. The generic 10M budget
+      // aborts valid LZ/range-decoder callbacks before they can finish.
+      constexpr u64 kSerialCallbackInstructionBudget = 200'000'000U;
       auto result = invoke_instance(*runnable,
                                     "java/lang/Runnable",
                                     "run",
-                                    "()V");
+                                    "()V",
+                                    {},
+                                    kSerialCallbackInstructionBudget);
       if (!result)
         return std::unexpected(result.error());
       if (result->completed_normally())
@@ -1937,6 +1944,18 @@ namespace phoneme::vm
         if (!wrapper)
         {
           return std::unexpected(wrapper.error());
+        }
+        auto cause_stored = heap_.set_field(
+            *wrapper, 1U, Value::from_reference(*result->throwable));
+        if (!cause_stored)
+        {
+          return std::unexpected(cause_stored.error());
+        }
+        auto cause_initialized = heap_.set_field(
+            *wrapper, 2U, Value::from_int(1));
+        if (!cause_initialized)
+        {
+          return std::unexpected(cause_initialized.error());
         }
         return std::optional<ObjectRef>(*wrapper);
       }
@@ -2538,6 +2557,42 @@ namespace phoneme::vm
     return states_.allocate_instance(heap_, (*throwable_class)->name());
   }
 
+  Result<ObjectRef> Machine::create_throwable(
+      std::string_view class_name,
+      std::string_view message)
+  {
+    auto throwable = create_throwable(class_name);
+    if (!throwable || message.empty() ||
+        class_name == "java/lang/OutOfMemoryError")
+    {
+      return throwable;
+    }
+    auto message_string = intern_string(message);
+    if (!message_string)
+    {
+      return std::unexpected(message_string.error());
+    }
+    auto message_stored = heap_.set_field(
+        *throwable, 0U, Value::from_reference(*message_string));
+    if (!message_stored)
+    {
+      return std::unexpected(message_stored.error());
+    }
+    auto cause_stored = heap_.set_field(
+        *throwable, 1U, Value::from_reference({}));
+    if (!cause_stored)
+    {
+      return std::unexpected(cause_stored.error());
+    }
+    auto cause_initialized = heap_.set_field(
+        *throwable, 2U, Value::from_int(0));
+    if (!cause_initialized)
+    {
+      return std::unexpected(cause_initialized.error());
+    }
+    return *throwable;
+  }
+
   Result<Value> Machine::load_constant(const classfile::ClassFile &owner,
                                        u16 index,
                                        bool category_two_only)
@@ -2598,6 +2653,8 @@ namespace phoneme::vm
     g_execution_machine = this;
     ++g_execution_lock_depth;
     scheduler_.set_current_state(JavaThreadState::running);
+    if (g_execution_lock_depth == 1U)
+      scheduler_.begin_execution_slice();
     const u32 invocation_depth = g_execution_lock_depth;
     const JavaThreadId invocation_thread = scheduler_.current_thread_id();
     const HeapAccessContext previous_heap_context =
@@ -2685,7 +2742,8 @@ namespace phoneme::vm
                         "native Java exception has no class name");
           }
           auto throwable = create_throwable(
-              native_result.error().java_exception_class);
+              native_result.error().java_exception_class,
+              native_result.error().message);
           if (!throwable)
             return std::unexpected(throwable.error());
           scheduler_.set_current_pending_exception(*throwable);
@@ -2974,10 +3032,13 @@ namespace phoneme::vm
 
     const auto raise_implicit =
         [this, &dispatch_exception](std::string_view class_name,
-                                    usize throw_pc)
+                                    usize throw_pc,
+                                    std::string_view message = {})
         -> Result<std::optional<ExecutionResult>>
     {
-      auto throwable = create_throwable(class_name);
+      auto throwable = message.empty()
+          ? create_throwable(class_name)
+          : create_throwable(class_name, message);
       if (!throwable)
       {
         return std::unexpected(throwable.error());
@@ -3011,13 +3072,20 @@ namespace phoneme::vm
             return std::unexpected(collected.error());
         }
         if (quantum_boundary)
-          cooperative_yield();
+          scheduler_.cooperative_quantum(*this);
       }
 
       if (executed >= instruction_budget)
       {
-        return fail(ErrorCode::invalid_state,
-                    "VM instruction budget was exhausted");
+        const ExecutionFrame& exhausted_frame = frames.back();
+        return fail(
+            ErrorCode::invalid_state,
+            "VM instruction budget was exhausted in " +
+                exhausted_frame.owner().name() + "." +
+                exhausted_frame.method().name +
+                exhausted_frame.method().descriptor +
+                " at bytecode " +
+                std::to_string(exhausted_frame.current_instruction_pc()));
       }
       if (frames.size() > kMaximumCallDepth)
       {
@@ -4961,7 +5029,8 @@ namespace phoneme::vm
               }
               auto raised = raise_implicit(
                   native_result.error().java_exception_class,
-                  opcode_pc);
+                  opcode_pc,
+                  native_result.error().message);
               if (!raised)
                 return std::unexpected(raised.error());
               if (raised->has_value())
@@ -5406,7 +5475,8 @@ namespace phoneme::vm
             {
               auto raised = raise_implicit(
                   exited.error().java_exception_class,
-                  opcode_pc);
+                  opcode_pc,
+                  exited.error().message);
               if (!raised)
                 return std::unexpected(raised.error());
               if (raised->has_value())

@@ -14,7 +14,7 @@ namespace phoneme::network {
 namespace {
 
 constexpr i32 kTimeoutEnabledMilliseconds = 30'000;
-constexpr i32 kTimeoutDisabledSafetyMilliseconds = 120'000;
+constexpr i32 kTimeoutDisabledMilliseconds = 0;
 constexpr usize kMaximumBufferedHttpBody = 16U * 1024U * 1024U;
 constexpr usize kMaximumDatagramLength = 65'507U;
 constexpr i32 kBlockingCancellationPollMilliseconds = 25;
@@ -247,11 +247,12 @@ Result<T> ConnectionRegistry::await_operation(ConnectionToken token,
     }
 
     auto state = std::make_shared<WaitState<T>>();
+    const std::weak_ptr<AsyncNetworkAdapter> weak_adapter(adapter);
     auto registered = register_pending_operation(
         token, kind,
-        [state, adapter] {
+        [state, weak_adapter] {
             state->cancel(
-                adapter,
+                weak_adapter.lock(),
                 "network operation was cancelled because the connection closed");
         });
     if (!registered) return std::unexpected(registered.error());
@@ -266,11 +267,13 @@ Result<T> ConnectionRegistry::await_operation(ConnectionToken token,
     NetworkBlockingScope blocking_scope(hooks);
     auto started = starter(
         adapter,
-        Completion<T> {[state, adapter](Result<T> result) {
+        Completion<T> {[state, weak_adapter](Result<T> result) {
             auto dropped = state->complete(std::move(result));
             if constexpr (std::is_same_v<T, NativeConnection>) {
                 if (dropped.has_value() && dropped->has_value()) {
-                    (void)adapter->close((**dropped).handle);
+                    if (auto live_adapter = weak_adapter.lock()) {
+                        (void)live_adapter->close((**dropped).handle);
+                    }
                 }
             }
         }});
@@ -477,7 +480,7 @@ Result<OpenedConnection> ConnectionRegistry::open(
         created.timeouts = timeouts;
         created.timeout_ms = timeouts
             ? kTimeoutEnabledMilliseconds
-            : kTimeoutDisabledSafetyMilliseconds;
+            : kTimeoutDisabledMilliseconds;
         switch (parsed->scheme) {
         case Scheme::socket:
             created.kind = parsed->server_endpoint

@@ -879,6 +879,198 @@ void register_text_builder(NativeMethodRegistry& registry,
     return value;
 }
 
+enum class SplitAtomKind : u8 {
+    literal,
+    any,
+    whitespace,
+    digit,
+    word,
+    character_class,
+};
+
+struct SplitPattern final {
+    SplitAtomKind kind {SplitAtomKind::literal};
+    std::u16string literal;
+    std::vector<std::pair<char16_t, char16_t>> ranges;
+    bool negate_class {false};
+    bool repeat {false};
+};
+
+[[nodiscard]] bool split_whitespace(char16_t value) noexcept {
+    return value == u' ' || value == u'\t' || value == u'\n' ||
+           value == u'\v' || value == u'\f' || value == u'\r';
+}
+
+[[nodiscard]] bool split_word(char16_t value) noexcept {
+    return (value >= u'a' && value <= u'z') ||
+           (value >= u'A' && value <= u'Z') ||
+           (value >= u'0' && value <= u'9') || value == u'_';
+}
+
+[[nodiscard]] SplitPattern parse_split_pattern(std::u16string regex) {
+    if (regex.size() >= 4U && regex.starts_with(u"\\Q") &&
+        regex.ends_with(u"\\E")) {
+        return SplitPattern {
+            .kind = SplitAtomKind::literal,
+            .literal = regex.substr(2U, regex.size() - 4U),
+        };
+    }
+
+    bool repeat = false;
+    if (regex.size() > 1U &&
+        (regex.back() == u'+' || regex.back() == u'*')) {
+        repeat = true;
+        regex.pop_back();
+    }
+    if (regex == u".") {
+        return SplitPattern {.kind = SplitAtomKind::any, .repeat = repeat};
+    }
+    if (regex == u"\\s") {
+        return SplitPattern {
+            .kind = SplitAtomKind::whitespace,
+            .repeat = repeat,
+        };
+    }
+    if (regex == u"\\d") {
+        return SplitPattern {.kind = SplitAtomKind::digit, .repeat = repeat};
+    }
+    if (regex == u"\\w") {
+        return SplitPattern {.kind = SplitAtomKind::word, .repeat = repeat};
+    }
+    if (regex.size() >= 2U && regex.front() == u'[' &&
+        regex.back() == u']') {
+        SplitPattern result {
+            .kind = SplitAtomKind::character_class,
+            .repeat = repeat,
+        };
+        usize index = 1U;
+        if (index + 1U < regex.size() && regex[index] == u'^') {
+            result.negate_class = true;
+            ++index;
+        }
+        const usize end = regex.size() - 1U;
+        while (index < end) {
+            char16_t first = regex[index++];
+            if (first == u'\\' && index < end) {
+                first = regex[index++];
+            }
+            char16_t last = first;
+            if (index + 1U < end && regex[index] == u'-') {
+                ++index;
+                last = regex[index++];
+                if (last == u'\\' && index < end) {
+                    last = regex[index++];
+                }
+                if (last < first) std::swap(first, last);
+            }
+            result.ranges.emplace_back(first, last);
+        }
+        if (!result.ranges.empty()) return result;
+    }
+
+    std::u16string literal;
+    literal.reserve(regex.size());
+    for (usize index = 0; index < regex.size(); ++index) {
+        if (regex[index] == u'\\' && index + 1U < regex.size()) {
+            literal.push_back(regex[++index]);
+        } else {
+            literal.push_back(regex[index]);
+        }
+    }
+    return SplitPattern {
+        .kind = SplitAtomKind::literal,
+        .literal = std::move(literal),
+    };
+}
+
+[[nodiscard]] bool split_atom_matches(const SplitPattern& pattern,
+                                      char16_t value) noexcept {
+    switch (pattern.kind) {
+      case SplitAtomKind::any:
+        return true;
+      case SplitAtomKind::whitespace:
+        return split_whitespace(value);
+      case SplitAtomKind::digit:
+        return value >= u'0' && value <= u'9';
+      case SplitAtomKind::word:
+        return split_word(value);
+      case SplitAtomKind::character_class: {
+        bool matches = false;
+        for (const auto [first, last] : pattern.ranges) {
+            if (value >= first && value <= last) {
+                matches = true;
+                break;
+            }
+        }
+        return pattern.negate_class ? !matches : matches;
+      }
+      case SplitAtomKind::literal:
+        return false;
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<std::pair<usize, usize>> next_split_match(
+    std::u16string_view text,
+    const SplitPattern& pattern,
+    usize search_from) noexcept {
+    if (pattern.kind == SplitAtomKind::literal) {
+        if (pattern.literal.empty()) {
+            if (search_from < text.size()) return {{search_from, 0U}};
+            return std::nullopt;
+        }
+        const usize position = text.find(pattern.literal, search_from);
+        if (position == std::u16string_view::npos) return std::nullopt;
+        return {{position, pattern.literal.size()}};
+    }
+
+    for (usize position = search_from; position < text.size(); ++position) {
+        if (!split_atom_matches(pattern, text[position])) continue;
+        usize length = 1U;
+        if (pattern.repeat) {
+            while (position + length < text.size() &&
+                   split_atom_matches(pattern, text[position + length])) {
+                ++length;
+            }
+        }
+        return {{position, length}};
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::vector<std::u16string> split_java_text(
+    std::u16string_view text,
+    const SplitPattern& pattern) {
+    if (pattern.kind == SplitAtomKind::literal && pattern.literal.empty()) {
+        std::vector<std::u16string> characters;
+        characters.reserve(text.size());
+        for (const char16_t character : text) {
+            characters.emplace_back(1U, character);
+        }
+        if (characters.empty()) characters.emplace_back();
+        return characters;
+    }
+
+    std::vector<std::u16string> parts;
+    usize cursor = 0U;
+    usize search_from = 0U;
+    bool matched = false;
+    while (auto match = next_split_match(text, pattern, search_from)) {
+        matched = true;
+        parts.emplace_back(text.substr(cursor, match->first - cursor));
+        cursor = match->first + match->second;
+        search_from = cursor;
+        if (search_from > text.size()) break;
+    }
+    if (!matched) {
+        parts.emplace_back(text);
+        return parts;
+    }
+    parts.emplace_back(text.substr(cursor));
+    while (!parts.empty() && parts.back().empty()) parts.pop_back();
+    return parts;
+}
+
 void register_string_extensions(NativeMethodRegistry& registry) {
     add(registry, "java/lang/String", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1447,8 +1639,12 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                 }
                 if (*begin < 0 || end < *begin ||
                     static_cast<usize>(end) > text->size()) {
-                    return fail_java("java/lang/StringIndexOutOfBoundsException",
-                                     "String.substring range is invalid");
+                    return fail_java(
+                        "java/lang/StringIndexOutOfBoundsException",
+                        "String.substring range is invalid: begin=" +
+                            std::to_string(*begin) + " end=" +
+                            std::to_string(end) + " length=" +
+                            std::to_string(text->size()));
                 }
                 auto result = create_java_string(
                     machine,
@@ -1569,6 +1765,47 @@ void register_string_extensions(NativeMethodRegistry& registry) {
     };
     register_string_case("toLowerCase", simple_case_fold);
     register_string_case("toUpperCase", simple_case_upper);
+
+    add(registry, "java/lang/String", "split",
+        "(Ljava/lang/String;)[Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.split expects one argument");
+            }
+            auto receiver = require_receiver(arguments);
+            auto regex = arguments[1].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!regex || regex->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.split pattern is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto regex_text = machine.heap().string_value(*regex);
+            if (!text || !regex_text) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.split pattern is not String");
+            }
+
+            auto parts = split_java_text(*text,
+                                         parse_split_pattern(*regex_text));
+            auto array = machine.heap().allocate_array(
+                "[Ljava/lang/String;", parts.size(),
+                Value::from_reference({}));
+            if (!array) return std::unexpected(array.error());
+            auto array_root = machine.pin_native_root(*array);
+            if (!array_root) return std::unexpected(array_root.error());
+            for (usize index = 0; index < parts.size(); ++index) {
+                auto value = create_java_string(machine,
+                                                std::move(parts[index]));
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *array, index, Value::from_reference(*value));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*array));
+        });
 
     add(registry, "java/lang/String", "valueOf",
         "(Ljava/lang/Object;)Ljava/lang/String;",
@@ -2219,6 +2456,22 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/Float",
+        "isNaN",
+        "(F)Z",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Float.isNaN expects one argument");
+            }
+            auto value = arguments[0].as_float();
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(
+                std::isnan(*value) ? 1 : 0));
+        });
+
+    add(registry,
+        "java/lang/Float",
         "intBitsToFloat",
         "(I)F",
         [](Machine&, std::span<const Value> arguments)
@@ -2406,6 +2659,33 @@ void register_core_natives(NativeMethodRegistry& registry) {
             if (!initialized) {
                 return std::unexpected(initialized.error());
             }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "<init>",
+        "(Ljava/lang/Runnable;Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(Runnable,String) expects target and name");
+            }
+            auto receiver = require_receiver(arguments);
+            auto target = arguments[1].as_reference();
+            auto name = arguments[2].as_reference();
+            if (!receiver || !target || !name) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(Runnable,String) arguments are invalid");
+            }
+            if (name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Thread name is null");
+            }
+            auto initialized = machine.initialize_java_thread(*receiver,
+                                                              *target);
+            if (!initialized) return std::unexpected(initialized.error());
             return std::optional<Value> {};
         });
 

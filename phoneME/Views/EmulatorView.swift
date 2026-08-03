@@ -949,6 +949,16 @@ private struct FrameSurface: View {
                             height: max(rect.height, 0)
                         )
                         .offset(x: rect.minX, y: rect.minY)
+
+#if canImport(UIKit)
+                    PhoneMEHardwareKeyboardView { key, pressed in
+                        session.send(key, pressed: pressed)
+                    }
+                    .frame(
+                        width: geometry.size.width,
+                        height: geometry.size.height
+                    )
+#endif
                 }
                 .frame(
                     width: geometry.size.width,
@@ -966,10 +976,18 @@ private struct FrameSurface: View {
         .accessibilityLabel("J2ME display")
     }
 
+    @ViewBuilder
     private func renderedFrame(_ frame: CGImage) -> some View {
+#if canImport(UIKit)
+        PhoneMEFrameLayerView(
+            image: frame,
+            filtering: profile.filtering
+        )
+#else
         Image(decorative: frame, scale: 1, orientation: .up)
             .resizable()
             .interpolation(profile.filtering ? .high : .none)
+#endif
     }
 
     private func pointerGesture(
@@ -1160,6 +1178,218 @@ private enum FrameLayout {
         }
     }
 }
+
+#if canImport(UIKit)
+private struct PhoneMEFrameLayerView: UIViewRepresentable {
+    let image: CGImage
+    let filtering: Bool
+
+    func makeUIView(context: Context) -> PhoneMEFrameLayerHostView {
+        let view = PhoneMEFrameLayerHostView()
+        view.update(image: image, filtering: filtering)
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: PhoneMEFrameLayerHostView,
+        context: Context
+    ) {
+        uiView.update(image: image, filtering: filtering)
+    }
+
+    static func dismantleUIView(
+        _ uiView: PhoneMEFrameLayerHostView,
+        coordinator: Void
+    ) {
+        uiView.clearFrame()
+    }
+}
+
+private struct PhoneMEHardwareKeyboardView: UIViewRepresentable {
+    let onKey: (J2MEKey, Bool) -> Void
+
+    func makeUIView(context: Context) -> PhoneMEHardwareKeyboardHostView {
+        let view = PhoneMEHardwareKeyboardHostView()
+        view.onKey = onKey
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: PhoneMEHardwareKeyboardHostView,
+        context: Context
+    ) {
+        uiView.onKey = onKey
+        uiView.requestFocusIfNeeded()
+    }
+
+    static func dismantleUIView(
+        _ uiView: PhoneMEHardwareKeyboardHostView,
+        coordinator: Void
+    ) {
+        uiView.releaseAllKeys()
+    }
+}
+
+private final class PhoneMEHardwareKeyboardHostView: UIView {
+    var onKey: ((J2MEKey, Bool) -> Void)?
+
+    private let suppressedSoftwareKeyboard = UIView(frame: .zero)
+    private var heldKeyCodes = Set<Int32>()
+    private var hasRequestedFocus = false
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    // This responder exists only for UIPress events from a connected hardware
+    // keyboard. Supplying an empty input view prevents UIKit from repeatedly
+    // constructing/dismissing the software keyboard while the game is active.
+    override var inputView: UIView? { suppressedSoftwareKeyboard }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            hasRequestedFocus = false
+            releaseAllKeys()
+        } else {
+            requestFocusIfNeeded()
+        }
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        false
+    }
+
+    func requestFocusIfNeeded() {
+        guard window != nil, !hasRequestedFocus else { return }
+        hasRequestedFocus = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window != nil else { return }
+            _ = self.becomeFirstResponder()
+        }
+    }
+
+    override func pressesBegan(
+        _ presses: Set<UIPress>,
+        with event: UIPressesEvent?
+    ) {
+        var handled = false
+        for press in presses {
+            guard let uiKey = press.key,
+                  let key = Self.j2meKey(for: uiKey) else {
+                continue
+            }
+            handled = true
+            if heldKeyCodes.insert(key.rawValue).inserted {
+                onKey?(key, true)
+            }
+        }
+        if !handled {
+            super.pressesBegan(presses, with: event)
+        }
+    }
+
+    override func pressesEnded(
+        _ presses: Set<UIPress>,
+        with event: UIPressesEvent?
+    ) {
+        var handled = false
+        for press in presses {
+            guard let uiKey = press.key,
+                  let key = Self.j2meKey(for: uiKey) else {
+                continue
+            }
+            handled = true
+            if heldKeyCodes.remove(key.rawValue) != nil {
+                onKey?(key, false)
+            }
+        }
+        if !handled {
+            super.pressesEnded(presses, with: event)
+        }
+    }
+
+    override func pressesCancelled(
+        _ presses: Set<UIPress>,
+        with event: UIPressesEvent?
+    ) {
+        for press in presses {
+            guard let uiKey = press.key,
+                  let key = Self.j2meKey(for: uiKey),
+                  heldKeyCodes.remove(key.rawValue) != nil else {
+                continue
+            }
+            onKey?(key, false)
+        }
+        super.pressesCancelled(presses, with: event)
+    }
+
+    func releaseAllKeys() {
+        let keys = heldKeyCodes.compactMap(J2MEKey.init(rawValue:))
+        heldKeyCodes.removeAll(keepingCapacity: true)
+        for key in keys {
+            onKey?(key, false)
+        }
+    }
+
+    private static func j2meKey(for key: UIKey) -> J2MEKey? {
+        switch key.charactersIgnoringModifiers.lowercased() {
+        case UIKeyCommand.inputUpArrow, "w", "i": return .up
+        case UIKeyCommand.inputDownArrow, "s", "k": return .down
+        case UIKeyCommand.inputLeftArrow, "a", "j": return .left
+        case UIKeyCommand.inputRightArrow, "d", "l": return .right
+        case "\r", "\n", " ": return .fire
+        case "q", "z", "[": return .softLeft
+        case "e", "x", "]", "\u{1b}", "\u{8}", "\u{7f}": return .softRight
+        case "0": return .zero
+        case "1": return .one
+        case "2": return .two
+        case "3": return .three
+        case "4": return .four
+        case "5": return .five
+        case "6": return .six
+        case "7": return .seven
+        case "8": return .eight
+        case "9": return .nine
+        case "*": return .star
+        case "#": return .pound
+        default: return nil
+        }
+    }
+}
+
+private final class PhoneMEFrameLayerHostView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = true
+        isUserInteractionEnabled = false
+        backgroundColor = .black
+        layer.contentsGravity = .resize
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        isOpaque = true
+        isUserInteractionEnabled = false
+        backgroundColor = .black
+        layer.contentsGravity = .resize
+    }
+
+    func update(image: CGImage, filtering: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.magnificationFilter = filtering ? .linear : .nearest
+        layer.minificationFilter = filtering ? .linear : .nearest
+        layer.contents = image
+        CATransaction.commit()
+    }
+
+    func clearFrame() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contents = nil
+        CATransaction.commit()
+    }
+}
+#endif
 
 struct PhoneMEToolbarTitle: View {
     let text: String

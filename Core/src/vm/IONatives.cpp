@@ -267,7 +267,7 @@ void add(NativeMethodRegistry& registry,
     case StreamCharset::utf16be:
         return u"UTF-16BE";
     }
-    return u"UTF-8";
+    return u"ISO-8859-1";
 }
 
 [[nodiscard]] Result<i32> stream_read_one(Machine& machine,
@@ -368,6 +368,29 @@ void add(NativeMethodRegistry& registry,
     auto range = validate_range(*destination_length, offset, length);
     if (!range) return std::unexpected(range.error());
     if (length == 0) return 0;
+
+    // FilterInputStream/DataInputStream must preserve InputStream's partial
+    // read contract. Reading one network byte at a time until the caller's
+    // whole buffer is full can block forever when a server sends a short
+    // packet and waits for the client's response. Delegate one bulk recv to
+    // the native stream and return as soon as any bytes are available.
+    auto network_read = connection_stream_read_range(
+        machine, stream, destination, offset, length);
+    if (!network_read) return std::unexpected(network_read.error());
+    if (network_read->has_value()) return **network_read;
+
+    auto filter = is_instance(machine, stream,
+                              "java/io/FilterInputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*filter) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_read_bytes(machine,
+                                 *input,
+                                 destination,
+                                 offset,
+                                 length);
+    }
 
     i32 count = 0;
     while (count < length) {
@@ -1736,7 +1759,7 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "InputStreamReader input is null");
         }
-        StreamCharset charset = StreamCharset::utf8;
+        StreamCharset charset = StreamCharset::latin1;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());
@@ -2003,7 +2026,7 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "OutputStreamWriter output is null");
         }
-        StreamCharset charset = StreamCharset::utf8;
+        StreamCharset charset = StreamCharset::latin1;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());

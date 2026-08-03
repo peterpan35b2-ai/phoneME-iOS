@@ -59,6 +59,22 @@ constexpr std::string_view kCertificateClass =
     "javax/microedition/pki/NativeCertificate";
 constexpr std::string_view kCertificateExceptionClass =
     "javax/microedition/pki/CertificateException";
+constexpr std::string_view kWirelessConnectionClass =
+    "javax/wireless/messaging/NativeMessageConnection";
+constexpr std::string_view kWirelessTextMessageClass =
+    "javax/wireless/messaging/NativeTextMessage";
+constexpr std::string_view kWirelessBinaryMessageClass =
+    "javax/wireless/messaging/NativeBinaryMessage";
+
+constexpr usize kWirelessConnectionAddressField = 0;
+constexpr usize kWirelessConnectionModeField = 1;
+constexpr usize kWirelessConnectionClosedField = 2;
+constexpr usize kWirelessConnectionListenerField = 3;
+constexpr usize kWirelessConnectionProtocolField = 4;
+
+constexpr usize kWirelessMessageAddressField = 0;
+constexpr usize kWirelessMessageTimestampField = 1;
+constexpr usize kWirelessMessagePayloadField = 2;
 
 constexpr usize kSecurityCertificateField = 0;
 constexpr usize kSecurityProtocolNameField = 1;
@@ -209,6 +225,14 @@ template <typename T>
     auto value = machine.heap().field(object, index);
     if (!value) return std::unexpected(value.error());
     return value->as_int();
+}
+
+[[nodiscard]] Result<i64> long_field(Machine& machine,
+                                     ObjectRef object,
+                                     usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_long();
 }
 
 [[nodiscard]] Result<ObjectRef> reference_field(Machine& machine,
@@ -600,6 +624,70 @@ template <typename T>
     return *object;
 }
 
+[[nodiscard]] Result<std::optional<ObjectRef>>
+try_open_wireless_connection(Machine& machine,
+                             ObjectRef url,
+                             std::string_view text,
+                             i32 mode) {
+    std::string_view protocol;
+    std::string_view send_permission;
+    std::string_view receive_permission;
+    if (text.starts_with("sms://")) {
+        protocol = "sms";
+        send_permission = security::permissions::wireless_sms_send;
+        receive_permission = security::permissions::wireless_sms_receive;
+    } else if (text.starts_with("mms://")) {
+        protocol = "mms";
+        send_permission = security::permissions::wireless_mms_send;
+        receive_permission = security::permissions::wireless_mms_receive;
+    } else if (text.starts_with("cbs://")) {
+        protocol = "cbs";
+        receive_permission = security::permissions::wireless_cbs_receive;
+    } else {
+        return std::optional<ObjectRef> {};
+    }
+
+    if (mode < 1 || mode > 3) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "wireless connection mode must be READ, WRITE or "
+                         "READ_WRITE");
+    }
+    if ((mode & 2) != 0 && send_permission.empty()) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "CBS connections are receive-only");
+    }
+    if ((mode & 1) != 0 && !receive_permission.empty()) {
+        auto permitted = machine.permission_policy().require(
+            receive_permission, std::string(text));
+        if (!permitted) return std::unexpected(permitted.error());
+    }
+    if ((mode & 2) != 0 && !send_permission.empty()) {
+        auto permitted = machine.permission_policy().require(
+            send_permission, std::string(text));
+        if (!permitted) return std::unexpected(permitted.error());
+    }
+
+    auto connection = machine.class_states().allocate_instance(
+        machine.heap(), kWirelessConnectionClass);
+    if (!connection) return std::unexpected(connection.error());
+    auto protocol_string = create_string(machine, protocol);
+    if (!protocol_string) return std::unexpected(protocol_string.error());
+    auto address_stored = set_reference_field(
+        machine, *connection, kWirelessConnectionAddressField, url);
+    auto mode_stored = set_int_field(
+        machine, *connection, kWirelessConnectionModeField, mode);
+    auto closed_stored = set_int_field(
+        machine, *connection, kWirelessConnectionClosedField, 0);
+    auto protocol_stored = set_reference_field(
+        machine, *connection, kWirelessConnectionProtocolField,
+        *protocol_string);
+    if (!address_stored) return std::unexpected(address_stored.error());
+    if (!mode_stored) return std::unexpected(mode_stored.error());
+    if (!closed_stored) return std::unexpected(closed_stored.error());
+    if (!protocol_stored) return std::unexpected(protocol_stored.error());
+    return std::optional<ObjectRef>(*connection);
+}
+
 [[nodiscard]] Status require_network_permission(
     Machine& machine,
     std::string_view url) {
@@ -642,6 +730,10 @@ template <typename T>
 
     auto text = utf8_text(machine, url);
     if (!text) return std::unexpected(text.error());
+    auto wireless = try_open_wireless_connection(
+        machine, url, *text, mode);
+    if (!wireless) return std::unexpected(wireless.error());
+    if (wireless->has_value()) return **wireless;
     auto permitted = require_network_permission(machine, *text);
     if (!permitted) return std::unexpected(permitted.error());
     auto opened = java_network_result(machine.connections().open(
@@ -2888,12 +2980,403 @@ void register_security_objects(NativeMethodRegistry& registry) {
         });
 }
 
+[[nodiscard]] Status require_wireless_connection_open(
+    Machine& machine,
+    ObjectRef connection,
+    i32 required_mode) {
+    auto closed = int_field(
+        machine, connection, kWirelessConnectionClosedField);
+    if (!closed) return std::unexpected(closed.error());
+    if (*closed != 0) {
+        return fail_java("java/io/IOException",
+                         "wireless message connection is closed");
+    }
+    auto mode = int_field(machine, connection, kWirelessConnectionModeField);
+    if (!mode) return std::unexpected(mode.error());
+    if ((*mode & required_mode) == 0) {
+        return fail_java("java/io/IOException",
+                         required_mode == 1
+                             ? "wireless connection is not open for reading"
+                             : "wireless connection is not open for writing");
+    }
+    return {};
+}
+
+[[nodiscard]] Result<ObjectRef> create_wireless_message(
+    Machine& machine,
+    ObjectRef type,
+    ObjectRef address) {
+    auto type_text = utf8_text(machine, type);
+    if (!type_text) return std::unexpected(type_text.error());
+    std::string_view class_name;
+    if (*type_text == "text") {
+        class_name = kWirelessTextMessageClass;
+    } else if (*type_text == "binary") {
+        class_name = kWirelessBinaryMessageClass;
+    } else if (*type_text == "multipart") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "multipart wireless messages are not supported");
+    } else {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "unknown wireless message type: " + *type_text);
+    }
+
+    auto message = machine.class_states().allocate_instance(
+        machine.heap(), class_name);
+    if (!message) return std::unexpected(message.error());
+    auto address_stored = set_reference_field(
+        machine, *message, kWirelessMessageAddressField, address);
+    auto timestamp_stored = set_long_field(
+        machine, *message, kWirelessMessageTimestampField, 0);
+    if (!address_stored) return std::unexpected(address_stored.error());
+    if (!timestamp_stored) return std::unexpected(timestamp_stored.error());
+    return *message;
+}
+
+[[nodiscard]] Result<std::optional<Value>> wireless_message_timestamp(
+    Machine& machine,
+    std::span<const Value> arguments) {
+    auto message = receiver(arguments, "Message.getTimestamp");
+    if (!message) return std::unexpected(message.error());
+    auto timestamp = long_field(
+        machine, *message, kWirelessMessageTimestampField);
+    if (!timestamp) return std::unexpected(timestamp.error());
+    if (*timestamp <= 0) {
+        return std::optional<Value>(Value::from_reference({}));
+    }
+    auto date = machine.class_states().allocate_instance(
+        machine.heap(), "java/util/Date");
+    if (!date) return std::unexpected(date.error());
+    auto stored = set_long_field(machine, *date, 0, *timestamp);
+    if (!stored) return std::unexpected(stored.error());
+    return std::optional<Value>(Value::from_reference(*date));
+}
+
+void register_wireless_messaging(NativeMethodRegistry& registry) {
+    add(registry, "javax/wireless/messaging/MessageConnection",
+        "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto text = set_static_string(
+                machine, "javax/wireless/messaging/MessageConnection",
+                "TEXT_MESSAGE", "text");
+            if (!text) return std::unexpected(text.error());
+            auto binary = set_static_string(
+                machine, "javax/wireless/messaging/MessageConnection",
+                "BINARY_MESSAGE", "binary");
+            if (!binary) return std::unexpected(binary.error());
+            auto multipart = set_static_string(
+                machine, "javax/wireless/messaging/MessageConnection",
+                "MULTIPART_MESSAGE", "multipart");
+            if (!multipart) return std::unexpected(multipart.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "close", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments, "MessageConnection.close");
+            if (!connection) return std::unexpected(connection.error());
+            auto stored = set_int_field(
+                machine, *connection, kWirelessConnectionClosedField, 1);
+            if (!stored) return std::unexpected(stored.error());
+            auto listener_cleared = set_reference_field(
+                machine, *connection, kWirelessConnectionListenerField, {});
+            if (!listener_cleared) {
+                return std::unexpected(listener_cleared.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "newMessage",
+        "(Ljava/lang/String;)Ljavax/wireless/messaging/Message;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments, "MessageConnection.newMessage");
+            auto type = reference_argument(arguments, 1, "message type");
+            if (!connection) return std::unexpected(connection.error());
+            if (!type) return std::unexpected(type.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 2);
+            if (!open) return std::unexpected(open.error());
+            auto address = reference_field(
+                machine, *connection, kWirelessConnectionAddressField);
+            if (!address) return std::unexpected(address.error());
+            auto message = create_wireless_message(
+                machine, *type, *address);
+            if (!message) return std::unexpected(message.error());
+            return std::optional<Value>(Value::from_reference(*message));
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "newMessage",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljavax/wireless/messaging/Message;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments, "MessageConnection.newMessage");
+            auto type = reference_argument(arguments, 1, "message type");
+            auto address = reference_argument(
+                arguments, 2, "message address", true);
+            if (!connection) return std::unexpected(connection.error());
+            if (!type) return std::unexpected(type.error());
+            if (!address) return std::unexpected(address.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 2);
+            if (!open) return std::unexpected(open.error());
+            auto message = create_wireless_message(
+                machine, *type, *address);
+            if (!message) return std::unexpected(message.error());
+            return std::optional<Value>(Value::from_reference(*message));
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "send",
+        "(Ljavax/wireless/messaging/Message;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments, "MessageConnection.send");
+            auto message = reference_argument(arguments, 1, "message");
+            if (!connection) return std::unexpected(connection.error());
+            if (!message) return std::unexpected(message.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 2);
+            if (!open) return std::unexpected(open.error());
+            auto address = reference_field(
+                machine, *message, kWirelessMessageAddressField);
+            if (!address) return std::unexpected(address.error());
+            if (address->is_null()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "wireless message has no destination address");
+            }
+            return fail_java(
+                "java/io/IOException",
+                "wireless send requires an explicit iOS host transport");
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "receive",
+        "()Ljavax/wireless/messaging/Message;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments, "MessageConnection.receive");
+            if (!connection) return std::unexpected(connection.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 1);
+            if (!open) return std::unexpected(open.error());
+            return fail_java(
+                "java/io/InterruptedIOException",
+                "wireless receive requires an iOS host delivery bridge");
+        });
+
+    add(registry, std::string(kWirelessConnectionClass), "numberOfSegments",
+        "(Ljavax/wireless/messaging/Message;)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(
+                arguments, "MessageConnection.numberOfSegments");
+            auto message = reference_argument(arguments, 1, "message");
+            if (!connection) return std::unexpected(connection.error());
+            if (!message) return std::unexpected(message.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 2);
+            if (!open) return std::unexpected(open.error());
+
+            auto is_text = machine.object_is_instance(
+                *message, "javax/wireless/messaging/TextMessage");
+            if (!is_text) return std::unexpected(is_text.error());
+            if (*is_text) {
+                auto payload = reference_field(
+                    machine, *message, kWirelessMessagePayloadField);
+                if (!payload) return std::unexpected(payload.error());
+                if (payload->is_null()) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                auto text = machine.heap().string_value(*payload);
+                if (!text) return std::unexpected(text.error());
+                bool gsm_compatible = true;
+                for (char16_t character : *text) {
+                    if (static_cast<u16>(character) > 0x7FU) {
+                        gsm_compatible = false;
+                        break;
+                    }
+                }
+                const usize first_capacity = gsm_compatible ? 160U : 70U;
+                const usize chained_capacity = gsm_compatible ? 153U : 67U;
+                const usize length = text->size();
+                const usize segments = length <= first_capacity
+                    ? 1U
+                    : 1U + ((length - first_capacity +
+                              chained_capacity - 1U) /
+                             chained_capacity);
+                if (segments > static_cast<usize>(
+                        std::numeric_limits<i32>::max())) {
+                    return fail_java(
+                        "javax/wireless/messaging/SizeExceededException",
+                        "wireless text message is too large");
+                }
+                return std::optional<Value>(
+                    Value::from_int(static_cast<i32>(segments)));
+            }
+
+            auto is_binary = machine.object_is_instance(
+                *message, "javax/wireless/messaging/BinaryMessage");
+            if (!is_binary) return std::unexpected(is_binary.error());
+            if (!*is_binary) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "object is not a wireless message");
+            }
+            auto payload = reference_field(
+                machine, *message, kWirelessMessagePayloadField);
+            if (!payload) return std::unexpected(payload.error());
+            if (payload->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto length = byte_array_length(machine, *payload);
+            if (!length) return std::unexpected(length.error());
+            const usize segments = *length <= 140U
+                ? 1U
+                : 1U + ((*length - 140U + 133U) / 134U);
+            if (segments > static_cast<usize>(
+                    std::numeric_limits<i32>::max())) {
+                return fail_java(
+                    "javax/wireless/messaging/SizeExceededException",
+                    "wireless binary message is too large");
+            }
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(segments)));
+        });
+
+    add(registry, std::string(kWirelessConnectionClass),
+        "setMessageListener",
+        "(Ljavax/wireless/messaging/MessageListener;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(
+                arguments, "MessageConnection.setMessageListener");
+            auto listener = reference_argument(
+                arguments, 1, "message listener", true);
+            if (!connection) return std::unexpected(connection.error());
+            if (!listener) return std::unexpected(listener.error());
+            auto open = require_wireless_connection_open(
+                machine, *connection, 1);
+            if (!open) return std::unexpected(open.error());
+            auto stored = set_reference_field(
+                machine, *connection, kWirelessConnectionListenerField,
+                *listener);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    const auto register_common_message = [&registry](
+        std::string_view owner) {
+        add(registry, std::string(owner), "getAddress",
+            "()Ljava/lang/String;",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "Message.getAddress");
+                if (!message) return std::unexpected(message.error());
+                auto address = reference_field(
+                    machine, *message, kWirelessMessageAddressField);
+                if (!address) return std::unexpected(address.error());
+                return std::optional<Value>(Value::from_reference(*address));
+            });
+        add(registry, std::string(owner), "setAddress",
+            "(Ljava/lang/String;)V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "Message.setAddress");
+                auto address = reference_argument(
+                    arguments, 1, "message address", true);
+                if (!message) return std::unexpected(message.error());
+                if (!address) return std::unexpected(address.error());
+                auto stored = set_reference_field(
+                    machine, *message, kWirelessMessageAddressField,
+                    *address);
+                if (!stored) return std::unexpected(stored.error());
+                return std::optional<Value> {};
+            });
+        add(registry, std::string(owner), "getTimestamp",
+            "()Ljava/util/Date;", wireless_message_timestamp);
+    };
+    register_common_message(kWirelessTextMessageClass);
+    register_common_message(kWirelessBinaryMessageClass);
+
+    add(registry, std::string(kWirelessTextMessageClass),
+        "getPayloadText", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "TextMessage.getPayloadText");
+            if (!message) return std::unexpected(message.error());
+            auto payload = reference_field(
+                machine, *message, kWirelessMessagePayloadField);
+            if (!payload) return std::unexpected(payload.error());
+            return std::optional<Value>(Value::from_reference(*payload));
+        });
+    add(registry, std::string(kWirelessTextMessageClass),
+        "setPayloadText", "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "TextMessage.setPayloadText");
+            auto payload = reference_argument(
+                arguments, 1, "text payload", true);
+            if (!message) return std::unexpected(message.error());
+            if (!payload) return std::unexpected(payload.error());
+            auto stored = set_reference_field(
+                machine, *message, kWirelessMessagePayloadField, *payload);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kWirelessBinaryMessageClass),
+        "getPayloadData", "()[B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(
+                arguments, "BinaryMessage.getPayloadData");
+            if (!message) return std::unexpected(message.error());
+            auto payload = reference_field(
+                machine, *message, kWirelessMessagePayloadField);
+            if (!payload) return std::unexpected(payload.error());
+            return std::optional<Value>(Value::from_reference(*payload));
+        });
+    add(registry, std::string(kWirelessBinaryMessageClass),
+        "setPayloadData", "([B)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(
+                arguments, "BinaryMessage.setPayloadData");
+            auto payload = reference_argument(
+                arguments, 1, "binary payload", true);
+            if (!message) return std::unexpected(message.error());
+            if (!payload) return std::unexpected(payload.error());
+            auto stored = set_reference_field(
+                machine, *message, kWirelessMessagePayloadField, *payload);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+}
+
 } // namespace
 
 Result<std::optional<i32>> connection_stream_read_one(
     Machine& machine,
     ObjectRef stream) {
     return native_read_one(machine, stream);
+}
+
+Result<std::optional<i32>> connection_stream_read_range(
+    Machine& machine,
+    ObjectRef stream,
+    ObjectRef destination,
+    i32 offset,
+    i32 length) {
+    auto is_native = machine.object_is_instance(stream, kInputStreamClass);
+    if (!is_native) return std::unexpected(is_native.error());
+    if (!*is_native) return std::optional<i32> {};
+    auto value = native_read_range(machine,
+                                   stream,
+                                   destination,
+                                   offset,
+                                   length);
+    if (!value) return std::unexpected(value.error());
+    return std::optional<i32>(*value);
 }
 
 Result<std::optional<usize>> connection_stream_available(
@@ -2976,6 +3459,7 @@ void register_connection_natives(NativeMethodRegistry& registry) {
     register_datagram_object(registry);
     register_http_connection(registry);
     register_security_objects(registry);
+    register_wireless_messaging(registry);
 }
 
 } // namespace phoneme::vm

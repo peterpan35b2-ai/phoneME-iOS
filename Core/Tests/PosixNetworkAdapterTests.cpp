@@ -866,6 +866,70 @@ void test_dns_cancellation_releases_network_workers() {
             "cancelled DNS operations suppress late callbacks");
 }
 
+void test_blocking_listeners_do_not_starve_new_operations() {
+    using phoneme::network::NativeConnection;
+    using phoneme::network::OperationId;
+
+    auto adapter = phoneme::network::make_posix_network_adapter();
+    auto server_url = phoneme::network::Url::parse("socket://:0");
+    require(server_url.has_value(), "parse listener-starvation server URL");
+
+    AsyncResult<NativeConnection> server_wait;
+    auto server_operation = adapter->open_server(
+        *server_url, 2'000,
+        [&server_wait](phoneme::Result<NativeConnection> result) {
+            server_wait.complete(std::move(result));
+        });
+    require(server_operation.has_value() && server_wait.wait_for(),
+            "listener-starvation server opens");
+    auto server_result = server_wait.take();
+    require(server_result.has_value() && server_result->has_value(),
+            "listener-starvation server result succeeds");
+    NativeConnection server = std::move(**server_result);
+
+    std::atomic<int> callback_count {0};
+    std::array<OperationId, 12> listeners {};
+    for (auto& listener : listeners) {
+        auto started = adapter->accept(
+            server.handle, 0,
+            [&callback_count](phoneme::Result<NativeConnection>) {
+                callback_count.fetch_add(1, std::memory_order_relaxed);
+            });
+        require(started.has_value() && started->valid(),
+                "start indefinitely blocking listener");
+        listener = *started;
+    }
+    std::this_thread::sleep_for(150ms);
+
+    AsyncResult<NativeConnection> probe_wait;
+    const auto started_at = std::chrono::steady_clock::now();
+    auto probe_operation = adapter->open_server(
+        *server_url, 2'000,
+        [&probe_wait](phoneme::Result<NativeConnection> result) {
+            probe_wait.complete(std::move(result));
+        });
+    require(probe_operation.has_value() && probe_wait.wait_for(1s),
+            "new network operation bypasses blocked listener burst");
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started_at);
+    auto probe_result = probe_wait.take();
+    require(probe_result.has_value() && probe_result->has_value() &&
+                elapsed < 1s,
+            "dynamic workers prevent online listener starvation");
+    require(adapter->close((**probe_result).handle).has_value(),
+            "close listener-starvation probe server");
+
+    for (const OperationId listener : listeners) {
+        require(adapter->cancel(listener).has_value(),
+                "cancel indefinitely blocking listener");
+    }
+    require(adapter->close(server.handle).has_value(),
+            "close listener-starvation server");
+    std::this_thread::sleep_for(200ms);
+    require(callback_count.load(std::memory_order_relaxed) == 0,
+            "cancelled blocking listeners suppress callbacks");
+}
+
 void test_adapter_shutdown_cancels_pending_accept() {
     using phoneme::network::NativeConnection;
 
@@ -1161,6 +1225,7 @@ int main() {
     test_posix_udp_roundtrip(adapter);
     test_posix_socket_workers(adapter);
     test_dns_cancellation_releases_network_workers();
+    test_blocking_listeners_do_not_starve_new_operations();
     test_adapter_shutdown_cancels_pending_accept();
 
     std::cout << "Posix network adapter async tests passed\n";

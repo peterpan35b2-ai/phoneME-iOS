@@ -117,6 +117,15 @@ using namespace builtin;
                               method(kPublic | kStatic, "openDataOutputStream", "(Ljava/lang/String;)Ljava/io/DataOutputStream;"),
                           });
     }
+    if (name == "javax/microedition/io/file/FileSystemRegistry") {
+        return make_class("javax/microedition/io/file/FileSystemRegistry",
+                          "java/lang/Object", kOrdinary | kFinal, {},
+                          {
+                              method(kPrivate, "<init>", "()V"),
+                              method(kPublic | kStatic, "listRoots",
+                                     "()Ljava/util/Enumeration;"),
+                          });
+    }
     if (name == "javax/microedition/io/file/FileConnection") {
         return make_class("javax/microedition/io/file/FileConnection",
                           "java/lang/Object",

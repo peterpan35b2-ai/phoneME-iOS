@@ -5,11 +5,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="${PHONEME_CORE_BUILD_DIR:-${1:-}}"
 [[ -n "$BUILD_ROOT" ]] || {
-  echo "Usage: PHONEME_CORE_BUILD_DIR=/path bash Core/Tools/verify-iphoneos.sh" >&2
+  echo "Usage: PHONEME_CORE_BUILD_DIR=/path [PHONEME_APPLE_SDK=iphoneos|iphonesimulator] bash Core/Tools/verify-iphoneos.sh" >&2
   exit 64
 }
 ARCHIVE="${PHONEME_CORE_OUTPUT:-${2:-$BUILD_ROOT/libphoneMECore.a}}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}"
+APPLE_SDK="${PHONEME_APPLE_SDK:-iphoneos}"
+case "$APPLE_SDK" in
+  iphoneos) EXPECTED_PLATFORM_ID=2 ;;
+  iphonesimulator) EXPECTED_PLATFORM_ID=7 ;;
+  *)
+    echo "Unsupported Apple SDK: $APPLE_SDK" >&2
+    exit 2
+    ;;
+esac
 PROVENANCE="$BUILD_ROOT/build-provenance.txt"
 
 [[ -f "$ARCHIVE" ]] || {
@@ -103,8 +112,8 @@ rg -q '[_[:space:]]phoneme_c_api_version$' <<< "$GLOBAL_SYMBOLS" || {
 while IFS= read -r object; do
   [[ -f "$object" ]] || continue
   INFO="$(otool -l "$object")"
-  rg -q 'platform 2' <<< "$INFO" || {
-    echo "Object is not built for iphoneos: $object" >&2
+  rg -q "platform ${EXPECTED_PLATFORM_ID}" <<< "$INFO" || {
+    echo "Object is not built for $APPLE_SDK: $object" >&2
     exit 1
   }
   rg -q "minos ${IOS_DEPLOYMENT_TARGET//./\\.}" <<< "$INFO" || {
@@ -115,6 +124,10 @@ done < <(find "$BUILD_ROOT/objects" -type f -name '*.o' -print | LC_ALL=C sort)
 
 [[ -f "$PROVENANCE" ]] || {
   echo "Core build provenance is missing." >&2
+  exit 1
+}
+rg -q "^platform=$APPLE_SDK$" "$PROVENANCE" || {
+  echo "Core provenance has the wrong Apple platform." >&2
   exit 1
 }
 rg -q '^external_runtime_archive_required=false$' "$PROVENANCE" || {
@@ -129,7 +142,7 @@ rg -q '^builtin_boot_classes=true$' "$PROVENANCE" || {
 printf 'phoneME Core verification passed.\n'
 printf 'Archive: %s\n' "$ARCHIVE"
 printf 'Architecture: arm64\n'
-printf 'Platform: iphoneos\n'
+printf 'Platform: %s\n' "$APPLE_SDK"
 printf 'Minimum deployment target: iOS %s\n' "$IOS_DEPLOYMENT_TARGET"
 printf 'C++ implementation files: %s\n' "$SOURCE_COUNT"
 printf 'Archive members: %s\n' "$OBJECT_COUNT"

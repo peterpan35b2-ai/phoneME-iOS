@@ -88,14 +88,14 @@ void append_branch(std::vector<BranchTarget>& targets,
 }
 
 [[nodiscard]] Status read_switch_padding(ByteReader& reader) {
+    // Some production J2ME obfuscators leave non-zero bytes in the alignment
+    // gap before tableswitch/lookupswitch. The bytes are never executed and
+    // phoneME-compatible runtimes ignore their contents, so only validate that
+    // the aligned payload is still fully present.
     while ((reader.position() & 3U) != 0U) {
         auto padding = read_u8(reader, "switch padding");
         if (!padding) {
             return std::unexpected(padding.error());
-        }
-        if (*padding != 0U) {
-            return fail(ErrorCode::malformed_class,
-                        "switch padding byte must be zero");
         }
     }
     return {};

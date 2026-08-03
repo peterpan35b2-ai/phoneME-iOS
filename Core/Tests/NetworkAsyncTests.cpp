@@ -421,6 +421,40 @@ void test_close_all_cancels_http_and_drops_late_callback() {
                       "late HTTP callback cannot replace cancellation result");
 }
 
+void test_pending_completion_does_not_own_adapter() {
+    std::weak_ptr<DeferredNetworkAdapter> weak_adapter;
+    auto adapter = std::make_shared<DeferredNetworkAdapter>();
+    weak_adapter = adapter;
+    {
+        ConnectionRegistry registry(adapter);
+        auto opened = registry.open("socket://example.test:7099",
+                                    ConnectionMode::read_write, true);
+        require(opened.has_value(),
+                "open adapter-lifetime stream");
+        require(registry.open_input(opened->token).has_value(),
+                "open adapter-lifetime input stream");
+
+        std::optional<Result<std::vector<u8>>> read_result;
+        std::thread worker([&] {
+            read_result.emplace(registry.read(opened->token, 8U));
+        });
+        require(adapter->wait_for_read(),
+                "adapter-lifetime read becomes pending");
+        registry.close_all();
+        worker.join();
+        require(read_result.has_value() && !read_result->has_value(),
+                "adapter-lifetime read is cancelled");
+    }
+
+    // The deferred adapter intentionally retains the pending completion. That
+    // completion must not retain the adapter in return: a strong capture forms
+    // a cycle and may make the final release happen on the adapter's own worker
+    // thread in the POSIX implementation, where destruction would self-join.
+    adapter.reset();
+    require(weak_adapter.expired(),
+            "pending network completion does not retain its adapter");
+}
+
 void test_registry_rejects_malformed_content_length() {
     auto adapter = std::make_shared<DeferredNetworkAdapter>();
     ConnectionRegistry registry(adapter);
@@ -800,6 +834,7 @@ void test_reconnect_cancels_pending_read() {
 
 int main() {
     test_close_all_cancels_http_and_drops_late_callback();
+    test_pending_completion_does_not_own_adapter();
     test_registry_rejects_malformed_content_length();
     test_close_cancels_accept_and_closes_late_handle();
     test_stream_limits_and_input_close_cancellation();

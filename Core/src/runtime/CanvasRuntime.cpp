@@ -109,6 +109,17 @@ Status CanvasRuntime::set_host_foreground(bool foreground) {
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
         if (found == canvases_.end()) continue;
+        if (!foreground) {
+            // A hidden GameCanvas may keep calling flushGraphics from its game
+            // loop. Do not retain or publish those regions while no host surface
+            // can display them.
+            found->second.flush_region.reset();
+        } else if (found->second.game_canvas &&
+                   !found->second.game_graphics.is_null()) {
+            // Publish the latest off-screen GameCanvas contents once when the
+            // MIDlet becomes visible again.
+            merge_region(found->second.flush_region, full_region());
+        }
         visibility_changes_.push_back(VisibilityChange {
             .object = found->second.object,
             .visible = found->second.display_visible,
@@ -403,6 +414,9 @@ Status CanvasRuntime::request_game_flush(vm::ObjectRef canvas,
         return fail_java("java/lang/IllegalStateException",
                          "Canvas is not a GameCanvas");
     }
+    if (!host_foreground_) {
+        return {};
+    }
     auto clipped = clipped_region(region);
     if (clipped.has_value()) {
         merge_region((*state)->flush_region, *clipped);
@@ -564,17 +578,33 @@ Status CanvasRuntime::process_inputs() {
             const bool pressed = input.second != 0;
             const bool was_pressed = state->pressed_keys.contains(key_code);
             const i32 mask = key_state_mask(key_code);
+            const bool suppress_callback =
+                suppresses_key_callback(*state, key_code);
             std::string_view callback;
             if (pressed) {
                 if (was_pressed) {
-                    if (!host_key || !repeat_events_supported_) continue;
-                    state->next_key_repeat.insert_or_assign(
-                        key_code, repeat_clock_() + kKeyRepeatInterval);
-                    callback = "keyRepeated";
+                    if (!host_key) {
+                        continue;
+                    }
+                    // Host input carries only press/release edges; scheduled
+                    // keyRepeated callbacks are generated below from the repeat
+                    // clock. If a release edge is lost by UIKit/SwiftUI, the
+                    // next physical press reaches us while the key is still in
+                    // pressed_keys. Converting that press to keyRepeated wedges
+                    // MIDlets such as Nicknso that implement keyPressed and
+                    // keyReleased but leave keyRepeated as the Canvas no-op.
+                    // Deliver the new host edge as keyPressed so input recovers
+                    // without requiring the Canvas to be recreated.
+                    if (repeat_events_supported_ && !suppress_callback) {
+                        state->next_key_repeat.insert_or_assign(
+                            key_code,
+                            repeat_clock_() + kKeyRepeatInitialDelay);
+                    }
+                    callback = "keyPressed";
                 } else {
                     state->pressed_keys.insert(key_code);
                     state->key_states |= mask;
-                    if (repeat_events_supported_) {
+                    if (repeat_events_supported_ && !suppress_callback) {
                         state->next_key_repeat.insert_or_assign(
                             key_code,
                             repeat_clock_() + kKeyRepeatInitialDelay);
@@ -588,10 +618,8 @@ Status CanvasRuntime::process_inputs() {
                 state->key_states &= ~mask;
                 callback = "keyReleased";
             }
-            const bool suppress = state->game_canvas &&
-                                  state->suppress_key_events;
             const vm::ObjectRef object = state->object;
-            if (!suppress) {
+            if (!suppress_callback) {
                 auto invoked = invoke_key_callback(*state, callback, key_code);
                 if (!invoked) return invoked;
             }
@@ -625,7 +653,6 @@ Status CanvasRuntime::process_inputs() {
 Status CanvasRuntime::process_key_repeats() {
     CanvasState* state = active_visible_state();
     if (!repeat_events_supported_ || state == nullptr ||
-        (state->game_canvas && state->suppress_key_events) ||
         state->next_key_repeat.empty()) {
         return {};
     }
@@ -651,6 +678,10 @@ Status CanvasRuntime::process_key_repeats() {
             }
             const auto found = state->next_key_repeat.find(key_code);
             if (found == state->next_key_repeat.end() || found->second > now) {
+                break;
+            }
+            if (suppresses_key_callback(*state, key_code)) {
+                state->next_key_repeat.erase(found);
                 break;
             }
             found->second += kKeyRepeatInterval;
@@ -805,8 +836,8 @@ Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
                                            kCanvasCallbackInstructionBudget);
     if (!result) {
         if (result.error().code == ErrorCode::invalid_state &&
-            result.error().message ==
-                "VM instruction budget was exhausted") {
+            result.error().message.starts_with(
+                "VM instruction budget was exhausted")) {
             std::string diagnostic = "callback ";
             diagnostic.append(method_name);
             diagnostic.append(descriptor);
@@ -828,7 +859,11 @@ Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
         message += " from " + result->exception_context;
     }
     append_canvas_diagnostic(machine_, message);
-    return {};
+    // An uncaught exception in key/pointer/paint/show callbacks is a MIDlet
+    // failure, not a recoverable diagnostic. Swallowing it leaves the app
+    // marked active with a dead or partially-mutated game loop, which appears
+    // to the user as a frozen screen that no longer accepts input.
+    return fail_java(*throwable, std::move(message));
 }
 
 Status CanvasRuntime::invoke_key_callback(CanvasState& state,
@@ -887,6 +922,13 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
                        "javax/microedition/lcdui/Canvas",
                        "hideNotify",
                        "()V");
+}
+
+bool CanvasRuntime::suppresses_key_callback(
+    const CanvasState& state,
+    i32 key_code) const noexcept {
+    return state.game_canvas && state.suppress_key_events &&
+           game_action_for_key(key_code) != 0;
 }
 
 i32 CanvasRuntime::key_state_mask(i32 key_code) const noexcept {

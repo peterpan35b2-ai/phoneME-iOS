@@ -26,10 +26,8 @@
 		A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000016 /* PhoneMERuntimeResources.swift */; };
 		A00000000000000000000016 /* LCDUIState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* LCDUIState.swift */; };
 		A00000000000000000000017 /* NativeLCDUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001C /* NativeLCDUIView.swift */; };
-		A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001D /* JarCompatibilityPatcher.swift */; };
 		A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001F /* PhoneMEMediaBridge.m */; };
 		A00000000000000000000021 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000020 /* AVFoundation.framework */; };
-		A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */; };
 		A00000000000000000000023 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000022 /* MediaPlayer.framework */; };
 		A00000000000000000000024 /* PhoneMEHTTPSBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000023 /* PhoneMEHTTPSBridge.m */; };
 		A00000000000000000000025 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000024 /* Security.framework */; };
@@ -61,10 +59,8 @@
 		B00000000000000000000019 /* libphoneMECore.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libphoneMECore.a; path = ../../Core/libphoneMECore.a; sourceTree = "<group>"; };
 		B0000000000000000000001B /* LCDUIState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LCDUIState.swift; sourceTree = "<group>"; };
 		B0000000000000000000001C /* NativeLCDUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLCDUIView.swift; sourceTree = "<group>"; };
-		B0000000000000000000001D /* JarCompatibilityPatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarCompatibilityPatcher.swift; sourceTree = "<group>"; };
 		B0000000000000000000001F /* PhoneMEMediaBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEMediaBridge.m; sourceTree = "<group>"; };
 		B00000000000000000000020 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
-		B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */ = {isa = PBXFileReference; lastKnownFileType = file; path = AvatarLAPROStackMaps.pmpatch; sourceTree = "<group>"; };
 		B00000000000000000000022 /* MediaPlayer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MediaPlayer.framework; path = System/Library/Frameworks/MediaPlayer.framework; sourceTree = SDKROOT; };
 		B00000000000000000000023 /* PhoneMEHTTPSBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMEHTTPSBridge.m; sourceTree = "<group>"; };
 		B00000000000000000000024 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
@@ -131,7 +127,6 @@
 				B00000000000000000000004 /* GameLibrary.swift */,
 				B0000000000000000000000F /* GameProfileStore.swift */,
 				B00000000000000000000011 /* JarMetadataReader.swift */,
-				B0000000000000000000001D /* JarCompatibilityPatcher.swift */,
 				B00000000000000000000015 /* ProfileTemplateStore.swift */,
 				B00000000000000000000026 /* BackgroundExecutionController.swift */,
 			);
@@ -187,7 +182,6 @@
 		D0000000000000000000000B /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				B00000000000000000000021 /* AvatarLAPROStackMaps.pmpatch */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -248,7 +242,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A00000000000000000000022 /* AvatarLAPROStackMaps.pmpatch in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -269,7 +262,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nif [ \"$PLATFORM_NAME\" != \"iphoneos\" ]; then\n  echo \"phoneME Core supports iphoneos only.\" >&2\n  exit 1\nfi\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
+			shellScript = "set -eu\ncase \"$PLATFORM_NAME\" in\n  iphoneos|iphonesimulator) ;;\n  *)\n    echo \"phoneME Core does not support platform: $PLATFORM_NAME\" >&2\n    exit 1\n    ;;\nesac\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ] && [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -298,7 +291,6 @@
 				A00000000000000000000013 /* PhoneMERuntimeResources.swift in Sources */,
 				A00000000000000000000016 /* LCDUIState.swift in Sources */,
 				A00000000000000000000017 /* NativeLCDUIView.swift in Sources */,
-				A00000000000000000000018 /* JarCompatibilityPatcher.swift in Sources */,
 				A00000000000000000000020 /* PhoneMEMediaBridge.m in Sources */,
 				A00000000000000000000024 /* PhoneMEHTTPSBridge.m in Sources */,
 				A00000000000000000000026 /* PhoneMEPlatformBridge.m in Sources */,
@@ -373,7 +365,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";
@@ -412,7 +404,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "phoneME/Support/phoneME-Bridging-Header.h";

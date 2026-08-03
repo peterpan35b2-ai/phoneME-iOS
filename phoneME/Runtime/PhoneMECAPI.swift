@@ -222,6 +222,17 @@ final class PhoneMECAPI: @unchecked Sendable {
         return (status, status == 0 ? suiteID : nil)
     }
 
+    func setSuiteTrusted(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32
+    ) -> Int32 {
+        phoneme_set_suite_trust(
+            runtime?.rawValue,
+            suiteID,
+            Int32(PHONEME_SUITE_TRUSTED.rawValue)
+        )
+    }
+
     func lastInstallStage() -> Int32 {
         phoneme_last_install_stage()
     }

@@ -6,6 +6,7 @@
 #include <exception>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,10 @@ constexpr usize kEnumerationIndexField = 1;
 constexpr usize kEnumerationSizeField = 2;
 constexpr usize kRandomSeedField = 0;
 constexpr usize kDateMillisField = 0;
+constexpr usize kTokenizerStringField = 0;
+constexpr usize kTokenizerDelimitersField = 1;
+constexpr usize kTokenizerPositionField = 2;
+constexpr usize kTokenizerReturnDelimitersField = 3;
 constexpr u64 kRandomMultiplier = 0x5DEECE66DULL;
 constexpr u64 kRandomAddend = 0xBULL;
 constexpr u64 kRandomMask = (1ULL << 48U) - 1ULL;
@@ -158,6 +163,180 @@ void add(NativeMethodRegistry& registry,
                                          ObjectRef value) {
     return machine.heap().set_field(object, index,
                                     Value::from_reference(value));
+}
+
+[[nodiscard]] Result<ObjectRef> create_string(Machine& machine,
+                                              std::u16string text) {
+    auto object = machine.class_states().allocate_instance(
+        machine.heap(), "java/lang/String");
+    if (!object) return std::unexpected(object.error());
+    auto attached = machine.heap().attach_string(*object, std::move(text));
+    if (!attached) return std::unexpected(attached.error());
+    return *object;
+}
+
+[[nodiscard]] constexpr bool is_high_surrogate(char16_t value) noexcept {
+    return value >= static_cast<char16_t>(0xD800U) &&
+           value <= static_cast<char16_t>(0xDBFFU);
+}
+
+[[nodiscard]] constexpr bool is_low_surrogate(char16_t value) noexcept {
+    return value >= static_cast<char16_t>(0xDC00U) &&
+           value <= static_cast<char16_t>(0xDFFFU);
+}
+
+struct Utf16CodePoint final {
+    u32 value {0};
+    usize units {1};
+};
+
+[[nodiscard]] Utf16CodePoint code_point_at(std::u16string_view text,
+                                           usize index) noexcept {
+    const auto first = text[index];
+    if (is_high_surrogate(first) && index + 1U < text.size()) {
+        const auto second = text[index + 1U];
+        if (is_low_surrogate(second)) {
+            const u32 high = static_cast<u32>(first) - 0xD800U;
+            const u32 low = static_cast<u32>(second) - 0xDC00U;
+            return Utf16CodePoint {
+                .value = 0x10000U + (high << 10U) + low,
+                .units = 2U,
+            };
+        }
+    }
+    return Utf16CodePoint {
+        .value = static_cast<u32>(first),
+        .units = 1U,
+    };
+}
+
+[[nodiscard]] bool delimiter_contains(std::u16string_view delimiters,
+                                      u32 code_point) noexcept {
+    for (usize index = 0; index < delimiters.size();) {
+        const auto delimiter = code_point_at(delimiters, index);
+        if (delimiter.value == code_point) return true;
+        index += delimiter.units;
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_delimiter_at(std::u16string_view text,
+                                   usize index,
+                                   std::u16string_view delimiters,
+                                   usize* units = nullptr) noexcept {
+    const auto candidate = code_point_at(text, index);
+    if (units != nullptr) *units = candidate.units;
+    return delimiter_contains(delimiters, candidate.value);
+}
+
+struct TokenizerState final {
+    ObjectRef object {};
+    ObjectRef string_object {};
+    ObjectRef delimiter_object {};
+    std::u16string string;
+    std::u16string delimiters;
+    usize position {0};
+    bool return_delimiters {false};
+};
+
+[[nodiscard]] Result<TokenizerState> tokenizer_state(
+    Machine& machine,
+    std::span<const Value> arguments) {
+    auto object = receiver(arguments);
+    if (!object) return std::unexpected(object.error());
+    auto string_object = reference_field(machine, *object, kTokenizerStringField);
+    auto delimiter_object = reference_field(machine, *object,
+                                            kTokenizerDelimitersField);
+    auto position = int_field(machine, *object, kTokenizerPositionField);
+    auto return_delimiters = int_field(machine, *object,
+                                       kTokenizerReturnDelimitersField);
+    if (!string_object || !delimiter_object || !position || !return_delimiters) {
+        return fail(ErrorCode::invalid_state,
+                    "StringTokenizer state is invalid");
+    }
+    if (string_object->is_null() || delimiter_object->is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "StringTokenizer string or delimiters are null");
+    }
+    auto string = machine.heap().string_value(*string_object);
+    auto delimiters = machine.heap().string_value(*delimiter_object);
+    if (!string || !delimiters) {
+        return fail(ErrorCode::invalid_state,
+                    "StringTokenizer text payload is unavailable");
+    }
+    if (*position < 0 || static_cast<usize>(*position) > string->size()) {
+        return fail(ErrorCode::invalid_state,
+                    "StringTokenizer position is outside the string");
+    }
+    return TokenizerState {
+        .object = *object,
+        .string_object = *string_object,
+        .delimiter_object = *delimiter_object,
+        .string = std::move(*string),
+        .delimiters = std::move(*delimiters),
+        .position = static_cast<usize>(*position),
+        .return_delimiters = *return_delimiters != 0,
+    };
+}
+
+[[nodiscard]] usize skip_delimiters(const TokenizerState& state,
+                                    usize position) noexcept {
+    if (state.return_delimiters) return position;
+    while (position < state.string.size()) {
+        usize units = 1U;
+        if (!is_delimiter_at(state.string, position,
+                             state.delimiters, &units)) {
+            break;
+        }
+        position += units;
+    }
+    return position;
+}
+
+[[nodiscard]] usize scan_token_end(const TokenizerState& state,
+                                   usize position) noexcept {
+    while (position < state.string.size()) {
+        usize units = 1U;
+        if (is_delimiter_at(state.string, position,
+                            state.delimiters, &units)) {
+            break;
+        }
+        position += units;
+    }
+    return position;
+}
+
+[[nodiscard]] Result<std::optional<Value>> tokenizer_next(
+    Machine& machine,
+    TokenizerState state) {
+    const usize start = skip_delimiters(state, state.position);
+    if (start >= state.string.size()) {
+        return fail_java("java/util/NoSuchElementException",
+                         "StringTokenizer has no more tokens");
+    }
+
+    usize end = start;
+    usize delimiter_units = 1U;
+    if (state.return_delimiters &&
+        is_delimiter_at(state.string, start, state.delimiters,
+                        &delimiter_units)) {
+        end += delimiter_units;
+    } else {
+        end = scan_token_end(state, start);
+    }
+
+    if (end > static_cast<usize>(std::numeric_limits<i32>::max())) {
+        return fail(ErrorCode::overflow,
+                    "StringTokenizer position exceeds Java int range");
+    }
+    auto stored = set_int_field(machine, state.object,
+                                kTokenizerPositionField,
+                                static_cast<i32>(end));
+    if (!stored) return std::unexpected(stored.error());
+    auto token = create_string(machine,
+        state.string.substr(start, end - start));
+    if (!token) return std::unexpected(token.error());
+    return std::optional<Value>(Value::from_reference(*token));
 }
 
 [[nodiscard]] Result<bool> values_equal(Machine& machine,
@@ -408,6 +587,169 @@ void add(NativeMethodRegistry& registry,
         *data, static_cast<usize>(*count - 1), Value::from_reference({}));
     if (!cleared) return cleared;
     return set_int_field(machine, vector, kVectorCountField, *count - 1);
+}
+
+[[nodiscard]] Status initialize_tokenizer(Machine& machine,
+                                          ObjectRef object,
+                                          ObjectRef string_object,
+                                          ObjectRef delimiter_object,
+                                          bool return_delimiters) {
+    if (string_object.is_null() || delimiter_object.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "StringTokenizer string or delimiters are null");
+    }
+    auto string = machine.heap().string_value(string_object);
+    auto delimiters = machine.heap().string_value(delimiter_object);
+    if (!string || !delimiters) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "StringTokenizer requires String arguments");
+    }
+    auto stored_string = set_reference_field(
+        machine, object, kTokenizerStringField, string_object);
+    auto stored_delimiters = set_reference_field(
+        machine, object, kTokenizerDelimitersField, delimiter_object);
+    auto stored_position = set_int_field(
+        machine, object, kTokenizerPositionField, 0);
+    auto stored_return = set_int_field(
+        machine, object, kTokenizerReturnDelimitersField,
+        return_delimiters ? 1 : 0);
+    if (!stored_string) return stored_string;
+    if (!stored_delimiters) return stored_delimiters;
+    if (!stored_position) return stored_position;
+    return stored_return;
+}
+
+[[nodiscard]] Result<std::optional<Value>> tokenizer_has_more(
+    Machine& machine,
+    std::span<const Value> arguments) {
+    auto state = tokenizer_state(machine, arguments);
+    if (!state) return std::unexpected(state.error());
+    const usize position = skip_delimiters(*state, state->position);
+    return std::optional<Value>(Value::from_int(
+        position < state->string.size() ? 1 : 0));
+}
+
+[[nodiscard]] Result<std::optional<Value>> tokenizer_count_tokens(
+    Machine& machine,
+    std::span<const Value> arguments) {
+    auto state = tokenizer_state(machine, arguments);
+    if (!state) return std::unexpected(state.error());
+    usize position = state->position;
+    usize count = 0U;
+    while (position < state->string.size()) {
+        position = skip_delimiters(*state, position);
+        if (position >= state->string.size()) break;
+        usize delimiter_units = 1U;
+        if (state->return_delimiters &&
+            is_delimiter_at(state->string, position, state->delimiters,
+                            &delimiter_units)) {
+            position += delimiter_units;
+        } else {
+            position = scan_token_end(*state, position);
+        }
+        ++count;
+        if (count > static_cast<usize>(std::numeric_limits<i32>::max())) {
+            return fail(ErrorCode::overflow,
+                        "StringTokenizer token count exceeds Java int range");
+        }
+    }
+    return std::optional<Value>(
+        Value::from_int(static_cast<i32>(count)));
+}
+
+void register_string_tokenizer(NativeMethodRegistry& registry) {
+    add(registry, "java/util/StringTokenizer", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto string_object = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!string_object) return std::unexpected(string_object.error());
+            auto delimiters = create_string(machine, u" \t\n\r\f");
+            if (!delimiters) return std::unexpected(delimiters.error());
+            auto initialized = initialize_tokenizer(
+                machine, *object, *string_object, *delimiters, false);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/StringTokenizer", "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto string_object = reference_argument(arguments, 1U);
+            auto delimiters = reference_argument(arguments, 2U);
+            if (!object) return std::unexpected(object.error());
+            if (!string_object) return std::unexpected(string_object.error());
+            if (!delimiters) return std::unexpected(delimiters.error());
+            auto initialized = initialize_tokenizer(
+                machine, *object, *string_object, *delimiters, false);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/StringTokenizer", "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Z)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto string_object = reference_argument(arguments, 1U);
+            auto delimiters = reference_argument(arguments, 2U);
+            auto return_delimiters = int_argument(arguments, 3U);
+            if (!object) return std::unexpected(object.error());
+            if (!string_object) return std::unexpected(string_object.error());
+            if (!delimiters) return std::unexpected(delimiters.error());
+            if (!return_delimiters) {
+                return std::unexpected(return_delimiters.error());
+            }
+            auto initialized = initialize_tokenizer(
+                machine, *object, *string_object, *delimiters,
+                *return_delimiters != 0);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/StringTokenizer", "hasMoreTokens", "()Z",
+        tokenizer_has_more);
+    add(registry, "java/util/StringTokenizer", "hasMoreElements", "()Z",
+        tokenizer_has_more);
+    add(registry, "java/util/StringTokenizer", "nextToken",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = tokenizer_state(machine, arguments);
+            if (!state) return std::unexpected(state.error());
+            return tokenizer_next(machine, std::move(*state));
+        });
+    add(registry, "java/util/StringTokenizer", "nextElement",
+        "()Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = tokenizer_state(machine, arguments);
+            if (!state) return std::unexpected(state.error());
+            return tokenizer_next(machine, std::move(*state));
+        });
+    add(registry, "java/util/StringTokenizer", "nextToken",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto delimiters = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!delimiters) return std::unexpected(delimiters.error());
+            auto delimiter_text = machine.heap().string_value(*delimiters);
+            if (!delimiter_text) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "StringTokenizer delimiter is not a String");
+            }
+            auto stored = set_reference_field(
+                machine, *object, kTokenizerDelimitersField, *delimiters);
+            if (!stored) return std::unexpected(stored.error());
+            auto state = tokenizer_state(machine, arguments.first(1U));
+            if (!state) return std::unexpected(state.error());
+            return tokenizer_next(machine, std::move(*state));
+        });
+    add(registry, "java/util/StringTokenizer", "countTokens", "()I",
+        tokenizer_count_tokens);
 }
 
 void register_enumeration(NativeMethodRegistry& registry) {
@@ -1648,6 +1990,7 @@ void register_random(NativeMethodRegistry& registry) {
 } // namespace
 
 void register_util_natives(NativeMethodRegistry& registry) {
+    register_string_tokenizer(registry);
     register_enumeration(registry);
     register_vector(registry);
     register_hashtable(registry);

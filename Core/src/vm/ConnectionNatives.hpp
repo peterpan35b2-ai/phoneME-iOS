@@ -14,6 +14,12 @@ void register_connection_natives(NativeMethodRegistry& registry);
 
 [[nodiscard]] Result<std::optional<i32>>
 connection_stream_read_one(Machine& machine, ObjectRef stream);
+[[nodiscard]] Result<std::optional<i32>> connection_stream_read_range(
+    Machine& machine,
+    ObjectRef stream,
+    ObjectRef destination,
+    i32 offset,
+    i32 length);
 [[nodiscard]] Result<std::optional<usize>>
 connection_stream_available(Machine& machine, ObjectRef stream);
 [[nodiscard]] Result<std::optional<bool>>

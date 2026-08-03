@@ -75,6 +75,32 @@ namespace phoneme::runtime
     return {};
   }
 
+  FrameMetadata Framebuffer::metadata() const noexcept
+  {
+    std::scoped_lock lock(mutex_);
+    return FrameMetadata{
+        .dimensions = dimensions_,
+        .generation = generation_,
+        .byte_count = rgba_.size(),
+    };
+  }
+
+  FrameMetadata Framebuffer::copy_rgba(
+      std::span<u8> destination) const noexcept
+  {
+    std::scoped_lock lock(mutex_);
+    const FrameMetadata result{
+        .dimensions = dimensions_,
+        .generation = generation_,
+        .byte_count = rgba_.size(),
+    };
+    if (!rgba_.empty() && destination.size() >= rgba_.size())
+    {
+      std::copy(rgba_.begin(), rgba_.end(), destination.begin());
+    }
+    return result;
+  }
+
   FrameSnapshot Framebuffer::snapshot() const
   {
     std::scoped_lock lock(mutex_);

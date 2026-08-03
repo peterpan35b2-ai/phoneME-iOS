@@ -693,6 +693,14 @@ namespace phoneme::classfile
         }
         if (*attribute_name != "ConstantValue")
           continue;
+
+        // Legacy phoneME ignores ConstantValue on instance fields instead of
+        // rejecting the whole class. Several obfuscators leave this harmless
+        // attribute behind, so mirror the original loader while retaining
+        // strict validation for static fields whose value is actually used.
+        constexpr u16 kStatic = 0x0008U;
+        if ((*access_flags & kStatic) == 0U)
+          continue;
         if (constant_value_index.has_value() || *attribute_length != 2U)
         {
           return fail(ErrorCode::malformed_class,
@@ -710,13 +718,6 @@ namespace phoneme::classfile
         {
           return fail(ErrorCode::malformed_class,
                       "ConstantValue references an invalid constant");
-        }
-        constexpr u16 kStatic = 0x0008U;
-        constexpr u16 kFinal = 0x0010U;
-        if ((*access_flags & (kStatic | kFinal)) != (kStatic | kFinal))
-        {
-          return fail(ErrorCode::malformed_class,
-                      "ConstantValue is only valid on static final fields");
         }
         const Result<ConstantKind> expected = [&]() -> Result<ConstantKind>
         {

@@ -104,12 +104,11 @@ void copy_utf8(char* destination,
     }
 }
 
-[[nodiscard]] i32 copy_frame(const phoneme::runtime::FrameSnapshot& frame,
-                             std::uint8_t* destination,
-                             i32 capacity,
-                             i32* width,
-                             i32* height,
-                             std::uint64_t* generation) noexcept {
+[[nodiscard]] i32 frame_byte_count(
+    const phoneme::runtime::FrameMetadata& frame,
+    i32* width,
+    i32* height,
+    std::uint64_t* generation) noexcept {
     if (width != nullptr) {
         *width = frame.dimensions.width;
     }
@@ -120,15 +119,11 @@ void copy_utf8(char* destination,
         *generation = frame.generation;
     }
 
-    if (frame.rgba.size() > static_cast<std::size_t>(std::numeric_limits<i32>::max())) {
+    if (frame.byte_count >
+        static_cast<std::size_t>(std::numeric_limits<i32>::max())) {
         return 0;
     }
-    const i32 required = static_cast<i32>(frame.rgba.size());
-    if (required == 0 || destination == nullptr || capacity < required) {
-        return required;
-    }
-    std::memcpy(destination, frame.rgba.data(), frame.rgba.size());
-    return required;
+    return static_cast<i32>(frame.byte_count);
 }
 
 } // namespace
@@ -554,8 +549,21 @@ int32_t phoneme_copy_frame_rgba(PhoneMERuntimeRef runtime,
     if (instance == nullptr) {
         return 0;
     }
-    return copy_frame(instance->frame_snapshot(), destination, capacity,
-                      width, height, generation);
+
+    // The size/generation query pumps the Canvas exactly once without copying
+    // the full framebuffer. The immediately following data call copies the
+    // latest complete frame under the framebuffer lock without pumping again.
+    // This avoids presenting pixels assembled from two separate VM pumps and
+    // removes the duplicate full-frame allocation from every host refresh.
+    if (destination == nullptr || capacity <= 0) {
+        return frame_byte_count(instance->frame_metadata(),
+                                width, height, generation);
+    }
+
+    const auto frame = instance->copy_current_frame_rgba(
+        std::span<std::uint8_t>(destination,
+                                static_cast<std::size_t>(capacity)));
+    return frame_byte_count(frame, width, height, generation);
 }
 
 int32_t phoneme_poll_lcdui_event(PhoneMERuntimeRef runtime,

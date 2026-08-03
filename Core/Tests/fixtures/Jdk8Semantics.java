@@ -280,11 +280,13 @@ public final class Jdk8Semantics {
             result |= 32;
         }
         if (floatValue.doubleValue() == 1.5
-                && Float.parseFloat("2.25") == 2.25F) {
+                && Float.parseFloat("2.25") == 2.25F
+                && Float.valueOf("1.75").floatValue() == 1.75F) {
             result |= 64;
         }
         if (doubleValue.intValue() == 2
-                && Double.parseDouble("3.5") == 3.5) {
+                && Double.parseDouble("3.5") == 3.5
+                && Double.valueOf("4.25").doubleValue() == 4.25) {
             result |= 128;
         }
         if (integer.toString().equals("123")

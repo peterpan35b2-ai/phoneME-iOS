@@ -131,6 +131,28 @@ using namespace builtin;
             method(kPublic, "nextElement", "()Ljava/lang/Object;"),
         }, {"java/util/Enumeration"});
     }
+    if (name == "java/util/StringTokenizer") {
+        return make_class("java/util/StringTokenizer", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate, "string", "Ljava/lang/String;"),
+            field(kPrivate, "delimiters", "Ljava/lang/String;"),
+            field(kPrivate, "position", "I"),
+            field(kPrivate, "returnDelimiters", "Z"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/lang/String;Z)V"),
+            method(kPublic, "hasMoreTokens", "()Z"),
+            method(kPublic, "nextToken", "()Ljava/lang/String;"),
+            method(kPublic, "nextToken",
+                   "(Ljava/lang/String;)Ljava/lang/String;"),
+            method(kPublic, "hasMoreElements", "()Z"),
+            method(kPublic, "nextElement", "()Ljava/lang/Object;"),
+            method(kPublic, "countTokens", "()I"),
+        }, {"java/util/Enumeration"});
+    }
     if (name == "java/util/Vector") {
         return make_class("java/util/Vector", "java/lang/Object", kOrdinary, {
             field(kPrivate, "elementData", "[Ljava/lang/Object;"),

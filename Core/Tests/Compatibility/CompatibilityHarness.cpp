@@ -391,6 +391,11 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     if (result.canvas_event_count != 0U) {
         (void)write_ppm(options, runtime.frame_snapshot(), result);
     }
+    const auto console_output = runtime.app_console_output(kAppId);
+    if (!console_output.empty()) {
+        std::cout << console_output;
+        std::cout.flush();
+    }
 
     if (runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
         auto destroyed = runtime.destroy_midlet(kAppId);

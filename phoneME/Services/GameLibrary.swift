@@ -9,7 +9,6 @@ final class GameLibrary: ObservableObject {
     private let gamesURL: URL
     private let iconsURL: URL
     private let metadataURL: URL
-    private let compatibilityRevision = "merged-launcher-stackmaps-v3"
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -49,42 +48,13 @@ final class GameLibrary: ObservableObject {
         return fileManager.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Applies compatibility fixes to JARs imported by older app versions.
-    /// New imports are already normalized, so this becomes a cheap no-op after
-    /// the first successful launch.
+    /// Returns the original imported JAR unchanged. Class-file parsing,
+    /// StackMap handling and verification belong exclusively to the C++ core.
     func prepareJarForLaunch(_ game: Game) throws -> URL {
         let sourceURL = fileURL(for: game)
         guard fileManager.fileExists(atPath: sourceURL.path) else {
             throw LibraryError.missingGameFile
         }
-        let needsTargetedRefresh =
-            JarCompatibilityPatcher.requiresTargetedCompatibilityRefresh(
-                at: sourceURL
-            )
-        guard !isCompatibilityPrepared(for: sourceURL)
-                || needsTargetedRefresh else {
-            return sourceURL
-        }
-
-        let replacementURL = gamesURL.appendingPathComponent(
-            "launch-normalized-\(UUID().uuidString).jar",
-            isDirectory: false
-        )
-        defer {
-            try? fileManager.removeItem(at: replacementURL)
-        }
-
-        if try JarCompatibilityPatcher.writeNormalizedJar(
-            from: sourceURL,
-            to: replacementURL
-        ) {
-            _ = try fileManager.replaceItemAt(
-                sourceURL,
-                withItemAt: replacementURL
-            )
-            print("[JarCompatibilityPatcher] normalized existing JAR: \(game.fileName)")
-        }
-        try? markCompatibilityPrepared(for: sourceURL)
         return sourceURL
     }
 
@@ -112,14 +82,7 @@ final class GameLibrary: ObservableObject {
         let iconFileName = try storeIcon(from: metadata, gameID: id)
 
         do {
-            let normalized = try JarCompatibilityPatcher.writeNormalizedJar(
-                from: sourceURL,
-                to: destinationURL
-            )
-            if !normalized {
-                try fileManager.copyItem(at: sourceURL, to: destinationURL)
-            }
-            try? markCompatibilityPrepared(for: destinationURL)
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
         } catch {
             if let iconFileName {
                 try? fileManager.removeItem(at: iconsURL.appendingPathComponent(iconFileName))
@@ -167,17 +130,10 @@ final class GameLibrary: ObservableObject {
         let destinationURL = fileURL(for: game)
         let replacementURL = destinationURL.deletingLastPathComponent()
             .appendingPathComponent("replacement-\(UUID().uuidString).jar")
-        let normalized = try JarCompatibilityPatcher.writeNormalizedJar(
-            from: sourceURL,
-            to: replacementURL
-        )
-        if !normalized {
-            try fileManager.copyItem(at: sourceURL, to: replacementURL)
-        }
+        try fileManager.copyItem(at: sourceURL, to: replacementURL)
 
         do {
             _ = try fileManager.replaceItemAt(destinationURL, withItemAt: replacementURL)
-            try? markCompatibilityPrepared(for: destinationURL)
         } catch {
             try? fileManager.removeItem(at: replacementURL)
             throw error
@@ -215,7 +171,6 @@ final class GameLibrary: ObservableObject {
         for game in removedGames {
             let jarURL = fileURL(for: game)
             try? fileManager.removeItem(at: jarURL)
-            try? fileManager.removeItem(at: compatibilityMarkerURL(for: jarURL))
             removeIcon(for: game)
             PhoneMERuntimeResources.removeStorage(for: game.id)
         }
@@ -227,7 +182,6 @@ final class GameLibrary: ObservableObject {
         games.remove(at: index)
         let jarURL = fileURL(for: game)
         try? fileManager.removeItem(at: jarURL)
-        try? fileManager.removeItem(at: compatibilityMarkerURL(for: jarURL))
         removeIcon(for: game)
         PhoneMERuntimeResources.removeStorage(for: game.id)
         try? save()
@@ -328,26 +282,6 @@ final class GameLibrary: ObservableObject {
     private func removeIcon(for game: Game) {
         guard let iconFileName = game.iconFileName else { return }
         try? fileManager.removeItem(at: iconsURL.appendingPathComponent(iconFileName))
-    }
-
-    private func compatibilityMarkerURL(for jarURL: URL) -> URL {
-        jarURL.appendingPathExtension("phoneme-compatibility")
-    }
-
-    private func isCompatibilityPrepared(for jarURL: URL) -> Bool {
-        let markerURL = compatibilityMarkerURL(for: jarURL)
-        guard let data = try? Data(contentsOf: markerURL),
-              let value = String(data: data, encoding: .utf8) else {
-            return false
-        }
-        return value == compatibilityRevision
-    }
-
-    private func markCompatibilityPrepared(for jarURL: URL) throws {
-        try Data(compatibilityRevision.utf8).write(
-            to: compatibilityMarkerURL(for: jarURL),
-            options: .atomic
-        )
     }
 
     private func save() throws {

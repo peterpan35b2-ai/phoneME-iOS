@@ -8,6 +8,12 @@
 
 namespace phoneme::runtime {
 
+struct FrameMetadata final {
+    Dimensions dimensions;
+    u64 generation {0};
+    usize byte_count {0};
+};
+
 struct FrameSnapshot final {
     Dimensions dimensions;
     u64 generation {0};
@@ -21,6 +27,8 @@ public:
     [[nodiscard]] Status resize(Dimensions dimensions);
     [[nodiscard]] Status replace(Dimensions dimensions,
                                  std::span<const u8> rgba);
+    [[nodiscard]] FrameMetadata metadata() const noexcept;
+    [[nodiscard]] FrameMetadata copy_rgba(std::span<u8> destination) const noexcept;
     [[nodiscard]] FrameSnapshot snapshot() const;
     void clear() noexcept;
 

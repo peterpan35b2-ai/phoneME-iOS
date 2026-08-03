@@ -11,6 +11,7 @@
 #include "ConnectionNatives.hpp"
 #include "GameApiNatives.hpp"
 #include "MediaNatives.hpp"
+#include "phoneme/media/MediaService.hpp"
 #include "phoneme/network/AsyncNetworkAdapter.hpp"
 #include "phoneme/runtime/Runtime.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
@@ -23,8 +24,23 @@ void register_connection_natives(NativeMethodRegistry&) {}
 void register_game_api_natives(NativeMethodRegistry&) {}
 void register_media_natives(NativeMethodRegistry&) {}
 
+Status dispatch_media_event(Machine&,
+                            ObjectRef,
+                            const media::MediaEvent&) {
+    return {};
+}
+
 Result<std::optional<i32>> connection_stream_read_one(Machine&, ObjectRef) {
     return std::optional<i32> {};
+}
+
+Result<std::optional<i32>> connection_stream_read_range(
+    Machine&,
+    ObjectRef,
+    ObjectRef,
+    i32,
+    i32) {
+    return 0;
 }
 
 Result<std::optional<usize>> connection_stream_available(Machine&, ObjectRef) {
@@ -253,8 +269,8 @@ int main(int argc, char** argv) {
         key_down_count += event->text == "eventDown:-59" ? 1 : 0;
         early_repeat = early_repeat || event->text == "eventRepeat:-59";
     }
-    require(key_down_count == 1 && !early_repeat,
-            "duplicate host key-down does not synthesize an immediate repeat");
+    require(key_down_count == 2 && !early_repeat,
+            "duplicate host key-down recovers as a fresh press edge");
     runtime.send_key(-59, false);
     bool released_once = false;
     while (auto event = runtime.poll_ui_event()) {
@@ -343,6 +359,55 @@ int main(int argc, char** argv) {
             "destroy Canvas capability fixture");
     require(runtime.configure_input_capabilities(true, true, true).has_value(),
             "restore default Canvas input capabilities");
+
+    constexpr phoneme::AppId suppress_app_id {436};
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.CanvasSuppressOps",
+                                 suppress_app_id,
+                                 phoneme::Dimensions {320, 240}).has_value(),
+            "start suppressing GameCanvas fixture");
+    while (runtime.poll_ui_event()) { }
+    runtime.send_key(-1, true);
+    runtime.send_key(-1, false);
+    runtime.send_key(-6, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+    (void)runtime.frame_snapshot();
+    runtime.send_key(-6, false);
+    runtime.send_key(-7, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+    (void)runtime.frame_snapshot();
+    runtime.send_key(-7, false);
+    bool suppressed_game_callback = false;
+    bool soft_left_down = false;
+    bool soft_left_repeat = false;
+    bool soft_left_up = false;
+    bool soft_right_down = false;
+    bool soft_right_repeat = false;
+    bool soft_right_up = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind != 3 || event->component_type != 22) continue;
+        suppressed_game_callback = suppressed_game_callback ||
+            event->text.find(":-59") != std::string::npos;
+        soft_left_down = soft_left_down ||
+            event->text == "suppressDown:-21";
+        soft_left_repeat = soft_left_repeat ||
+            event->text == "suppressRepeat:-21";
+        soft_left_up = soft_left_up ||
+            event->text == "suppressUp:-21";
+        soft_right_down = soft_right_down ||
+            event->text == "suppressDown:-22";
+        soft_right_repeat = soft_right_repeat ||
+            event->text == "suppressRepeat:-22";
+        soft_right_up = soft_right_up ||
+            event->text == "suppressUp:-22";
+    }
+    require(!suppressed_game_callback,
+            "GameCanvas suppression blocks mapped game-action callbacks");
+    require(soft_left_down && soft_left_repeat && soft_left_up &&
+                soft_right_down && soft_right_repeat && soft_right_up,
+            "GameCanvas suppression preserves mapped L/R soft-key callbacks");
+    require(runtime.destroy_midlet(suppress_app_id).has_value(),
+            "destroy suppressing GameCanvas fixture");
 
     constexpr phoneme::AppId throw_app_id {435};
     require(runtime.start_midlet(*suite_id,

@@ -4,10 +4,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common-test-root.sh"
+APPLE_SDK="${PHONEME_APPLE_SDK:-iphoneos}"
+case "$APPLE_SDK" in
+  iphoneos)
+    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-16.0}"
+    MIN_VERSION_FLAG="-miphoneos-version-min=${IOS_DEPLOYMENT_TARGET:-16.0}"
+    ;;
+  iphonesimulator)
+    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-16.0}-simulator"
+    MIN_VERSION_FLAG="-mios-simulator-version-min=${IOS_DEPLOYMENT_TARGET:-16.0}"
+    ;;
+  *)
+    echo "Unsupported Apple SDK: $APPLE_SDK" >&2
+    exit 2
+    ;;
+esac
+
 if [[ -n "${PHONEME_CORE_BUILD_DIR:-}" ]]; then
   BUILD_ROOT="$(phoneme_prepare_managed_root "$PHONEME_CORE_BUILD_DIR" "$CORE_ROOT")"
 else
-  BUILD_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "iphoneos-arm64")"
+  BUILD_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "$APPLE_SDK-arm64")"
 fi
 OBJECT_ROOT="$BUILD_ROOT/objects"
 OUTPUT_ARCHIVE="${PHONEME_CORE_OUTPUT:-$BUILD_ROOT/libphoneMECore.a}"
@@ -53,8 +69,8 @@ if rg -n 'Vendor/phoneME|phoneME/Resources/PhoneMERuntime|_MergedSrc' \
   exit 1
 fi
 
-SDK_ROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
-CXX="$(xcrun --sdk iphoneos --find clang++)"
+SDK_ROOT="$(xcrun --sdk "$APPLE_SDK" --show-sdk-path)"
+CXX="$(xcrun --sdk "$APPLE_SDK" --find clang++)"
 
 mkdir -p "$OBJECT_ROOT" "$(dirname "$OUTPUT_ARCHIVE")"
 
@@ -79,9 +95,9 @@ OBJECT_LIST="$BUILD_ROOT/archive-members.txt"
 
 COMMON_FLAGS=(
   -std=c++23
-  -target "arm64-apple-ios${IOS_DEPLOYMENT_TARGET}"
+  -target "$TARGET_TRIPLE"
   -isysroot "$SDK_ROOT"
-  -miphoneos-version-min="$IOS_DEPLOYMENT_TARGET"
+  "$MIN_VERSION_FLAG"
   -I"$CORE_ROOT/include"
   -DPHONEME_IPHONEOS_ONLY=1
   -fno-exceptions
@@ -141,7 +157,7 @@ ARCHIVE_SIZE="$(du -h "$OUTPUT_ARCHIVE" | awk '{print $1}')"
 
 cat > "$PROVENANCE" <<EOF
 source_root=$CORE_ROOT
-platform=iphoneos
+platform=$APPLE_SDK
 architecture=arm64
 minimum_ios=$IOS_DEPLOYMENT_TARGET
 compiler=$CXX
@@ -163,6 +179,7 @@ cat > "$BUILD_ROOT/build-result.env" <<EOF
 PHONEME_CORE_BUILD_DIR=$BUILD_ROOT
 PHONEME_CORE_OUTPUT=$OUTPUT_ARCHIVE
 IOS_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET
+PHONEME_APPLE_SDK=$APPLE_SDK
 EOF
 
 cat <<EOF
@@ -170,6 +187,7 @@ phoneME Core built successfully.
 Source: $CORE_ROOT/include + $CORE_ROOT/src
 Archive: $OUTPUT_ARCHIVE
 Architecture: arm64
+Platform: $APPLE_SDK
 Deployment target: iOS $IOS_DEPLOYMENT_TARGET
 C++ standard: C++23
 Source files: $SOURCE_COUNT

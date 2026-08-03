@@ -155,13 +155,9 @@ struct LibraryView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .onAppear {
-            prepareLibraryForMultitasking()
-        }
         .onOpenURL { url in
             do {
                 let game = try library.importJar(from: url)
-                prepareLibraryForMultitasking()
                 configuringGame = game
             } catch {
                 errorMessage = error.localizedDescription
@@ -395,17 +391,9 @@ struct LibraryView: View {
             guard let url = urls.first else { return }
             let game = try library.importJar(from: url)
             applyDefaultProfile(to: game)
-            prepareLibraryForMultitasking()
             installedGame = game
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    private func prepareLibraryForMultitasking() {
-        session.prepareApplications(library.games) { game in
-            (try? library.prepareJarForLaunch(game))
-                ?? library.fileURL(for: game)
         }
     }
 

@@ -568,8 +568,12 @@ void test_png_variants_limits_and_fuzz() {
 
     auto trailing = grayscale_png;
     trailing.push_back(0U);
-    require(!phoneme::graphics::decode_png(trailing).has_value(),
-            "trailing data after IEND is rejected");
+    trailing.push_back(0x7FU);
+    auto trailing_decoded = phoneme::graphics::decode_png(trailing);
+    require(trailing_decoded.has_value() &&
+                trailing_decoded->pixel(0, 0).value() ==
+                    grayscale->pixel(0, 0).value(),
+            "legacy alignment data after IEND is ignored");
 
     auto duplicate_palette = png_prefix(1, 1, 1, 3, 0);
     constexpr std::array<u8, 6> two_colors {

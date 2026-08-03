@@ -120,7 +120,16 @@ void add(NativeMethodRegistry& registry,
     std::span<const phoneme::u8> bytes) {
     auto array = machine.heap().allocate_array(
         "[B", bytes.size(), Value::from_int(0));
+    if (!array && array.error().code == ErrorCode::overflow) {
+        auto collected = machine.collect_garbage();
+        if (!collected) return std::unexpected(collected.error());
+        array = machine.heap().allocate_array(
+            "[B", bytes.size(), Value::from_int(0));
+    }
     if (!array) return std::unexpected(array.error());
+    auto array_root = machine.pin_native_root(*array);
+    if (!array_root) return std::unexpected(array_root.error());
+
     for (usize index = 0; index < bytes.size(); ++index) {
         auto stored = machine.heap().set_element(
             *array, index,
@@ -128,8 +137,11 @@ void add(NativeMethodRegistry& registry,
                 static_cast<std::int8_t>(bytes[index]))));
         if (!stored) return std::unexpected(stored.error());
     }
-    auto stream = machine.class_states().allocate_instance(
-        machine.heap(), "java/io/ByteArrayInputStream");
+
+    auto stream_root = machine.allocate_pinned_instance(
+        "java/io/ByteArrayInputStream");
+    if (!stream_root) return std::unexpected(stream_root.error());
+    auto stream = stream_root->get();
     if (!stream) return std::unexpected(stream.error());
     auto buffer_stored = machine.heap().set_field(
         *stream, kByteInputBufferField, Value::from_reference(*array));

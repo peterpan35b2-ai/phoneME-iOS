@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -16,6 +17,10 @@
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/LcduiBridge.hpp"
 #include "phoneme/vm/Machine.hpp"
+
+#if defined(__APPLE__)
+#include <os/log.h>
+#endif
 
 namespace phoneme::runtime {
 
@@ -30,6 +35,7 @@ public:
     vm::ClassRepository classes;
     vm::Machine machine;
     CanvasRuntime canvas;
+    vm::NativeRootScope paint_graphics;
     vm::ObjectRef midlet;
 };
 
@@ -39,30 +45,126 @@ constexpr usize kImageWidthField = 0;
 constexpr usize kImageHeightField = 1;
 constexpr usize kImageMutableField = 2;
 constexpr usize kGraphicsTargetField = 0;
+// Obfuscated Gameloft constructors can synchronously range-decode most of the
+// asset pack before startApp. This remains finite launch work, but routinely
+// exceeds the generic callback guard used for paint/input handlers.
+constexpr u64 kMidletConstructorInstructionBudget = 200'000'000U;
+constexpr u64 kMidletLifecycleInstructionBudget = 100'000'000U;
 
-[[nodiscard]] Result<vm::NativeRootScope> create_canvas_graphics(
+[[nodiscard]] bool is_glu_vendor(std::u16string_view vendor) noexcept {
+    constexpr std::u16string_view kPrefix = u"glu";
+    if (vendor.size() < kPrefix.size()) return false;
+    for (usize index = 0; index < kPrefix.size(); ++index) {
+        char16_t character = vendor[index];
+        if (character >= u'A' && character <= u'Z') {
+            character = static_cast<char16_t>(character - u'A' + u'a');
+        }
+        if (character != kPrefix[index]) return false;
+    }
+    return true;
+}
+
+void apply_legacy_property_defaults(vm::Machine& machine,
+                                    const Suite& suite) {
+    const auto vendor = suite.properties.find(u"MIDlet-Vendor");
+    if (vendor == suite.properties.end() || !is_glu_vendor(vendor->second)) {
+        return;
+    }
+    if (!suite.properties.contains(u"ClientLogoEnable")) {
+        // Several GLU/Metaflow builds call equals() directly on this optional
+        // property. Reference devices shipped these builds with the carrier
+        // customization defaulted off even when the final JAR manifest omitted
+        // the key.
+        machine.set_app_property(u"ClientLogoEnable", u"false");
+    }
+}
+
+[[nodiscard]] Status copy_framebuffer_to_image(
+    Framebuffer& framebuffer,
+    graphics::Image& image) {
+    const FrameSnapshot current = framebuffer.snapshot();
+    if (current.dimensions.width != image.width() ||
+        current.dimensions.height != image.height() ||
+        current.rgba.size() != image.pixels().size() * 4U) {
+        return {};
+    }
+
+    auto pixels = image.mutable_pixels();
+    for (usize index = 0; index < pixels.size(); ++index) {
+        const usize offset = index * 4U;
+        pixels[index] = graphics::argb(current.rgba[offset + 3U],
+                                       current.rgba[offset],
+                                       current.rgba[offset + 1U],
+                                       current.rgba[offset + 2U]);
+    }
+    return {};
+}
+
+[[nodiscard]] Status reset_canvas_graphics(
+    vm::Machine& machine,
+    Framebuffer& framebuffer,
+    vm::ObjectRef graphics_object,
+    Dimensions dimensions,
+    vm::CanvasRect clip,
+    bool display_target) {
+    auto target_value = machine.heap().field(graphics_object,
+                                             kGraphicsTargetField);
+    if (!target_value) return std::unexpected(target_value.error());
+    auto image_object = target_value->as_reference();
+    if (!image_object) return std::unexpected(image_object.error());
+
+    auto target = machine.graphics().image(image_object->bits);
+    if (!target) return std::unexpected(target.error());
+    if ((*target)->width() != dimensions.width ||
+        (*target)->height() != dimensions.height) {
+        return fail(ErrorCode::invalid_state,
+                    "cached Canvas graphics dimensions changed");
+    }
+    auto copied = copy_framebuffer_to_image(framebuffer, **target);
+    if (!copied) return copied;
+
+    auto context = machine.graphics().context(graphics_object.bits);
+    if (!context) return std::unexpected(context.error());
+    **context = graphics::GraphicsContext {
+        .target_key = image_object->bits,
+        .display_target = display_target,
+    };
+    return graphics::set_clip(**context,
+                              **target,
+                              clip.x,
+                              clip.y,
+                              clip.width,
+                              clip.height);
+}
+
+[[nodiscard]] Result<vm::NativeRootScope> prepare_canvas_graphics(
     vm::Machine& machine,
     Framebuffer& framebuffer,
     Dimensions dimensions,
     vm::CanvasRect clip,
-    bool display_target) {
+    bool display_target,
+    vm::NativeRootScope* persistent_cache = nullptr) {
+    if (persistent_cache != nullptr && persistent_cache->active()) {
+        auto cached = persistent_cache->get();
+        if (cached) {
+            auto reset = reset_canvas_graphics(machine,
+                                               framebuffer,
+                                               *cached,
+                                               dimensions,
+                                               clip,
+                                               display_target);
+            if (reset) {
+                return machine.pin_native_root(*cached);
+            }
+        }
+        (void)persistent_cache->release();
+    }
+
     auto image = graphics::Image::create_mutable(dimensions.width,
                                                   dimensions.height);
     if (!image) return std::unexpected(image.error());
-
-    const FrameSnapshot current = framebuffer.snapshot();
-    if (current.dimensions.width == dimensions.width &&
-        current.dimensions.height == dimensions.height &&
-        current.rgba.size() == image->pixels().size() * 4U) {
-        auto pixels = image->mutable_pixels();
-        for (usize index = 0; index < pixels.size(); ++index) {
-            const usize offset = index * 4U;
-            pixels[index] = graphics::argb(current.rgba[offset + 3U],
-                                           current.rgba[offset],
-                                           current.rgba[offset + 1U],
-                                           current.rgba[offset + 2U]);
-        }
-    }
+    auto copied = copy_framebuffer_to_image(framebuffer, *image);
+    if (!copied) return std::unexpected(copied.error());
 
     auto image_root = machine.allocate_pinned_instance(
         "javax/microedition/lcdui/Image");
@@ -96,17 +198,19 @@ constexpr usize kGraphicsTargetField = 0;
         graphics_object->bits, image_object->bits, display_target);
     if (!context_attached) return std::unexpected(context_attached.error());
 
-    auto context = machine.graphics().context(graphics_object->bits);
-    auto target = machine.graphics().image(image_object->bits);
-    if (!context) return std::unexpected(context.error());
-    if (!target) return std::unexpected(target.error());
-    auto clipped = graphics::set_clip(**context,
-                                      **target,
-                                      clip.x,
-                                      clip.y,
-                                      clip.width,
-                                      clip.height);
-    if (!clipped) return std::unexpected(clipped.error());
+    auto reset = reset_canvas_graphics(machine,
+                                       framebuffer,
+                                       *graphics_object,
+                                       dimensions,
+                                       clip,
+                                       display_target);
+    if (!reset) return std::unexpected(reset.error());
+
+    if (persistent_cache != nullptr) {
+        auto pinned = machine.pin_native_root(*graphics_object);
+        if (!pinned) return std::unexpected(pinned.error());
+        *persistent_cache = std::move(*pinned);
+    }
     return std::move(*graphics_root);
 }
 
@@ -146,6 +250,76 @@ constexpr usize kGraphicsTargetField = 0;
            S_ISREG(status.st_mode);
 }
 
+void append_utf8(std::string& output, std::u16string_view text) {
+    for (usize index = 0; index < text.size(); ++index) {
+        u32 code_point = static_cast<u16>(text[index]);
+        if (code_point >= 0xD800U && code_point <= 0xDBFFU &&
+            index + 1U < text.size()) {
+            const u32 low = static_cast<u16>(text[index + 1U]);
+            if (low >= 0xDC00U && low <= 0xDFFFU) {
+                code_point = 0x10000U +
+                    ((code_point - 0xD800U) << 10U) +
+                    (low - 0xDC00U);
+                ++index;
+            }
+        }
+        if (code_point <= 0x7FU) {
+            output.push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7FFU) {
+            output.push_back(static_cast<char>(0xC0U | (code_point >> 6U)));
+            output.push_back(static_cast<char>(
+                0x80U | (code_point & 0x3FU)));
+        } else if (code_point <= 0xFFFFU) {
+            output.push_back(static_cast<char>(0xE0U | (code_point >> 12U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | (code_point & 0x3FU)));
+        } else {
+            output.push_back(static_cast<char>(0xF0U | (code_point >> 18U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 12U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | (code_point & 0x3FU)));
+        }
+    }
+}
+
+[[nodiscard]] Result<std::string> describe_throwable(
+    vm::Machine& machine,
+    vm::ObjectRef throwable,
+    usize depth = 0U) {
+    auto class_name = machine.heap().class_name(throwable);
+    if (!class_name) return std::unexpected(class_name.error());
+    std::string description = *class_name;
+
+    auto message_value = machine.heap().field(throwable, 0U);
+    if (message_value) {
+        auto message = message_value->as_reference();
+        if (message && !message->is_null()) {
+            auto text = machine.heap().string_value(*message);
+            if (text && !text->empty()) {
+                description += ": ";
+                append_utf8(description, *text);
+            }
+        }
+    }
+
+    if (depth < 3U) {
+        auto cause_value = machine.heap().field(throwable, 1U);
+        if (cause_value) {
+            auto cause = cause_value->as_reference();
+            if (cause && !cause->is_null() && *cause != throwable) {
+                auto nested = describe_throwable(machine, *cause, depth + 1U);
+                if (nested) description += " caused by " + *nested;
+            }
+        }
+    }
+    return description;
+}
+
 [[nodiscard]] Status require_normal_completion(
     vm::Machine& machine,
     const vm::ExecutionResult& result,
@@ -158,12 +332,12 @@ constexpr usize kGraphicsTargetField = 0;
                     std::string(lifecycle_phase) +
                         " ended abnormally without a throwable");
     }
-    auto class_name = machine.heap().class_name(*result.throwable);
-    if (!class_name) {
-        return std::unexpected(class_name.error());
+    auto throwable = describe_throwable(machine, *result.throwable);
+    if (!throwable) {
+        return std::unexpected(throwable.error());
     }
     std::string message = std::string(lifecycle_phase) +
-        " threw an uncaught Java exception: " + *class_name;
+        " threw an uncaught Java exception: " + *throwable;
     if (!result.exception_context.empty()) {
         message += " from " + result.exception_context;
     }
@@ -178,16 +352,17 @@ ApplicationVM::ApplicationVM(Dimensions dimensions,
     : machine(classes), canvas(machine, dimensions, keymap) {
     machine.configure_canvas_bridge(&canvas);
     CanvasRenderHooks hooks;
-    hooks.acquire_paint_graphics = [&framebuffer](
+    hooks.acquire_paint_graphics = [this, &framebuffer](
         vm::Machine& target_machine,
         vm::ObjectRef,
         Dimensions target_dimensions,
         vm::CanvasRect repaint_region) {
-        return create_canvas_graphics(target_machine,
-                                      framebuffer,
-                                      target_dimensions,
-                                      repaint_region,
-                                      true);
+        return prepare_canvas_graphics(target_machine,
+                                       framebuffer,
+                                       target_dimensions,
+                                       repaint_region,
+                                       true,
+                                       &paint_graphics);
     };
     hooks.commit_paint = [&framebuffer](
         vm::Machine& target_machine,
@@ -202,7 +377,7 @@ ApplicationVM::ApplicationVM(Dimensions dimensions,
         vm::Machine& target_machine,
         vm::ObjectRef,
         Dimensions target_dimensions) {
-        return create_canvas_graphics(
+        return prepare_canvas_graphics(
             target_machine,
             framebuffer,
             target_dimensions,
@@ -318,13 +493,17 @@ Status Runtime::set_suite_trust(SuiteId suite_id,
                     "suite trust requires a valid suite ID");
     }
     std::scoped_lock lock(mutex_);
-    if (running_) {
-        return fail(ErrorCode::already_running,
-                    "suite trust cannot change while running");
-    }
     if (suite_store_.find(suite_id) == nullptr) {
         return fail(ErrorCode::invalid_argument,
                     "suite trust references an unknown suite");
+    }
+    for (const auto& [app_id, app] : apps_) {
+        (void)app_id;
+        if (app.suite_id == suite_id && app.vm != nullptr &&
+            app.state != AppState::destroyed) {
+            return fail(ErrorCode::invalid_state,
+                        "suite trust cannot change while its MIDlet is alive");
+        }
     }
     suite_trust_.insert_or_assign(suite_id.value, trust);
     permission_policies_.erase(suite_id.value);
@@ -342,10 +521,9 @@ Result<SuiteId> Runtime::install_jar(const std::string& jar_path) {
         return fail(ErrorCode::not_configured,
                     "runtime must be configured before installing a suite");
     }
-    if (running_) {
-        return fail(ErrorCode::invalid_state,
-                    "suite installation is blocked while the VM is running");
-    }
+    // Suite installation mutates only the persistent SuiteStore. Each live
+    // MIDlet owns an immutable copy of its Suite and its own class repository,
+    // so adding another JAR is safe while unrelated applications are running.
     return suite_store_.install(jar_path);
 }
 
@@ -456,8 +634,17 @@ Status Runtime::start_midlet(SuiteId suite_id,
                     suite.declared_required_permissions,
                 .optional_permissions =
                     suite.declared_optional_permissions,
+                // The iOS host marks locally imported JARs as trusted so they
+                // run with the emulator's compatibility domain. A number of
+                // real-world unsigned MIDlets (including Nicknso) declare only
+                // an unrelated optional permission and still open sockets at
+                // runtime. Treating that partial list as an allow-list blocks
+                // Connector.open() before the TCP adapter is reached. phoneME's
+                // unidentified/compatibility domain grants from the domain
+                // policy instead of limiting access to the manifest list.
                 .enforce_declared_permissions =
-                    suite.has_permission_declarations,
+                    suite.has_permission_declarations &&
+                    suite_trust != security::SuiteTrust::trusted,
                 .trusted_default_allow = true,
                 .prompt = std::move(permission_prompt),
             });
@@ -516,6 +703,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
     for (const auto& [key, value] : suite.properties) {
         application_vm->machine.set_app_property(key, value);
     }
+    apply_legacy_property_defaults(application_vm->machine, suite);
     auto is_midlet = application_vm->classes.is_assignable(
         main_class, "javax/microedition/midlet/MIDlet");
     if (!is_midlet) return fail_start(is_midlet.error());
@@ -540,10 +728,12 @@ Status Runtime::start_midlet(SuiteId suite_id,
     }
 
     std::scoped_lock application_operation(application_vm->operation_mutex);
+    application_vm->machine.scheduler().set_host_foreground(true);
     auto launch_foregrounded = application_vm->canvas.set_host_foreground(true);
     if (!launch_foregrounded) return fail_start(launch_foregrounded.error());
     auto constructor = application_vm->machine.invoke_instance(
-        *receiver, main_class, "<init>", "()V");
+        *receiver, main_class, "<init>", "()V", {},
+        kMidletConstructorInstructionBudget);
     if (!constructor) return fail_start(constructor.error());
     auto completion = require_normal_completion(application_vm->machine,
                                                 *constructor,
@@ -551,7 +741,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
     if (!completion) return fail_start(completion.error());
 
     auto started = application_vm->machine.invoke_instance(
-        *receiver, main_class, "startApp", "()V");
+        *receiver, main_class, "startApp", "()V", {},
+        kMidletLifecycleInstructionBudget);
     if (!started) return fail_start(started.error());
     completion = require_normal_completion(application_vm->machine,
                                            *started,
@@ -584,6 +775,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         if (!hidden) return fail_start(hidden.error());
         auto pumped = previous_vm->canvas.pump();
         if (!pumped) return fail_start(pumped.error());
+        previous_vm->machine.scheduler().set_host_foreground(false);
     }
     if (launch_signal == vm::MidletSignal::paused) {
         application_vm->machine.media().suspend();
@@ -591,6 +783,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         application_vm->machine.media().resume();
     }
     if (launch_signal != vm::MidletSignal::destroyed) {
+        application_vm->machine.scheduler().set_host_foreground(true);
         auto resized = framebuffer_.resize(dimensions);
         if (!resized) return fail_start(resized.error());
         auto foregrounded = application_vm->canvas.set_host_foreground(true);
@@ -638,9 +831,78 @@ Status Runtime::start_midlet(SuiteId suite_id,
 }
 
 Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
-    if (!app_id.valid() || !dimensions.valid()) {
+    // app_id == 0 is the host-level "detach visible application" operation.
+    // It is intentionally not MIDlet.pauseApp(): sockets, timers and audio may
+    // remain alive, but Canvas rendering is disabled and the VM scheduler moves
+    // to its shared low-duty background gate.
+    if (!app_id.valid()) {
+        std::shared_ptr<ApplicationVM> hidden_vm;
+        AppId hidden_id;
+        u64 hidden_token = 0;
+        {
+            std::unique_lock lock(mutex_);
+            auto running = require_running_unlocked();
+            if (!running) return running;
+            if (!foreground_app_id_.valid()) {
+                framebuffer_.clear();
+                return {};
+            }
+            hidden_id = foreground_app_id_;
+            App* hidden = find_app_unlocked(hidden_id);
+            if (hidden == nullptr || hidden->vm == nullptr ||
+                hidden->state == AppState::destroyed) {
+                foreground_app_id_ = {};
+                framebuffer_.clear();
+                return {};
+            }
+            if (hidden->lifecycle_busy) {
+                return fail(ErrorCode::invalid_state,
+                            "foreground application is busy");
+            }
+            hidden->lifecycle_busy = true;
+            hidden_token = hidden->lifecycle_token = ++sequence_;
+            hidden_vm = hidden->vm;
+        }
+
+        const auto fail_hide = [&](Error error) -> Status {
+            std::unique_lock lock(mutex_);
+            App* hidden = find_app_unlocked(hidden_id);
+            if (hidden != nullptr && hidden->vm == hidden_vm &&
+                hidden->lifecycle_token == hidden_token) {
+                hidden->state = AppState::error;
+                hidden->lifecycle_busy = false;
+                hidden->generation = ++sequence_;
+            }
+            last_exit_code_ = -1;
+            return std::unexpected(std::move(error));
+        };
+
+        {
+            std::scoped_lock hidden_operation(hidden_vm->operation_mutex);
+            auto hidden = hidden_vm->canvas.set_host_foreground(false);
+            if (!hidden) return fail_hide(hidden.error());
+            auto pumped = hidden_vm->canvas.pump();
+            if (!pumped) return fail_hide(pumped.error());
+            hidden_vm->machine.scheduler().set_host_foreground(false);
+        }
+
+        std::unique_lock lock(mutex_);
+        App* hidden = find_app_unlocked(hidden_id);
+        if (hidden == nullptr || hidden->vm != hidden_vm ||
+            hidden->lifecycle_token != hidden_token) {
+            return fail(ErrorCode::invalid_state,
+                        "foreground detach was superseded");
+        }
+        hidden->lifecycle_busy = false;
+        hidden->generation = ++sequence_;
+        foreground_app_id_ = {};
+        framebuffer_.clear();
+        last_exit_code_ = 0;
+        return {};
+    }
+    if (!dimensions.valid()) {
         return fail(ErrorCode::invalid_argument,
-                    "invalid foreground application arguments");
+                    "invalid foreground application dimensions");
     }
 
     std::shared_ptr<ApplicationVM> target_vm;
@@ -716,7 +978,9 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
         if (!hidden) return finish_failure(hidden.error(), true);
         auto pumped = previous_vm->canvas.pump();
         if (!pumped) return finish_failure(pumped.error(), true);
+        previous_vm->machine.scheduler().set_host_foreground(false);
     }
+    target_vm->machine.scheduler().set_host_foreground(true);
     auto canvas_resized = target_vm->canvas.set_dimensions(dimensions);
     if (!canvas_resized) {
         return finish_failure(canvas_resized.error(), false);
@@ -805,6 +1069,7 @@ Status Runtime::pause_midlet(AppId app_id) {
         if (!hidden) return fail_lifecycle(hidden.error());
         auto pumped = vm->canvas.pump();
         if (!pumped) return fail_lifecycle(pumped.error());
+        vm->machine.scheduler().set_host_foreground(false);
     }
     if (signal == vm::MidletSignal::resume_requested) {
         vm->machine.media().resume();
@@ -898,6 +1163,7 @@ Status Runtime::resume_midlet(AppId app_id) {
         vm->machine.media().resume();
     }
     if (was_foreground && signal != vm::MidletSignal::destroyed) {
+        vm->machine.scheduler().set_host_foreground(active);
         auto visible = vm->canvas.set_host_foreground(active);
         if (!visible) return fail_lifecycle(visible.error());
         auto pumped = vm->canvas.pump();
@@ -973,6 +1239,7 @@ Status Runtime::destroy_midlet(AppId app_id) {
         if (!hidden) return fail_lifecycle(hidden.error());
         auto pumped = vm->canvas.pump();
         if (!pumped) return fail_lifecycle(pumped.error());
+        vm->machine.scheduler().set_host_foreground(false);
     }
 
     const vm::Value unconditional = vm::Value::from_int(1);
@@ -1202,6 +1469,27 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
     return static_cast<i64>(estimated);
 }
 
+std::string Runtime::app_console_output(AppId app_id) const {
+    std::shared_ptr<ApplicationVM> application_vm;
+    {
+        std::scoped_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr) return {};
+        application_vm = app->vm;
+    }
+    if (application_vm == nullptr) return {};
+
+    std::u16string console;
+    {
+        std::scoped_lock vm_operation(application_vm->operation_mutex);
+        console = application_vm->machine.console_output();
+    }
+    std::string utf8;
+    utf8.reserve(console.size());
+    append_utf8(utf8, console);
+    return utf8;
+}
+
 void Runtime::stop() noexcept {
     std::vector<App> stopping_apps;
     {
@@ -1231,17 +1519,24 @@ void Runtime::stop() noexcept {
     // scheduler cancellation guarantees a busy Java worker cannot hang here.
     const vm::Value unconditional = vm::Value::from_int(1);
     for (App& app : stopping_apps) {
-        if (app.vm == nullptr) continue;
-        std::scoped_lock vm_operation(app.vm->operation_mutex);
-        (void)app.vm->canvas.set_host_foreground(false);
-        (void)app.vm->canvas.pump();
-        (void)app.vm->machine.invoke_instance(
-            app.vm->midlet,
-            app.main_class,
-            "destroyApp",
-            "(Z)V",
-            std::span<const vm::Value>(&unconditional, 1));
-        app.vm.reset();
+        auto application_vm = std::move(app.vm);
+        if (application_vm == nullptr) continue;
+        {
+            std::scoped_lock vm_operation(application_vm->operation_mutex);
+            (void)application_vm->canvas.set_host_foreground(false);
+            (void)application_vm->canvas.pump();
+            application_vm->machine.scheduler().set_host_foreground(false);
+            (void)application_vm->machine.invoke_instance(
+                application_vm->midlet,
+                app.main_class,
+                "destroyApp",
+                "(Z)V",
+                std::span<const vm::Value>(&unconditional, 1));
+        }
+        // The VM owns operation_mutex. Its final shared_ptr must be released
+        // only after the lock guard is gone; otherwise the guard unlocks a
+        // mutex that was destroyed together with the VM.
+        application_vm.reset();
     }
 }
 
@@ -1280,6 +1575,7 @@ void Runtime::suspend() noexcept {
     }
     for (const auto& vm : application_vms) {
         std::scoped_lock vm_operation(vm->operation_mutex);
+        vm->machine.scheduler().set_host_foreground(false);
         vm->machine.media().suspend();
     }
 }
@@ -1314,6 +1610,7 @@ void Runtime::resume() noexcept {
     }
     if (foreground_vm != nullptr) {
         std::scoped_lock foreground_operation(foreground_vm->operation_mutex);
+        foreground_vm->machine.scheduler().set_host_foreground(true);
         auto shown = foreground_vm->canvas.set_host_foreground(true);
         auto pumped = shown ? foreground_vm->canvas.pump()
                             : Status(std::unexpected(shown.error()));
@@ -1385,7 +1682,7 @@ void Runtime::send_pointer(i32 x, i32 y, i32 action) {
     dispatch_input();
 }
 
-FrameSnapshot Runtime::frame_snapshot() {
+FrameMetadata Runtime::frame_metadata() {
     std::shared_ptr<ApplicationVM> vm;
     AppId app_id;
     u64 generation = 0;
@@ -1414,6 +1711,16 @@ FrameSnapshot Runtime::frame_snapshot() {
             }
         }
     }
+    return framebuffer_.metadata();
+}
+
+FrameMetadata Runtime::copy_current_frame_rgba(
+    std::span<u8> destination) const noexcept {
+    return framebuffer_.copy_rgba(destination);
+}
+
+FrameSnapshot Runtime::frame_snapshot() {
+    (void)frame_metadata();
     return framebuffer_.snapshot();
 }
 
@@ -1526,6 +1833,21 @@ void Runtime::dispatch_input() {
 }
 
 void Runtime::mark_canvas_failure_unlocked(App& app, const Error& error) {
+    char message[1536] {};
+    std::snprintf(message,
+                  sizeof(message),
+                  "phoneME app %d Canvas dispatcher failed: %s%s%s",
+                  app.id.value,
+                  error.java_exception_class.empty()
+                      ? ""
+                      : error.java_exception_class.c_str(),
+                  error.java_exception_class.empty() ? "" : ": ",
+                  error.message.c_str());
+    std::fprintf(stderr, "%s\n", message);
+#if defined(__APPLE__)
+    os_log_error(OS_LOG_DEFAULT, "%{public}s", message);
+#endif
+
     app.state = AppState::error;
     app.generation = ++sequence_;
     last_exit_code_ = -1;

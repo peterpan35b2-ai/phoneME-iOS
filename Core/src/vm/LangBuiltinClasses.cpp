@@ -86,6 +86,8 @@ using namespace builtin;
             method(kPublic, "trim", "()Ljava/lang/String;"),
             method(kPublic, "toLowerCase", "()Ljava/lang/String;"),
             method(kPublic, "toUpperCase", "()Ljava/lang/String;"),
+            method(kPublic, "split",
+                   "(Ljava/lang/String;)[Ljava/lang/String;"),
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "intern", "()Ljava/lang/String;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
@@ -153,6 +155,8 @@ using namespace builtin;
                           }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(Ljava/lang/Runnable;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/Runnable;Ljava/lang/String;)V"),
             method(kPublic, "start", "()V"),
             method(kPublic, "run", "()V"),
             method(kPublic | kStatic, "currentThread", "()Ljava/lang/Thread;"),
@@ -192,6 +196,8 @@ using namespace builtin;
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(Z)Ljava/lang/Boolean;"),
+            method(kPublic | kStatic, "valueOf",
+                   "(Ljava/lang/String;)Ljava/lang/Boolean;"),
             method(kPublic | kStatic, "parseBoolean", "(Ljava/lang/String;)Z"),
             method(kPublic | kStatic, "toString", "(Z)Ljava/lang/String;"),
         });
@@ -259,6 +265,8 @@ using namespace builtin;
             method(kPublic | kStatic, "valueOf", "(I)Ljava/lang/Integer;"),
             method(kPublic | kStatic, "valueOf",
                    "(Ljava/lang/String;)Ljava/lang/Integer;"),
+            method(kPublic | kStatic, "valueOf",
+                   "(Ljava/lang/String;I)Ljava/lang/Integer;"),
             method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;)I"),
             method(kPublic | kStatic, "parseInt", "(Ljava/lang/String;I)I"),
             method(kPublic | kStatic, "toString", "(I)Ljava/lang/String;"),
@@ -323,7 +331,9 @@ using namespace builtin;
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/Float;"),
+            method(kPublic | kStatic, "valueOf", "(Ljava/lang/String;)Ljava/lang/Float;"),
             method(kPublic | kStatic, "parseFloat", "(Ljava/lang/String;)F"),
+            method(kPublic | kStatic, "isNaN", "(F)Z"),
             method(kPublic | kStatic, "toString", "(F)Ljava/lang/String;"),
             method(kPublic | kStatic, "floatToIntBits", "(F)I"),
             method(kPublic | kStatic, "intBitsToFloat", "(I)F"),
@@ -340,6 +350,7 @@ using namespace builtin;
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/Double;"),
+            method(kPublic | kStatic, "valueOf", "(Ljava/lang/String;)Ljava/lang/Double;"),
             method(kPublic | kStatic, "parseDouble", "(Ljava/lang/String;)D"),
             method(kPublic | kStatic, "toString", "(D)Ljava/lang/String;"),
             method(kPublic | kStatic, "doubleToLongBits", "(D)J"),
@@ -421,18 +432,27 @@ using namespace builtin;
         });
     }
 
+    if (name == "java/lang/ExceptionInInitializerError") {
+        return make_class(name.data(), "java/lang/LinkageError", kOrdinary,
+                          {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
+            method(kPublic, "getException", "()Ljava/lang/Throwable;"),
+        });
+    }
+
     struct Hierarchy final {
         const char* name;
         const char* super_name;
     };
-    static constexpr std::array<Hierarchy, 28> hierarchy {{
+    static constexpr std::array<Hierarchy, 27> hierarchy {{
         {"java/lang/Exception", "java/lang/Throwable"},
         {"java/lang/RuntimeException", "java/lang/Exception"},
         {"java/lang/Error", "java/lang/Throwable"},
         {"java/lang/VirtualMachineError", "java/lang/Error"},
         {"java/lang/LinkageError", "java/lang/Error"},
         {"java/lang/BootstrapMethodError", "java/lang/LinkageError"},
-        {"java/lang/ExceptionInInitializerError", "java/lang/LinkageError"},
         {"java/lang/NoClassDefFoundError", "java/lang/LinkageError"},
         {"java/lang/ClassFormatError", "java/lang/LinkageError"},
         {"java/lang/VerifyError", "java/lang/LinkageError"},

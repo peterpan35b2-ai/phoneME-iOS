@@ -10,6 +10,7 @@ import java.util.Enumeration;
 import javax.microedition.io.Connector;
 import javax.microedition.io.file.ConnectionClosedException;
 import javax.microedition.io.file.FileConnection;
+import javax.microedition.io.file.FileSystemRegistry;
 import javax.microedition.io.file.IllegalModeException;
 
 public final class FileOps {
@@ -330,6 +331,13 @@ public final class FileOps {
         directory.delete();
         directory.close();
         return 1;
+    }
+
+    public static int rootEnumeration() {
+        Enumeration roots = FileSystemRegistry.listRoots();
+        return roots != null && roots.hasMoreElements() &&
+            "root/".equals((String) roots.nextElement()) &&
+            !roots.hasMoreElements() ? 1 : 0;
     }
 
     public static int hiddenListingPolicy() throws Exception {

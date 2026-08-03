@@ -9,6 +9,7 @@
 #include "phoneme/network/AsyncNetworkAdapter.hpp"
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/Machine.hpp"
+#include "phoneme/vm/MediaEventDispatch.hpp"
 
 namespace phoneme::network {
 
@@ -22,6 +23,15 @@ namespace phoneme::vm {
 
 Result<std::optional<i32>> connection_stream_read_one(Machine&, ObjectRef) {
     return std::optional<i32> {};
+}
+
+Result<std::optional<i32>> connection_stream_read_range(
+    Machine&,
+    ObjectRef,
+    ObjectRef,
+    i32,
+    i32) {
+    return 0;
 }
 
 Result<std::optional<usize>> connection_stream_available(Machine&, ObjectRef) {
@@ -44,6 +54,12 @@ Result<std::optional<bool>> connection_stream_close_input(Machine&, ObjectRef) {
 
 Result<std::optional<bool>> connection_stream_close_output(Machine&, ObjectRef) {
     return std::optional<bool> {};
+}
+
+Status dispatch_media_event(Machine&,
+                            ObjectRef,
+                            const media::MediaEvent&) {
+    return {};
 }
 
 void register_core_natives(NativeMethodRegistry& registry) {

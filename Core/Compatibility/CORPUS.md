@@ -21,6 +21,11 @@ bash Core/Compatibility/run-corpus.sh --list
 
 # Run with ASan/UBSan.
 bash Core/Compatibility/run-corpus.sh --sanitize
+
+# Compare deterministic JVM/CLDC semantics against the installed OpenJDK.
+bash Core/Compatibility/test-vm-differential.sh
+PHONEME_SANITIZER=asan-ubsan \
+  bash Core/Compatibility/test-vm-differential.sh
 ```
 
 Every run uses an isolated output root under `Core/build/compatibility-17/` unless `PHONEME_COMPAT_ROOT` or `--output` overrides it. The report is written to `report.md`; `report.json` and `api-coverage.json` are the machine-readable forms.
@@ -94,6 +99,23 @@ For a real game, use milestones that prove a meaningful state: title screen, men
 The C++ runner writes a deterministic PPM snapshot. The analyzer computes SHA-256 and compares it with `expected.frame_hashes` when the list is non-empty. Use frame hashes only for scenes with deterministic rendering and state. Keep the original screenshot outside Git when licensing does not permit redistribution; the hash is sufficient for exact regression matching.
 
 When a scene legitimately varies, use semantic milestones plus `min_frames` rather than weakening the test with a broad image tolerance.
+
+## VM semantic differential suite
+
+`test-vm-differential.sh` compiles one Java 8 fixture, executes it first on the
+local OpenJDK as the oracle, then invokes the same static methods through the
+C++ VM. The harness compares signed `int`/`long` values and exact uncaught Java
+exception classes. Current coverage includes integer/long overflow and shifts,
+floating-point bit patterns and conversions, switches, primitive/reference and
+multidimensional arrays, casts, exception/finally behavior, virtual/interface
+dispatch, class initialization failure state, UTF-16 strings, StringBuffer,
+Vector, Hashtable, StringTokenizer, data streams, Random, Thread/Runnable,
+join, synchronized monitor contention, and common implicit exceptions.
+
+The test must not replace Java with hand-written expected constants. Add each
+new case to the Java oracle and C++ case table together, then keep the fixture
+method free of host-only APIs so the exact same class file runs in both VMs.
+Build output is isolated and the sanitizer mode uses the same oracle values.
 
 ## Differential runner protocol
 

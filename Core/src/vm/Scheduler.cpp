@@ -1,7 +1,13 @@
 #include "phoneme/vm/Scheduler.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <limits>
 #include <thread>
+
+#if defined(__APPLE__)
+#include <os/log.h>
+#endif
 
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
@@ -10,6 +16,116 @@ namespace phoneme::vm {
 
 thread_local Scheduler* Scheduler::tls_scheduler_ = nullptr;
 thread_local JavaThreadId Scheduler::tls_thread_id_ = 0;
+thread_local u32 Scheduler::tls_unblocked_quantum_count_ = 0U;
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_quantum_resume_time_ {};
+thread_local bool Scheduler::tls_quantum_timing_valid_ = false;
+
+namespace {
+
+constexpr auto kExplicitYieldBackoff = std::chrono::milliseconds(1);
+constexpr auto kInitialQuantumBackoff = std::chrono::microseconds(100);
+constexpr auto kWarmMinimumBackoff = std::chrono::microseconds(250);
+constexpr auto kWarmMaximumBackoff = std::chrono::milliseconds(2);
+constexpr auto kSustainedMinimumBackoff = std::chrono::microseconds(500);
+constexpr auto kSustainedMaximumBackoff = std::chrono::milliseconds(6);
+constexpr auto kBusyMinimumBackoff = std::chrono::milliseconds(1);
+constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(10);
+// Hidden MIDlets share one execution gate per VM. This caps aggregate CPU even
+// when a game has several Java threads that would otherwise take turns while
+// each individual thread is sleeping. A blocked socket/timer callback still
+// runs immediately until it reaches the next 10K-bytecode scheduler quantum.
+constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(25);
+constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(250);
+
+[[nodiscard]] std::chrono::steady_clock::duration background_interval(
+    std::chrono::microseconds active_cpu_time) noexcept {
+    // Reserve roughly one execution slot for every ten units of interpreter
+    // time. This targets <=10% aggregate VM duty while adapting across Debug,
+    // Release and different device generations.
+    const auto target = active_cpu_time * 10;
+    return std::clamp(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(target),
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            kBackgroundMinimumInterval),
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            kBackgroundMaximumInterval));
+}
+
+[[nodiscard]] std::chrono::microseconds clamp_backoff(
+    std::chrono::microseconds value,
+    std::chrono::microseconds minimum,
+    std::chrono::microseconds maximum) noexcept {
+    return std::clamp(value, minimum, maximum);
+}
+
+[[nodiscard]] std::chrono::microseconds quantum_backoff(
+    u32 uninterrupted_quantums,
+    std::chrono::microseconds active_cpu_time) noexcept {
+    if (uninterrupted_quantums < 4U) {
+        return kInitialQuantumBackoff;
+    }
+    if (uninterrupted_quantums < 16U) {
+        return clamp_backoff(
+            active_cpu_time / 4,
+            kWarmMinimumBackoff,
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                kWarmMaximumBackoff));
+    }
+    if (uninterrupted_quantums < 64U) {
+        return clamp_backoff(
+            active_cpu_time * 2 / 3,
+            kSustainedMinimumBackoff,
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                kSustainedMaximumBackoff));
+    }
+    return clamp_backoff(
+        active_cpu_time,
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            kBusyMinimumBackoff),
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            kBusyMaximumBackoff));
+}
+
+void report_thread_failure(
+    Machine& machine,
+    JavaThreadId thread_id,
+    const std::optional<ObjectRef>& throwable,
+    const std::optional<Error>& failure) noexcept {
+    if (failure.has_value()) {
+        char message[1024] {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "phoneME Java thread %u failed: %s%s%s",
+            static_cast<unsigned>(thread_id),
+            failure->java_exception_class.empty()
+                ? ""
+                : failure->java_exception_class.c_str(),
+            failure->java_exception_class.empty() ? "" : ": ",
+            failure->message.c_str());
+        std::fprintf(stderr, "%s\n", message);
+#if defined(__APPLE__)
+        os_log_error(OS_LOG_DEFAULT, "%{public}s", message);
+#endif
+    }
+    if (throwable.has_value() && !throwable->is_null()) {
+        auto class_name = machine.heap().class_name(*throwable);
+        char message[512] {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "phoneME Java thread %u terminated with uncaught %s",
+            static_cast<unsigned>(thread_id),
+            class_name.has_value() ? class_name->c_str() : "Throwable");
+        std::fprintf(stderr, "%s\n", message);
+#if defined(__APPLE__)
+        os_log_error(OS_LOG_DEFAULT, "%{public}s", message);
+#endif
+    }
+}
+
+} // namespace
 
 Scheduler::Scheduler() {
     auto main_thread = std::make_shared<JavaThread>(
@@ -167,10 +283,13 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
             std::optional<ObjectRef> throwable;
             std::optional<Error> failure;
             if (!stop_token.stop_requested()) {
-                auto result = machine.invoke_instance(thread->object_,
-                                                      "java/lang/Thread",
-                                                      "run",
-                                                      "()V");
+                auto result = machine.invoke_instance(
+                    thread->object_,
+                    "java/lang/Thread",
+                    "run",
+                    "()V",
+                    {},
+                    Machine::kLongLivedThreadInstructionBudget);
                 if (!result) {
                     failure = result.error();
                 } else if (result->throwable.has_value()) {
@@ -178,6 +297,8 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
                 }
             }
 
+            report_thread_failure(
+                machine, thread->id_, throwable, failure);
             machine.monitors().release_all(thread->id_);
             finish_thread(thread, throwable, failure);
             tls_scheduler_ = nullptr;
@@ -244,6 +365,8 @@ Status Scheduler::start_native_thread(
                 }
             }
 
+            report_thread_failure(
+                machine, thread->id_, throwable, failure);
             machine.monitors().release_all(thread->id_);
             finish_thread(thread, throwable, failure);
             tls_scheduler_ = nullptr;
@@ -266,19 +389,115 @@ Result<ObjectRef> Scheduler::runnable_target(ObjectRef thread_object) const {
     return thread->target_;
 }
 
+void Scheduler::begin_execution_slice() noexcept {
+    // Host-driven main-thread invocations do not own Scheduler TLS, but they
+    // execute the same interpreter loop and require identical CPU pacing.
+    tls_unblocked_quantum_count_ = 0U;
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
+}
+
+void Scheduler::set_host_foreground(bool foreground) noexcept {
+    {
+        std::scoped_lock lock(mutex_);
+        if (host_foreground_ == foreground) return;
+        host_foreground_ = foreground;
+        background_resume_deadline_ = {};
+    }
+    // Foregrounding must release every Java thread waiting on the shared
+    // background gate immediately instead of adding up to 25 ms input latency.
+    background_condition_.notify_all();
+}
+
+void Scheduler::cooperative_quantum(Machine& machine) {
+    auto current = current_thread_record();
+    if (!current) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto active_cpu_time = tls_quantum_timing_valid_
+        ? std::max(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  now - tls_quantum_resume_time_),
+              std::chrono::microseconds(1))
+        : kInitialQuantumBackoff;
+    if (tls_unblocked_quantum_count_ !=
+        std::numeric_limits<u32>::max()) {
+        ++tls_unblocked_quantum_count_;
+    }
+    bool deterministic_mode = false;
+    std::optional<std::chrono::steady_clock::time_point> background_deadline;
+    {
+        std::scoped_lock lock(mutex_);
+        deterministic_mode = deterministic_;
+        if (!deterministic_mode && !host_foreground_) {
+            const auto reservation_time = std::chrono::steady_clock::now();
+            if (background_resume_deadline_ < reservation_time) {
+                background_resume_deadline_ = reservation_time;
+            }
+            background_resume_deadline_ +=
+                background_interval(active_cpu_time);
+            background_deadline = background_resume_deadline_;
+        }
+    }
+    const auto backoff = deterministic_mode
+        ? std::chrono::duration_cast<std::chrono::microseconds>(
+              kBusyMinimumBackoff)
+        : quantum_backoff(
+              tls_unblocked_quantum_count_, active_cpu_time);
+
+    set_current_state(JavaThreadState::runnable);
+    const u32 depth = machine.suspend_execution_for_blocking();
+    if (background_deadline.has_value()) {
+        std::unique_lock lock(mutex_);
+        background_condition_.wait_until(lock, *background_deadline, [this] {
+            return host_foreground_ || shutting_down_;
+        });
+    } else {
+        std::this_thread::sleep_for(backoff);
+    }
+    machine.resume_execution_after_blocking(depth);
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
+    set_current_state(JavaThreadState::running);
+}
+
 void Scheduler::cooperative_yield(Machine& machine) {
     auto current = current_thread_record();
     if (!current) {
         return;
     }
+
+    // Thread.yield() and Thread.sleep(0) are commonly used as frame pacing in
+    // older MIDlets. Giving them a real scheduler-sized pause avoids a tight
+    // currentTimeMillis/yield loop monopolizing a core on iOS.
+    tls_unblocked_quantum_count_ = 0U;
+    std::optional<std::chrono::steady_clock::time_point> background_deadline;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!deterministic_ && !host_foreground_) {
+            const auto reservation_time = std::chrono::steady_clock::now();
+            if (background_resume_deadline_ < reservation_time) {
+                background_resume_deadline_ = reservation_time;
+            }
+            background_resume_deadline_ += kBackgroundMinimumInterval;
+            background_deadline = background_resume_deadline_;
+        }
+    }
     set_current_state(JavaThreadState::runnable);
     const u32 depth = machine.suspend_execution_for_blocking();
-    if (deterministic()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (background_deadline.has_value()) {
+        std::unique_lock lock(mutex_);
+        background_condition_.wait_until(lock, *background_deadline, [this] {
+            return host_foreground_ || shutting_down_;
+        });
     } else {
-        std::this_thread::yield();
+        std::this_thread::sleep_for(kExplicitYieldBackoff);
     }
     machine.resume_execution_after_blocking(depth);
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
     set_current_state(JavaThreadState::running);
 }
 
@@ -547,6 +766,15 @@ void Scheduler::update_queue_membership_locked(JavaThreadId id,
 }
 
 void Scheduler::set_current_state(JavaThreadState state) noexcept {
+    if (state != JavaThreadState::runnable &&
+        state != JavaThreadState::running) {
+        tls_unblocked_quantum_count_ = 0U;
+        tls_quantum_timing_valid_ = false;
+    } else if (state == JavaThreadState::running &&
+               !tls_quantum_timing_valid_) {
+        tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+        tls_quantum_timing_valid_ = true;
+    }
     auto current = current_thread_record();
     if (!current) {
         return;
@@ -689,6 +917,7 @@ void Scheduler::shutdown(MonitorTable* monitors) noexcept {
             }
         }
     }
+    background_condition_.notify_all();
     for (const auto& thread : threads) {
         {
             std::scoped_lock lock(thread->mutex_);

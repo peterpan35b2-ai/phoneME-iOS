@@ -505,6 +505,144 @@ using namespace builtin;
                           {"javax/microedition/io/HttpsConnection",
                            "javax/microedition/io/OutputConnection"});
     }
+    if (name == "javax/wireless/messaging/Message") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "getAddress",
+                                     "()Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "setAddress",
+                                     "(Ljava/lang/String;)V"),
+                              method(kPublic | kAbstract, "getTimestamp",
+                                     "()Ljava/util/Date;"),
+                          });
+    }
+    if (name == "javax/wireless/messaging/TextMessage") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "getPayloadText",
+                                     "()Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "setPayloadText",
+                                     "(Ljava/lang/String;)V"),
+                          },
+                          {"javax/wireless/messaging/Message"});
+    }
+    if (name == "javax/wireless/messaging/BinaryMessage") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "getPayloadData",
+                                     "()[B"),
+                              method(kPublic | kAbstract, "setPayloadData",
+                                     "([B)V"),
+                          },
+                          {"javax/wireless/messaging/Message"});
+    }
+    if (name == "javax/wireless/messaging/MessageListener") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract,
+                                     "notifyIncomingMessage",
+                                     "(Ljavax/wireless/messaging/MessageConnection;)V"),
+                          });
+    }
+    if (name == "javax/wireless/messaging/MessageConnection") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract,
+                          {
+                              field(kPublic | kStatic | kFinal,
+                                    "TEXT_MESSAGE", "Ljava/lang/String;"),
+                              field(kPublic | kStatic | kFinal,
+                                    "BINARY_MESSAGE", "Ljava/lang/String;"),
+                              field(kPublic | kStatic | kFinal,
+                                    "MULTIPART_MESSAGE", "Ljava/lang/String;"),
+                          },
+                          {
+                              method(kStatic, "<clinit>", "()V"),
+                              method(kPublic | kAbstract, "newMessage",
+                                     "(Ljava/lang/String;)Ljavax/wireless/messaging/Message;"),
+                              method(kPublic | kAbstract, "newMessage",
+                                     "(Ljava/lang/String;Ljava/lang/String;)Ljavax/wireless/messaging/Message;"),
+                              method(kPublic | kAbstract, "send",
+                                     "(Ljavax/wireless/messaging/Message;)V"),
+                              method(kPublic | kAbstract, "receive",
+                                     "()Ljavax/wireless/messaging/Message;"),
+                              method(kPublic | kAbstract, "numberOfSegments",
+                                     "(Ljavax/wireless/messaging/Message;)I"),
+                              method(kPublic | kAbstract, "setMessageListener",
+                                     "(Ljavax/wireless/messaging/MessageListener;)V"),
+                          },
+                          {"javax/microedition/io/Connection"});
+    }
+    if (name == "javax/wireless/messaging/SizeExceededException") {
+        return make_class(name.data(), "java/io/IOException", kOrdinary, {},
+                          {
+                              method(kPublic, "<init>", "()V"),
+                              method(kPublic, "<init>",
+                                     "(Ljava/lang/String;)V"),
+                          });
+    }
+    if (name == "javax/wireless/messaging/NativeMessageConnection") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPrivate, "address", "Ljava/lang/String;"),
+                              field(kPrivate, "mode", "I"),
+                              field(kPrivate, "closed", "Z"),
+                              field(kPrivate, "listener",
+                                    "Ljavax/wireless/messaging/MessageListener;"),
+                              field(kPrivate, "protocol", "Ljava/lang/String;"),
+                          },
+                          {
+                              method(kPublic, "close", "()V"),
+                              method(kPublic, "newMessage",
+                                     "(Ljava/lang/String;)Ljavax/wireless/messaging/Message;"),
+                              method(kPublic, "newMessage",
+                                     "(Ljava/lang/String;Ljava/lang/String;)Ljavax/wireless/messaging/Message;"),
+                              method(kPublic, "send",
+                                     "(Ljavax/wireless/messaging/Message;)V"),
+                              method(kPublic, "receive",
+                                     "()Ljavax/wireless/messaging/Message;"),
+                              method(kPublic, "numberOfSegments",
+                                     "(Ljavax/wireless/messaging/Message;)I"),
+                              method(kPublic, "setMessageListener",
+                                     "(Ljavax/wireless/messaging/MessageListener;)V"),
+                          },
+                          {"javax/wireless/messaging/MessageConnection"});
+    }
+    if (name == "javax/wireless/messaging/NativeTextMessage") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPrivate, "address", "Ljava/lang/String;"),
+                              field(kPrivate, "timestamp", "J"),
+                              field(kPrivate, "payload", "Ljava/lang/String;"),
+                          },
+                          {
+                              method(kPublic, "getAddress", "()Ljava/lang/String;"),
+                              method(kPublic, "setAddress", "(Ljava/lang/String;)V"),
+                              method(kPublic, "getTimestamp", "()Ljava/util/Date;"),
+                              method(kPublic, "getPayloadText", "()Ljava/lang/String;"),
+                              method(kPublic, "setPayloadText", "(Ljava/lang/String;)V"),
+                          },
+                          {"javax/wireless/messaging/TextMessage"});
+    }
+    if (name == "javax/wireless/messaging/NativeBinaryMessage") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPrivate, "address", "Ljava/lang/String;"),
+                              field(kPrivate, "timestamp", "J"),
+                              field(kPrivate, "payload", "[B"),
+                          },
+                          {
+                              method(kPublic, "getAddress", "()Ljava/lang/String;"),
+                              method(kPublic, "setAddress", "(Ljava/lang/String;)V"),
+                              method(kPublic, "getTimestamp", "()Ljava/util/Date;"),
+                              method(kPublic, "getPayloadData", "()[B"),
+                              method(kPublic, "setPayloadData", "([B)V"),
+                          },
+                          {"javax/wireless/messaging/BinaryMessage"});
+    }
     return nullptr;
 }
 

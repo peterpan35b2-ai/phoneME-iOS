@@ -50,6 +50,8 @@ void test_archive_and_classfile(const std::string& fixture_jar) {
     require(parsed.has_value(), "parse fixture class");
     require(parsed->name() == "corefixture/Arithmetic",
             "fixture class name is correct");
+    require(parsed->major_version() == 52U,
+            "Java 8 class version remains native and is not downgraded");
 
     const auto* exception_entry = archive->find("corefixture/Exceptions.class");
     require(exception_entry != nullptr, "find exception fixture class");
@@ -269,6 +271,20 @@ void test_bytecode_structure_verifier() {
     require(!phoneme::classfile::verify_code_structure(truncated_switch, {})
                  .has_value(),
             "structural verifier rejects truncated switch payload");
+
+    const std::vector<phoneme::u8> nonzero_switch_padding {
+        0x03,             // iconst_0
+        0xAA,             // tableswitch at pc 1
+        0x7F, 0x55,       // legacy obfuscator alignment bytes
+        0x00, 0x00, 0x00, 0x13, // default -> pc 20
+        0x00, 0x00, 0x00, 0x00, // low = 0
+        0x00, 0x00, 0x00, 0x00, // high = 0
+        0x00, 0x00, 0x00, 0x13, // case 0 -> pc 20
+        0xB1,             // return
+    };
+    require(phoneme::classfile::verify_code_structure(
+                nonzero_switch_padding, {}).has_value(),
+            "structural verifier accepts non-zero legacy switch padding");
 
     const std::vector<phoneme::classfile::StackMapFrame> bad_stack_map {
         phoneme::classfile::StackMapFrame {
@@ -578,6 +594,8 @@ void test_machine_exceptions(const std::string& fixture_jar) {
                        "aastore enforces reference component type");
     require_int_result("typeChecks", 47,
                        "execute instanceof and catch failed checkcast");
+    require_int_result("nativeExceptionMessage", 49,
+                       "native Java exception preserves diagnostic message");
 
     auto uncaught = machine.invoke_static("corefixture/Exceptions",
                                           "uncaught",
@@ -1222,6 +1240,8 @@ void test_machine_network(const std::string& fixture_jar) {
     int datagram_receiver_prompts = 0;
     int http_prompts = 0;
     int https_prompts = 0;
+    int sms_send_prompts = 0;
+    int sms_receive_prompts = 0;
     auto network_policy =
         std::make_shared<phoneme::security::PermissionPolicy>();
     require(network_policy->configure(
@@ -1235,6 +1255,8 @@ void test_machine_network(const std::string& fixture_jar) {
                         std::string(phoneme::security::permissions::connector_datagram_receiver),
                         std::string(phoneme::security::permissions::connector_http),
                         std::string(phoneme::security::permissions::connector_https),
+                        std::string(phoneme::security::permissions::wireless_sms_send),
+                        std::string(phoneme::security::permissions::wireless_sms_receive),
                     },
                     .enforce_declared_permissions = true,
                     .prompt = [&](const phoneme::security::PermissionRequest& request) {
@@ -1256,6 +1278,12 @@ void test_machine_network(const std::string& fixture_jar) {
                         } else if (request.permission ==
                                    phoneme::security::permissions::connector_https) {
                             ++https_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::wireless_sms_send) {
+                            ++sms_send_prompts;
+                        } else if (request.permission ==
+                                   phoneme::security::permissions::wireless_sms_receive) {
+                            ++sms_receive_prompts;
                         }
                         return phoneme::security::PermissionResponse {
                             phoneme::security::PermissionDecision::allowed,
@@ -1321,12 +1349,42 @@ void test_machine_network(const std::string& fixture_jar) {
                            "execute interrupted network read fixture") == 2,
             "Thread.interrupt aborts read with InterruptedIOException");
     adapter->set_defer_reads(false);
+
+    const auto invoke_wireless = [&](const char* method,
+                                     const char* description) {
+        auto result = machine.invoke_static(
+            "WirelessMessagingOps", method, "()I", {}, 20'000'000);
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value(),
+                description);
+        auto value = result->return_value->as_int();
+        require(value.has_value(), description);
+        return *value;
+    };
+    require(invoke_wireless("classSurface",
+                            "load WMA built-in interfaces") == 1,
+            "WMA classes resolve through Class.forName");
+    require(invoke_wireless("textRoundTrip",
+                            "execute WMA text message fixture") == 1,
+            "WMA text message preserves address payload and segmentation");
+    require(invoke_wireless("binaryRoundTrip",
+                            "execute WMA binary message fixture") == 1,
+            "WMA binary message preserves payload and segmentation");
+    require(invoke_wireless("sendRequiresHost",
+                            "execute WMA send fallback fixture") == 1,
+            "WMA send reports unavailable host transport as IOException");
+    require(invoke_wireless("receiveRequiresHost",
+                            "execute WMA receive fallback fixture") == 1,
+            "WMA receive reports unavailable host transport without blocking");
+
     require(adapter->open_handle_count() == 0U,
             "all Java network handles close after fixture execution");
     require(socket_prompts == 1 && server_socket_prompts == 1 &&
                 datagram_prompts == 1 && datagram_receiver_prompts == 1 &&
-                http_prompts == 1 && https_prompts == 1,
-            "network gates prompt once per session permission and scheme");
+                http_prompts == 1 && https_prompts == 1 &&
+                sms_send_prompts == 1 && sms_receive_prompts == 1,
+            "network and WMA gates prompt once per session permission and "
+            "scheme");
 
     auto reconnect_adapter =
         std::make_shared<phoneme::tests::FakeNetworkAdapter>();
@@ -2384,6 +2442,24 @@ void test_runtime_canvas(const std::string& fixture_jar) {
              event->text == "show");
     }
     require(shown_again, "restoring foreground invokes Canvas.showNotify");
+
+    require(runtime.set_foreground(phoneme::AppId {},
+                                   phoneme::Dimensions {1, 1}).has_value(),
+            "detach the visible MIDlet without pausing its isolate");
+    require(!runtime.foreground_app_id().valid(),
+            "foreground detach clears the runtime foreground application");
+    bool detached_hidden = false;
+    while (auto event = runtime.poll_ui_event()) {
+        detached_hidden = detached_hidden ||
+            (event->kind == 3 && event->component_type == 22 &&
+             event->text == "hide");
+    }
+    require(detached_hidden,
+            "foreground detach invokes Canvas.hideNotify");
+
+    require(runtime.set_foreground(canvas_app,
+                                   phoneme::Dimensions {240, 320}).has_value(),
+            "restore Canvas after host detach");
 
     require(runtime.destroy_midlet(canvas_app).has_value(),
             "destroy Canvas fixture MIDlet");

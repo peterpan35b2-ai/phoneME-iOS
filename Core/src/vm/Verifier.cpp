@@ -109,13 +109,12 @@ public:
     }
 
     [[nodiscard]] Status align_switch() {
+        // Accept non-zero alignment bytes emitted by several legacy J2ME
+        // obfuscators. They are outside the instruction stream; bounds and
+        // branch-target validation below remain strict.
         while ((position_ & 3U) != 0U) {
             auto padding = read_u8("switch padding");
             if (!padding) return std::unexpected(padding.error());
-            if (*padding != 0U) {
-                return fail(ErrorCode::verification_failed,
-                            "switch padding is not zero");
-            }
         }
         return {};
     }

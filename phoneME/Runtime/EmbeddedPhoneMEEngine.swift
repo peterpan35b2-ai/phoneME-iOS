@@ -448,10 +448,32 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     throw PhoneMECoreError.launchFailed(keymapResult)
                 }
 
-                let result = loadedAPI.startJar(
+                let install = loadedAPI.installJar(
                     createdRuntime,
-                    jarURL: jarURL,
+                    jarURL: jarURL
+                )
+                guard install.status == 0, let suiteID = install.suiteID else {
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw PhoneMECoreError.launchFailed(install.status)
+                }
+                let trustResult = loadedAPI.setSuiteTrusted(
+                    createdRuntime,
+                    suiteID: suiteID
+                )
+                guard trustResult == 0 else {
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw PhoneMECoreError.launchFailed(trustResult)
+                }
+                let systemStartResult = loadedAPI.startSystem(createdRuntime)
+                guard systemStartResult == 0 else {
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw PhoneMECoreError.launchFailed(systemStartResult)
+                }
+                let result = loadedAPI.startMidlet(
+                    createdRuntime,
+                    suiteID: suiteID,
                     mainClass: mainClass,
+                    appID: 1,
                     screenWidth: screenWidth,
                     screenHeight: screenHeight
                 )
@@ -517,9 +539,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     in: context
                 )
 
-                // fileInstaller owns MIDP initialization/finalization and is
-                // intentionally used only before the MVM begins running.
-                // Already prepared suites remain available for every isolate.
+                // Bulk library preparation can transiently allocate several
+                // large ZIP/class indexes. Never do that beside a live game;
+                // a newly imported suite is installed on demand by its launch
+                // path, which remains safe while unrelated MIDlets are active.
                 guard !loadedAPI.isRunning(createdRuntime) else { return }
 
                 for (gameID, jarURL) in applications
@@ -538,6 +561,16 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         // only, while valid suites remain available to MVM.
                         phoneMEMultitaskingLogger.error(
                             "Skipped game \(gameID.uuidString, privacy: .public) during preparation: status=\(install.status), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
+                        )
+                        continue
+                    }
+                    let trustResult = loadedAPI.setSuiteTrusted(
+                        createdRuntime,
+                        suiteID: suiteID
+                    )
+                    guard trustResult == 0 else {
+                        phoneMEMultitaskingLogger.error(
+                            "Skipped game \(gameID.uuidString, privacy: .public) because suite trust failed: status=\(trustResult)"
                         )
                         continue
                     }
@@ -629,9 +662,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 var suiteID = context.suiteIDs[gameID]
                 if suiteID == nil {
-                    guard !loadedAPI.isRunning(createdRuntime) else {
-                        throw PhoneMECoreError.applicationNotPrepared
-                    }
                     let install = loadedAPI.installJar(
                         createdRuntime,
                         jarURL: jarURL
@@ -642,11 +672,28 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     guard install.status == 0, let installedSuiteID = install.suiteID else {
                         throw PhoneMECoreError.launchFailed(install.status)
                     }
+                    let trustResult = loadedAPI.setSuiteTrusted(
+                        createdRuntime,
+                        suiteID: installedSuiteID
+                    )
+                    guard trustResult == 0 else {
+                        throw PhoneMECoreError.launchFailed(trustResult)
+                    }
                     context.suiteIDs[gameID] = installedSuiteID
                     suiteID = installedSuiteID
                 }
 
                 guard !currentLaunchToken.isCancelled else { return }
+
+                if !loadedAPI.isRunning(createdRuntime) {
+                    let systemStartResult = loadedAPI.startSystem(createdRuntime)
+                    phoneMEMultitaskingLogger.info(
+                        "Started C++ runtime system: status=\(systemStartResult)"
+                    )
+                    guard systemStartResult == 0 else {
+                        throw PhoneMECoreError.launchFailed(systemStartResult)
+                    }
+                }
 
                 let keymapResult = loadedAPI.configureKeymap(
                     createdRuntime,
@@ -827,16 +874,15 @@ final class EmbeddedPhoneMEEngine: NSObject {
             else {
                 return
             }
-            _ = api.setForeground(
-                runtime,
-                appID: nil,
-                screenWidth: 1,
-                screenHeight: 1
-            )
-            Self.waitUntilNoForegroundApplication(
+            let detached = Self.detachForegroundApplication(
                 api: api,
                 runtime: runtime
             )
+            if !detached {
+                phoneMEMultitaskingLogger.error(
+                    "Failed to detach the foreground MIDlet after hiding its UI"
+                )
+            }
         }
     }
 
@@ -998,16 +1044,27 @@ final class EmbeddedPhoneMEEngine: NSObject {
         return !token.isCancelled
     }
 
-    nonisolated private static func waitUntilNoForegroundApplication(
+    nonisolated private static func detachForegroundApplication(
         api: PhoneMECAPI,
         runtime: PhoneMECAPI.RuntimeHandle,
         timeout: TimeInterval = 2
-    ) {
+    ) -> Bool {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
-        while api.foregroundAppID(runtime) != nil,
-              ProcessInfo.processInfo.systemUptime < deadline {
+        repeat {
+            let result = api.setForeground(
+                runtime,
+                appID: nil,
+                screenWidth: 1,
+                screenHeight: 1
+            )
+            if result == 0, api.foregroundAppID(runtime) == nil {
+                return true
+            }
+            // Launch/lifecycle work may still hold the isolate briefly. Retry
+            // the detach instead of silently leaving Core in foreground mode.
             Thread.sleep(forTimeInterval: 0.005)
-        }
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        return api.foregroundAppID(runtime) == nil
     }
 
     nonisolated private static func configureMediaMetadata(
