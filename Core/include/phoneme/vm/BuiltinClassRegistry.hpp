@@ -25,6 +25,7 @@ void register_lang_classes(BuiltinClassRegistry& registry);
 void register_io_classes(BuiltinClassRegistry& registry);
 void register_file_classes(BuiltinClassRegistry& registry);
 void register_connection_classes(BuiltinClassRegistry& registry);
+void register_bluetooth_classes(BuiltinClassRegistry& registry);
 void register_util_classes(BuiltinClassRegistry& registry);
 void register_lcdui_classes(BuiltinClassRegistry& registry);
 void register_game_classes(BuiltinClassRegistry& registry);

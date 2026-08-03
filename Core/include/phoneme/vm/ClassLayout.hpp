@@ -64,6 +64,7 @@ private:
     ClassRepository& classes_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<const ClassLayout>> layouts_;
+    std::unordered_map<std::string, FieldLocation> resolved_fields_;
     std::unordered_map<std::string, Value> static_fields_;
 };
 

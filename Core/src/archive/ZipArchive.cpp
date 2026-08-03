@@ -304,13 +304,47 @@ Status ZipArchive::parse_directory() {
             return fail(ErrorCode::out_of_range,
                         "JAR entry name exceeds configured size limit");
         }
-        if (limits_.reject_unsafe_paths && !safe_entry_name(name)) {
+        const bool harmless_root_directory =
+            name == "./" && compressed_size == 0U && uncompressed_size == 0U;
+        if (limits_.reject_unsafe_paths && !safe_entry_name(name) &&
+            !harmless_root_directory) {
             return fail(ErrorCode::malformed_archive,
                         "JAR entry contains an unsafe path: " + name);
         }
+        ZipEntry candidate {
+            .name = name,
+            .compression_method = method,
+            .flags = flags,
+            .crc32 = entry_crc,
+            .compressed_size = compressed_size,
+            .uncompressed_size = uncompressed_size,
+            .local_header_offset = local_offset,
+        };
         if (limits_.reject_duplicate_names && !names.insert(name).second) {
-            return fail(ErrorCode::malformed_archive,
-                        "JAR contains a duplicate entry name: " + name);
+            const auto existing = std::find_if(
+                entries_.begin(), entries_.end(),
+                [&name](const ZipEntry& entry) { return entry.name == name; });
+            const bool matching_metadata = existing != entries_.end() &&
+                existing->compression_method == candidate.compression_method &&
+                existing->crc32 == candidate.crc32 &&
+                existing->compressed_size == candidate.compressed_size &&
+                existing->uncompressed_size == candidate.uncompressed_size;
+            if (!matching_metadata) {
+                return fail(ErrorCode::malformed_archive,
+                            "JAR contains a conflicting duplicate entry: " +
+                                name);
+            }
+            auto existing_bytes = read(*existing);
+            auto candidate_bytes = read(candidate);
+            if (!existing_bytes) return std::unexpected(existing_bytes.error());
+            if (!candidate_bytes) return std::unexpected(candidate_bytes.error());
+            if (*existing_bytes != *candidate_bytes) {
+                return fail(ErrorCode::malformed_archive,
+                            "JAR contains duplicate entries with different data: " +
+                                name);
+            }
+            cursor = *record_end;
+            continue;
         }
         if (static_cast<u64>(uncompressed_size) >
             limits_.maximum_entry_uncompressed_bytes) {
@@ -341,15 +375,7 @@ Status ZipArchive::parse_directory() {
                         "JAR entry exceeds configured compression ratio limit");
         }
 
-        entries_.push_back(ZipEntry {
-            .name = std::move(name),
-            .compression_method = method,
-            .flags = flags,
-            .crc32 = entry_crc,
-            .compressed_size = compressed_size,
-            .uncompressed_size = uncompressed_size,
-            .local_header_offset = local_offset,
-        });
+        entries_.push_back(std::move(candidate));
 
         cursor = *record_end;
     }

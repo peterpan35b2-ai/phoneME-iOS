@@ -1990,7 +1990,8 @@ void register_datagram_object(NativeMethodRegistry& registry) {
             auto bytes = datagram_read_bytes(machine, *datagram, length);
             if (!bytes) return std::unexpected(bytes.error());
             const std::string encoded(bytes->begin(), bytes->end());
-            auto decoded = decode_modified_utf8(encoded);
+            auto decoded = decode_modified_utf8(
+                encoded, ModifiedUtf8Mode::allow_raw_nul);
             if (!decoded) {
                 return fail_java("java/io/UTFDataFormatException",
                                  decoded.error().message);

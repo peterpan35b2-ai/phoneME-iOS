@@ -469,7 +469,7 @@ void register_group(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
     add(registry, kGroup, "removeChild",
-        "(Ljavax/microedition/m3g/Node;)Z",
+        "(Ljavax/microedition/m3g/Node;)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments, "Group.removeChild");
@@ -508,9 +508,9 @@ void register_group(NativeMethodRegistry& registry) {
                 auto updated = set_int_field(machine, *object, kGroup,
                                              "childCount", *count - 1);
                 if (!updated) return std::unexpected(updated.error());
-                return std::optional<Value>(Value::from_int(1));
+                return std::optional<Value> {};
             }
-            return std::optional<Value>(Value::from_int(0));
+            return std::optional<Value> {};
         });
     add(registry, kGroup, "getChild", "(I)Ljavax/microedition/m3g/Node;",
         [](Machine& machine, std::span<const Value> arguments)

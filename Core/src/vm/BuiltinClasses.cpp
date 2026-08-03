@@ -14,6 +14,7 @@ namespace {
         register_io_classes(result);
         register_file_classes(result);
         register_connection_classes(result);
+        register_bluetooth_classes(result);
         register_util_classes(result);
         register_midlet_classes(result);
         register_media_classes(result);

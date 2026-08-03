@@ -1419,7 +1419,8 @@ void register_data_input(NativeMethodRegistry& registry) {
         encoded.reserve(length);
         for (const u8 byte : *bytes)
             encoded.push_back(static_cast<char>(byte));
-        auto decoded = decode_modified_utf8(encoded);
+        auto decoded = decode_modified_utf8(
+            encoded, ModifiedUtf8Mode::allow_raw_nul);
         if (!decoded)
             return fail_java("java/io/UTFDataFormatException",
                              decoded.error().message);

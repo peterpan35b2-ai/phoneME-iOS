@@ -896,8 +896,7 @@ void register_console_natives(NativeMethodRegistry& registry) {
                 return fail(ErrorCode::invalid_argument,
                             "System.gc expects no arguments");
             }
-            auto collected = machine.collect_garbage();
-            if (!collected) return std::unexpected(collected.error());
+            machine.request_garbage_collection();
             return std::optional<Value> {};
         });
     add(registry, "java/lang/System", "exit", "(I)V",

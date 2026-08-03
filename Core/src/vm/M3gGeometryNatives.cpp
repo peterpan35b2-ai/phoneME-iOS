@@ -131,7 +131,7 @@ void register_image2d(NativeMethodRegistry& registry) {
     register_read_only_int(registry, kImage2D, "width", "getWidth");
     register_read_only_int(registry, kImage2D, "height", "getHeight");
     register_read_only_int(registry, kImage2D, "mutable", "isMutable", "Z");
-    add(registry, kImage2D, "set", "(III[B)V",
+    add(registry, kImage2D, "set", "(IIII[B)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments, "Image2D.set");

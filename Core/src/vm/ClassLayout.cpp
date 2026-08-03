@@ -20,6 +20,23 @@ namespace phoneme::vm
       return normalized;
     }
 
+    [[nodiscard]] std::string field_resolution_key(
+        std::string_view owner,
+        std::string_view name,
+        std::string_view descriptor,
+        bool require_static)
+    {
+      std::string key;
+      key.reserve(owner.size() + name.size() + descriptor.size() + 4U);
+      key.append(owner);
+      key.push_back('\n');
+      key.append(name);
+      key.push_back('\n');
+      key.append(descriptor);
+      key.push_back(require_static ? '\1' : '\0');
+      return key;
+    }
+
   } // namespace
 
   Result<std::shared_ptr<const ClassLayout>> ClassStateRegistry::layout(
@@ -66,6 +83,24 @@ namespace phoneme::vm
     }
 
     std::string current = normalize_name(owner);
+    const std::string cache_key = field_resolution_key(
+        current, name, descriptor, require_static);
+    {
+      std::scoped_lock lock(mutex_);
+      if (const auto cached = resolved_fields_.find(cache_key);
+          cached != resolved_fields_.end())
+      {
+        return cached->second;
+      }
+    }
+    const auto cache_location = [this, &cache_key](FieldLocation location) {
+      std::scoped_lock lock(mutex_);
+      const auto [iterator, inserted] = resolved_fields_.emplace(
+          cache_key, std::move(location));
+      (void)inserted;
+      return iterator->second;
+    };
+
     usize hierarchy_depth = 0;
     while (!current.empty())
     {
@@ -96,14 +131,14 @@ namespace phoneme::vm
 
         if (is_static)
         {
-          return FieldLocation{
+          return cache_location(FieldLocation{
               .declaring_class = current,
               .name = std::string(name),
               .descriptor = std::string(descriptor),
               .index = 0,
               .is_static = true,
               .constant_value_index = field.constant_value_index,
-          };
+          });
         }
 
         auto declaring_layout = layout(current);
@@ -118,14 +153,14 @@ namespace phoneme::vm
           return fail(ErrorCode::internal_error,
                       "instance field is absent from its class layout");
         }
-        return FieldLocation{
+        return cache_location(FieldLocation{
             .declaring_class = current,
             .name = std::string(name),
             .descriptor = std::string(descriptor),
             .index = offset->second,
             .is_static = false,
             .constant_value_index = std::nullopt,
-        };
+        });
       }
       current = (*loaded)->super_name();
     }
@@ -314,6 +349,7 @@ namespace phoneme::vm
   {
     std::scoped_lock lock(mutex_);
     layouts_.clear();
+    resolved_fields_.clear();
     static_fields_.clear();
   }
 

@@ -34,6 +34,18 @@ constexpr usize kMaximumRepeatsPerPump = 8U;
         static_cast<i64>(std::numeric_limits<i32>::max())));
 }
 
+void append_canvas_diagnostic(vm::Machine& machine,
+                              std::string_view message) {
+    std::u16string diagnostic = u"[Canvas] ";
+    diagnostic.reserve(diagnostic.size() + message.size() + 1U);
+    for (const char character : message) {
+        diagnostic.push_back(static_cast<char16_t>(
+            static_cast<unsigned char>(character)));
+    }
+    diagnostic.push_back(u'\n');
+    machine.append_console(diagnostic);
+}
+
 } // namespace
 
 CanvasRuntime::CanvasRuntime(vm::Machine& machine,
@@ -248,6 +260,10 @@ Status CanvasRuntime::set_display_visible(vm::ObjectRef displayable,
     return {};
 }
 
+Status CanvasRuntime::flush_visibility_callbacks() {
+    return process_visibility_changes();
+}
+
 Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
                                       vm::CanvasRect region) {
     auto state = require_state(canvas);
@@ -263,7 +279,8 @@ Status CanvasRuntime::request_service_repaints(vm::ObjectRef canvas) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
     (*state)->service_requested = true;
-    if (pumping_ || !(*state)->effectively_visible ||
+    if (pumping_ || machine_.executing_on_current_thread() ||
+        !(*state)->effectively_visible ||
         !(*state)->repaint_region.has_value()) {
         return {};
     }
@@ -779,12 +796,26 @@ Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
                                   std::string_view method_name,
                                   std::string_view descriptor,
                                   std::span<const vm::Value> arguments) {
+    constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
     auto result = machine_.invoke_instance(receiver,
                                            declared_class,
                                            method_name,
                                            descriptor,
-                                           arguments);
-    if (!result) return std::unexpected(result.error());
+                                           arguments,
+                                           kCanvasCallbackInstructionBudget);
+    if (!result) {
+        if (result.error().code == ErrorCode::invalid_state &&
+            result.error().message ==
+                "VM instruction budget was exhausted") {
+            std::string diagnostic = "callback ";
+            diagnostic.append(method_name);
+            diagnostic.append(descriptor);
+            diagnostic += " exceeded instruction budget";
+            append_canvas_diagnostic(machine_, diagnostic);
+            return {};
+        }
+        return std::unexpected(result.error());
+    }
     if (result->completed_normally()) return {};
     if (!result->throwable.has_value()) {
         return fail(ErrorCode::internal_error,
@@ -792,8 +823,12 @@ Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
     }
     auto throwable = machine_.heap().class_name(*result->throwable);
     if (!throwable) return std::unexpected(throwable.error());
-    return fail(ErrorCode::java_exception,
-                "Canvas callback threw " + *throwable);
+    std::string message = "Canvas callback threw " + *throwable;
+    if (!result->exception_context.empty()) {
+        message += " from " + result->exception_context;
+    }
+    append_canvas_diagnostic(machine_, message);
+    return {};
 }
 
 Status CanvasRuntime::invoke_key_callback(CanvasState& state,

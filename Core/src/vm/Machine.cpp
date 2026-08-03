@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
@@ -948,8 +949,7 @@ namespace phoneme::vm
       return;
     media_events_.shutdown();
     timers_.shutdown();
-    scheduler_.shutdown();
-    monitors_.clear();
+    scheduler_.shutdown(&monitors_);
   }
 
   Result<ObjectRef> Machine::current_java_thread()
@@ -1071,6 +1071,11 @@ namespace phoneme::vm
   void Machine::cooperative_yield()
   {
     scheduler_.cooperative_yield(*this);
+  }
+
+  bool Machine::executing_on_current_thread() const noexcept
+  {
+    return g_execution_machine == this && g_execution_lock_depth != 0U;
   }
 
   void Machine::request_garbage_collection() noexcept
@@ -2903,6 +2908,12 @@ namespace phoneme::vm
                     "athrow operand is not assignable to Throwable");
       }
 
+      const std::string exception_context = frames.empty()
+          ? std::string {}
+          : frames.back().owner().name() + "." +
+                frames.back().method().name +
+                frames.back().method().descriptor + " at bytecode " +
+                std::to_string(throw_pc);
       usize current_throw_pc = throw_pc;
       while (!frames.empty())
       {
@@ -2957,6 +2968,7 @@ namespace phoneme::vm
           .return_value = std::nullopt,
           .throwable = throwable,
           .executed_instructions = executed,
+          .exception_context = exception_context,
       });
     };
 
@@ -3208,6 +3220,20 @@ namespace phoneme::vm
           return std::unexpected(length.error());
         if (*index < 0 || static_cast<usize>(*index) >= *length)
         {
+          if (std::getenv("PHONEME_TRACE_ARRAY_BOUNDS") != nullptr)
+          {
+            auto traced_class = heap_.class_name(*array);
+            const std::string descriptor = traced_class
+                ? *traced_class
+                : std::string("<unknown>");
+            std::fprintf(stderr,
+                         "[array-bounds] method=%s.%s%s pc=%zu array=%s "
+                         "index=%d length=%zu\n",
+                         frame.owner().name().c_str(),
+                         frame.method().name.c_str(),
+                         frame.method().descriptor.c_str(),
+                         opcode_pc, descriptor.c_str(), *index, *length);
+          }
           auto raised = raise_implicit(
               "java/lang/ArrayIndexOutOfBoundsException", opcode_pc);
           if (!raised)
@@ -4711,7 +4737,19 @@ namespace phoneme::vm
             }
             return std::unexpected(constructor.error());
           }
-          if ((constructor->method->access_flags & kAccPublic) == 0U)
+          const auto package_name = [](std::string_view name) {
+            const usize separator = name.rfind('/');
+            return separator == std::string_view::npos
+                ? std::string_view {}
+                : name.substr(0U, separator);
+          };
+          const u16 constructor_flags = constructor->method->access_flags;
+          const bool legacy_same_package_access =
+              (*loaded)->major_version() <= 50U &&
+              (constructor_flags & kAccPrivate) == 0U &&
+              package_name(frame.owner().name()) == package_name(*class_name);
+          if ((constructor_flags & kAccPublic) == 0U &&
+              !legacy_same_package_access)
           {
             auto raised = raise_implicit("java/lang/IllegalAccessException",
                                          opcode_pc);

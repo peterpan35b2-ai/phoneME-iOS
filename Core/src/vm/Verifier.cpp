@@ -1504,8 +1504,20 @@ void replace_uninitialized(FrameState& state,
             if (!popped) return std::unexpected(popped.error());
         }
         if (opcode == 0xB4 || opcode == 0xB5) {
-            auto receiver = pop_reference(result.state);
+            const bool allow_legacy_uninitialized_this =
+                opcode == 0xB5 && method.name == "<init>" &&
+                owner.major_version() <= 50U &&
+                reference->owner == owner.name();
+            auto receiver = pop_reference(
+                result.state, allow_legacy_uninitialized_this);
             if (!receiver) return std::unexpected(receiver.error());
+            if (receiver->kind != VerificationValueKind::reference &&
+                !(allow_legacy_uninitialized_this &&
+                  receiver->kind ==
+                      VerificationValueKind::uninitialized_this)) {
+                return verify_fail(method, pc,
+                                   "field access requires initialized receiver");
+            }
         }
         if (opcode == 0xB2 || opcode == 0xB4) {
             auto status = push(result.state,
@@ -2050,7 +2062,10 @@ void replace_uninitialized(FrameState& state,
                                              *jsr_return_sites,
                                              allow_legacy_return_stack);
         if (!transfer) {
-            if (transfer.error().code == ErrorCode::verification_failed) {
+            const std::string prefix = method.name + method.descriptor +
+                " at bytecode ";
+            if (transfer.error().code == ErrorCode::verification_failed &&
+                transfer.error().message.starts_with(prefix)) {
                 return std::unexpected(transfer.error());
             }
             return verify_fail(method, pc, transfer.error().message);

@@ -88,7 +88,7 @@ public:
     [[nodiscard]] bool deterministic() const noexcept;
 
     void wake_thread(JavaThreadId thread_id) noexcept;
-    void shutdown() noexcept;
+    void shutdown(MonitorTable* monitors = nullptr) noexcept;
 
 private:
     [[nodiscard]] std::shared_ptr<JavaThread> find_thread_locked(

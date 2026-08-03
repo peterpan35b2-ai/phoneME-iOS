@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "BluetoothNatives.hpp"
 #include "CanvasNatives.hpp"
 #include "ChoiceNatives.hpp"
 #include "ClassNatives.hpp"
@@ -1706,6 +1707,7 @@ void register_string_extensions(NativeMethodRegistry& registry) {
 } // namespace
 
 void register_core_natives(NativeMethodRegistry& registry) {
+    register_bluetooth_natives(registry);
     register_canvas_natives(registry);
     register_class_natives(registry);
     register_choice_natives(registry);

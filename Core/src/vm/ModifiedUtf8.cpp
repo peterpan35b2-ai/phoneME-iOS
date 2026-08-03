@@ -11,7 +11,8 @@ namespace {
 
 } // namespace
 
-Result<std::u16string> decode_modified_utf8(std::string_view encoded) {
+Result<std::u16string> decode_modified_utf8(std::string_view encoded,
+                                             ModifiedUtf8Mode mode) {
     std::u16string result;
     result.reserve(encoded.size());
 
@@ -19,6 +20,11 @@ Result<std::u16string> decode_modified_utf8(std::string_view encoded) {
     while (index < encoded.size()) {
         const auto first = static_cast<unsigned char>(encoded[index]);
         if (first == 0) {
+            if (mode == ModifiedUtf8Mode::allow_raw_nul) {
+                result.push_back(u'\0');
+                ++index;
+                continue;
+            }
             return fail(ErrorCode::malformed_class,
                         "modified UTF-8 contains an unencoded null byte");
         }

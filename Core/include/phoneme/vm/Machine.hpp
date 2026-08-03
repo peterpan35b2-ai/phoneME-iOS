@@ -113,6 +113,7 @@ namespace phoneme::vm
         std::optional<i64> millis);
     [[nodiscard]] Status notify_object(ObjectRef object, bool all);
     void cooperative_yield();
+    [[nodiscard]] bool executing_on_current_thread() const noexcept;
     void request_garbage_collection() noexcept;
     [[nodiscard]] graphics::GraphicsStore& graphics() noexcept {
       return graphics_;

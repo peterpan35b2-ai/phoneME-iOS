@@ -46,6 +46,9 @@ private:
     std::vector<std::string> archive_paths_;
     std::unordered_map<std::string,
                        std::shared_ptr<const classfile::ClassFile>> cache_;
+    std::unordered_map<std::string, ResolvedMethod> method_cache_;
+    std::unordered_map<std::string, ResolvedMethod> declared_method_cache_;
+    std::unordered_map<std::string, bool> assignability_cache_;
 };
 
 } // namespace phoneme::vm

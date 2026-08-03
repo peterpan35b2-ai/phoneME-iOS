@@ -1,3 +1,6 @@
+#include <array>
+#include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -903,6 +906,8 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "time API failures unwind through Java exceptions");
     require_jdk8_string_result("ioRoundTrip", 1023,
                                "round-trip DataInputStream and DataOutputStream values");
+    require_jdk8_string_result("legacyRawNullUtf", 1,
+                               "decode KVM-era raw NUL in DataInputStream.readUTF");
     require_jdk8_string_result("byteArrayStreams", 15,
                                "execute byte-array stream mark reset skip and writeTo");
     require_jdk8_string_result("ioExceptions", 15,
@@ -2384,6 +2389,54 @@ void test_runtime_canvas(const std::string& fixture_jar) {
             "destroy Canvas fixture MIDlet");
     require(runtime.destroy_midlet(plain_app).has_value(),
             "destroy secondary lifecycle MIDlet");
+
+    constexpr phoneme::AppId budget_app {33};
+    const auto budget_started_at = std::chrono::steady_clock::now();
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.CanvasBudgetOps",
+                                 budget_app,
+                                 phoneme::Dimensions {320, 240}).has_value(),
+            "Canvas callback instruction budget isolates an infinite paint");
+    const auto budget_elapsed = std::chrono::steady_clock::now() -
+        budget_started_at;
+    require(budget_elapsed < std::chrono::seconds(5),
+            "infinite Canvas paint cannot block the runtime indefinitely");
+    require(runtime.app_state(budget_app) ==
+                phoneme::runtime::AppState::active,
+            "budget-exhausted Canvas remains active");
+    const auto budget_frame = runtime.frame_snapshot();
+    require(budget_frame.rgba.size() == 320U * 240U * 4U &&
+                budget_frame.rgba[0] == 0x22U &&
+                budget_frame.rgba[1] == 0x44U &&
+                budget_frame.rgba[2] == 0x66U &&
+                budget_frame.rgba[3] == 0xFFU,
+            "Canvas commits drawing completed before budget exhaustion");
+    require(runtime.destroy_midlet(budget_app).has_value(),
+            "destroy Canvas budget fixture MIDlet");
+}
+
+void test_machine_shutdown_waiter(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add infinite-wait fixture archive");
+    phoneme::vm::Machine machine(classes);
+    auto started = machine.invoke_static("corefixture/WaitForeverOps",
+                                         "startWaiter",
+                                         "()I",
+                                         {},
+                                         20'000'000U);
+    require(started.has_value() && started->completed_normally() &&
+                started->return_value.has_value(),
+            "start Java worker blocked in Object.wait");
+    auto status = started->return_value->as_int();
+    require(status.has_value() && *status == 1,
+            "waiter fixture reaches its monitor wait");
+
+    const auto shutdown_started = std::chrono::steady_clock::now();
+    machine.shutdown();
+    require(std::chrono::steady_clock::now() - shutdown_started <
+                std::chrono::seconds(2),
+            "VM shutdown cancels Object.wait before joining Java workers");
 }
 
 void test_machine_timer(const std::string& fixture_jar) {
@@ -2562,6 +2615,85 @@ void test_runtime_failure_isolation(const std::string& fixture_jar) {
             "healthy MIDlet reaches active state after failure isolation");
 }
 
+void test_machine_m3g() {
+    phoneme::vm::ClassRepository classes;
+    phoneme::vm::Machine machine(classes);
+
+    const auto invoke_void = [&](phoneme::vm::ObjectRef object,
+                                 const char* owner,
+                                 const char* name,
+                                 const char* descriptor,
+                                 std::span<const phoneme::vm::Value> arguments = {}) {
+        auto result = machine.invoke_instance(object, owner, name,
+                                              descriptor, arguments);
+        require(result.has_value() && result->completed_normally(),
+                "invoke M3G method normally");
+    };
+
+    auto transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(transform.has_value(), "allocate M3G Transform");
+    invoke_void(*transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> translation {
+        phoneme::vm::Value::from_float(4.0F),
+        phoneme::vm::Value::from_float(-3.0F),
+        phoneme::vm::Value::from_float(2.0F),
+    };
+    invoke_void(*transform, "javax/microedition/m3g/Transform",
+                "postTranslate", "(FFF)V", translation);
+    auto matrix = machine.heap().allocate_array(
+        "[F", 16U, phoneme::vm::Value::from_float(0.0F));
+    require(matrix.has_value(), "allocate M3G transform destination");
+    const phoneme::vm::Value matrix_argument =
+        phoneme::vm::Value::from_reference(*matrix);
+    invoke_void(*transform, "javax/microedition/m3g/Transform",
+                "get", "([F)V",
+                std::span<const phoneme::vm::Value>(&matrix_argument, 1U));
+    const auto require_float = [&](phoneme::usize index, float expected) {
+        auto value = machine.heap().element(*matrix, index);
+        require(value.has_value(), "read M3G matrix element");
+        auto number = value->as_float();
+        require(number.has_value() && std::abs(*number - expected) < 0.0001F,
+                "M3G Transform preserves matrix values");
+    };
+    require_float(3U, 4.0F);
+    require_float(7U, -3.0F);
+    require_float(11U, 2.0F);
+
+    auto group = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    auto camera = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Camera");
+    require(group.has_value() && camera.has_value(),
+            "allocate M3G scene nodes");
+    invoke_void(*group, "javax/microedition/m3g/Group", "<init>", "()V");
+    invoke_void(*camera, "javax/microedition/m3g/Camera", "<init>", "()V");
+    const phoneme::vm::Value camera_argument =
+        phoneme::vm::Value::from_reference(*camera);
+    invoke_void(*group, "javax/microedition/m3g/Group", "addChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&camera_argument, 1U));
+    auto count = machine.invoke_instance(*group,
+        "javax/microedition/m3g/Group", "getChildCount", "()I");
+    require(count.has_value() && count->completed_normally() &&
+                count->return_value.has_value(),
+            "read M3G Group child count");
+    auto count_value = count->return_value->as_int();
+    require(count_value.has_value() && *count_value == 1,
+            "M3G Group owns added child");
+    invoke_void(*group, "javax/microedition/m3g/Group", "removeChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&camera_argument, 1U));
+    count = machine.invoke_instance(*group,
+        "javax/microedition/m3g/Group", "getChildCount", "()I");
+    require(count.has_value() && count->return_value.has_value(),
+            "read M3G Group count after removal");
+    count_value = count->return_value->as_int();
+    require(count_value.has_value() && *count_value == 0,
+            "M3G Group removes child with void signature");
+}
+
 void test_framebuffer_sizes() {
     phoneme::runtime::Framebuffer framebuffer;
     require(framebuffer.resize({320, 240}).has_value(),
@@ -2618,6 +2750,12 @@ int main(int argc, char** argv) {
         std::cout << "Standalone Canvas Graphics tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "m3g") {
+        test_builtin_boot_classes();
+        test_machine_m3g();
+        std::cout << "Standalone M3G Core tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "game-api") {
         test_archive_and_classfile(fixture_jar);
         test_builtin_boot_classes();
@@ -2648,7 +2786,9 @@ int main(int argc, char** argv) {
     test_machine_media(fixture_jar);
     test_machine_graphics(fixture_jar);
     test_machine_game_api(fixture_jar);
+    test_machine_m3g();
     test_machine_gc_roots(fixture_jar);
+    test_machine_shutdown_waiter(fixture_jar);
     test_runtime_lcdui(fixture_jar);
     test_runtime_canvas(fixture_jar);
     test_machine_timer(fixture_jar);

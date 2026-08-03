@@ -25,6 +25,7 @@ public:
                                                  bool suppress_key_events) = 0;
     [[nodiscard]] virtual Status set_display_visible(ObjectRef displayable,
                                                      bool visible) = 0;
+    [[nodiscard]] virtual Status flush_visibility_callbacks() = 0;
     [[nodiscard]] virtual Status request_repaint(ObjectRef canvas,
                                                  CanvasRect region) = 0;
     [[nodiscard]] virtual Status request_service_repaints(

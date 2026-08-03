@@ -72,6 +72,7 @@ public:
                                          bool suppress_key_events) override;
     [[nodiscard]] Status set_display_visible(vm::ObjectRef displayable,
                                              bool visible) override;
+    [[nodiscard]] Status flush_visibility_callbacks() override;
     [[nodiscard]] Status request_repaint(vm::ObjectRef canvas,
                                          vm::CanvasRect region) override;
     [[nodiscard]] Status request_service_repaints(vm::ObjectRef canvas) override;

@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "phoneme/vm/Machine.hpp"
+#include "phoneme/vm/MonitorTable.hpp"
 
 namespace phoneme::vm {
 
@@ -674,7 +675,7 @@ void Scheduler::finish_thread(const std::shared_ptr<JavaThread>& thread,
                                    JavaThreadState::terminated);
 }
 
-void Scheduler::shutdown() noexcept {
+void Scheduler::shutdown(MonitorTable* monitors) noexcept {
     std::vector<std::shared_ptr<JavaThread>> threads;
     {
         std::scoped_lock lock(mutex_);
@@ -696,6 +697,9 @@ void Scheduler::shutdown() noexcept {
         }
         thread->worker_.request_stop();
         thread->condition_.notify_all();
+    }
+    if (monitors != nullptr) {
+        monitors->clear();
     }
     for (const auto& thread : threads) {
         if (thread->worker_.joinable() &&

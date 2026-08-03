@@ -162,9 +162,12 @@ constexpr usize kGraphicsTargetField = 0;
     if (!class_name) {
         return std::unexpected(class_name.error());
     }
-    return fail(ErrorCode::java_exception,
-                std::string(lifecycle_phase) +
-                    " threw an uncaught Java exception: " + *class_name);
+    std::string message = std::string(lifecycle_phase) +
+        " threw an uncaught Java exception: " + *class_name;
+    if (!result.exception_context.empty()) {
+        message += " from " + result.exception_context;
+    }
+    return fail(ErrorCode::java_exception, std::move(message));
 }
 
 } // namespace
@@ -537,6 +540,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
     }
 
     std::scoped_lock application_operation(application_vm->operation_mutex);
+    auto launch_foregrounded = application_vm->canvas.set_host_foreground(true);
+    if (!launch_foregrounded) return fail_start(launch_foregrounded.error());
     auto constructor = application_vm->machine.invoke_instance(
         *receiver, main_class, "<init>", "()V");
     if (!constructor) return fail_start(constructor.error());
@@ -978,10 +983,31 @@ Status Runtime::destroy_midlet(AppId app_id) {
         "(Z)V",
         std::span<const vm::Value>(&unconditional, 1));
     if (!destroyed) return fail_lifecycle(destroyed.error());
-    auto completion = require_normal_completion(vm->machine,
-                                                *destroyed,
-                                                "MIDlet destroyApp");
-    if (!completion) return fail_lifecycle(completion.error());
+    if (!destroyed->completed_normally()) {
+        if (!destroyed->throwable.has_value()) {
+            return fail_lifecycle(fail(
+                ErrorCode::internal_error,
+                "MIDlet destroyApp failed without a Java throwable").error());
+        }
+        auto throwable_class = vm->machine.heap().class_name(
+            *destroyed->throwable);
+        if (!throwable_class) {
+            return fail_lifecycle(throwable_class.error());
+        }
+        std::string diagnostic =
+            "[Lifecycle] forced destroy ignored " + *throwable_class;
+        if (!destroyed->exception_context.empty()) {
+            diagnostic += " from " + destroyed->exception_context;
+        }
+        diagnostic.push_back('\n');
+        std::u16string utf16;
+        utf16.reserve(diagnostic.size());
+        for (const char character : diagnostic) {
+            utf16.push_back(static_cast<char16_t>(
+                static_cast<unsigned char>(character)));
+        }
+        vm->machine.append_console(utf16);
+    }
 
     std::unique_lock lock(mutex_);
     App* app = find_app_unlocked(app_id);

@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "phoneme/classfile/ClassFile.hpp"
@@ -13,6 +14,7 @@ struct ExecutionResult final {
     std::optional<Value> return_value;
     std::optional<ObjectRef> throwable;
     u64 executed_instructions {0};
+    std::string exception_context;
 
     [[nodiscard]] bool completed_normally() const noexcept {
         return !throwable.has_value();

@@ -109,7 +109,7 @@ using namespace builtin;
         }, {
             api_method("<init>", "()V"),
             api_method("addChild", "(Ljavax/microedition/m3g/Node;)V"),
-            api_method("removeChild", "(Ljavax/microedition/m3g/Node;)Z"),
+            api_method("removeChild", "(Ljavax/microedition/m3g/Node;)V"),
             api_method("getChild", "(I)Ljavax/microedition/m3g/Node;"),
             api_method("getChildCount", "()I"),
             api_method("pick", "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z"),
@@ -337,7 +337,7 @@ using namespace builtin;
             api_method("<init>", "(III[B[B)V"),
             api_method("getFormat", "()I"), api_method("getWidth", "()I"),
             api_method("getHeight", "()I"), api_method("isMutable", "()Z"),
-            api_method("set", "(III[B)V"),
+            api_method("set", "(IIII[B)V"),
         });
     }
     if (name == "javax/microedition/m3g/Texture2D") {

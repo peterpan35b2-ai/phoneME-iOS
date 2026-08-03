@@ -762,6 +762,16 @@ public final class Jdk8Semantics {
         return result;
     }
 
+    public static int legacyRawNullUtf() throws java.io.IOException {
+        byte[] encoded = new byte[] {0, 2, 0x17, 0};
+        java.io.DataInputStream input = new java.io.DataInputStream(
+                new java.io.ByteArrayInputStream(encoded));
+        String value = input.readUTF();
+        return value.length() == 2
+                && value.charAt(0) == 0x17
+                && value.charAt(1) == 0 ? 1 : 0;
+    }
+
     public static int byteArrayStreams() throws java.io.IOException {
         java.io.ByteArrayOutputStream first = new java.io.ByteArrayOutputStream();
         first.write(new byte[] {'A', 'B', 'C'}, 0, 3);
@@ -930,7 +940,7 @@ public final class Jdk8Semantics {
             result += 1;
         }
         try {
-            byte[] invalid = {0, 1, 0};
+            byte[] invalid = {0, 2, (byte) 0xC2, 0x20};
             new java.io.DataInputStream(
                 new java.io.ByteArrayInputStream(invalid)).readUTF();
         } catch (java.io.UTFDataFormatException expected) {

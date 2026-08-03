@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <span>
 #include <string>
@@ -419,8 +421,14 @@ void register_class_natives(NativeMethodRegistry& registry) {
             }
             auto bytes = machine.classes().read_resource(path);
             if (!bytes) {
-                if (bytes.error().code == ErrorCode::class_not_found)
+                if (bytes.error().code == ErrorCode::class_not_found) {
+                    if (std::getenv("PHONEME_TRACE_RESOURCE_MISS") != nullptr) {
+                        std::fprintf(stderr,
+                                     "[resource-miss] class=%s path=%s\n",
+                                     class_name->c_str(), path.c_str());
+                    }
                     return std::optional<Value>(Value::from_reference({}));
+                }
                 if (bytes.error().code == ErrorCode::invalid_argument)
                     return fail_java("java/lang/SecurityException",
                                      bytes.error().message);

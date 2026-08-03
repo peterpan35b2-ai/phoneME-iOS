@@ -11,6 +11,35 @@
 
 namespace phoneme::vm
 {
+  namespace
+  {
+    [[nodiscard]] std::string method_resolution_key(
+        std::string_view owner,
+        std::string_view name,
+        std::string_view descriptor)
+    {
+      std::string key;
+      key.reserve(owner.size() + name.size() + descriptor.size() + 2U);
+      key.append(owner);
+      key.push_back('\n');
+      key.append(name);
+      key.push_back('\n');
+      key.append(descriptor);
+      return key;
+    }
+
+    [[nodiscard]] std::string assignability_key(
+        std::string_view source,
+        std::string_view target)
+    {
+      std::string key;
+      key.reserve(source.size() + target.size() + 1U);
+      key.append(source);
+      key.push_back('\n');
+      key.append(target);
+      return key;
+    }
+  } // namespace
 
   Status ClassRepository::add_archive(std::string archive_path)
   {
@@ -31,6 +60,9 @@ namespace phoneme::vm
     {
       archive_paths_.push_back(std::move(archive_path));
       cache_.clear();
+      method_cache_.clear();
+      declared_method_cache_.clear();
+      assignability_cache_.clear();
     }
     return {};
   }
@@ -73,6 +105,24 @@ namespace phoneme::vm
     }
 
     std::string current = normalize_name(binary_name);
+    const std::string cache_key = method_resolution_key(
+        current, method_name, descriptor);
+    {
+      std::scoped_lock lock(mutex_);
+      if (const auto cached = method_cache_.find(cache_key);
+          cached != method_cache_.end())
+      {
+        return cached->second;
+      }
+    }
+    const auto cache_method = [this, &cache_key](ResolvedMethod resolved) {
+      std::scoped_lock lock(mutex_);
+      const auto [iterator, inserted] = method_cache_.emplace(
+          cache_key, std::move(resolved));
+      (void)inserted;
+      return iterator->second;
+    };
+
     std::unordered_set<std::string> visited;
     visited.reserve(16);
     std::vector<std::string> pending_interfaces;
@@ -100,10 +150,10 @@ namespace phoneme::vm
               (*loaded)->find_method(method_name, descriptor);
           method != nullptr)
       {
-        return ResolvedMethod{
+        return cache_method(ResolvedMethod{
             .owner = *loaded,
             .method = method,
-        };
+        });
       }
       for (const std::string &interface_name : (*loaded)->interfaces())
       {
@@ -134,10 +184,10 @@ namespace phoneme::vm
               (*loaded)->find_method(method_name, descriptor);
           method != nullptr)
       {
-        return ResolvedMethod{
+        return cache_method(ResolvedMethod{
             .owner = *loaded,
             .method = method,
-        };
+        });
       }
       for (const std::string &parent_interface : (*loaded)->interfaces())
       {
@@ -161,7 +211,18 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "method name and descriptor must not be empty");
     }
-    auto loaded = load(binary_name);
+    const std::string normalized = normalize_name(binary_name);
+    const std::string cache_key = method_resolution_key(
+        normalized, method_name, descriptor);
+    {
+      std::scoped_lock lock(mutex_);
+      if (const auto cached = declared_method_cache_.find(cache_key);
+          cached != declared_method_cache_.end())
+      {
+        return cached->second;
+      }
+    }
+    auto loaded = load(normalized);
     if (!loaded)
     {
       return std::unexpected(loaded.error());
@@ -175,10 +236,15 @@ namespace phoneme::vm
                       normalize_name(binary_name) + "." +
                       std::string(method_name) + std::string(descriptor));
     }
-    return ResolvedMethod{
+    ResolvedMethod resolved {
         .owner = *loaded,
         .method = method,
     };
+    std::scoped_lock lock(mutex_);
+    const auto [iterator, inserted] = declared_method_cache_.emplace(
+        cache_key, std::move(resolved));
+    (void)inserted;
+    return iterator->second;
   }
 
   Result<bool> ClassRepository::is_assignable(
@@ -192,9 +258,23 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "assignability requires non-empty class names");
     }
+    const std::string cache_key = assignability_key(source, target);
+    {
+      std::scoped_lock lock(mutex_);
+      if (const auto cached = assignability_cache_.find(cache_key);
+          cached != assignability_cache_.end())
+      {
+        return cached->second;
+      }
+    }
+    const auto cache_result = [this, &cache_key](bool value) {
+      std::scoped_lock lock(mutex_);
+      assignability_cache_.insert_or_assign(cache_key, value);
+      return value;
+    };
     if (source == target)
     {
-      return true;
+      return cache_result(true);
     }
 
     const auto component_name = [](std::string_view descriptor)
@@ -230,11 +310,11 @@ namespace phoneme::vm
           target == "java/lang/Cloneable" ||
           target == "java/io/Serializable")
       {
-        return true;
+        return cache_result(true);
       }
       if (target.front() != '[')
       {
-        return false;
+        return cache_result(false);
       }
       auto source_component = component_name(std::string_view(source).substr(1));
       auto target_component = component_name(std::string_view(target).substr(1));
@@ -250,13 +330,19 @@ namespace phoneme::vm
       const bool target_primitive = target_component->size() == 1;
       if (source_primitive || target_primitive)
       {
-        return *source_component == *target_component;
+        return cache_result(*source_component == *target_component);
       }
-      return is_assignable(*source_component, *target_component);
+      auto component_assignable = is_assignable(
+          *source_component, *target_component);
+      if (!component_assignable)
+      {
+        return std::unexpected(component_assignable.error());
+      }
+      return cache_result(*component_assignable);
     }
     if (target.front() == '[')
     {
-      return false;
+      return cache_result(false);
     }
 
     std::vector<std::string> pending{source};
@@ -277,7 +363,7 @@ namespace phoneme::vm
       }
       if (current == target)
       {
-        return true;
+        return cache_result(true);
       }
       auto loaded = load(current);
       if (!loaded)
@@ -293,7 +379,7 @@ namespace phoneme::vm
         pending.push_back(interface_name);
       }
     }
-    return false;
+    return cache_result(false);
   }
 
   Result<std::vector<u8>> ClassRepository::read_resource(
@@ -308,6 +394,9 @@ namespace phoneme::vm
     std::scoped_lock lock(mutex_);
     archive_paths_.clear();
     cache_.clear();
+    method_cache_.clear();
+    declared_method_cache_.clear();
+    assignability_cache_.clear();
   }
 
   Result<std::shared_ptr<const classfile::ClassFile>>
@@ -368,7 +457,9 @@ namespace phoneme::vm
       auto verified = verify_class(*parsed);
       if (!verified)
       {
-        return std::unexpected(verified.error());
+        return fail(verified.error().code,
+                    std::string(internal_name) + "." +
+                        verified.error().message);
       }
       return std::make_shared<const classfile::ClassFile>(std::move(*parsed));
     }
