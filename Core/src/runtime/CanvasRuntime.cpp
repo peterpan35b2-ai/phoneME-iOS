@@ -959,11 +959,13 @@ CanvasRuntime::active_visible_state() const noexcept {
     return nullptr;
 }
 
-Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
-                                  std::string_view declared_class,
-                                  std::string_view method_name,
-                                  std::string_view descriptor,
-                                  std::span<const vm::Value> arguments) {
+Status CanvasRuntime::invoke_void(
+    vm::ObjectRef receiver,
+    std::string_view declared_class,
+    std::string_view method_name,
+    std::string_view descriptor,
+    std::span<const vm::Value> arguments,
+    CallbackExceptionPolicy exception_policy) {
     constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
     auto result = machine_.invoke_instance(receiver,
                                            declared_class,
@@ -996,10 +998,17 @@ Status CanvasRuntime::invoke_void(vm::ObjectRef receiver,
         message += " from " + result->exception_context;
     }
     append_canvas_diagnostic(machine_, message);
-    // An uncaught exception in key/pointer/paint/show callbacks is a MIDlet
-    // failure, not a recoverable diagnostic. Swallowing it leaves the app
-    // marked active with a dead or partially-mutated game loop, which appears
-    // to the user as a frozen screen that no longer accepts input.
+    // phoneME's LCDUI implementation catches Throwable from showNotify() and
+    // hideNotify() through Display.handleThrowable(). A host visibility edge
+    // must therefore remain recoverable; otherwise hiding an app poisons the
+    // isolate and the next foreground activation fails with system-start -6.
+    if (exception_policy == CallbackExceptionPolicy::report_and_continue) {
+        return {};
+    }
+
+    // Input and paint callback failures remain fatal. Continuing after those
+    // callbacks leaves the game loop partially mutated and commonly presents
+    // as a frozen screen that no longer accepts input.
     return fail_java(*throwable, std::move(message));
 }
 
@@ -1042,10 +1051,13 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     const vm::ObjectRef canvas = state.object;
     if (desired) {
         active_canvas_ = canvas.bits;
-        auto shown = invoke_void(canvas,
-                                 "javax/microedition/lcdui/Canvas",
-                                 "showNotify",
-                                 "()V");
+        auto shown = invoke_void(
+            canvas,
+            "javax/microedition/lcdui/Canvas",
+            "showNotify",
+            "()V",
+            {},
+            CallbackExceptionPolicy::report_and_continue);
         if (!shown) return shown;
         CanvasState* current = find_state(canvas);
         if (current != nullptr) {
@@ -1059,10 +1071,13 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     state.key_states = 0;
     state.pressed_keys.clear();
     state.next_key_repeat.clear();
-    return invoke_void(canvas,
-                       "javax/microedition/lcdui/Canvas",
-                       "hideNotify",
-                       "()V");
+    return invoke_void(
+        canvas,
+        "javax/microedition/lcdui/Canvas",
+        "hideNotify",
+        "()V",
+        {},
+        CallbackExceptionPolicy::report_and_continue);
 }
 
 void CanvasRuntime::set_game_rendering_enabled(

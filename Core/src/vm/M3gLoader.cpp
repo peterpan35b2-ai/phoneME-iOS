@@ -115,6 +115,7 @@ struct ParsedObject final {
     bool picking_enabled {true};
     float alpha_factor {1.0F};
     i32 scope {-1};
+    std::string external_uri;
     ObjectRef java_object {};
 };
 
@@ -360,7 +361,22 @@ struct ParsedObject final {
 }
 
 [[nodiscard]] Status parse_serialized_object(ParsedObject& object) {
-    if (object.type == 0U || object.type == 255U) return {};
+    if (object.type == 0U) return {};
+    if (object.type == 255U) {
+        if (object.payload.size() < 2U || object.payload.back() != 0U) {
+            return io_failure("M3G external reference URI is not terminated");
+        }
+        const auto terminator = std::find(object.payload.begin(),
+                                          object.payload.end(), 0U);
+        if (terminator != object.payload.end() - 1 ||
+            terminator == object.payload.begin()) {
+            return io_failure("M3G external reference URI is invalid");
+        }
+        object.external_uri.assign(
+            reinterpret_cast<const char*>(object.payload.data()),
+            object.payload.size() - 1U);
+        return {};
+    }
     Cursor cursor(object.payload);
     Status parsed;
     switch (object.type) {
@@ -898,7 +914,10 @@ struct ParsedObject final {
 
 } // namespace
 
-Result<ObjectRef> load_m3g(Machine& machine, std::span<const u8> bytes) {
+Result<ObjectRef> load_m3g(
+    Machine& machine,
+    std::span<const u8> bytes,
+    const ExternalReferenceResolver& resolve_external) {
     std::vector<ParsedObject> objects;
     auto sections = parse_sections(bytes, objects);
     if (!sections) return std::unexpected(sections.error());
@@ -910,9 +929,24 @@ Result<ObjectRef> load_m3g(Machine& machine, std::span<const u8> bytes) {
     std::vector<NativeRootScope> pinned;
     pinned.reserve(objects.size() + 1U);
     for (ParsedObject& object : objects) {
-        if (object.type == 0U || object.type == 255U) continue;
-        auto initialized = initialize_loaded_object(machine, object);
-        if (!initialized) return std::unexpected(initialized.error());
+        if (object.type == 0U) continue;
+        if (object.type == 255U) {
+            if (!resolve_external) {
+                return fail_java(
+                    "java/io/IOException",
+                    "M3G file contains an external reference without a resolver");
+            }
+            auto resolved = resolve_external(object.external_uri);
+            if (!resolved) return std::unexpected(resolved.error());
+            if (resolved->is_null()) {
+                return fail_java("java/io/IOException",
+                                 "M3G external reference resolved to null");
+            }
+            object.java_object = *resolved;
+        } else {
+            auto initialized = initialize_loaded_object(machine, object);
+            if (!initialized) return std::unexpected(initialized.error());
+        }
         auto root = machine.pin_native_root(object.java_object);
         if (!root) return std::unexpected(root.error());
         pinned.push_back(std::move(*root));

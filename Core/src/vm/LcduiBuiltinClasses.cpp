@@ -41,7 +41,15 @@ using namespace builtin;
 [[nodiscard]] ClassPtr build_lcdui_class(std::string_view name) {
     if (name == "javax/microedition/lcdui/Choice") {
         return make_class("javax/microedition/lcdui/Choice", "java/lang/Object",
-                          kPublic | kInterface | kAbstract, {}, {
+                          kPublic | kInterface | kAbstract, {
+            field(kPublic | kStatic | kFinal, "EXCLUSIVE", "I"),
+            field(kPublic | kStatic | kFinal, "MULTIPLE", "I"),
+            field(kPublic | kStatic | kFinal, "IMPLICIT", "I"),
+            field(kPublic | kStatic | kFinal, "POPUP", "I"),
+            field(kPublic | kStatic | kFinal, "TEXT_WRAP_DEFAULT", "I"),
+            field(kPublic | kStatic | kFinal, "TEXT_WRAP_ON", "I"),
+            field(kPublic | kStatic | kFinal, "TEXT_WRAP_OFF", "I"),
+        }, {
             method(kPublic | kAbstract, "size", "()I"),
             method(kPublic | kAbstract, "getString", "(I)Ljava/lang/String;"),
             method(kPublic | kAbstract, "getImage",
@@ -172,7 +180,29 @@ using namespace builtin;
     if (name == "javax/microedition/lcdui/Canvas") {
         return make_class("javax/microedition/lcdui/Canvas",
                           "javax/microedition/lcdui/Displayable",
-                          kOrdinary | kAbstract, {}, {
+                          kOrdinary | kAbstract, {
+            field(kPublic | kStatic | kFinal, "KEY_NUM0", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM1", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM2", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM3", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM4", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM5", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM6", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM7", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM8", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_NUM9", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_STAR", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_POUND", "I"),
+            field(kPublic | kStatic | kFinal, "UP", "I"),
+            field(kPublic | kStatic | kFinal, "DOWN", "I"),
+            field(kPublic | kStatic | kFinal, "LEFT", "I"),
+            field(kPublic | kStatic | kFinal, "RIGHT", "I"),
+            field(kPublic | kStatic | kFinal, "FIRE", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_A", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_B", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_C", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_D", "I"),
+        }, {
             method(kProtected, "<init>", "()V"),
             method(kProtected | kAbstract, "paint",
                    "(Ljavax/microedition/lcdui/Graphics;)V"),
@@ -203,7 +233,17 @@ using namespace builtin;
     if (name == "javax/microedition/lcdui/game/GameCanvas") {
         return make_class("javax/microedition/lcdui/game/GameCanvas",
                           "javax/microedition/lcdui/Canvas",
-                          kOrdinary, {}, {
+                          kOrdinary, {
+            field(kPublic | kStatic | kFinal, "UP_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "DOWN_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "LEFT_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "RIGHT_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "FIRE_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_A_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_B_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_C_PRESSED", "I"),
+            field(kPublic | kStatic | kFinal, "GAME_D_PRESSED", "I"),
+        }, {
             method(kProtected, "<init>", "(Z)V"),
             method(kProtected, "paint",
                    "(Ljavax/microedition/lcdui/Graphics;)V"),
@@ -218,6 +258,15 @@ using namespace builtin;
         return make_class("javax/microedition/lcdui/Graphics",
                           "java/lang/Object", kOrdinary | kFinal, {
             field(kPrivate, "target", "Ljavax/microedition/lcdui/Image;"),
+            field(kPublic | kStatic | kFinal, "HCENTER", "I"),
+            field(kPublic | kStatic | kFinal, "VCENTER", "I"),
+            field(kPublic | kStatic | kFinal, "LEFT", "I"),
+            field(kPublic | kStatic | kFinal, "RIGHT", "I"),
+            field(kPublic | kStatic | kFinal, "TOP", "I"),
+            field(kPublic | kStatic | kFinal, "BOTTOM", "I"),
+            field(kPublic | kStatic | kFinal, "BASELINE", "I"),
+            field(kPublic | kStatic | kFinal, "SOLID", "I"),
+            field(kPublic | kStatic | kFinal, "DOTTED", "I"),
         }, {
             method(kPublic, "setColor", "(I)V"),
             method(kPublic, "setColor", "(III)V"),
@@ -281,6 +330,18 @@ using namespace builtin;
             field(kPrivate, "face", "I"),
             field(kPrivate, "style", "I"),
             field(kPrivate, "size", "I"),
+            field(kPublic | kStatic | kFinal, "FACE_SYSTEM", "I"),
+            field(kPublic | kStatic | kFinal, "FACE_MONOSPACE", "I"),
+            field(kPublic | kStatic | kFinal, "FACE_PROPORTIONAL", "I"),
+            field(kPublic | kStatic | kFinal, "STYLE_PLAIN", "I"),
+            field(kPublic | kStatic | kFinal, "STYLE_BOLD", "I"),
+            field(kPublic | kStatic | kFinal, "STYLE_ITALIC", "I"),
+            field(kPublic | kStatic | kFinal, "STYLE_UNDERLINED", "I"),
+            field(kPublic | kStatic | kFinal, "SIZE_MEDIUM", "I"),
+            field(kPublic | kStatic | kFinal, "SIZE_SMALL", "I"),
+            field(kPublic | kStatic | kFinal, "SIZE_LARGE", "I"),
+            field(kPublic | kStatic | kFinal, "FONT_STATIC_TEXT", "I"),
+            field(kPublic | kStatic | kFinal, "FONT_INPUT_TEXT", "I"),
         }, {
             method(kPublic | kStatic, "getDefaultFont",
                    "()Ljavax/microedition/lcdui/Font;"),
@@ -312,6 +373,14 @@ using namespace builtin;
             field(kPrivate, "commandType", "I"),
             field(kPrivate, "priority", "I"),
             field(kPrivate, "ownerItemId", "I"),
+            field(kPublic | kStatic | kFinal, "SCREEN", "I"),
+            field(kPublic | kStatic | kFinal, "BACK", "I"),
+            field(kPublic | kStatic | kFinal, "CANCEL", "I"),
+            field(kPublic | kStatic | kFinal, "OK", "I"),
+            field(kPublic | kStatic | kFinal, "HELP", "I"),
+            field(kPublic | kStatic | kFinal, "STOP", "I"),
+            field(kPublic | kStatic | kFinal, "EXIT", "I"),
+            field(kPublic | kStatic | kFinal, "ITEM", "I"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/String;II)V"),
             method(kPublic, "<init>",
@@ -433,6 +502,23 @@ using namespace builtin;
                   "Ljavax/microedition/lcdui/Command;"),
             field(kPrivate, "preferredWidth", "I"),
             field(kPrivate, "preferredHeight", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_DEFAULT", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_LEFT", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_RIGHT", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_CENTER", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_TOP", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_BOTTOM", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_VCENTER", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_NEWLINE_BEFORE", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_NEWLINE_AFTER", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_SHRINK", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_EXPAND", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_VSHRINK", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_VEXPAND", "I"),
+            field(kPublic | kStatic | kFinal, "LAYOUT_2", "I"),
+            field(kPublic | kStatic | kFinal, "PLAIN", "I"),
+            field(kPublic | kStatic | kFinal, "HYPERLINK", "I"),
+            field(kPublic | kStatic | kFinal, "BUTTON", "I"),
         }, {
             method(kProtected, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "getLabel", "()Ljava/lang/String;"),
@@ -494,6 +580,8 @@ using namespace builtin;
             method(kPublic, "setItemStateListener",
                    "(Ljavax/microedition/lcdui/ItemStateListener;)V"),
             method(kPublic, "size", "()I"),
+            method(kPublic, "getWidth", "()I"),
+            method(kPublic, "getHeight", "()I"),
         });
     }
     if (name == "javax/microedition/lcdui/ChoiceGroup") {
@@ -518,6 +606,8 @@ using namespace builtin;
             "[Ljavax/microedition/lcdui/Image;)V");
         methods.insert(methods.begin(), method(kStatic, "<clinit>", "()V"));
         methods.push_back(method(kPublic, "setSelectCommand",
+                                 "(Ljavax/microedition/lcdui/Command;)V"));
+        methods.push_back(method(kPublic, "removeCommand",
                                  "(Ljavax/microedition/lcdui/Command;)V"));
         return make_class("javax/microedition/lcdui/List",
                           "javax/microedition/lcdui/Screen", kOrdinary, {
@@ -553,6 +643,7 @@ using namespace builtin;
                    "()Ljavax/microedition/lcdui/Font;"),
             method(kPublic, "setFont",
                    "(Ljavax/microedition/lcdui/Font;)V"),
+            method(kPublic, "setPreferredSize", "(II)V"),
         });
     }
     if (name == "javax/microedition/lcdui/TextField") {
@@ -563,6 +654,19 @@ using namespace builtin;
             field(kPrivate, "constraints", "I"),
             field(kPrivate, "caretPosition", "I"),
             field(kPrivate, "initialInputMode", "Ljava/lang/String;"),
+            field(kPublic | kStatic | kFinal, "ANY", "I"),
+            field(kPublic | kStatic | kFinal, "EMAILADDR", "I"),
+            field(kPublic | kStatic | kFinal, "NUMERIC", "I"),
+            field(kPublic | kStatic | kFinal, "PHONENUMBER", "I"),
+            field(kPublic | kStatic | kFinal, "URL", "I"),
+            field(kPublic | kStatic | kFinal, "DECIMAL", "I"),
+            field(kPublic | kStatic | kFinal, "CONSTRAINT_MASK", "I"),
+            field(kPublic | kStatic | kFinal, "PASSWORD", "I"),
+            field(kPublic | kStatic | kFinal, "UNEDITABLE", "I"),
+            field(kPublic | kStatic | kFinal, "SENSITIVE", "I"),
+            field(kPublic | kStatic | kFinal, "NON_PREDICTIVE", "I"),
+            field(kPublic | kStatic | kFinal, "INITIAL_CAPS_WORD", "I"),
+            field(kPublic | kStatic | kFinal, "INITIAL_CAPS_SENTENCE", "I"),
         }, {
             method(kPublic, "<init>",
                    "(Ljava/lang/String;Ljava/lang/String;II)V"),
@@ -588,6 +692,11 @@ using namespace builtin;
             field(kPrivate, "interactive", "Z"),
             field(kPrivate, "maxValue", "I"),
             field(kPrivate, "value", "I"),
+            field(kPublic | kStatic | kFinal, "INDEFINITE", "I"),
+            field(kPublic | kStatic | kFinal, "CONTINUOUS_IDLE", "I"),
+            field(kPublic | kStatic | kFinal, "INCREMENTAL_IDLE", "I"),
+            field(kPublic | kStatic | kFinal, "CONTINUOUS_RUNNING", "I"),
+            field(kPublic | kStatic | kFinal, "INCREMENTAL_UPDATING", "I"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/String;ZII)V"),
             method(kPublic, "isInteractive", "()Z"),
@@ -595,6 +704,15 @@ using namespace builtin;
             method(kPublic, "setMaxValue", "(I)V"),
             method(kPublic, "getValue", "()I"),
             method(kPublic, "setValue", "(I)V"),
+            method(kPublic, "addCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setDefaultCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setItemCommandListener",
+                   "(Ljavax/microedition/lcdui/ItemCommandListener;)V"),
+            method(kPublic, "setLabel", "(Ljava/lang/String;)V"),
+            method(kPublic, "setLayout", "(I)V"),
+            method(kPublic, "setPreferredSize", "(II)V"),
         });
     }
     if (name == "javax/microedition/lcdui/DateField") {
@@ -603,6 +721,9 @@ using namespace builtin;
             field(kPrivate, "date", "Ljava/util/Date;"),
             field(kPrivate, "inputMode", "I"),
             field(kPrivate, "timeZone", "Ljava/util/TimeZone;"),
+            field(kPublic | kStatic | kFinal, "DATE", "I"),
+            field(kPublic | kStatic | kFinal, "TIME", "I"),
+            field(kPublic | kStatic | kFinal, "DATE_TIME", "I"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/String;I)V"),
             method(kPublic, "<init>",
@@ -623,6 +744,11 @@ using namespace builtin;
             method(kPublic, "setMinimumSize", "(II)V"),
             method(kPublic, "getMinimumWidth", "()I"),
             method(kPublic, "getMinimumHeight", "()I"),
+            method(kPublic, "addCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setDefaultCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setLabel", "(Ljava/lang/String;)V"),
         });
     }
     if (name == "javax/microedition/lcdui/ImageItem") {
@@ -646,6 +772,8 @@ using namespace builtin;
             method(kPublic, "getAltText", "()Ljava/lang/String;"),
             method(kPublic, "setAltText", "(Ljava/lang/String;)V"),
             method(kPublic, "getAppearanceMode", "()I"),
+            method(kPublic, "getLayout", "()I"),
+            method(kPublic, "setLayout", "(I)V"),
         });
     }
     if (name == "javax/microedition/lcdui/Ticker") {
@@ -666,6 +794,15 @@ using namespace builtin;
             field(kPrivate, "paintImage",
                   "Ljavax/microedition/lcdui/Image;"),
             field(kPrivate, "paintGeneration", "I"),
+            field(kProtected | kStatic | kFinal, "NONE", "I"),
+            field(kProtected | kStatic | kFinal, "TRAVERSE_HORIZONTAL", "I"),
+            field(kProtected | kStatic | kFinal, "TRAVERSE_VERTICAL", "I"),
+            field(kProtected | kStatic | kFinal, "KEY_PRESS", "I"),
+            field(kProtected | kStatic | kFinal, "KEY_RELEASE", "I"),
+            field(kProtected | kStatic | kFinal, "KEY_REPEAT", "I"),
+            field(kProtected | kStatic | kFinal, "POINTER_PRESS", "I"),
+            field(kProtected | kStatic | kFinal, "POINTER_RELEASE", "I"),
+            field(kProtected | kStatic | kFinal, "POINTER_DRAG", "I"),
         }, {
             method(kProtected, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "getGameAction", "(I)I"),
@@ -780,6 +917,12 @@ using namespace builtin;
                    "()Ljavax/microedition/lcdui/Gauge;"),
             method(kPublic, "setIndicator",
                    "(Ljavax/microedition/lcdui/Gauge;)V"),
+            method(kPublic, "addCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "removeCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setCommandListener",
+                   "(Ljavax/microedition/lcdui/CommandListener;)V"),
         });
     }
 

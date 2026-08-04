@@ -184,6 +184,18 @@ i32 dismiss_command_id(const std::vector<UiBridgeEvent>& events) {
     return 0;
 }
 
+i32 choice_image_key(const std::vector<UiBridgeEvent>& events,
+                     i32 component_id,
+                     i32 index) {
+    for (const auto& event : events) {
+        if (event.kind == 12 && event.component_id == component_id &&
+            event.index == index) {
+            return event.arguments[3];
+        }
+    }
+    return 0;
+}
+
 bool has_image_metadata(const std::vector<UiBridgeEvent>& events,
                         i32 component_id,
                         i32 width,
@@ -289,6 +301,10 @@ int main(int argc, char** argv) {
             "DATE bridge supplies default timezone");
     require(has_date_metadata(events, time_only, 1),
             "TIME bridge supplies default timezone");
+    const i32 choice_image = choice_image_key(events, choice, 0);
+    require(choice_image < 0 &&
+                ((-static_cast<i64>(choice_image)) >> 8U) == choice,
+            "Choice bridge publishes a stable per-element image key");
     require(has_image_metadata(events, image, 2, 3),
             "ImageItem bridge publishes dimensions and image generation");
     require(has_item_style(events, image, 2),

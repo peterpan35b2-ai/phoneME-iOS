@@ -39,7 +39,7 @@ public:
     JavaThread(JavaThreadId thread_id,
                ObjectRef thread_object,
                ObjectRef runnable_target);
-    ~JavaThread() = default;
+    ~JavaThread();
 
     JavaThread(const JavaThread&) = delete;
     JavaThread& operator=(const JavaThread&) = delete;

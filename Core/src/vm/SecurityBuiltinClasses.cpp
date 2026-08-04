@@ -20,6 +20,123 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;Z)V"),
         });
     }
+    // CLDC 1.1.1 ships AccessController with only checkPermission(); the
+    // doPrivileged / getContext machinery is commented out in the source, so
+    // those members are deliberately absent here. The body of checkPermission
+    // is also commented out, making it a permissive no-op implemented natively.
+    if (name == "java/security/AccessController") {
+        return make_class("java/security/AccessController",
+                          "java/lang/Object", kOrdinary | kFinal, {}, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPublic | kStatic, "checkPermission",
+                   "(Ljava/security/Permission;)V"),
+        });
+    }
+    if (name == "java/security/Permission") {
+        return make_class("java/security/Permission", "java/lang/Object",
+                          kOrdinary | kAbstract, {
+            field(kPrivate, "name", "Ljava/lang/String;"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic | kAbstract, "implies",
+                   "(Ljava/security/Permission;)Z"),
+            method(kPublic | kAbstract, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "hashCode", "()I"),
+            method(kPublic | kAbstract, "getActions",
+                   "()Ljava/lang/String;"),
+            method(kPublic | kFinal, "getName", "()Ljava/lang/String;"),
+            method(kPublic, "newPermissionCollection",
+                   "()Ljava/security/PermissionCollection;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/security/PermissionCollection") {
+        return make_class("java/security/PermissionCollection",
+                          "java/lang/Object", kOrdinary | kAbstract, {
+            field(kPrivate, "readOnly", "Z"),
+        }, {
+            method(kPublic | kAbstract, "add",
+                   "(Ljava/security/Permission;)V"),
+            method(kPublic | kAbstract, "implies",
+                   "(Ljava/security/Permission;)Z"),
+            method(kPublic | kAbstract, "elements",
+                   "()Ljava/util/Enumeration;"),
+            method(kPublic, "setReadOnly", "()V"),
+            method(kPublic, "isReadOnly", "()Z"),
+        });
+    }
+    if (name == "java/security/BasicPermission") {
+        return make_class("java/security/BasicPermission",
+                          "java/security/Permission", kOrdinary | kAbstract, {}, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;Ljava/lang/String;)V"),
+            method(kPublic, "implies", "(Ljava/security/Permission;)Z"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "getActions", "()Ljava/lang/String;"),
+            method(kPublic, "newPermissionCollection",
+                   "()Ljava/security/PermissionCollection;"),
+        });
+    }
+    if (name == "java/security/BasicPermissionCollection") {
+        return make_class("java/security/BasicPermissionCollection",
+                          "java/security/PermissionCollection", kOrdinary | kFinal, {
+            field(kPrivate, "entries", "[Ljava/security/Permission;"),
+            field(kPrivate, "count", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "add", "(Ljava/security/Permission;)V"),
+            method(kPublic, "implies", "(Ljava/security/Permission;)Z"),
+            method(kPublic, "elements", "()Ljava/util/Enumeration;"),
+        });
+    }
+    if (name == "java/lang/RuntimePermission") {
+        return make_class("java/lang/RuntimePermission",
+                          "java/security/BasicPermission", kOrdinary | kFinal, {}, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;Ljava/lang/String;)V"),
+        });
+    }
+    if (name == "java/util/PropertyPermission") {
+        return make_class("java/util/PropertyPermission",
+                          "java/security/BasicPermission", kOrdinary | kFinal, {
+            field(kPrivate, "mask", "I"),
+        }, {
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/lang/String;)V"),
+            method(kPublic, "implies", "(Ljava/security/Permission;)Z"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "getActions", "()Ljava/lang/String;"),
+            method(kPublic, "getMask", "()I"),
+            method(kPublic, "newPermissionCollection",
+                   "()Ljava/security/PermissionCollection;"),
+        });
+    }
+    if (name == "java/util/PropertyPermissionCollection") {
+        return make_class("java/util/PropertyPermissionCollection",
+                          "java/security/PermissionCollection", kOrdinary | kFinal, {
+            field(kPrivate, "entries", "[Ljava/util/PropertyPermission;"),
+            field(kPrivate, "count", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "add", "(Ljava/security/Permission;)V"),
+            method(kPublic, "implies", "(Ljava/security/Permission;)Z"),
+            method(kPublic, "elements", "()Ljava/util/Enumeration;"),
+        });
+    }
+    if (name == "java/security/AccessControlException") {
+        return make_class("java/security/AccessControlException",
+                          "java/lang/SecurityException", kOrdinary, {
+            field(kPrivate, "perm", "Ljava/security/Permission;"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/String;Ljava/security/Permission;)V"),
+            method(kPublic, "getPermission",
+                   "()Ljava/security/Permission;"),
+        });
+    }
     return nullptr;
 }
 

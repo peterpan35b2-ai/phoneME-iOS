@@ -1,14 +1,17 @@
 #include "phoneme/graphics/TextRasterizer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "PhoneMEFontData.hpp"
 #include "phoneme/graphics/Graphics.hpp"
 
 #if defined(__APPLE__)
@@ -19,16 +22,321 @@
 namespace phoneme::graphics {
 namespace {
 
+constexpr usize kMaximumTextCodePoints = 262'144U;
+constexpr usize kMaximumFontGlyphs = 256U;
+constexpr usize kAsciiGlyphCount = 128U;
+constexpr i32 kPhoneMEFontAscent = 11;
+constexpr i32 kPhoneMEFontDescent = 2;
+constexpr i32 kPhoneMEFontHeight =
+    kPhoneMEFontAscent + kPhoneMEFontDescent;
+constexpr i32 kExpectedFontHeight = 13;
+constexpr i32 kInvalidGlyphIndex = -1;
+
+struct PhoneMEFontBin final {
+    const u8* widths {nullptr};
+    const u8* bitmap {nullptr};
+    std::array<char32_t, kMaximumFontGlyphs> codepoints {};
+    std::array<u16, kMaximumFontGlyphs> x_offsets {};
+    std::array<i32, kAsciiGlyphCount> ascii_indices {};
+    i32 glyph_count {0};
+    i32 height {0};
+    i32 atlas_width {0};
+    bool valid {false};
+};
+
+[[nodiscard]] bool decode_utf8_codepoint(std::span<const u8> bytes,
+                                         usize limit,
+                                         usize& cursor,
+                                         u32& codepoint) noexcept {
+    if (cursor >= limit) {
+        return false;
+    }
+
+    const u8 first = bytes[cursor++];
+    if (first < 0x80U) {
+        codepoint = first;
+        return true;
+    }
+
+    u32 value = 0U;
+    usize continuation_count = 0U;
+    if ((first & 0xE0U) == 0xC0U) {
+        value = first & 0x1FU;
+        continuation_count = 1U;
+    } else if ((first & 0xF0U) == 0xE0U) {
+        value = first & 0x0FU;
+        continuation_count = 2U;
+    } else if ((first & 0xF8U) == 0xF0U) {
+        value = first & 0x07U;
+        continuation_count = 3U;
+    } else {
+        return false;
+    }
+
+    if (continuation_count > limit - cursor) {
+        return false;
+    }
+    for (usize index = 0U; index < continuation_count; ++index) {
+        const u8 continuation = bytes[cursor++];
+        if ((continuation & 0xC0U) != 0x80U) {
+            return false;
+        }
+        value = (value << 6U) | static_cast<u32>(continuation & 0x3FU);
+    }
+
+    codepoint = value;
+    return true;
+}
+
+[[nodiscard]] PhoneMEFontBin parse_font_bin() noexcept {
+    PhoneMEFontBin font;
+    font.ascii_indices.fill(kInvalidGlyphIndex);
+
+    constexpr usize data_length = detail::phone_me_font_bin_data_length;
+    static_assert(sizeof(detail::phone_me_font_bin_data) == data_length + 1U);
+    const std::span<const u8> bytes(detail::phone_me_font_bin_data,
+                                    data_length);
+    if (bytes.size() < 4U) {
+        return font;
+    }
+
+    const usize charset_length =
+        (static_cast<usize>(bytes[0]) << 8U) |
+        static_cast<usize>(bytes[1]);
+    constexpr usize charset_start = 2U;
+    if (charset_length > bytes.size() - charset_start) {
+        return font;
+    }
+    const usize charset_end = charset_start + charset_length;
+    if (charset_end >= bytes.size()) {
+        return font;
+    }
+
+    usize cursor = charset_start;
+    usize glyph_count = 0U;
+    while (cursor < charset_end) {
+        u32 codepoint = 0U;
+        if (glyph_count >= kMaximumFontGlyphs ||
+            !decode_utf8_codepoint(bytes, charset_end, cursor, codepoint) ||
+            codepoint > 0xFFFFU ||
+            (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
+            return font;
+        }
+        font.codepoints[glyph_count++] = static_cast<char32_t>(codepoint);
+    }
+    if (glyph_count == 0U || cursor != charset_end) {
+        return font;
+    }
+
+    font.height = bytes[charset_end];
+    if (font.height != kExpectedFontHeight) {
+        return font;
+    }
+
+    const usize widths_offset = charset_end + 1U;
+    if (glyph_count > bytes.size() - widths_offset) {
+        return font;
+    }
+    const usize bitmap_offset = widths_offset + glyph_count;
+    font.widths = bytes.data() + widths_offset;
+
+    i32 atlas_width = 0;
+    for (usize index = 0U; index < glyph_count; ++index) {
+        const i32 width = font.widths[index];
+        if (width <= 0 ||
+            atlas_width > static_cast<i32>(
+                std::numeric_limits<u16>::max()) - width) {
+            return PhoneMEFontBin {};
+        }
+        font.x_offsets[index] = static_cast<u16>(atlas_width);
+        atlas_width += width;
+
+        const u32 codepoint = static_cast<u32>(font.codepoints[index]);
+        if (codepoint < kAsciiGlyphCount) {
+            font.ascii_indices[codepoint] = static_cast<i32>(index);
+        }
+    }
+
+    const usize bitmap_bits =
+        static_cast<usize>(atlas_width) * static_cast<usize>(font.height);
+    const usize bitmap_bytes = (bitmap_bits + 7U) / 8U;
+    if (bitmap_offset > bytes.size() ||
+        bitmap_bytes > bytes.size() - bitmap_offset) {
+        return PhoneMEFontBin {};
+    }
+
+    font.bitmap = bytes.data() + bitmap_offset;
+    font.glyph_count = static_cast<i32>(glyph_count);
+    font.atlas_width = atlas_width;
+    font.valid = true;
+    return font;
+}
+
+[[nodiscard]] const PhoneMEFontBin& phone_me_font() noexcept {
+    static const PhoneMEFontBin font = parse_font_bin();
+    return font;
+}
+
+[[nodiscard]] i32 lookup_glyph(const PhoneMEFontBin& font,
+                               char32_t character) noexcept {
+    if (!font.valid) {
+        return kInvalidGlyphIndex;
+    }
+    const u32 codepoint = static_cast<u32>(character);
+    if (codepoint < kAsciiGlyphCount) {
+        return font.ascii_indices[codepoint];
+    }
+    for (i32 index = 0; index < font.glyph_count; ++index) {
+        if (font.codepoints[static_cast<usize>(index)] == character) {
+            return index;
+        }
+    }
+    return kInvalidGlyphIndex;
+}
+
+[[nodiscard]] i32 style_horizontal_padding(const Font& font) noexcept {
+    i32 padding = 0;
+    if (font.is_bold()) {
+        ++padding;
+    }
+    if (font.is_italic()) {
+        padding += 2;
+    }
+    return padding;
+}
+
+[[nodiscard]] i32 glyph_advance(const PhoneMEFontBin& font,
+                                i32 glyph_index,
+                                const Font& logical_font) noexcept {
+    return static_cast<i32>(font.widths[static_cast<usize>(glyph_index)]) +
+           style_horizontal_padding(logical_font);
+}
+
+[[nodiscard]] std::optional<i32> bitmap_text_width(
+    const Font& logical_font,
+    std::span<const char32_t> text) noexcept {
+    if (text.empty()) {
+        return 0;
+    }
+    const PhoneMEFontBin& font = phone_me_font();
+    if (!font.valid) {
+        return std::nullopt;
+    }
+
+    i32 width = 0;
+    for (const char32_t character : text) {
+        const i32 glyph_index = lookup_glyph(font, character);
+        if (glyph_index == kInvalidGlyphIndex) {
+            return std::nullopt;
+        }
+        const i32 advance = glyph_advance(font, glyph_index, logical_font);
+        if (width > std::numeric_limits<i32>::max() - advance) {
+            return std::nullopt;
+        }
+        width += advance;
+    }
+    return width;
+}
+
+[[nodiscard]] bool bitmap_pixel_is_set(const PhoneMEFontBin& font,
+                                       i32 glyph_index,
+                                       i32 glyph_x,
+                                       i32 glyph_y) noexcept {
+    const usize bit_index =
+        static_cast<usize>(glyph_y) *
+            static_cast<usize>(font.atlas_width) +
+        static_cast<usize>(font.x_offsets[static_cast<usize>(glyph_index)]) +
+        static_cast<usize>(glyph_x);
+    return ((font.bitmap[bit_index >> 3U] >> (bit_index & 7U)) & 1U) != 0U;
+}
+
+[[nodiscard]] Status draw_bitmap_text(Image& target,
+                                      const Font& logical_font,
+                                      std::span<const char32_t> text,
+                                      i32 x,
+                                      i32 top,
+                                      Pixel color,
+                                      const Rect& clip) {
+    const PhoneMEFontBin& font = phone_me_font();
+    if (!font.valid) {
+        return fail(ErrorCode::unsupported_feature,
+                    "phoneME bitmap font is unavailable");
+    }
+
+    const Rect visible_clip = intersect(clip, target_bounds(target));
+    if (visible_clip.width <= 0 || visible_clip.height <= 0) {
+        return {};
+    }
+    const i64 clip_right = static_cast<i64>(visible_clip.x) +
+                           visible_clip.width;
+    const i64 clip_bottom = static_cast<i64>(visible_clip.y) +
+                            visible_clip.height;
+
+    i64 pen_x = x;
+    for (const char32_t character : text) {
+        const i32 glyph_index = lookup_glyph(font, character);
+        if (glyph_index == kInvalidGlyphIndex) {
+            return fail(ErrorCode::unsupported_feature,
+                        "phoneME bitmap font does not contain the glyph");
+        }
+        const i32 glyph_width =
+            font.widths[static_cast<usize>(glyph_index)];
+        for (i32 glyph_y = 0; glyph_y < font.height; ++glyph_y) {
+            const i64 destination_y = static_cast<i64>(top) + glyph_y;
+            if (destination_y < visible_clip.y ||
+                destination_y >= clip_bottom) {
+                continue;
+            }
+            const i32 italic_shift = logical_font.is_italic()
+                ? (font.height - 1 - glyph_y) / 6
+                : 0;
+            for (i32 glyph_x = 0; glyph_x < glyph_width; ++glyph_x) {
+                if (!bitmap_pixel_is_set(font,
+                                         glyph_index,
+                                         glyph_x,
+                                         glyph_y)) {
+                    continue;
+                }
+                const i64 destination_x = pen_x + glyph_x + italic_shift;
+                if (destination_x < visible_clip.x ||
+                    destination_x >= clip_right) {
+                    continue;
+                }
+                auto stored = target.set_pixel(static_cast<i32>(destination_x),
+                                               static_cast<i32>(destination_y),
+                                               color,
+                                               true);
+                if (!stored) {
+                    return stored;
+                }
+                if (logical_font.is_bold() &&
+                    destination_x + 1 < clip_right) {
+                    stored = target.set_pixel(
+                        static_cast<i32>(destination_x + 1),
+                        static_cast<i32>(destination_y),
+                        color,
+                        true);
+                    if (!stored) {
+                        return stored;
+                    }
+                }
+            }
+        }
+        pen_x += glyph_advance(font, glyph_index, logical_font);
+    }
+    return {};
+}
+
 #if defined(__APPLE__)
 
-constexpr usize kMaximumTextCodePoints = 262'144U;
+constexpr CGFloat kCoreTextFallbackPointSize = 10.0;
+constexpr CGFloat kCoreTextFallbackBaselineFromBottom = 2.0;
+constexpr i32 kCoreTextFallbackPadding = 1;
 
 struct CachedFont final {
     CTFontRef font {nullptr};
-    PlatformFontMetrics metrics {};
 
-    CachedFont(CTFontRef value, PlatformFontMetrics measured) noexcept
-        : font(value), metrics(measured) {}
+    explicit CachedFont(CTFontRef value) noexcept : font(value) {}
 
     ~CachedFont() {
         if (font != nullptr) {
@@ -42,32 +350,21 @@ struct CachedFont final {
 
 [[nodiscard]] i32 font_cache_key(const Font& font) noexcept {
     return (font.face() & 0xFF) |
-           ((font.style() & 0xFF) << 8) |
-           ((font.size() & 0xFF) << 16);
-}
-
-[[nodiscard]] CGFloat point_size(const Font& font) noexcept {
-    switch (static_cast<FontSize>(font.size())) {
-    case FontSize::small:
-        return 12.0;
-    case FontSize::large:
-        return 20.0;
-    case FontSize::medium:
-        return 16.0;
-    }
-    return 16.0;
+           ((font.style() & (style_bold | style_italic)) << 8);
 }
 
 [[nodiscard]] std::shared_ptr<const CachedFont> create_font(
     const Font& font) {
-    const CGFloat size = point_size(font);
-    CTFontRef base = nullptr;
-    if (font.face() == static_cast<i32>(FontFace::monospace)) {
-        base = CTFontCreateWithName(CFSTR("Menlo"), size, nullptr);
-    } else {
-        base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem,
-                                             size,
-                                             nullptr);
+    const CTFontUIFontType font_type =
+        font.face() == static_cast<i32>(FontFace::monospace)
+        ? kCTFontUIFontUserFixedPitch
+        : kCTFontUIFontSystem;
+    CTFontRef base = CTFontCreateUIFontForLanguage(
+        font_type, kCoreTextFallbackPointSize, nullptr);
+    if (base == nullptr) {
+        base = CTFontCreateWithName(CFSTR("Helvetica"),
+                                    kCoreTextFallbackPointSize,
+                                    nullptr);
     }
     if (base == nullptr) {
         return {};
@@ -82,24 +379,17 @@ struct CachedFont final {
     }
     if (traits != 0U) {
         CTFontRef styled = CTFontCreateCopyWithSymbolicTraits(
-            base, size, nullptr, traits, traits);
+            base,
+            kCoreTextFallbackPointSize,
+            nullptr,
+            traits,
+            traits);
         if (styled != nullptr) {
             CFRelease(base);
             base = styled;
         }
     }
-
-    const CGFloat ascent = CTFontGetAscent(base);
-    const CGFloat descent = CTFontGetDescent(base);
-    const CGFloat leading = CTFontGetLeading(base);
-    const i32 height = std::max(
-        1,
-        static_cast<i32>(std::ceil(ascent + descent + leading)));
-    const i32 baseline = std::clamp(
-        static_cast<i32>(std::ceil(ascent)), 1, height);
-    return std::make_shared<CachedFont>(
-        base,
-        PlatformFontMetrics {.height = height, .baseline = baseline});
+    return std::make_shared<CachedFont>(base);
 }
 
 [[nodiscard]] std::shared_ptr<const CachedFont> cached_font(
@@ -109,7 +399,7 @@ struct CachedFont final {
 
     const i32 key = font_cache_key(font);
     std::scoped_lock lock(mutex);
-    auto iterator = cache.find(key);
+    const auto iterator = cache.find(key);
     if (iterator != cache.end()) {
         return iterator->second;
     }
@@ -178,33 +468,9 @@ struct CachedFont final {
     return line;
 }
 
-#endif
-
-} // namespace
-
-std::optional<PlatformFontMetrics> platform_font_metrics(
-    const Font& font) noexcept {
-#if defined(__APPLE__)
-    auto resource = cached_font(font);
-    if (resource) {
-        return resource->metrics;
-    }
-#else
-    static_cast<void>(font);
-#endif
-    return std::nullopt;
-}
-
-std::optional<i32> platform_text_width(
+[[nodiscard]] std::optional<i32> core_text_width(
     const Font& font,
     std::span<const char32_t> text) noexcept {
-#if defined(__APPLE__)
-    if (text.empty()) {
-        return 0;
-    }
-    if (text.size() > kMaximumTextCodePoints) {
-        return std::nullopt;
-    }
     auto resource = cached_font(font);
     if (!resource) {
         return std::nullopt;
@@ -219,76 +485,106 @@ std::optional<i32> platform_text_width(
                                                     nullptr);
     CFRelease(line);
     if (!std::isfinite(width) || width < 0.0 ||
-        width > static_cast<double>(std::numeric_limits<i32>::max())) {
+        width > static_cast<double>(std::numeric_limits<i32>::max() - 1)) {
         return std::nullopt;
     }
-    return static_cast<i32>(std::ceil(width));
-#else
-    static_cast<void>(font);
-    static_cast<void>(text);
-    return std::nullopt;
-#endif
+    return width > 0.0 ? static_cast<i32>(std::ceil(width)) : 1;
 }
 
-Status draw_platform_text(Image& target,
-                          const Font& font,
-                          std::span<const char32_t> text,
-                          i32 x,
-                          i32 top,
-                          Pixel color,
-                          const Rect& clip) {
-#if defined(__APPLE__)
-    if (!target.is_mutable()) {
-        return fail(ErrorCode::invalid_state,
-                    "cannot draw text into an immutable image");
-    }
-    if (text.empty() || alpha(color) == 0U) {
-        return {};
-    }
-    if (text.size() > kMaximumTextCodePoints) {
-        return fail(ErrorCode::overflow,
-                    "CoreText input exceeds the bounded text budget");
-    }
+[[nodiscard]] Status draw_core_text_fallback(
+    Image& target,
+    const Font& font,
+    std::span<const char32_t> text,
+    i32 x,
+    i32 top,
+    Pixel color,
+    const Rect& clip) {
     auto resource = cached_font(font);
-    auto measured_width = platform_text_width(font, text);
-    if (!resource || !measured_width) {
+    if (!resource) {
         return fail(ErrorCode::unsupported_feature,
-                    "CoreText font could not be created");
+                    "CoreText fallback font could not be created");
     }
-    const i32 height = resource->metrics.height;
-    const i32 padding = std::max(2, height / 4);
-    const i64 clip_left = std::max<i64>(0, clip.x);
-    const i64 clip_top = std::max<i64>(0, clip.y);
-    const i64 clip_right = std::min<i64>(
-        target.width(),
-        static_cast<i64>(clip.x) + std::max(0, clip.width));
-    const i64 clip_bottom = std::min<i64>(
-        target.height(),
-        static_cast<i64>(clip.y) + std::max(0, clip.height));
-    const i64 glyph_left = static_cast<i64>(x) - padding;
-    const i64 glyph_right = static_cast<i64>(x) + *measured_width + padding;
-    const i64 glyph_top = top;
-    const i64 glyph_bottom = static_cast<i64>(top) + height;
-    const i64 visible_left = std::max(clip_left, glyph_left);
-    const i64 visible_right = std::min(clip_right, glyph_right);
-    const i64 visible_top = std::max(clip_top, glyph_top);
-    const i64 visible_bottom = std::min(clip_bottom, glyph_bottom);
+    CTLineRef line = create_line(resource->font, text);
+    if (line == nullptr) {
+        return fail(ErrorCode::internal_error,
+                    "failed to create CoreText fallback line");
+    }
+
+    const double advance = CTLineGetTypographicBounds(line,
+                                                      nullptr,
+                                                      nullptr,
+                                                      nullptr);
+    const CGRect ink_bounds = CTLineGetBoundsWithOptions(
+        line, kCTLineBoundsUseGlyphPathBounds);
+    const double ink_min_x = CGRectGetMinX(ink_bounds);
+    const double ink_max_x = CGRectGetMaxX(ink_bounds);
+    if (!std::isfinite(advance) || !std::isfinite(ink_min_x) ||
+        !std::isfinite(ink_max_x)) {
+        CFRelease(line);
+        return fail(ErrorCode::internal_error,
+                    "CoreText fallback returned invalid glyph bounds");
+    }
+
+    const double minimum_x_value = std::floor(std::min(0.0, ink_min_x));
+    const double maximum_x_value = std::ceil(std::max(advance, ink_max_x));
+    if (minimum_x_value < static_cast<double>(std::numeric_limits<i32>::min()) ||
+        maximum_x_value > static_cast<double>(std::numeric_limits<i32>::max())) {
+        CFRelease(line);
+        return fail(ErrorCode::overflow,
+                    "CoreText fallback glyph bounds overflow");
+    }
+    const i32 minimum_x = static_cast<i32>(minimum_x_value);
+    const i32 maximum_x = static_cast<i32>(maximum_x_value);
+    if (maximum_x < minimum_x) {
+        CFRelease(line);
+        return fail(ErrorCode::internal_error,
+                    "CoreText fallback glyph bounds are inverted");
+    }
+
+    const i64 full_mask_width =
+        static_cast<i64>(maximum_x) - minimum_x +
+        kCoreTextFallbackPadding * 2LL;
+    if (full_mask_width <= 0 ||
+        full_mask_width > static_cast<i64>(std::numeric_limits<i32>::max())) {
+        CFRelease(line);
+        return fail(ErrorCode::overflow,
+                    "CoreText fallback mask width overflows");
+    }
+
+    const Rect target_clip = intersect(clip, target_bounds(target));
+    const i64 full_left = static_cast<i64>(x) + minimum_x -
+                          kCoreTextFallbackPadding;
+    const i64 full_right = full_left + full_mask_width;
+    const i64 full_top = top;
+    const i64 full_bottom = full_top + kPhoneMEFontHeight;
+    const i64 clip_right = static_cast<i64>(target_clip.x) +
+                           target_clip.width;
+    const i64 clip_bottom = static_cast<i64>(target_clip.y) +
+                            target_clip.height;
+    const i64 visible_left = std::max<i64>(target_clip.x, full_left);
+    const i64 visible_right = std::min<i64>(clip_right, full_right);
+    const i64 visible_top = std::max<i64>(target_clip.y, full_top);
+    const i64 visible_bottom = std::min<i64>(clip_bottom, full_bottom);
     if (visible_right <= visible_left || visible_bottom <= visible_top) {
+        CFRelease(line);
         return {};
     }
+
     const i32 mask_width = static_cast<i32>(visible_right - visible_left);
     const usize width_value = static_cast<usize>(mask_width);
-    const usize height_value = static_cast<usize>(height);
-    if (height_value != 0U &&
-        width_value > std::numeric_limits<usize>::max() / height_value) {
+    constexpr usize height_value = static_cast<usize>(kPhoneMEFontHeight);
+    if (width_value > std::numeric_limits<usize>::max() / height_value) {
+        CFRelease(line);
         return fail(ErrorCode::overflow,
-                    "CoreText glyph mask size overflows");
+                    "CoreText fallback mask size overflows");
     }
     std::vector<u8> mask(width_value * height_value, 0U);
+
     CGColorSpaceRef color_space = CGColorSpaceCreateDeviceGray();
     if (color_space == nullptr) {
+        CFRelease(line);
         return fail(ErrorCode::internal_error,
-                    "failed to create CoreText gray color space");
+                    "failed to create CoreText fallback color space");
     }
     CGContextRef context = CGBitmapContextCreate(
         mask.data(),
@@ -300,45 +596,42 @@ Status draw_platform_text(Image& target,
         static_cast<CGBitmapInfo>(kCGImageAlphaNone));
     CGColorSpaceRelease(color_space);
     if (context == nullptr) {
+        CFRelease(line);
         return fail(ErrorCode::internal_error,
-                    "failed to create CoreText glyph context");
-    }
-    CTLineRef line = create_line(resource->font, text);
-    if (line == nullptr) {
-        CGContextRelease(context);
-        return fail(ErrorCode::internal_error,
-                    "failed to create CoreText line");
+                    "failed to create CoreText fallback bitmap context");
     }
 
+    const i64 source_x_offset = visible_left - full_left;
     CGContextSetAllowsAntialiasing(context, true);
     CGContextSetShouldAntialias(context, true);
-    CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+    CGContextSetShouldSmoothFonts(context, true);
     CGContextSetGrayFillColor(context, 1.0, 1.0);
-    const CGFloat baseline_from_bottom = static_cast<CGFloat>(
-        height - resource->metrics.baseline);
+    CGContextSetTextMatrix(context, CGAffineTransformIdentity);
     CGContextSetTextPosition(
         context,
-        static_cast<CGFloat>(static_cast<i64>(x) - visible_left),
-        baseline_from_bottom);
+        static_cast<CGFloat>(kCoreTextFallbackPadding - minimum_x) -
+            static_cast<CGFloat>(source_x_offset),
+        kCoreTextFallbackBaselineFromBottom);
     CTLineDraw(line, context);
-    CFRelease(line);
     CGContextRelease(context);
+    CFRelease(line);
 
     const u32 base_alpha = alpha(color);
-    for (i32 memory_y = 0; memory_y < height; ++memory_y) {
-        const i32 destination_y = top + (height - 1 - memory_y);
+    for (i32 source_y = 0; source_y < kPhoneMEFontHeight; ++source_y) {
+        // This is the same row mapping used by the phoneME C iOS port. The
+        // fallback mask and Canvas framebuffer both expose row zero at top.
+        const i64 destination_y = static_cast<i64>(top) + source_y;
         if (destination_y < visible_top || destination_y >= visible_bottom) {
             continue;
         }
-        for (i32 mask_x = 0; mask_x < mask_width; ++mask_x) {
+        for (i32 source_x = 0; source_x < mask_width; ++source_x) {
             const u8 coverage = mask[
-                static_cast<usize>(memory_y) * width_value +
-                static_cast<usize>(mask_x)];
+                static_cast<usize>(source_y) * width_value +
+                static_cast<usize>(source_x)];
             if (coverage == 0U) {
                 continue;
             }
-            const i32 destination_x = static_cast<i32>(
-                visible_left + mask_x);
+            const i32 destination_x = static_cast<i32>(visible_left + source_x);
             const u8 source_alpha = static_cast<u8>(
                 (base_alpha * coverage + 127U) / 255U);
             const Pixel source = argb(source_alpha,
@@ -346,7 +639,7 @@ Status draw_platform_text(Image& target,
                                       green(color),
                                       blue(color));
             auto stored = target.set_pixel(destination_x,
-                                           destination_y,
+                                           static_cast<i32>(destination_y),
                                            source,
                                            true);
             if (!stored) {
@@ -355,16 +648,69 @@ Status draw_platform_text(Image& target,
         }
     }
     return {};
-#else
-    static_cast<void>(target);
+}
+
+#endif
+
+} // namespace
+
+std::optional<PlatformFontMetrics> platform_font_metrics(
+    const Font& font) noexcept {
     static_cast<void>(font);
-    static_cast<void>(text);
-    static_cast<void>(x);
-    static_cast<void>(top);
-    static_cast<void>(color);
-    static_cast<void>(clip);
+    if (!phone_me_font().valid) {
+        return std::nullopt;
+    }
+    return PlatformFontMetrics {
+        .height = kPhoneMEFontHeight,
+        .baseline = kPhoneMEFontAscent,
+    };
+}
+
+std::optional<i32> platform_text_width(
+    const Font& font,
+    std::span<const char32_t> text) noexcept {
+    if (text.empty()) {
+        return 0;
+    }
+    if (text.size() > kMaximumTextCodePoints) {
+        return std::nullopt;
+    }
+    if (auto bitmap_width = bitmap_text_width(font, text)) {
+        return bitmap_width;
+    }
+#if defined(__APPLE__)
+    return core_text_width(font, text);
+#else
+    return std::nullopt;
+#endif
+}
+
+Status draw_platform_text(Image& target,
+                          const Font& font,
+                          std::span<const char32_t> text,
+                          i32 x,
+                          i32 top,
+                          Pixel color,
+                          const Rect& clip) {
+    if (!target.is_mutable()) {
+        return fail(ErrorCode::invalid_state,
+                    "cannot draw text into an immutable image");
+    }
+    if (text.empty() || alpha(color) == 0U) {
+        return {};
+    }
+    if (text.size() > kMaximumTextCodePoints) {
+        return fail(ErrorCode::overflow,
+                    "text input exceeds the bounded glyph budget");
+    }
+    if (bitmap_text_width(font, text).has_value()) {
+        return draw_bitmap_text(target, font, text, x, top, color, clip);
+    }
+#if defined(__APPLE__)
+    return draw_core_text_fallback(target, font, text, x, top, color, clip);
+#else
     return fail(ErrorCode::unsupported_feature,
-                "platform text rasterizer is unavailable");
+                "platform text fallback is unavailable");
 #endif
 }
 

@@ -664,20 +664,21 @@ int32_t phoneme_copy_lcdui_image_rgba(PhoneMERuntimeRef runtime,
                                       int32_t* width,
                                       int32_t* height,
                                       uint64_t* generation) {
-    (void)runtime;
-    (void)component_id;
-    (void)destination;
-    (void)capacity;
-    if (width != nullptr) {
-        *width = 0;
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || component_id == 0) {
+        return frame_byte_count({}, width, height, generation);
     }
-    if (height != nullptr) {
-        *height = 0;
-    }
-    if (generation != nullptr) {
-        *generation = 0;
-    }
-    return 0;
+
+    const std::span<uint8_t> storage =
+        destination != nullptr && capacity > 0
+            ? std::span<uint8_t>(destination,
+                                 static_cast<std::size_t>(capacity))
+            : std::span<uint8_t> {};
+    return frame_byte_count(
+        instance->copy_lcdui_image_rgba(component_id, storage),
+        width,
+        height,
+        generation);
 }
 
 int phoneme_inflate_raw(const uint8_t* source,

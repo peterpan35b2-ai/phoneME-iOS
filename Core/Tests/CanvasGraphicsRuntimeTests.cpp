@@ -468,9 +468,21 @@ int main(int argc, char** argv) {
                                  phoneme::Dimensions {320, 240}).has_value(),
             "start throwing Canvas callback fixture");
     while (runtime.poll_ui_event()) { }
+    require(runtime.set_foreground(phoneme::AppId {},
+                                   phoneme::Dimensions {1, 1}).has_value(),
+            "hideNotify exceptions do not fail host foreground detach");
+    require(runtime.app_state(throw_app_id) ==
+                phoneme::runtime::AppState::active,
+            "hideNotify exceptions remain recoverable like phoneME LCDUI");
+    require(runtime.set_foreground(throw_app_id,
+                                   phoneme::Dimensions {320, 240}).has_value(),
+            "restore a MIDlet after a throwing hideNotify callback");
+    require(runtime.app_state(throw_app_id) ==
+                phoneme::runtime::AppState::active,
+            "restored MIDlet remains active after hide and reopen");
     runtime.send_pointer(1, 2, 1);
     require(runtime.app_state(throw_app_id) == phoneme::runtime::AppState::error,
-            "uncaught Canvas callback exception is isolated to the MIDlet");
+            "uncaught input callback exception is isolated to the MIDlet");
     require(runtime.destroy_midlet(throw_app_id).has_value(),
             "forced destroy ignores hideNotify exceptions");
     require(runtime.app_state(throw_app_id) ==

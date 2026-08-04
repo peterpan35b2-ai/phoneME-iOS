@@ -39,7 +39,8 @@ done < <(find "$CORE_ROOT/Tests/stubs" -type f -name '*.java' -print | LC_ALL=C 
   -d "$FIXTURE_CLASSES" \
   "$CORE_ROOT/Tests/fixtures/CldcLibraryOps.java" \
   "$CORE_ROOT/Tests/fixtures/TimerOps.java" \
-  "$CORE_ROOT/Tests/fixtures/WeakReferenceOps.java"
+  "$CORE_ROOT/Tests/fixtures/WeakReferenceOps.java" \
+  "$CORE_ROOT/Tests/fixtures/wt.java"
 "$JAR" cf "$FIXTURE_JAR" -C "$FIXTURE_CLASSES" .
 
 SOURCES=()

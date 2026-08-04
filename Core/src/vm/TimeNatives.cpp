@@ -19,6 +19,8 @@ constexpr usize kZoneIdField = 0U;
 constexpr usize kZoneRawOffsetField = 1U;
 constexpr usize kCalendarTimeField = 0U;
 constexpr usize kCalendarZoneField = 1U;
+constexpr usize kCalendarFieldsField = 2U;
+constexpr usize kCalendarIsSetField = 3U;
 
 constexpr i64 kMillisPerSecond = 1'000LL;
 constexpr i64 kMillisPerMinute = 60LL * kMillisPerSecond;
@@ -779,13 +781,25 @@ void register_time_natives(NativeMethodRegistry& registry) {
                 if (!fallback) return std::unexpected(fallback.error());
                 zone = *fallback;
             }
+            auto fields = machine.heap().allocate_array(
+                "[I", 15U, Value::from_int(0));
+            auto is_set = machine.heap().allocate_array(
+                "[Z", 15U, Value::from_int(0));
+            if (!fields) return std::unexpected(fields.error());
+            if (!is_set) return std::unexpected(is_set.error());
             auto stored_time = set_long_field(machine, *calendar,
                                               kCalendarTimeField,
                                               current_millis());
             auto stored_zone = set_reference_field(machine, *calendar,
                                                    kCalendarZoneField, zone);
+            auto stored_fields = set_reference_field(
+                machine, *calendar, kCalendarFieldsField, *fields);
+            auto stored_is_set = set_reference_field(
+                machine, *calendar, kCalendarIsSetField, *is_set);
             if (!stored_time) return std::unexpected(stored_time.error());
             if (!stored_zone) return std::unexpected(stored_zone.error());
+            if (!stored_fields) return std::unexpected(stored_fields.error());
+            if (!stored_is_set) return std::unexpected(stored_is_set.error());
             return std::optional<Value> {};
         };
     add(registry, "java/util/Calendar", "<init>", "()V",
@@ -794,6 +808,17 @@ void register_time_natives(NativeMethodRegistry& registry) {
         calendar_constructor);
     add(registry, "java/util/GregorianCalendar", "<init>",
         "(Ljava/util/TimeZone;)V", calendar_constructor);
+    for (const char* name : {"computeFields", "computeTime"}) {
+        add(registry, "java/util/GregorianCalendar", name, "()V",
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto calendar = receiver(arguments);
+                if (!calendar) return std::unexpected(calendar.error());
+                // Calendar's public operations in this runtime already keep
+                // the millisecond representation synchronized directly.
+                return std::optional<Value> {};
+            });
+    }
 
     add(registry, "java/util/Calendar", "getInstance",
         "()Ljava/util/Calendar;",

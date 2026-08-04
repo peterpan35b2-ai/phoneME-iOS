@@ -757,7 +757,7 @@ final class EmulatorSession: ObservableObject {
         componentID: Int32
     ) -> Bool {
         guard key < 0 else { return false }
-        return ((-Int64(key)) >> 10) == Int64(componentID)
+        return ((-Int64(key)) >> 8) == Int64(componentID)
     }
 
     func setLCDUIDate(componentID: Int32, date: Date) {

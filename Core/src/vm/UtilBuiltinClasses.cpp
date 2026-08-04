@@ -76,20 +76,56 @@ using namespace builtin;
         }, {"java/lang/Cloneable", "java/io/Serializable"});
     }
     if (name == "java/util/Calendar") {
-        return make_class("java/util/Calendar", "java/lang/Object", kOrdinary, {
+        return make_class("java/util/Calendar", "java/lang/Object",
+                          kOrdinary | kAbstract, {
             field(kProtected, "time", "J"),
-            field(kProtected, "zone", "Ljava/util/TimeZone;"),
+            field(kPrivate, "zone", "Ljava/util/TimeZone;"),
+            field(kProtected, "fields", "[I"),
+            field(kProtected, "isSet", "[Z"),
+            field(kPublic | kStatic | kFinal, "YEAR", "I"),
+            field(kPublic | kStatic | kFinal, "MONTH", "I"),
+            field(kPublic | kStatic | kFinal, "DATE", "I"),
+            field(kPublic | kStatic | kFinal, "DAY_OF_MONTH", "I"),
+            field(kPublic | kStatic | kFinal, "DAY_OF_WEEK", "I"),
+            field(kPublic | kStatic | kFinal, "AM_PM", "I"),
+            field(kPublic | kStatic | kFinal, "HOUR", "I"),
+            field(kPublic | kStatic | kFinal, "HOUR_OF_DAY", "I"),
+            field(kPublic | kStatic | kFinal, "MINUTE", "I"),
+            field(kPublic | kStatic | kFinal, "SECOND", "I"),
+            field(kPublic | kStatic | kFinal, "MILLISECOND", "I"),
+            field(kPublic | kStatic | kFinal, "SUNDAY", "I"),
+            field(kPublic | kStatic | kFinal, "MONDAY", "I"),
+            field(kPublic | kStatic | kFinal, "TUESDAY", "I"),
+            field(kPublic | kStatic | kFinal, "WEDNESDAY", "I"),
+            field(kPublic | kStatic | kFinal, "THURSDAY", "I"),
+            field(kPublic | kStatic | kFinal, "FRIDAY", "I"),
+            field(kPublic | kStatic | kFinal, "SATURDAY", "I"),
+            field(kPublic | kStatic | kFinal, "JANUARY", "I"),
+            field(kPublic | kStatic | kFinal, "FEBRUARY", "I"),
+            field(kPublic | kStatic | kFinal, "MARCH", "I"),
+            field(kPublic | kStatic | kFinal, "APRIL", "I"),
+            field(kPublic | kStatic | kFinal, "MAY", "I"),
+            field(kPublic | kStatic | kFinal, "JUNE", "I"),
+            field(kPublic | kStatic | kFinal, "JULY", "I"),
+            field(kPublic | kStatic | kFinal, "AUGUST", "I"),
+            field(kPublic | kStatic | kFinal, "SEPTEMBER", "I"),
+            field(kPublic | kStatic | kFinal, "OCTOBER", "I"),
+            field(kPublic | kStatic | kFinal, "NOVEMBER", "I"),
+            field(kPublic | kStatic | kFinal, "DECEMBER", "I"),
+            field(kPublic | kStatic | kFinal, "AM", "I"),
+            field(kPublic | kStatic | kFinal, "PM", "I"),
         }, {
             method(kProtected, "<init>", "()V"),
-            method(kPublic | kStatic, "getInstance", "()Ljava/util/Calendar;"),
-            method(kPublic | kStatic, "getInstance",
+            method(kPublic | kStatic | kSynchronized, "getInstance",
+                   "()Ljava/util/Calendar;"),
+            method(kPublic | kStatic | kSynchronized, "getInstance",
                    "(Ljava/util/TimeZone;)Ljava/util/Calendar;"),
-            method(kPublic, "getTime", "()Ljava/util/Date;"),
-            method(kPublic, "setTime", "(Ljava/util/Date;)V"),
-            method(kPublic, "getTimeInMillis", "()J"),
-            method(kPublic, "setTimeInMillis", "(J)V"),
-            method(kPublic, "get", "(I)I"),
-            method(kPublic, "set", "(II)V"),
+            method(kPublic | kFinal, "getTime", "()Ljava/util/Date;"),
+            method(kPublic | kFinal, "setTime", "(Ljava/util/Date;)V"),
+            method(kProtected, "getTimeInMillis", "()J"),
+            method(kProtected, "setTimeInMillis", "(J)V"),
+            method(kPublic | kFinal, "get", "(I)I"),
+            method(kPublic | kFinal, "set", "(II)V"),
             method(kPublic, "clear", "()V"),
             method(kPublic, "clear", "(I)V"),
             method(kPublic, "before", "(Ljava/lang/Object;)Z"),
@@ -97,6 +133,8 @@ using namespace builtin;
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic, "setTimeZone", "(Ljava/util/TimeZone;)V"),
             method(kPublic, "getTimeZone", "()Ljava/util/TimeZone;"),
+            method(kProtected | kAbstract, "computeFields", "()V"),
+            method(kProtected | kAbstract, "computeTime", "()V"),
         }, {"java/lang/Cloneable", "java/io/Serializable"});
     }
     if (name == "java/util/GregorianCalendar") {
@@ -104,6 +142,8 @@ using namespace builtin;
                           kOrdinary, {}, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(Ljava/util/TimeZone;)V"),
+            method(kProtected, "computeFields", "()V"),
+            method(kProtected, "computeTime", "()V"),
         });
     }
     if (name == "java/util/Objects") {
@@ -155,9 +195,9 @@ using namespace builtin;
     }
     if (name == "java/util/Vector") {
         return make_class("java/util/Vector", "java/lang/Object", kOrdinary, {
-            field(kPrivate, "elementData", "[Ljava/lang/Object;"),
-            field(kPrivate, "elementCount", "I"),
-            field(kPrivate, "capacityIncrement", "I"),
+            field(kProtected, "elementData", "[Ljava/lang/Object;"),
+            field(kProtected, "elementCount", "I"),
+            field(kProtected, "capacityIncrement", "I"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(I)V"),
@@ -184,6 +224,7 @@ using namespace builtin;
             method(kPublic | kSynchronized, "removeElement", "(Ljava/lang/Object;)Z"),
             method(kPublic | kSynchronized, "removeAllElements", "()V"),
             method(kPublic | kSynchronized, "elements", "()Ljava/util/Enumeration;"),
+            method(kPublic | kSynchronized, "toString", "()Ljava/lang/String;"),
         });
     }
     if (name == "java/util/Stack") {
@@ -220,6 +261,8 @@ using namespace builtin;
             method(kPublic | kSynchronized, "clear", "()V"),
             method(kPublic | kSynchronized, "keys", "()Ljava/util/Enumeration;"),
             method(kPublic | kSynchronized, "elements", "()Ljava/util/Enumeration;"),
+            method(kProtected, "rehash", "()V"),
+            method(kPublic | kSynchronized, "toString", "()Ljava/lang/String;"),
         });
     }
     if (name == "java/util/Random") {

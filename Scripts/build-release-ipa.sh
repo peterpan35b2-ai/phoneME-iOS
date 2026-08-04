@@ -9,7 +9,8 @@ SCHEME="${SCHEME:-phoneME}"
 CONFIGURATION="Release"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/Artifacts}"
 TEAM_ID="${DEVELOPMENT_TEAM:-V73SB7GBMS}"
-REBUILD_CORE=false
+EXPORT_METHOD="${EXPORT_METHOD:-debugging}"
+RUN_CORE_TESTS=false
 
 usage() {
   cat <<'USAGE'
@@ -19,25 +20,31 @@ Usage:
   bash Scripts/build-release-ipa.sh [options]
 
 Options:
-  --rebuild-core       Rebuild and package the phoneME core before archiving.
+  --rebuild-core       Run host Core tests before the archive build.
   --team TEAM_ID       Override the Apple Developer team ID.
+  --method METHOD      Export method: debugging, release-testing, or app-store-connect.
   --output-root PATH   Override the artifact output directory.
   -h, --help           Show this help.
 
 Environment overrides:
-  DEVELOPMENT_TEAM, OUTPUT_ROOT, SCHEME
+  DEVELOPMENT_TEAM, EXPORT_METHOD, OUTPUT_ROOT, SCHEME
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild-core)
-      REBUILD_CORE=true
+      RUN_CORE_TESTS=true
       shift
       ;;
     --team)
       [[ $# -ge 2 ]] || { echo "Missing value for --team" >&2; exit 2; }
       TEAM_ID="$2"
+      shift 2
+      ;;
+    --method)
+      [[ $# -ge 2 ]] || { echo "Missing value for --method" >&2; exit 2; }
+      EXPORT_METHOD="$2"
       shift 2
       ;;
     --output-root)
@@ -57,7 +64,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for command in xcodebuild unzip codesign lipo plutil shasum; do
+case "$EXPORT_METHOD" in
+  debugging|release-testing|app-store-connect) ;;
+  *)
+    echo "Unsupported export method: $EXPORT_METHOD" >&2
+    echo "Expected debugging, release-testing, or app-store-connect." >&2
+    exit 2
+    ;;
+esac
+
+for command in xcodebuild xcrun unzip codesign lipo plutil shasum tee find awk du mktemp; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required command not found: $command" >&2
     exit 1
@@ -69,23 +85,14 @@ done
   exit 1
 }
 
-if [[ "$REBUILD_CORE" == true ]]; then
-  echo "== Rebuilding independent phoneME Core =="
-  bash "$REPO_ROOT/Core/tools/test-host.sh"
-  bash "$REPO_ROOT/Core/tools/build-iphoneos.sh"
+if [[ "$RUN_CORE_TESTS" == true ]]; then
+  echo "== Running phoneME Core host tests =="
+  bash "$REPO_ROOT/Core/Tools/test-host.sh"
 fi
 
-CORE_LIBRARY="$REPO_ROOT/Core/libphoneMECore.a"
-for required_file in "$CORE_LIBRARY"; do
-  [[ -f "$required_file" ]] || {
-    echo "Required packaged core file is missing: $required_file" >&2
-    echo "Run with --rebuild-core." >&2
-    exit 1
-  }
-done
-
-bash "$REPO_ROOT/Core/tools/verify-iphoneos.sh"
-
+# The Xcode target's Core build phase always compiles and verifies a fresh
+# iphoneos/arm64 archive in DerivedData. Do not verify Core/libphoneMECore.a
+# here: verify-iphoneos.sh requires the matching object/provenance build root.
 BUILD_SETTINGS="$(
   xcodebuild \
     -project "$PROJECT_PATH" \
@@ -104,11 +111,13 @@ VERSION="$(build_setting MARKETING_VERSION)"
 BUILD_NUMBER="$(build_setting CURRENT_PROJECT_VERSION)"
 BUNDLE_ID="$(build_setting PRODUCT_BUNDLE_IDENTIFIER)"
 PRODUCT_NAME="$(build_setting PRODUCT_NAME)"
+DEPLOYMENT_TARGET="$(build_setting IPHONEOS_DEPLOYMENT_TARGET)"
 
 VERSION="${VERSION:-unknown}"
 BUILD_NUMBER="${BUILD_NUMBER:-unknown}"
 BUNDLE_ID="${BUNDLE_ID:-unknown}"
 PRODUCT_NAME="${PRODUCT_NAME:-phoneME}"
+DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-16.0}"
 
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 ARTIFACT_DIR="$OUTPUT_ROOT/${PRODUCT_NAME}-Release-${VERSION}-build${BUILD_NUMBER}-iphone-${TIMESTAMP}"
@@ -118,6 +127,7 @@ EXPORT_OPTIONS="$ARTIFACT_DIR/ExportOptions.plist"
 ARCHIVE_LOG="$ARTIFACT_DIR/archive.log"
 EXPORT_LOG="$ARTIFACT_DIR/export.log"
 FINAL_IPA="$ARTIFACT_DIR/${PRODUCT_NAME}.ipa"
+LATEST_IPA="$OUTPUT_ROOT/${PRODUCT_NAME}-latest.ipa"
 
 mkdir -p "$ARTIFACT_DIR" "$EXPORT_DIR"
 
@@ -126,16 +136,18 @@ cat >"$EXPORT_OPTIONS" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>destination</key>
+  <string>export</string>
   <key>method</key>
-  <string>debugging</string>
+  <string>${EXPORT_METHOD}</string>
   <key>signingStyle</key>
   <string>automatic</string>
   <key>teamID</key>
   <string>${TEAM_ID}</string>
   <key>stripSwiftSymbols</key>
   <true/>
-  <key>compileBitcode</key>
-  <false/>
+  <key>thinning</key>
+  <string>&lt;none&gt;</string>
 </dict>
 </plist>
 PLIST
@@ -150,6 +162,8 @@ trap cleanup EXIT
 
 echo "== Archiving ${PRODUCT_NAME} ${VERSION} (${BUILD_NUMBER}) for iPhone =="
 echo "Team: $TEAM_ID"
+echo "Export method: $EXPORT_METHOD"
+echo "Core: fresh iphoneos/arm64 build and verification inside the Xcode archive"
 xcodebuild \
   -project "$PROJECT_PATH" \
   -scheme "$SCHEME" \
@@ -179,6 +193,7 @@ EXPORTED_IPA="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -qui
 }
 
 cp -f "$EXPORTED_IPA" "$FINAL_IPA"
+cp -f "$FINAL_IPA" "$LATEST_IPA"
 
 printf '%s\n' '== Verifying IPA =='
 unzip -tq "$FINAL_IPA" >/dev/null
@@ -222,7 +237,9 @@ IPA: $FINAL_IPA
 Archive: $ARCHIVE_PATH
 Bundle: $BUNDLE_ID
 Version: $VERSION ($BUILD_NUMBER)
-Target: iPhone only, arm64, iOS 16+
+Target: iPhone only, arm64, iOS ${DEPLOYMENT_TARGET}+
+Export method: $EXPORT_METHOD
+Latest IPA: $LATEST_IPA
 IPA size: $IPA_SIZE
 App size: $APP_SIZE
 Signed by: $SIGNED_BY

@@ -1034,6 +1034,46 @@ void register_rms_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "javax/microedition/rms/RecordStore",
+        "openRecordStore",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+        "Ljavax/microedition/rms/RecordStore;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "cross-suite openRecordStore expects three strings");
+            }
+            auto name_reference = arguments[0].as_reference();
+            auto vendor_reference = arguments[1].as_reference();
+            auto suite_reference = arguments[2].as_reference();
+            if (!name_reference || !vendor_reference || !suite_reference) {
+                return fail(ErrorCode::invalid_argument,
+                            "cross-suite RecordStore arguments are invalid");
+            }
+            if (vendor_reference->is_null() || suite_reference->is_null()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "vendorName and suiteName must be non null");
+            }
+            if (name_reference->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "RecordStore name is null");
+            }
+            auto name = utf8_text(machine, *name_reference);
+            auto vendor = utf8_text(machine, *vendor_reference);
+            auto suite = utf8_text(machine, *suite_reference);
+            if (!name) return std::unexpected(name.error());
+            if (!vendor) return std::unexpected(vendor.error());
+            if (!suite) return std::unexpected(suite.error());
+            auto opened = machine.record_stores().open(*name, false);
+            if (!opened) return rms_failure(opened.error());
+            auto handle = create_store_handle(machine, *name_reference);
+            if (!handle) return std::unexpected(handle.error());
+            track_open_handle(machine, *handle);
+            return std::optional<Value>(Value::from_reference(*handle));
+        });
+
+    add(registry,
+        "javax/microedition/rms/RecordStore",
         "deleteRecordStore",
         "(Ljava/lang/String;)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1090,6 +1130,33 @@ void register_rms_natives(NativeMethodRegistry& registry) {
                 *handle, kStoreOpenField, Value::from_int(0));
             if (!open_stored) return std::unexpected(open_stored.error());
             untrack_open_handle(machine, *handle);
+            return std::optional<Value> {};
+        });
+    add(registry,
+        "javax/microedition/rms/RecordStore",
+        "setMode",
+        "(IZ)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto handle = receiver(arguments);
+            if (!handle) return std::unexpected(handle.error());
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "RecordStore.setMode expects authmode and writable");
+            }
+            auto authmode = arguments[1].as_int();
+            auto writable = arguments[2].as_int();
+            if (!authmode) return std::unexpected(authmode.error());
+            if (!writable) return std::unexpected(writable.error());
+            auto name = store_name_from_handle(machine, *handle, true);
+            if (!name) return std::unexpected(name.error());
+            if (*authmode != 0 && *authmode != 1) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "RecordStore authmode is invalid");
+            }
+            // The storage root already enforces owner-suite isolation. ACL
+            // metadata for cross-suite sharing is intentionally deferred until
+            // Runtime exposes per-suite vendor/name roots.
             return std::optional<Value> {};
         });
     add(registry,

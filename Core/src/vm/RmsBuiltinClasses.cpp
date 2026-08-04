@@ -19,7 +19,11 @@ using namespace builtin;
     if (name == "javax/microedition/rms/RecordComparator") {
         return make_class("javax/microedition/rms/RecordComparator",
                           "java/lang/Object",
-                          kPublic | kInterface | kAbstract, {}, {
+                          kPublic | kInterface | kAbstract, {
+            field(kPublic | kStatic | kFinal, "PRECEDES", "I"),
+            field(kPublic | kStatic | kFinal, "EQUIVALENT", "I"),
+            field(kPublic | kStatic | kFinal, "FOLLOWS", "I"),
+        }, {
             method(kPublic | kAbstract, "compare", "([B[B)I"),
         });
     }
@@ -82,14 +86,20 @@ using namespace builtin;
                           kOrdinary | kFinal, {
             field(kPrivate, "storeName", "Ljava/lang/String;"),
             field(kPrivate, "open", "Z"),
+            field(kPublic | kStatic | kFinal, "AUTHMODE_PRIVATE", "I"),
+            field(kPublic | kStatic | kFinal, "AUTHMODE_ANY", "I"),
         }, {
             method(kPublic | kStatic, "openRecordStore",
                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;"),
             method(kPublic | kStatic, "openRecordStore",
                    "(Ljava/lang/String;ZIZ)Ljavax/microedition/rms/RecordStore;"),
+            method(kPublic | kStatic, "openRecordStore",
+                   "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+                   "Ljavax/microedition/rms/RecordStore;"),
             method(kPublic | kStatic, "deleteRecordStore", "(Ljava/lang/String;)V"),
             method(kPublic | kStatic, "listRecordStores", "()[Ljava/lang/String;"),
             method(kPublic, "closeRecordStore", "()V"),
+            method(kPublic, "setMode", "(IZ)V"),
             method(kPublic, "getName", "()Ljava/lang/String;"),
             method(kPublic, "getVersion", "()I"),
             method(kPublic, "getNumRecords", "()I"),

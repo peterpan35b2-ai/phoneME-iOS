@@ -5,8 +5,10 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "phoneme/security/PermissionPolicy.hpp"
+#include "phoneme/security/PermissionSemantics.hpp"
 
 namespace {
 
@@ -21,6 +23,7 @@ using phoneme::security::PermissionResponse;
 using phoneme::security::PermissionScope;
 using phoneme::security::SuiteTrust;
 namespace permissions = phoneme::security::permissions;
+namespace semantics = phoneme::security;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -222,6 +225,112 @@ void test_concurrent_prompt_coalescing() {
             "concurrent session requests share one prompt");
 }
 
+void test_permission_actions_parsing() {
+    require(semantics::parse_actions("read") == semantics::kActionRead,
+            "read parses to the read bit");
+    require(semantics::parse_actions("write") == semantics::kActionWrite,
+            "write parses to the write bit");
+    require(semantics::parse_actions("read,write") == semantics::kActionAll,
+            "read,write parses to both bits");
+    require(semantics::parse_actions("write,read") == semantics::kActionAll,
+            "action order is irrelevant");
+    require(semantics::parse_actions("READ") == semantics::kActionRead,
+            "actions are case-insensitive");
+    require(semantics::parse_actions("") == semantics::kActionNone,
+            "empty actions yield no mask");
+    require(semantics::parse_actions("read, write") < 0,
+            "spaces between actions are invalid");
+    require(semantics::parse_actions("bogus") < 0,
+            "unknown actions are invalid");
+    require(semantics::parse_actions("read,") < 0,
+            "trailing comma is invalid");
+
+    require(semantics::format_actions(semantics::kActionNone).empty(),
+            "no actions format to empty");
+    require(semantics::format_actions(semantics::kActionRead) == "read",
+            "read formats canonically");
+    require(semantics::format_actions(semantics::kActionWrite) == "write",
+            "write formats canonically");
+    require(semantics::format_actions(semantics::kActionAll) == "read,write",
+            "both actions format in fixed order");
+}
+
+void test_basic_permission_wildcards() {
+    require(semantics::basic_implies_name("exit", "exit"),
+            "literal name implies itself");
+    require(!semantics::basic_implies_name("exit", "setIO"),
+            "unrelated literals do not imply");
+    require(semantics::basic_implies_name("java.*", "java.home"),
+            "wildcard implies a deeper name");
+    require(!semantics::basic_implies_name("java.*", "java"),
+            "wildcard does not imply its own stem");
+    require(!semantics::basic_implies_name("java.home", "java.*"),
+            "literal does not imply a wildcard");
+    require(semantics::basic_implies_name("*", "anything.at.all"),
+            "global wildcard implies everything");
+    require(semantics::basic_implies_name("a.b.*", "a.b.c"),
+            "nested wildcard implies a descendant");
+    require(!semantics::basic_implies_name("a.b.*", "a.b"),
+            "nested wildcard does not imply its stem");
+    require(semantics::basic_implies_name("a.*", "a.b.*"),
+            "one wildcard can imply another");
+}
+
+void test_property_permission_implies() {
+    require(semantics::property_implies("java.*", semantics::kActionRead,
+                                        "java.home", semantics::kActionRead),
+            "matching mask with wildcard name implies");
+    require(!semantics::property_implies("java.*", semantics::kActionRead,
+                                         "java.home", semantics::kActionAll),
+            "read alone does not imply read,write");
+    require(semantics::property_implies("java.home", semantics::kActionAll,
+                                        "java.home", semantics::kActionRead),
+            "read,write implies the read subset");
+    require(!semantics::property_implies("java.*", semantics::kActionRead,
+                                         "os.name", semantics::kActionRead),
+            "non-matching name never implies");
+}
+
+void test_string_hashcode() {
+    require(semantics::java_string_hashcode(u"") == 0,
+            "empty string hashes to zero");
+    require(semantics::java_string_hashcode(u"abc") == 96354,
+            "hashCode matches the Java reference for abc");
+    require(semantics::java_string_hashcode(u"exit") == 3127582,
+            "hashCode matches the Java reference for exit");
+}
+
+void test_collection_implies() {
+    const std::vector<semantics::PermissionEntry> basic_entries {
+        semantics::PermissionEntry {.name = "exit"},
+        semantics::PermissionEntry {.name = "setIO"},
+    };
+    require(semantics::basic_collection_implies(basic_entries, "exit"),
+            "basic collection implies a stored literal");
+    require(!semantics::basic_collection_implies(basic_entries, "setFactory"),
+            "basic collection rejects an unstored name");
+
+    const std::vector<semantics::PermissionEntry> wildcard_entries {
+        semantics::PermissionEntry {.name = "loadLibrary.*"},
+    };
+    require(semantics::basic_collection_implies(wildcard_entries,
+                                                "loadLibrary.foo"),
+            "basic collection honors wildcard entries");
+
+    const std::vector<semantics::PermissionEntry> split_mask {
+        semantics::PermissionEntry {.name = "java.home",
+                                    .mask = semantics::kActionRead},
+        semantics::PermissionEntry {.name = "java.home",
+                                    .mask = semantics::kActionWrite},
+    };
+    require(semantics::property_collection_implies(
+                split_mask, "java.home", semantics::kActionAll),
+            "duplicate names merge their action masks");
+    require(!semantics::property_collection_implies(
+                split_mask, "os.name", semantics::kActionRead),
+            "property collection rejects unmatched names");
+}
+
 } // namespace
 
 int main() {
@@ -237,6 +346,11 @@ int main() {
     test_trusted_and_domains();
     test_prompt_reentry_is_rejected();
     test_concurrent_prompt_coalescing();
+    test_permission_actions_parsing();
+    test_basic_permission_wildcards();
+    test_property_permission_implies();
+    test_string_hashcode();
+    test_collection_implies();
 
     std::filesystem::remove_all(root, error);
     require(!error, "remove security test directory");

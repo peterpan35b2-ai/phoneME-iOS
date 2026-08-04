@@ -316,6 +316,7 @@ void add(NativeMethodRegistry& registry,
     if (read_method && read_method->owner != nullptr &&
         read_method->owner->name() != "java/io/InputStream" &&
         read_method->owner->name() != "java/io/FilterInputStream" &&
+        read_method->owner->name() != "java/io/DataInputStream" &&
         read_method->owner->name() != "java/io/ByteArrayInputStream" &&
         read_method->owner->name() != "java/io/FileInputStream") {
         auto invoked = machine.invoke_instance(stream, *runtime_class,
@@ -346,6 +347,14 @@ void add(NativeMethodRegistry& registry,
     if (!network_input) return std::unexpected(network_input.error());
     if (network_input->has_value()) return **network_input;
 
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    if (*data_input) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_read_one(machine, *input, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterInputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -379,6 +388,14 @@ void add(NativeMethodRegistry& registry,
     if (!network_read) return std::unexpected(network_read.error());
     if (network_read->has_value()) return **network_read;
 
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    if (*data_input) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_read_bytes(machine, *input, destination, offset, length);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterInputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -442,6 +459,14 @@ void add(NativeMethodRegistry& registry,
     if (!file_input) return std::unexpected(file_input.error());
     if (*file_input) return file_input_skip(machine, stream, requested);
 
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    if (*data_input) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_skip(machine, *input, requested, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterInputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -496,6 +521,14 @@ void add(NativeMethodRegistry& registry,
             static_cast<usize>(std::numeric_limits<i32>::max())));
     }
 
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    if (*data_input) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_available(machine, *input, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterInputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -620,6 +653,16 @@ void add(NativeMethodRegistry& registry,
     if (!network_output) return std::unexpected(network_output.error());
     if (network_output->has_value()) return {};
 
+    auto data_output = is_instance(machine, stream,
+                                   "java/io/DataOutputStream");
+    if (!data_output) return std::unexpected(data_output.error());
+    if (*data_output) {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        auto written = stream_write_one(machine, *output, byte, depth + 1U);
+        if (!written) return written;
+        return increment_data_written(machine, stream, 1);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterOutputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -669,6 +712,14 @@ void add(NativeMethodRegistry& registry,
     if (!network_output) return std::unexpected(network_output.error());
     if (network_output->has_value()) return {};
 
+    auto data_output = is_instance(machine, stream,
+                                   "java/io/DataOutputStream");
+    if (!data_output) return std::unexpected(data_output.error());
+    if (*data_output) {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        return stream_flush(machine, *output, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterOutputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -696,6 +747,14 @@ void add(NativeMethodRegistry& registry,
     if (!network_input) return std::unexpected(network_input.error());
     if (network_input->has_value()) return {};
 
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    if (*data_input) {
+        auto input = reference_field(machine, stream, kFilterStreamField);
+        if (!input) return std::unexpected(input.error());
+        return stream_close_input(machine, *input, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterInputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -723,6 +782,16 @@ void add(NativeMethodRegistry& registry,
     if (!network_output) return std::unexpected(network_output.error());
     if (network_output->has_value()) return {};
 
+    auto data_output = is_instance(machine, stream,
+                                   "java/io/DataOutputStream");
+    if (!data_output) return std::unexpected(data_output.error());
+    if (*data_output) {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        auto flushed = stream_flush(machine, *output, depth + 1U);
+        if (!flushed) return flushed;
+        return stream_close_output(machine, *output, depth + 1U);
+    }
     auto filter = is_instance(machine, stream,
                               "java/io/FilterOutputStream");
     if (!filter) return std::unexpected(filter.error());
@@ -843,6 +912,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
             });
     };
     input_read_one("java/io/FilterInputStream");
+    input_read_one("java/io/DataInputStream");
     input_read_one("java/io/ByteArrayInputStream");
 
     const auto input_skip = [&registry](std::string owner) {
@@ -860,6 +930,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
     };
     input_skip("java/io/InputStream");
     input_skip("java/io/FilterInputStream");
+    input_skip("java/io/DataInputStream");
     input_skip("java/io/ByteArrayInputStream");
 
     const auto input_available = [&registry](std::string owner) {
@@ -875,6 +946,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
     };
     input_available("java/io/InputStream");
     input_available("java/io/FilterInputStream");
+    input_available("java/io/DataInputStream");
     input_available("java/io/ByteArrayInputStream");
 
     const auto input_close = [&registry](std::string owner) {
@@ -890,6 +962,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
     };
     input_close("java/io/InputStream");
     input_close("java/io/FilterInputStream");
+    input_close("java/io/DataInputStream");
     input_close("java/io/ByteArrayInputStream");
 
     add(registry, "java/io/InputStream", "mark", "(I)V",
@@ -951,6 +1024,60 @@ void register_base_streams(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
     add(registry, "java/io/FilterInputStream", "markSupported", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto input = receiver(arguments);
+            if (!input) return std::unexpected(input.error());
+            auto target = reference_field(machine, *input, kFilterStreamField);
+            if (!target) return std::unexpected(target.error());
+            auto byte_array = is_instance(machine, *target,
+                                          "java/io/ByteArrayInputStream");
+            if (!byte_array) return std::unexpected(byte_array.error());
+            return std::optional<Value>(Value::from_int(*byte_array ? 1 : 0));
+        });
+
+    add(registry, "java/io/DataInputStream", "mark", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto input = receiver(arguments);
+            if (!input) return std::unexpected(input.error());
+            auto target = reference_field(machine, *input, kFilterStreamField);
+            if (!target) return std::unexpected(target.error());
+            auto byte_array = is_instance(machine, *target,
+                                          "java/io/ByteArrayInputStream");
+            if (!byte_array) return std::unexpected(byte_array.error());
+            if (*byte_array) {
+                auto position = int_field(machine, *target,
+                                          kByteInputPositionField);
+                if (!position) return std::unexpected(position.error());
+                auto stored = set_int_field(machine, *target,
+                                            kByteInputMarkField,
+                                            *position);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/DataInputStream", "reset", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto input = receiver(arguments);
+            if (!input) return std::unexpected(input.error());
+            auto target = reference_field(machine, *input, kFilterStreamField);
+            if (!target) return std::unexpected(target.error());
+            auto byte_array = is_instance(machine, *target,
+                                          "java/io/ByteArrayInputStream");
+            if (!byte_array) return std::unexpected(byte_array.error());
+            if (!*byte_array)
+                return fail_java("java/io/IOException",
+                                 "mark/reset is not supported");
+            auto mark = int_field(machine, *target, kByteInputMarkField);
+            if (!mark) return std::unexpected(mark.error());
+            auto stored = set_int_field(machine, *target,
+                                        kByteInputPositionField, *mark);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/DataInputStream", "markSupported", "()Z",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
@@ -1041,6 +1168,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
     };
     output_flush("java/io/OutputStream");
     output_flush("java/io/FilterOutputStream");
+    output_flush("java/io/DataOutputStream");
 
     const auto output_close = [&registry](std::string owner) {
         add(registry, std::move(owner), "close", "()V",
@@ -1055,6 +1183,7 @@ void register_base_streams(NativeMethodRegistry& registry) {
     };
     output_close("java/io/OutputStream");
     output_close("java/io/FilterOutputStream");
+    output_close("java/io/DataOutputStream");
     output_close("java/io/ByteArrayOutputStream");
 }
 
@@ -1854,6 +1983,92 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_int(
                 *pending >= 0 || *available > 0 ? 1 : 0));
         });
+    add(registry, "java/io/InputStreamReader", "skip", "(J)J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto requested = arguments[1].as_long();
+            if (!object) return std::unexpected(object.error());
+            if (!requested) return std::unexpected(requested.error());
+            auto opened = require_open(machine, *object,
+                                       kReaderClosedField,
+                                       "InputStreamReader");
+            if (!opened) return std::unexpected(opened.error());
+            auto input = reference_field(machine, *object, kReaderInputField);
+            if (!input) return std::unexpected(input.error());
+            auto skipped = stream_skip(machine, *input, *requested, 0U);
+            if (!skipped) return std::unexpected(skipped.error());
+            return std::optional<Value>(Value::from_long(*skipped));
+        });
+    add(registry, "java/io/InputStreamReader", "markSupported", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto closed = int_field(machine, *object, kReaderClosedField);
+            if (!closed) return std::unexpected(closed.error());
+            if (*closed != 0) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto input = reference_field(machine, *object, kReaderInputField);
+            if (!input) return std::unexpected(input.error());
+            auto supported = is_instance(machine, *input,
+                                         "java/io/ByteArrayInputStream");
+            if (!supported) return std::unexpected(supported.error());
+            return std::optional<Value>(Value::from_int(*supported ? 1 : 0));
+        });
+    add(registry, "java/io/InputStreamReader", "mark", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto opened = require_open(machine, *object,
+                                       kReaderClosedField,
+                                       "InputStreamReader");
+            if (!opened) return std::unexpected(opened.error());
+            auto input = reference_field(machine, *object, kReaderInputField);
+            if (!input) return std::unexpected(input.error());
+            auto supported = is_instance(machine, *input,
+                                         "java/io/ByteArrayInputStream");
+            if (!supported) return std::unexpected(supported.error());
+            if (!*supported) {
+                return fail_java("java/io/IOException",
+                                 "mark() not supported");
+            }
+            auto position = int_field(machine, *input,
+                                      kByteInputPositionField);
+            if (!position) return std::unexpected(position.error());
+            auto stored = set_int_field(machine, *input,
+                                        kByteInputMarkField, *position);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/io/InputStreamReader", "reset", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto opened = require_open(machine, *object,
+                                       kReaderClosedField,
+                                       "InputStreamReader");
+            if (!opened) return std::unexpected(opened.error());
+            auto input = reference_field(machine, *object, kReaderInputField);
+            if (!input) return std::unexpected(input.error());
+            auto supported = is_instance(machine, *input,
+                                         "java/io/ByteArrayInputStream");
+            if (!supported) return std::unexpected(supported.error());
+            if (!*supported) {
+                return fail_java("java/io/IOException",
+                                 "mark/reset is not supported");
+            }
+            auto mark = int_field(machine, *input, kByteInputMarkField);
+            if (!mark) return std::unexpected(mark.error());
+            auto stored = set_int_field(machine, *input,
+                                        kByteInputPositionField, *mark);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
     add(registry, "java/io/InputStreamReader", "getEncoding",
         "()Ljava/lang/String;",
         [](Machine& machine, std::span<const Value> arguments)

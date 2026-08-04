@@ -108,7 +108,7 @@ using namespace builtin;
                               method(kPublic | kAbstract, "getEncoding", "()Ljava/lang/String;"),
                               method(kPublic | kAbstract, "getLength", "()J"),
                           },
-                          {"javax/microedition/io/InputConnection"});
+                          {"javax/microedition/io/StreamConnection"});
     }
     if (name == "javax/microedition/io/StreamConnectionNotifier") {
         return make_class(name.data(), "java/lang/Object",
@@ -158,6 +158,14 @@ using namespace builtin;
                           },
                           {"javax/microedition/io/StreamConnectionNotifier"});
     }
+    if (name == "javax/microedition/io/UDPDatagramConnection") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "getLocalAddress",
+                   "()Ljava/lang/String;"),
+            method(kPublic | kAbstract, "getLocalPort", "()I"),
+        }, {"javax/microedition/io/DatagramConnection"});
+    }
     if (name == "javax/microedition/io/DatagramConnection") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract, {},
@@ -167,7 +175,9 @@ using namespace builtin;
                               method(kPublic | kAbstract, "send", "(Ljavax/microedition/io/Datagram;)V"),
                               method(kPublic | kAbstract, "receive", "(Ljavax/microedition/io/Datagram;)V"),
                               method(kPublic | kAbstract, "newDatagram", "(I)Ljavax/microedition/io/Datagram;"),
+                              method(kPublic | kAbstract, "newDatagram", "(ILjava/lang/String;)Ljavax/microedition/io/Datagram;"),
                               method(kPublic | kAbstract, "newDatagram", "([BI)Ljavax/microedition/io/Datagram;"),
+                              method(kPublic | kAbstract, "newDatagram", "([BILjava/lang/String;)Ljavax/microedition/io/Datagram;"),
                               method(kPublic | kAbstract, "newDatagram", "([BII)Ljavax/microedition/io/Datagram;"),
                           },
                           {"javax/microedition/io/Connection"});
@@ -453,10 +463,14 @@ using namespace builtin;
                               method(kPublic, "send", "(Ljavax/microedition/io/Datagram;)V"),
                               method(kPublic, "receive", "(Ljavax/microedition/io/Datagram;)V"),
                               method(kPublic, "newDatagram", "(I)Ljavax/microedition/io/Datagram;"),
+                              method(kPublic, "newDatagram", "(ILjava/lang/String;)Ljavax/microedition/io/Datagram;"),
                               method(kPublic, "newDatagram", "([BI)Ljavax/microedition/io/Datagram;"),
+                              method(kPublic, "newDatagram", "([BILjava/lang/String;)Ljavax/microedition/io/Datagram;"),
                               method(kPublic, "newDatagram", "([BII)Ljavax/microedition/io/Datagram;"),
+                              method(kPublic, "getLocalAddress", "()Ljava/lang/String;"),
+                              method(kPublic, "getLocalPort", "()I"),
                           },
-                          {"javax/microedition/io/DatagramConnection"});
+                          {"javax/microedition/io/UDPDatagramConnection"});
     }
     if (name == "javax/microedition/io/NativeDatagram") {
         auto methods = std::vector<classfile::Method> {

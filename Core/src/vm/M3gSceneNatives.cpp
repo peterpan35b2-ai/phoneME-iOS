@@ -1,6 +1,8 @@
 #include "M3gNativeModules.hpp"
 
 #include <array>
+#include <limits>
+#include <unordered_set>
 #include <vector>
 
 #include "M3gNativeSupport.hpp"
@@ -133,35 +135,235 @@ using namespace m3g;
     return result;
 }
 
-[[nodiscard]] Result<ObjectRef> find_by_user_id(Machine& machine,
-                                                 ObjectRef object,
-                                                 i32 user_id,
-                                                 usize depth = 0U) {
-    if (depth > 1'024U) {
-        return fail(ErrorCode::overflow, "M3G scene graph is too deep");
+void append_unique_reference(std::vector<ObjectRef>& references,
+                             ObjectRef reference) {
+    if (reference.is_null()) return;
+    if (std::find(references.begin(), references.end(), reference) ==
+        references.end()) {
+        references.push_back(reference);
     }
+}
+
+[[nodiscard]] Status append_reference_field(
+    Machine& machine,
+    ObjectRef object,
+    std::string_view owner,
+    std::string_view name,
+    std::string_view descriptor,
+    std::vector<ObjectRef>& references) {
+    auto reference = reference_field(machine, object, owner, name, descriptor);
+    if (!reference) return std::unexpected(reference.error());
+    append_unique_reference(references, *reference);
+    return {};
+}
+
+[[nodiscard]] Status append_reference_array(
+    Machine& machine,
+    ObjectRef object,
+    std::string_view owner,
+    std::string_view name,
+    std::string_view descriptor,
+    usize maximum,
+    std::vector<ObjectRef>& references) {
+    auto array = reference_field(machine, object, owner, name, descriptor);
+    if (!array) return std::unexpected(array.error());
+    if (array->is_null()) return {};
+    auto length = machine.heap().array_length(*array);
+    if (!length) return std::unexpected(length.error());
+    const usize count = std::min(*length, maximum);
+    for (usize index = 0U; index < count; ++index) {
+        auto value = machine.heap().element(*array, index);
+        if (!value) return std::unexpected(value.error());
+        auto reference = value->as_reference();
+        if (!reference) return std::unexpected(reference.error());
+        append_unique_reference(references, *reference);
+    }
+    return {};
+}
+
+[[nodiscard]] Result<std::vector<ObjectRef>> object_references(
+    Machine& machine,
+    ObjectRef object) {
+    auto class_name = machine.heap().class_name(object);
+    if (!class_name) return std::unexpected(class_name.error());
+    const std::string_view type = *class_name;
+    std::vector<ObjectRef> references;
+    references.reserve(12U);
+
+    auto animation_count = int_field(machine, object, kObject3D,
+                                     "animationTrackCount");
+    if (!animation_count) return std::unexpected(animation_count.error());
+    const usize animations = *animation_count <= 0
+        ? 0U : static_cast<usize>(*animation_count);
+    auto appended = append_reference_array(
+        machine, object, kObject3D, "animationTracks",
+        "[Ljavax/microedition/m3g/AnimationTrack;", animations,
+        references);
+    if (!appended) return std::unexpected(appended.error());
+
+    const bool node = type == kCamera || type == kLight || type == kGroup ||
+        type == kWorld || type == kMesh ||
+        type == "javax/microedition/m3g/MorphingMesh" ||
+        type == "javax/microedition/m3g/SkinnedMesh" || type == kSprite3D;
+    if (node) {
+        appended = append_reference_field(
+            machine, object, kNode, "zTarget",
+            "Ljavax/microedition/m3g/Node;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_field(
+            machine, object, kNode, "yTarget",
+            "Ljavax/microedition/m3g/Node;", references);
+        if (!appended) return std::unexpected(appended.error());
+    }
+
+    if (type == kGroup || type == kWorld) {
+        auto child_count = int_field(machine, object, kGroup, "childCount");
+        if (!child_count) return std::unexpected(child_count.error());
+        const usize children = *child_count <= 0
+            ? 0U : static_cast<usize>(*child_count);
+        appended = append_reference_array(
+            machine, object, kGroup, "children",
+            "[Ljavax/microedition/m3g/Node;", children, references);
+        if (!appended) return std::unexpected(appended.error());
+    }
+    if (type == kWorld) {
+        appended = append_reference_field(
+            machine, object, kWorld, "activeCamera",
+            "Ljavax/microedition/m3g/Camera;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_field(
+            machine, object, kWorld, "background",
+            "Ljavax/microedition/m3g/Background;", references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kBackground) {
+        appended = append_reference_field(
+            machine, object, kBackground, "image",
+            "Ljavax/microedition/m3g/Image2D;", references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kAppearance) {
+        for (const auto& [name, descriptor] :
+             std::array<std::pair<const char*, const char*>, 4> {{
+                 {"compositingMode",
+                  "Ljavax/microedition/m3g/CompositingMode;"},
+                 {"fog", "Ljavax/microedition/m3g/Fog;"},
+                 {"polygonMode", "Ljavax/microedition/m3g/PolygonMode;"},
+                 {"material", "Ljavax/microedition/m3g/Material;"},
+             }}) {
+            appended = append_reference_field(
+                machine, object, kAppearance, name, descriptor, references);
+            if (!appended) return std::unexpected(appended.error());
+        }
+        appended = append_reference_array(
+            machine, object, kAppearance, "textures",
+            "[Ljavax/microedition/m3g/Texture2D;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kTexture2D) {
+        appended = append_reference_field(
+            machine, object, kTexture2D, "image",
+            "Ljavax/microedition/m3g/Image2D;", references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kAnimationTrack) {
+        appended = append_reference_field(
+            machine, object, kAnimationTrack, "sequence",
+            "Ljavax/microedition/m3g/KeyframeSequence;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_field(
+            machine, object, kAnimationTrack, "controller",
+            "Ljavax/microedition/m3g/AnimationController;", references);
+        if (!appended) return std::unexpected(appended.error());
+    }
+
+    const bool mesh = type == kMesh ||
+        type == "javax/microedition/m3g/MorphingMesh" ||
+        type == "javax/microedition/m3g/SkinnedMesh";
+    if (mesh) {
+        appended = append_reference_field(
+            machine, object, kMesh, "vertexBuffer",
+            "Ljavax/microedition/m3g/VertexBuffer;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_array(
+            machine, object, kMesh, "indexBuffers",
+            "[Ljavax/microedition/m3g/IndexBuffer;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_array(
+            machine, object, kMesh, "appearances",
+            "[Ljavax/microedition/m3g/Appearance;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+    }
+    if (type == "javax/microedition/m3g/MorphingMesh") {
+        appended = append_reference_array(
+            machine, object, type, "morphTargets",
+            "[Ljavax/microedition/m3g/VertexBuffer;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == "javax/microedition/m3g/SkinnedMesh") {
+        appended = append_reference_field(
+            machine, object, type, "skeleton",
+            "Ljavax/microedition/m3g/Group;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_array(
+            machine, object, type, "bones",
+            "[Ljavax/microedition/m3g/Node;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kSprite3D) {
+        appended = append_reference_field(
+            machine, object, kSprite3D, "image",
+            "Ljavax/microedition/m3g/Image2D;", references);
+        if (!appended) return std::unexpected(appended.error());
+        appended = append_reference_field(
+            machine, object, kSprite3D, "appearance",
+            "Ljavax/microedition/m3g/Appearance;", references);
+        if (!appended) return std::unexpected(appended.error());
+    } else if (type == kVertexBuffer) {
+        for (const char* name : {"positions", "normals", "colors"}) {
+            appended = append_reference_field(
+                machine, object, kVertexBuffer, name,
+                "Ljavax/microedition/m3g/VertexArray;", references);
+            if (!appended) return std::unexpected(appended.error());
+        }
+        appended = append_reference_array(
+            machine, object, kVertexBuffer, "texCoords",
+            "[Ljavax/microedition/m3g/VertexArray;",
+            std::numeric_limits<usize>::max(), references);
+        if (!appended) return std::unexpected(appended.error());
+    }
+    return references;
+}
+
+[[nodiscard]] Result<ObjectRef> find_by_user_id(
+    Machine& machine,
+    ObjectRef object,
+    i32 user_id,
+    std::unordered_set<u64>& visited,
+    usize depth = 0U) {
+    if (depth > 4'096U) {
+        return fail(ErrorCode::overflow, "M3G object graph is too deep");
+    }
+    if (!visited.insert(object.bits).second) return ObjectRef {};
     auto current_id = int_field(machine, object, kObject3D, "userID");
     if (!current_id) return std::unexpected(current_id.error());
     if (*current_id == user_id) return object;
-    auto is_group = machine.object_is_instance(object, kGroup);
-    if (!is_group) return std::unexpected(is_group.error());
-    if (!*is_group) return ObjectRef {};
-    auto children = child_array(machine, object);
-    auto count = int_field(machine, object, kGroup, "childCount");
-    if (!children) return std::unexpected(children.error());
-    if (!count) return std::unexpected(count.error());
-    for (i32 index = 0; index < *count; ++index) {
-        auto value = machine.heap().element(*children,
-                                            static_cast<usize>(index));
-        if (!value) return std::unexpected(value.error());
-        auto child = value->as_reference();
-        if (!child) return std::unexpected(child.error());
-        if (child->is_null()) continue;
-        auto found = find_by_user_id(machine, *child, user_id, depth + 1U);
+    auto references = object_references(machine, object);
+    if (!references) return std::unexpected(references.error());
+    for (ObjectRef reference : *references) {
+        auto found = find_by_user_id(
+            machine, reference, user_id, visited, depth + 1U);
         if (!found) return std::unexpected(found.error());
         if (!found->is_null()) return *found;
     }
     return ObjectRef {};
+}
+
+[[nodiscard]] Result<ObjectRef> find_by_user_id(Machine& machine,
+                                                 ObjectRef object,
+                                                 i32 user_id) {
+    std::unordered_set<u64> visited;
+    visited.reserve(64U);
+    return find_by_user_id(machine, object, user_id, visited);
 }
 
 void register_object3d(NativeMethodRegistry& registry) {
@@ -220,9 +422,32 @@ void register_object3d(NativeMethodRegistry& registry) {
         });
     add(registry, kObject3D, "getReferences",
         "([Ljavax/microedition/m3g/Object3D;)I",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return std::optional<Value>(Value::from_int(0));
+            auto object = receiver(arguments, "Object3D.getReferences");
+            auto destination = reference_argument(
+                arguments, 1U, "Object3D.getReferences", true);
+            if (!object) return std::unexpected(object.error());
+            if (!destination) return std::unexpected(destination.error());
+            auto references = object_references(machine, *object);
+            if (!references) return std::unexpected(references.error());
+            if (!destination->is_null()) {
+                auto length = machine.heap().array_length(*destination);
+                if (!length) return std::unexpected(length.error());
+                if (*length < references->size()) {
+                    return fail_java(
+                        "java/lang/IllegalArgumentException",
+                        "Object3D reference array is too short");
+                }
+                for (usize index = 0U; index < references->size(); ++index) {
+                    auto stored = machine.heap().set_element(
+                        *destination, index,
+                        Value::from_reference((*references)[index]));
+                    if (!stored) return std::unexpected(stored.error());
+                }
+            }
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(references->size())));
         });
     add(registry, kObject3D, "addAnimationTrack",
         "(Ljavax/microedition/m3g/AnimationTrack;)V",

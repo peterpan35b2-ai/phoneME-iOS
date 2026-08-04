@@ -13,7 +13,7 @@ using namespace builtin;
     if (name == "java/io/InputStream") {
         return make_class("java/io/InputStream", "java/lang/Object",
                           kOrdinary | kAbstract, {}, {
-            method(kProtected, "<init>", "()V"),
+            method(kPublic, "<init>", "()V"),
             method(kPublic | kAbstract, "read", "()I"),
             method(kPublic, "read", "([B)I"),
             method(kPublic, "read", "([BII)I"),
@@ -28,7 +28,7 @@ using namespace builtin;
     if (name == "java/io/OutputStream") {
         return make_class("java/io/OutputStream", "java/lang/Object",
                           kOrdinary | kAbstract, {}, {
-            method(kProtected, "<init>", "()V"),
+            method(kPublic, "<init>", "()V"),
             method(kPublic | kAbstract, "write", "(I)V"),
             method(kPublic, "write", "([B)V"),
             method(kPublic, "write", "([BII)V"),
@@ -84,7 +84,11 @@ using namespace builtin;
             method(kPublic, "getEncoding", "()Ljava/lang/String;"),
             method(kPublic, "read", "()I"),
             method(kPublic, "read", "([CII)I"),
+            method(kPublic, "skip", "(J)J"),
             method(kPublic, "ready", "()Z"),
+            method(kPublic, "markSupported", "()Z"),
+            method(kPublic, "mark", "(I)V"),
+            method(kPublic, "reset", "()V"),
             method(kPublic, "close", "()V"),
         });
     }
@@ -250,11 +254,20 @@ using namespace builtin;
         });
     }
     if (name == "java/io/DataInputStream") {
-        return make_class("java/io/DataInputStream", "java/io/FilterInputStream",
-                          kOrdinary, {}, {
+        return make_class("java/io/DataInputStream", "java/io/InputStream",
+                          kOrdinary, {
+            field(kProtected, "in", "Ljava/io/InputStream;"),
+        }, {
             method(kPublic, "<init>", "(Ljava/io/InputStream;)V"),
+            method(kPublic, "read", "()I"),
             method(kPublic | kFinal, "read", "([B)I"),
             method(kPublic | kFinal, "read", "([BII)I"),
+            method(kPublic, "skip", "(J)J"),
+            method(kPublic, "available", "()I"),
+            method(kPublic, "close", "()V"),
+            method(kPublic | kSynchronized, "mark", "(I)V"),
+            method(kPublic | kSynchronized, "reset", "()V"),
+            method(kPublic, "markSupported", "()Z"),
             method(kPublic | kFinal, "readFully", "([B)V"),
             method(kPublic | kFinal, "readFully", "([BII)V"),
             method(kPublic | kFinal, "skipBytes", "(I)I"),
@@ -274,13 +287,16 @@ using namespace builtin;
         }, {"java/io/DataInput"});
     }
     if (name == "java/io/DataOutputStream") {
-        return make_class("java/io/DataOutputStream", "java/io/FilterOutputStream",
+        return make_class("java/io/DataOutputStream", "java/io/OutputStream",
                           kOrdinary, {
+            field(kProtected, "out", "Ljava/io/OutputStream;"),
             field(kProtected, "written", "I"),
         }, {
             method(kPublic, "<init>", "(Ljava/io/OutputStream;)V"),
             method(kPublic | kSynchronized, "write", "(I)V"),
             method(kPublic | kSynchronized, "write", "([BII)V"),
+            method(kPublic, "flush", "()V"),
+            method(kPublic, "close", "()V"),
             method(kPublic | kFinal, "writeBoolean", "(Z)V"),
             method(kPublic | kFinal, "writeByte", "(I)V"),
             method(kPublic | kFinal, "writeShort", "(I)V"),
@@ -298,6 +314,16 @@ using namespace builtin;
     if (name == "java/io/Serializable") {
         return make_class("java/io/Serializable", "java/lang/Object",
                           kPublic | kInterface | kAbstract);
+    }
+
+    if (name == "java/io/InterruptedIOException") {
+        return make_class("java/io/InterruptedIOException", "java/io/IOException",
+                          kOrdinary, {
+            field(kPublic, "bytesTransferred", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
     }
 
     struct Hierarchy final {

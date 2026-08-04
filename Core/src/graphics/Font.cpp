@@ -32,11 +32,8 @@ Font Font::default_font() noexcept {
 }
 
 i32 Font::height() const noexcept {
-    // The phoneME putpixel port used by the reference runtime exposes the
-    // bundled 9x14 bitmap font for every logical MIDP face/style/size.
-    // Keep Java-visible metrics deterministic instead of leaking CoreText
-    // device/font-version differences into game layout calculations.
-    return 14;
+    // Match the bundled phoneME font.bin metrics used by the original C port.
+    return 13;
 }
 
 i32 Font::baseline() const noexcept {
@@ -44,18 +41,24 @@ i32 Font::baseline() const noexcept {
 }
 
 i32 Font::char_width(char32_t character) const noexcept {
-    static_cast<void>(character);
+    const std::span<const char32_t> glyph(&character, 1U);
+    if (auto width = platform_text_width(*this, glyph)) {
+        return *width;
+    }
     return 9;
 }
 
 i32 Font::chars_width(std::span<const char32_t> characters) const noexcept {
-    constexpr i64 glyph_width = 9;
+    if (auto width = platform_text_width(*this, characters)) {
+        return *width;
+    }
+    constexpr i64 fallback_glyph_width = 9;
     if (characters.size() > static_cast<usize>(
-            std::numeric_limits<i32>::max() / glyph_width)) {
+            std::numeric_limits<i32>::max() / fallback_glyph_width)) {
         return std::numeric_limits<i32>::max();
     }
     return static_cast<i32>(characters.size() *
-                            static_cast<usize>(glyph_width));
+                            static_cast<usize>(fallback_glyph_width));
 }
 
 } // namespace phoneme::graphics

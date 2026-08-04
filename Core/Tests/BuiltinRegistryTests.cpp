@@ -29,9 +29,17 @@ void test_lang_registry() {
     const auto object = registry.find("java/lang/Object");
     const auto string = registry.find("java/lang/String");
     const auto buffer = registry.find("java/lang/StringBuffer");
+    const auto system = registry.find("java/lang/System");
+    const auto runtime = registry.find("java/lang/Runtime");
+    const auto thread = registry.find("java/lang/Thread");
 
     require(object != nullptr && object->super_name().empty(),
             "lang registry owns Object");
+    require_method(object, "wait", "(JI)V",
+                   "Object exposes nanosecond wait overload");
+    const auto* clone = object->find_method("clone", "()Ljava/lang/Object;");
+    require(clone != nullptr && (clone->access_flags & 0x0001U) != 0U,
+            "CLDC Object.clone is public");
     require(string != nullptr && string->super_name() == "java/lang/Object",
             "lang registry owns String");
     require_method(string, "<init>", "([BIILjava/lang/String;)V",
@@ -40,6 +48,19 @@ void test_lang_registry() {
                    "String exposes charset encoder");
     require_method(buffer, "append", "(Ljava/lang/String;)Ljava/lang/StringBuffer;",
                    "StringBuffer append returns StringBuffer");
+    require_method(system, "linkLegacyWtChain",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                   "System exposes legacy Zelix chain linker");
+    require_method(runtime, "exit", "(I)V",
+                   "Runtime exposes CLDC exit");
+    require_method(thread, "<init>", "(Ljava/lang/String;)V",
+                   "Thread exposes name constructor");
+    require_method(thread, "getName", "()Ljava/lang/String;",
+                   "Thread exposes name getter");
+    require_method(thread, "checkAccess", "()V",
+                   "Thread exposes CLDC access check");
+    require_method(thread, "toString", "()Ljava/lang/String;",
+                   "Thread exposes CLDC text form");
     require(registry.find("java/util/Vector") == nullptr,
             "lang registry does not claim util classes");
 }
@@ -57,13 +78,22 @@ void test_io_registry() {
     require(input != nullptr && input->super_name() == "java/lang/Object",
             "io registry owns InputStream");
     require(data_input != nullptr &&
-                data_input->super_name() == "java/io/FilterInputStream",
-            "DataInputStream extends FilterInputStream");
+                data_input->super_name() == "java/io/InputStream",
+            "DataInputStream matches CLDC InputStream hierarchy");
     require(data_input->interfaces().size() == 1U &&
                 data_input->interfaces().front() == "java/io/DataInput",
             "DataInputStream implements DataInput");
+    require_method(data_input, "read", "()I",
+                   "DataInputStream exposes direct byte reader");
+    require_method(data_input, "markSupported", "()Z",
+                   "DataInputStream exposes mark support");
     require_method(data_input, "readUTF", "()Ljava/lang/String;",
                    "DataInputStream exposes modified UTF reader");
+    require(data_output != nullptr &&
+                data_output->super_name() == "java/io/OutputStream",
+            "DataOutputStream matches CLDC OutputStream hierarchy");
+    require_method(data_output, "flush", "()V",
+                   "DataOutputStream exposes flush");
     require_method(data_output, "writeUTF", "(Ljava/lang/String;)V",
                    "DataOutputStream exposes modified UTF writer");
     require_method(byte_output, "toByteArray", "()[B",
@@ -71,6 +101,9 @@ void test_io_registry() {
     require(interrupted != nullptr &&
                 interrupted->super_name() == "java/io/IOException",
             "InterruptedIOException extends IOException");
+    require(!interrupted->fields().empty() &&
+                interrupted->fields().front().name == "bytesTransferred",
+            "InterruptedIOException exposes bytesTransferred");
     require(registry.find("java/util/Calendar") == nullptr,
             "io registry does not claim util classes");
 }

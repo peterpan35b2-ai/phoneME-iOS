@@ -170,6 +170,82 @@ public final class CldcLibraryOps {
         return 0;
     }
 
+    private static int objectAndThreadCompatibility() throws Exception {
+        Object lock = new Object();
+        synchronized (lock) {
+            try {
+                lock.wait(-1L, 0);
+                return 161;
+            } catch (IllegalArgumentException expected) {
+            }
+            try {
+                lock.wait(0L, 1000000);
+                return 162;
+            } catch (IllegalArgumentException expected) {
+            }
+        }
+
+        Thread named = new Thread("worker");
+        if (!"worker".equals(named.getName())) return 163;
+        named.checkAccess();
+        if (!"Thread[worker,5]".equals(named.toString())) return 164;
+
+        Thread generated = new Thread();
+        if (generated.getName() == null ||
+                !generated.getName().startsWith("Thread-")) return 165;
+        return 0;
+    }
+
+    private static int permissionCompatibility() throws Exception {
+        RuntimePermission wildcard = new RuntimePermission("loadLibrary.*");
+        RuntimePermission requested = new RuntimePermission("loadLibrary.game");
+        if (!wildcard.implies(requested)) return 166;
+        if (wildcard.implies(new RuntimePermission("loadLibrary"))) return 167;
+        if (!wildcard.equals(new RuntimePermission("loadLibrary.*"))) return 168;
+        if (wildcard.hashCode() != new RuntimePermission("loadLibrary.*").hashCode()) {
+            return 169;
+        }
+        if (!"".equals(wildcard.getActions())) return 170;
+
+        java.security.PermissionCollection basic =
+            wildcard.newPermissionCollection();
+        basic.add(wildcard);
+        if (!basic.implies(requested)) return 171;
+        if (!basic.elements().hasMoreElements()) return 172;
+        basic.setReadOnly();
+        if (!basic.isReadOnly()) return 173;
+        try {
+            basic.add(new RuntimePermission("loadLibrary.other"));
+            return 174;
+        } catch (SecurityException expected) {
+        }
+
+        java.util.PropertyPermission read =
+            new java.util.PropertyPermission("java.*", "read");
+        java.util.PropertyPermission write =
+            new java.util.PropertyPermission("java.home", "write");
+        java.util.PropertyPermission both =
+            new java.util.PropertyPermission("java.home", "read,write");
+        if (!read.implies(new java.util.PropertyPermission("java.home", "read"))) {
+            return 175;
+        }
+        if (read.implies(both)) return 176;
+        if (!"read,write".equals(both.getActions())) return 177;
+
+        java.security.PermissionCollection properties =
+            read.newPermissionCollection();
+        properties.add(read);
+        properties.add(write);
+        if (!properties.implies(both)) return 178;
+
+        java.security.AccessControlException exception =
+            new java.security.AccessControlException("denied", requested);
+        if (exception.getPermission() != requested) return 179;
+        if (!"denied".equals(exception.getMessage())) return 180;
+        java.security.AccessController.checkPermission(requested);
+        return 0;
+    }
+
     private static int throwableSemantics() throws Exception {
         IOException outer = new IOException("hỏng");
         Exception inner = new Exception("gốc");
@@ -203,6 +279,10 @@ public final class CldcLibraryOps {
             result = modifiedUtfRoundTrip();
             if (result != 0) return result;
             result = wrapperCompatibility();
+            if (result != 0) return result;
+            result = objectAndThreadCompatibility();
+            if (result != 0) return result;
+            result = permissionCompatibility();
             if (result != 0) return result;
             return throwableSemantics();
         } catch (Throwable failure) {

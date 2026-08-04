@@ -124,6 +124,10 @@ private:
     };
 
     enum class InputKind : u8 { key, host_key, pointer };
+    enum class CallbackExceptionPolicy : u8 {
+        fail_midlet,
+        report_and_continue,
+    };
 
     struct PendingInput final {
         InputKind kind {InputKind::key};
@@ -156,11 +160,14 @@ private:
     [[nodiscard]] Status process_repaints();
     [[nodiscard]] CanvasState* active_visible_state() noexcept;
     [[nodiscard]] const CanvasState* active_visible_state() const noexcept;
-    [[nodiscard]] Status invoke_void(vm::ObjectRef receiver,
-                                     std::string_view declared_class,
-                                     std::string_view method_name,
-                                     std::string_view descriptor,
-                                     std::span<const vm::Value> arguments = {});
+    [[nodiscard]] Status invoke_void(
+        vm::ObjectRef receiver,
+        std::string_view declared_class,
+        std::string_view method_name,
+        std::string_view descriptor,
+        std::span<const vm::Value> arguments = {},
+        CallbackExceptionPolicy exception_policy =
+            CallbackExceptionPolicy::fail_midlet);
     [[nodiscard]] Status invoke_key_callback(CanvasState& state,
                                              std::string_view method,
                                              i32 key_code);

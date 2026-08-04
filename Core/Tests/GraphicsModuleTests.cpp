@@ -737,12 +737,24 @@ void test_font_unicode_and_measurement() {
                 font->height() > font->baseline() &&
                 font->chars_width(text) >= font->char_width(U'A'),
             "font flags and text metrics are internally consistent");
+    require_equal(font->height(), 13,
+                  "phoneME font.bin exposes its 13-pixel height");
+    require_equal(font->baseline(), 11,
+                  "phoneME font.bin exposes its 11-pixel baseline");
+    require_equal(font->char_width(U'A'), 8,
+                  "phoneME bold A width includes one style pixel");
+    require_equal(font->chars_width(text), 15,
+                  "phoneME variable glyph widths replace fixed 9-pixel cells");
 
     auto unicode_font = phoneme::graphics::Font::create(
         static_cast<i32>(phoneme::graphics::FontFace::system),
         phoneme::graphics::style_plain,
         static_cast<i32>(phoneme::graphics::FontSize::medium));
     require(unicode_font.has_value(), "create Unicode system font");
+    require_equal(unicode_font->char_width(U'I'), 4,
+                  "phoneME atlas preserves narrow glyph width");
+    require_equal(unicode_font->char_width(U'W'), 10,
+                  "phoneME atlas preserves wide glyph width");
     constexpr std::u32string_view unicode_text = U"Tiếng Việt 日本語 \U0001F642";
     const std::span<const char32_t> characters(unicode_text.data(),
                                                unicode_text.size());
@@ -751,7 +763,7 @@ void test_font_unicode_and_measurement() {
         *unicode_font, characters);
     require(metrics.has_value() && unicode_width.has_value() &&
                 *unicode_width > 0,
-            "CoreText measures Vietnamese Japanese and fallback glyphs");
+            "phoneME atlas and CoreText fallback measure mixed Unicode text");
     auto text_image = Image::create_mutable(*unicode_width + 8,
                                              metrics->height + 4);
     require(text_image.has_value(), "create Unicode text target");
@@ -766,7 +778,7 @@ void test_font_unicode_and_measurement() {
                                                    0xFF000000U,
                                                    text_clip)
                 .has_value(),
-            "CoreText rasterizes Vietnamese Japanese and fallback glyphs");
+            "phoneME atlas and CoreText fallback rasterize mixed Unicode text");
     usize changed_pixels = 0;
     for (const Pixel pixel : text_image->pixels()) {
         if (pixel != 0xFFFFFFFFU) {
@@ -777,6 +789,92 @@ void test_font_unicode_and_measurement() {
             "Unicode rasterizer emits visible anti-aliased glyph pixels");
     require(text_image->has_dirty_region(),
             "text rasterization contributes a bounded dirty region");
+
+    constexpr std::array<char32_t, 1> orientation_text {U'T'};
+    auto orientation_font = phoneme::graphics::Font::create(
+        static_cast<i32>(phoneme::graphics::FontFace::monospace),
+        phoneme::graphics::style_bold,
+        static_cast<i32>(phoneme::graphics::FontSize::large));
+    require(orientation_font.has_value(),
+            "create asymmetric glyph orientation font");
+    auto orientation_metrics =
+        phoneme::graphics::platform_font_metrics(*orientation_font);
+    auto orientation_width = phoneme::graphics::platform_text_width(
+        *orientation_font, orientation_text);
+    require(orientation_metrics.has_value() && orientation_width.has_value(),
+            "measure asymmetric glyph orientation fixture");
+    auto orientation_image = Image::create_mutable(
+        *orientation_width + 4, orientation_metrics->height);
+    require(orientation_image.has_value(),
+            "create asymmetric glyph orientation target");
+    require(phoneme::graphics::draw_platform_text(
+                *orientation_image,
+                *orientation_font,
+                orientation_text,
+                2,
+                0,
+                0xFF000000U,
+                phoneme::graphics::target_bounds(*orientation_image))
+                .has_value(),
+            "rasterize asymmetric glyph orientation fixture");
+    usize widest_row = 0U;
+    usize widest_ink = 0U;
+    for (i32 row = 0; row < orientation_image->height(); ++row) {
+        usize row_ink = 0U;
+        for (i32 column = 0; column < orientation_image->width(); ++column) {
+            if (orientation_image->pixel(column, row).value() != 0xFFFFFFFFU) {
+                ++row_ink;
+            }
+        }
+        if (row_ink > widest_ink) {
+            widest_ink = row_ink;
+            widest_row = static_cast<usize>(row);
+        }
+    }
+    require(widest_ink > 0U &&
+                widest_row < static_cast<usize>(orientation_image->height() / 2),
+            "phoneME bitmap glyph rows preserve top-down Canvas orientation");
+
+    constexpr std::array<char32_t, 1> fallback_orientation_text {U'⊤'};
+    auto fallback_orientation_width = phoneme::graphics::platform_text_width(
+        *unicode_font, fallback_orientation_text);
+    require(fallback_orientation_width.has_value(),
+            "measure asymmetric CoreText fallback glyph");
+    auto fallback_orientation_image = Image::create_mutable(
+        *fallback_orientation_width + 4, metrics->height);
+    require(fallback_orientation_image.has_value(),
+            "create CoreText fallback orientation target");
+    require(phoneme::graphics::draw_platform_text(
+                *fallback_orientation_image,
+                *unicode_font,
+                fallback_orientation_text,
+                2,
+                0,
+                0xFF000000U,
+                phoneme::graphics::target_bounds(*fallback_orientation_image))
+                .has_value(),
+            "rasterize asymmetric CoreText fallback glyph");
+    usize fallback_widest_row = 0U;
+    usize fallback_widest_ink = 0U;
+    for (i32 row = 0; row < fallback_orientation_image->height(); ++row) {
+        usize row_ink = 0U;
+        for (i32 column = 0;
+             column < fallback_orientation_image->width();
+             ++column) {
+            if (fallback_orientation_image->pixel(column, row).value() !=
+                0xFFFFFFFFU) {
+                ++row_ink;
+            }
+        }
+        if (row_ink > fallback_widest_ink) {
+            fallback_widest_ink = row_ink;
+            fallback_widest_row = static_cast<usize>(row);
+        }
+    }
+    require(fallback_widest_ink > 0U &&
+                fallback_widest_row < static_cast<usize>(
+                    fallback_orientation_image->height() / 2),
+            "CoreText fallback glyph rows preserve top-down Canvas orientation");
 
     auto narrow_target = Image::create_mutable(32, metrics->height + 2);
     require(narrow_target.has_value(), "create clipped text target");

@@ -90,7 +90,17 @@ using namespace builtin;
             "javax/microedition/media/PlayerListener",
             "java/lang/Object",
             kPublic | kInterface | kAbstract,
-            {},
+            {
+                field(kPublic | kStatic | kFinal, "STARTED", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "STOPPED", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "END_OF_MEDIA", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "DURATION_UPDATED", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "DEVICE_UNAVAILABLE", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "DEVICE_AVAILABLE", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "VOLUME_CHANGED", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "ERROR", "Ljava/lang/String;"),
+                field(kPublic | kStatic | kFinal, "CLOSED", "Ljava/lang/String;"),
+            },
             {method(kPublic | kAbstract,
                     "playerUpdate",
                     "(Ljavax/microedition/media/Player;Ljava/lang/String;Ljava/lang/Object;)V")});
@@ -100,7 +110,14 @@ using namespace builtin;
             "javax/microedition/media/Player",
             "java/lang/Object",
             kPublic | kInterface | kAbstract,
-            {},
+            {
+                field(kPublic | kStatic | kFinal, "UNREALIZED", "I"),
+                field(kPublic | kStatic | kFinal, "REALIZED", "I"),
+                field(kPublic | kStatic | kFinal, "PREFETCHED", "I"),
+                field(kPublic | kStatic | kFinal, "STARTED", "I"),
+                field(kPublic | kStatic | kFinal, "CLOSED", "I"),
+                field(kPublic | kStatic | kFinal, "TIME_UNKNOWN", "J"),
+            },
             {
                 method(kPublic | kAbstract, "realize", "()V"),
                 method(kPublic | kAbstract, "prefetch", "()V"),
@@ -156,7 +173,18 @@ using namespace builtin;
             "javax/microedition/media/control/ToneControl",
             "java/lang/Object",
             kPublic | kInterface | kAbstract,
-            {},
+            {
+                field(kPublic | kStatic | kFinal, "VERSION", "B"),
+                field(kPublic | kStatic | kFinal, "TEMPO", "B"),
+                field(kPublic | kStatic | kFinal, "RESOLUTION", "B"),
+                field(kPublic | kStatic | kFinal, "BLOCK_START", "B"),
+                field(kPublic | kStatic | kFinal, "BLOCK_END", "B"),
+                field(kPublic | kStatic | kFinal, "PLAY_BLOCK", "B"),
+                field(kPublic | kStatic | kFinal, "SET_VOLUME", "B"),
+                field(kPublic | kStatic | kFinal, "REPEAT", "B"),
+                field(kPublic | kStatic | kFinal, "SILENCE", "B"),
+                field(kPublic | kStatic | kFinal, "C4", "B"),
+            },
             {method(kPublic | kAbstract, "setSequence", "([B)V")},
             {"javax/microedition/media/Control"});
     }
@@ -269,7 +297,10 @@ using namespace builtin;
             "javax/microedition/media/Manager",
             "java/lang/Object",
             kOrdinary | kFinal,
-            {},
+            {
+                field(kPublic | kStatic | kFinal, "TONE_DEVICE_LOCATOR",
+                      "Ljava/lang/String;"),
+            },
             {
                 method(kPrivate, "<init>", "()V"),
                 method(kPublic | kStatic,

@@ -13,6 +13,9 @@ import javax.microedition.lcdui.DateField;
 import javax.microedition.lcdui.Displayable;
 import javax.microedition.lcdui.Form;
 import javax.microedition.lcdui.Gauge;
+import javax.microedition.lcdui.Graphics;
+import javax.microedition.lcdui.Image;
+import javax.microedition.lcdui.ImageItem;
 import javax.microedition.lcdui.Item;
 import javax.microedition.lcdui.ItemCommandListener;
 import javax.microedition.lcdui.ItemStateListener;
@@ -48,6 +51,12 @@ public final class LcduiApp extends MIDlet
                 TimeZone.getTimeZone("GMT+07:00"));
         dateField.setDate(new Date(1700000000000L));
         Spacer spacer = new Spacer(12, 18);
+        Image previewImage = Image.createImage(2, 3);
+        Graphics previewGraphics = previewImage.getGraphics();
+        previewGraphics.setColor(0x123456);
+        previewGraphics.fillRect(0, 0, 2, 3);
+        ImageItem preview = new ImageItem(
+                "Preview", previewImage, 0, "preview");
         StringItem action = new StringItem("Action", "Tap",
                 StringItem.BUTTON);
         Command itemCommand = new Command("Go", Command.ITEM, 1);
@@ -60,6 +69,7 @@ public final class LcduiApp extends MIDlet
         form.append(modes);
         form.append(dateField);
         form.append(spacer);
+        form.append(preview);
         form.append(action);
         form.append("Tail");
 

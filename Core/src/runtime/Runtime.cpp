@@ -59,6 +59,156 @@ constexpr usize kImageWidthField = 0;
 constexpr usize kImageHeightField = 1;
 constexpr usize kImageMutableField = 2;
 constexpr usize kGraphicsTargetField = 0;
+constexpr usize kImageItemImageField = 11;
+constexpr usize kImageItemGenerationField = 14;
+constexpr usize kCustomItemPaintImageField = 11;
+constexpr usize kCustomItemPaintGenerationField = 12;
+constexpr usize kAlertImageField = 10;
+constexpr usize kAlertImageGenerationField = 14;
+constexpr usize kChoiceGroupImagesField = 13;
+constexpr usize kListImagesField = 12;
+constexpr u32 kChoiceImageIndexBits = 8U;
+constexpr i64 kChoiceImageIndexMask =
+    (1LL << kChoiceImageIndexBits) - 1LL;
+
+struct LCDUIImageSource final {
+    vm::ObjectRef image;
+    u64 generation {0};
+};
+
+[[nodiscard]] Result<vm::ObjectRef> runtime_reference_field(
+    vm::Machine& machine,
+    vm::ObjectRef object,
+    usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_reference();
+}
+
+[[nodiscard]] Result<i32> runtime_int_field(vm::Machine& machine,
+                                            vm::ObjectRef object,
+                                            usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_int();
+}
+
+[[nodiscard]] Result<LCDUIImageSource> resolve_lcdui_image_source(
+    vm::Machine& machine,
+    i32 component_id) {
+    if (component_id == 0) {
+        return fail(ErrorCode::invalid_argument,
+                    "LCDUI image component ID is zero");
+    }
+
+    if (component_id < 0) {
+        const i64 packed = -static_cast<i64>(component_id);
+        const i64 owner_value = packed >> kChoiceImageIndexBits;
+        const i64 index_value = packed & kChoiceImageIndexMask;
+        if (owner_value <= 0 ||
+            owner_value > static_cast<i64>(std::numeric_limits<i32>::max())) {
+            return fail(ErrorCode::out_of_range,
+                        "LCDUI choice image owner is outside bounds");
+        }
+        auto owner = machine.ui_component(static_cast<i32>(owner_value));
+        if (!owner) return std::unexpected(owner.error());
+
+        auto is_list = machine.object_is_instance(
+            *owner, "javax/microedition/lcdui/List");
+        if (!is_list) return std::unexpected(is_list.error());
+        auto is_group = machine.object_is_instance(
+            *owner, "javax/microedition/lcdui/ChoiceGroup");
+        if (!is_group) return std::unexpected(is_group.error());
+        if (!*is_list && !*is_group) {
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI choice image owner is not a Choice");
+        }
+
+        auto images = runtime_reference_field(
+            machine,
+            *owner,
+            *is_list ? kListImagesField : kChoiceGroupImagesField);
+        if (!images) return std::unexpected(images.error());
+        if (images->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "LCDUI Choice has no image storage");
+        }
+        auto length = machine.heap().array_length(*images);
+        if (!length) return std::unexpected(length.error());
+        const usize index = static_cast<usize>(index_value);
+        if (index >= *length) {
+            return fail(ErrorCode::out_of_range,
+                        "LCDUI choice image index is outside bounds");
+        }
+        auto value = machine.heap().element(*images, index);
+        if (!value) return std::unexpected(value.error());
+        auto image = value->as_reference();
+        if (!image) return std::unexpected(image.error());
+        if (image->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "LCDUI choice element has no image");
+        }
+        return LCDUIImageSource {
+            .image = *image,
+            .generation = image->bits,
+        };
+    }
+
+    auto component = machine.ui_component(component_id);
+    if (!component) return std::unexpected(component.error());
+
+    auto is_image = machine.object_is_instance(
+        *component, "javax/microedition/lcdui/Image");
+    if (!is_image) return std::unexpected(is_image.error());
+    if (*is_image) {
+        return LCDUIImageSource {
+            .image = *component,
+            .generation = component->bits,
+        };
+    }
+
+    usize image_field = 0;
+    usize generation_field = 0;
+    auto is_alert = machine.object_is_instance(
+        *component, "javax/microedition/lcdui/Alert");
+    if (!is_alert) return std::unexpected(is_alert.error());
+    if (*is_alert) {
+        image_field = kAlertImageField;
+        generation_field = kAlertImageGenerationField;
+    } else {
+        auto is_custom = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/CustomItem");
+        if (!is_custom) return std::unexpected(is_custom.error());
+        if (*is_custom) {
+            image_field = kCustomItemPaintImageField;
+            generation_field = kCustomItemPaintGenerationField;
+        } else {
+            auto is_image_item = machine.object_is_instance(
+                *component, "javax/microedition/lcdui/ImageItem");
+            if (!is_image_item) return std::unexpected(is_image_item.error());
+            if (!*is_image_item) {
+                return fail(ErrorCode::invalid_argument,
+                            "LCDUI component does not expose an image");
+            }
+            image_field = kImageItemImageField;
+            generation_field = kImageItemGenerationField;
+        }
+    }
+
+    auto image = runtime_reference_field(machine, *component, image_field);
+    if (!image) return std::unexpected(image.error());
+    if (image->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "LCDUI component image is null");
+    }
+    auto generation = runtime_int_field(
+        machine, *component, generation_field);
+    if (!generation) return std::unexpected(generation.error());
+    return LCDUIImageSource {
+        .image = *image,
+        .generation = static_cast<u64>(std::max(*generation, 0)),
+    };
+}
 // Obfuscated Gameloft constructors can synchronously range-decode most of the
 // asset pack before startApp. This remains finite launch work, but routinely
 // exceeds the generic callback guard used for paint/input handlers.
@@ -744,6 +894,15 @@ Status Runtime::start_midlet(SuiteId suite_id,
                 .detail = std::move(event.detail),
             });
         });
+    // Clear the host's presentation state before the constructor/startApp can
+    // emit SCREEN_SHOWN or Canvas events. Emitting RESET after startApp caused
+    // an entire poll batch to build a native Form/List and then erase it again,
+    // leaving physical iOS devices on an empty framebuffer for LCDUI MIDlets.
+    ui_queue_.push(UiEvent {
+        .kind = 1,
+        .component_id = app_id.value,
+        .generation = lifecycle_token,
+    });
     auto configured = application_vm->machine.configure_network_owner(
         app_id.value);
     if (!configured) return fail_start(configured.error());
@@ -974,8 +1133,11 @@ Status Runtime::start_midlet(SuiteId suite_id,
         last_exit_code_ = 0;
     }
 
+    // This is lifecycle diagnostics, not an LCDUI reset. Kind NONE keeps it
+    // observable to compatibility tooling without invalidating the screen that
+    // startApp just published.
     ui_queue_.push(UiEvent {
-        .kind = 1,
+        .kind = 0,
         .component_id = app_id.value,
         .generation = event_generation,
         .detail = launch_signal == vm::MidletSignal::destroyed
@@ -1905,6 +2067,52 @@ FrameMetadata Runtime::frame_metadata() {
 FrameMetadata Runtime::copy_current_frame_rgba(
     std::span<u8> destination) const noexcept {
     return framebuffer_.copy_rgba(destination);
+}
+
+FrameMetadata Runtime::copy_lcdui_image_rgba(
+    i32 component_id,
+    std::span<u8> destination) {
+    std::shared_ptr<ApplicationVM> vm;
+    {
+        std::unique_lock lock(mutex_);
+        if (!running_ || suspended_) return {};
+        const App* app = find_app_unlocked(foreground_app_id_);
+        if (app == nullptr || app->vm == nullptr ||
+            (app->state != AppState::active &&
+             app->state != AppState::paused)) {
+            return {};
+        }
+        vm = app->vm;
+    }
+
+    std::scoped_lock vm_operation(vm->operation_mutex);
+    auto source = resolve_lcdui_image_source(vm->machine, component_id);
+    if (!source) return {};
+    auto image = vm->machine.graphics().image(source->image.bits);
+    if (!image) return {};
+
+    const auto pixels = (*image)->pixels();
+    const usize byte_count = pixels.size() * 4U;
+    FrameMetadata metadata {
+        .dimensions = {
+            .width = (*image)->width(),
+            .height = (*image)->height(),
+        },
+        .generation = source->generation,
+        .byte_count = byte_count,
+    };
+    if (destination.size() < byte_count) return metadata;
+
+    usize offset = 0U;
+    for (const graphics::Pixel pixel : pixels) {
+        const graphics::Pixel display_pixel =
+            graphics::rgb565_roundtrip(pixel);
+        destination[offset++] = graphics::red(display_pixel);
+        destination[offset++] = graphics::green(display_pixel);
+        destination[offset++] = graphics::blue(display_pixel);
+        destination[offset++] = graphics::alpha(display_pixel);
+    }
+    return metadata;
 }
 
 FrameSnapshot Runtime::frame_snapshot() {

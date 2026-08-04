@@ -722,6 +722,21 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         appID: existingAppID
                     )
                     if existingState == .destroyed || existingState == .error {
+                        if existingState == .error {
+                            // A failed visibility/input callback leaves its VM
+                            // allocated until forced destruction. Starting a
+                            // replacement without releasing that isolate first
+                            // leaks scheduler/network/media state and can make
+                            // the next launch fail with PHONEME_ERROR_SYSTEM_START
+                            // (-6), especially on a physical device.
+                            let destroyResult = loadedAPI.destroyMidlet(
+                                createdRuntime,
+                                appID: existingAppID
+                            )
+                            guard destroyResult == 0 else {
+                                throw PhoneMECoreError.launchFailed(destroyResult)
+                            }
+                        }
                         context.removeApplication(gameID: gameID)
                         guard let replacementAppID = context.nextAvailableAppID() else {
                             throw PhoneMECoreError.tooManyApplications
@@ -1520,7 +1535,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     break
                 }
 
-                if event.arguments.3 == -1004 {
+                if event.arguments.3 == -1004 || event.arguments.3 == -1009 {
                     imageComponentIDs.insert(event.componentID)
                 } else if event.kind == 12, event.arguments.3 < 0 {
                     imageComponentIDs.insert(event.arguments.3)

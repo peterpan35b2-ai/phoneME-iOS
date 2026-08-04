@@ -496,19 +496,34 @@ void append_utf8(std::string& output, u32 code_point) {
     auto selected = selected_at(machine, object, layout, index);
     auto fit = int_field(machine, object, layout.fit_policy);
     auto type = int_field(machine, object, layout.type);
+    auto image = choice_image(machine, object, layout, index);
     if (!component_id) return std::unexpected(component_id.error());
     if (!text) return std::unexpected(text.error());
     if (!selected) return std::unexpected(selected.error());
     if (!fit) return std::unexpected(fit.error());
     if (!type) return std::unexpected(type.error());
+    if (!image) return std::unexpected(image.error());
     auto encoded = string_utf8(machine, *text);
     if (!encoded) return std::unexpected(encoded.error());
+
+    i32 image_key = 0;
+    // Eight index bits keep the synthetic key inside signed Int32 for all
+    // 64 app namespaces supported by the iOS host.
+    if (!image->is_null() && index >= 0 && index < 256) {
+        const i64 packed =
+            (static_cast<i64>(*component_id) << 8U) |
+            static_cast<i64>(index);
+        if (packed > 0 &&
+            packed <= static_cast<i64>(std::numeric_limits<i32>::max())) {
+            image_key = -static_cast<i32>(packed);
+        }
+    }
     return UiBridgeEvent {
         .kind = kEventChoiceElement,
         .component_id = *component_id,
         .component_type = component_type(*type),
         .index = index,
-        .arguments = {*selected ? 1 : 0, 0, *fit, -1},
+        .arguments = {*selected ? 1 : 0, 0, *fit, image_key},
         .text = std::move(*encoded),
     };
 }

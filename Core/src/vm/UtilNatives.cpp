@@ -177,6 +177,33 @@ void add(NativeMethodRegistry& registry,
     return *object;
 }
 
+[[nodiscard]] Result<std::u16string> collection_value_text(
+    Machine& machine,
+    ObjectRef value,
+    ObjectRef owner,
+    std::u16string_view self_text) {
+    if (value.is_null()) return std::u16string(u"null");
+    if (value == owner) return std::u16string(self_text);
+    auto class_name = machine.heap().class_name(value);
+    if (!class_name) return std::unexpected(class_name.error());
+    auto invoked = machine.invoke_instance(
+        value, *class_name, "toString", "()Ljava/lang/String;");
+    if (!invoked) return std::unexpected(invoked.error());
+    if (invoked->throwable.has_value()) {
+        auto thrown = machine.heap().class_name(*invoked->throwable);
+        if (!thrown) return std::unexpected(thrown.error());
+        return fail_java(*thrown, "collection element toString threw");
+    }
+    if (!invoked->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "collection element toString returned no value");
+    }
+    auto string = invoked->return_value->as_reference();
+    if (!string) return std::unexpected(string.error());
+    if (string->is_null()) return std::u16string(u"null");
+    return machine.heap().string_value(*string);
+}
+
 [[nodiscard]] constexpr bool is_high_surrogate(char16_t value) noexcept {
     return value >= static_cast<char16_t>(0xD800U) &&
            value <= static_cast<char16_t>(0xDBFFU);
@@ -1265,6 +1292,35 @@ void register_vector(NativeMethodRegistry& registry) {
             if (!enumeration) return std::unexpected(enumeration.error());
             return std::optional<Value>(Value::from_reference(*enumeration));
         });
+    add(registry, "java/util/Vector", "toString", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "Vector state is invalid");
+            }
+            std::u16string text(u"[");
+            for (i32 index = 0; index < *count; ++index) {
+                if (index != 0) text.append(u", ");
+                auto value = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto reference = value->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                auto value_text = collection_value_text(
+                    machine, *reference, *object, u"(this Collection)");
+                if (!value_text) return std::unexpected(value_text.error());
+                text.append(*value_text);
+            }
+            text.push_back(u']');
+            auto string = create_string(machine, std::move(text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
 
     add(registry, "java/util/Stack", "push",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
@@ -1897,6 +1953,71 @@ void register_hashtable(NativeMethodRegistry& registry) {
     };
     enumeration("keys", false);
     enumeration("elements", true);
+    add(registry, "java/util/Hashtable", "rehash", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto keys = reference_field(machine, *object, kHashtableKeysField);
+            if (!keys) return std::unexpected(keys.error());
+            auto capacity = machine.heap().array_length(*keys);
+            if (!capacity) return std::unexpected(capacity.error());
+            if (*capacity > static_cast<usize>(
+                    (std::numeric_limits<i32>::max() - 1) / 2)) {
+                return fail_java("java/lang/OutOfMemoryError",
+                                 "Hashtable capacity overflowed");
+            }
+            auto grown = ensure_hashtable_capacity(
+                machine, *object, static_cast<i32>(*capacity * 2U + 1U));
+            if (!grown) return std::unexpected(grown.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Hashtable", "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kHashtableCountField);
+            auto keys = reference_field(machine, *object, kHashtableKeysField);
+            auto values = reference_field(machine, *object,
+                                          kHashtableValuesField);
+            if (!count || !keys || !values) {
+                return fail(ErrorCode::invalid_state,
+                            "Hashtable state is invalid");
+            }
+            std::u16string text(u"{");
+            for (i32 index = 0; index < *count; ++index) {
+                if (index != 0) text.append(u", ");
+                auto key_value = machine.heap().element(
+                    *keys, static_cast<usize>(index));
+                auto mapped_value = machine.heap().element(
+                    *values, static_cast<usize>(index));
+                if (!key_value || !mapped_value) {
+                    return fail(ErrorCode::invalid_state,
+                                "Hashtable entry is invalid");
+                }
+                auto key = key_value->as_reference();
+                auto value = mapped_value->as_reference();
+                if (!key || !value) {
+                    return fail(ErrorCode::invalid_state,
+                                "Hashtable entry is not a reference");
+                }
+                auto key_text = collection_value_text(
+                    machine, *key, *object, u"(this Map)");
+                auto value_text = collection_value_text(
+                    machine, *value, *object, u"(this Map)");
+                if (!key_text) return std::unexpected(key_text.error());
+                if (!value_text) return std::unexpected(value_text.error());
+                text.append(*key_text);
+                text.push_back(u'=');
+                text.append(*value_text);
+            }
+            text.push_back(u'}');
+            auto string = create_string(machine, std::move(text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
 }
 
 [[nodiscard]] Result<i32> random_next(Machine& machine,

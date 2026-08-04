@@ -1115,6 +1115,12 @@ void register_character_wrapper(NativeMethodRegistry& registry) {
         return value == u' ' || value == u'\t' || value == u'\n' ||
                value == u'\r' || value == u'\f';
     });
+    predicate("isLowerCase", [](char16_t value) {
+        return value >= u'a' && value <= u'z';
+    });
+    predicate("isUpperCase", [](char16_t value) {
+        return value >= u'A' && value <= u'Z';
+    });
     add(registry, "java/lang/Character", "digit", "(CI)I",
         [](Machine&, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1211,6 +1217,20 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
+    if (is_float) {
+        add(registry, class_name, "<init>", "(D)V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto parsed = arguments[1].as_double();
+                if (!object) return std::unexpected(object.error());
+                if (!parsed) return std::unexpected(parsed.error());
+                auto stored = machine.heap().set_field(
+                    *object, 0, Value::from_float(static_cast<float>(*parsed)));
+                if (!stored) return std::unexpected(stored.error());
+                return std::optional<Value> {};
+            });
+    }
     add(registry, class_name, "valueOf",
         "(" + primitive_descriptor + ")" + object_descriptor,
         [class_name, is_float](Machine& machine,
@@ -1246,6 +1266,22 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
         if (!parsed) return std::unexpected(parsed.error());
         return static_cast<Number>(*parsed);
     };
+    add(registry, class_name, "byteValue", "()B",
+        [read_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = read_number(machine, arguments);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(static_cast<i32>(
+                static_cast<i8>(floating_to_int(*value)))));
+        });
+    add(registry, class_name, "shortValue", "()S",
+        [read_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = read_number(machine, arguments);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(static_cast<i32>(
+                static_cast<i16>(floating_to_int(*value)))));
+        });
     add(registry, class_name, "intValue", "()I",
         [read_number](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1277,6 +1313,48 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(Value::from_double(
                 static_cast<double>(*value)));
+        });
+    add(registry, class_name, "isNaN", "()Z",
+        [read_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = read_number(machine, arguments);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(
+                std::isnan(*value) ? 1 : 0));
+        });
+    add(registry, class_name, "isNaN",
+        "(" + primitive_descriptor + ")Z",
+        [is_float](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            const bool result = is_float
+                ? arguments[0].as_float().transform([](float value) {
+                      return std::isnan(value);
+                  }).value_or(false)
+                : arguments[0].as_double().transform([](double value) {
+                      return std::isnan(value);
+                  }).value_or(false);
+            return std::optional<Value>(Value::from_int(result ? 1 : 0));
+        });
+    add(registry, class_name, "isInfinite", "()Z",
+        [read_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = read_number(machine, arguments);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(
+                std::isinf(*value) ? 1 : 0));
+        });
+    add(registry, class_name, "isInfinite",
+        "(" + primitive_descriptor + ")Z",
+        [is_float](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            const bool result = is_float
+                ? arguments[0].as_float().transform([](float value) {
+                      return std::isinf(value);
+                  }).value_or(false)
+                : arguments[0].as_double().transform([](double value) {
+                      return std::isinf(value);
+                  }).value_or(false);
+            return std::optional<Value>(Value::from_int(result ? 1 : 0));
         });
     add(registry, class_name, "toString", "()Ljava/lang/String;",
         [read_number](Machine& machine, std::span<const Value> arguments)
@@ -1531,6 +1609,27 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 auto object = receiver(arguments);
                 auto message = arguments[1].as_reference();
                 if (!object) return std::unexpected(object.error());
+                if (!message) return std::unexpected(message.error());
+                auto initialized = initialize_throwable(
+                    machine, *object, *message, {}, false);
+                if (!initialized) return std::unexpected(initialized.error());
+                return std::optional<Value> {};
+            });
+    }
+
+    for (const std::string_view class_name : {
+             std::string_view("java/lang/ArrayIndexOutOfBoundsException"),
+             std::string_view("java/lang/StringIndexOutOfBoundsException")}) {
+        add(registry, std::string(class_name), "<init>", "(I)V",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto index = arguments[1].as_int();
+                if (!object) return std::unexpected(object.error());
+                if (!index) return std::unexpected(index.error());
+                auto text = signed_text(*index, 10);
+                if (!text) return std::unexpected(text.error());
+                auto message = create_string(machine, std::move(*text));
                 if (!message) return std::unexpected(message.error());
                 auto initialized = initialize_throwable(
                     machine, *object, *message, {}, false);

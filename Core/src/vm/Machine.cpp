@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <numbers>
 #include <utility>
 #include <vector>
 
@@ -1959,6 +1960,376 @@ namespace phoneme::vm
         if (!stored)
           return std::unexpected(stored.error());
       }
+    }
+    const auto set_static_constant =
+        [this, &canonical_name](std::string_view field_name,
+                                std::string_view descriptor,
+                                Value value) -> Status
+    {
+      auto field = states_.resolve_field(
+          canonical_name, field_name, descriptor, true);
+      if (!field)
+        return std::unexpected(field.error());
+      return states_.set_static_field(*field, value);
+    };
+    const auto set_int_constants =
+        [&set_static_constant](
+            std::span<const std::pair<std::string_view, i32>> constants,
+            std::string_view descriptor = "I") -> Status
+    {
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_constant(
+            field_name, descriptor, Value::from_int(value));
+        if (!stored)
+          return std::unexpected(stored.error());
+      }
+      return {};
+    };
+    const auto set_static_string =
+        [this, &set_static_constant](std::string_view field_name,
+                                     std::string_view value) -> Status
+    {
+      std::u16string text;
+      text.reserve(value.size());
+      for (const char character : value)
+        text.push_back(static_cast<char16_t>(
+            static_cast<unsigned char>(character)));
+      auto string = states_.allocate_instance(heap_, "java/lang/String");
+      if (!string)
+        return std::unexpected(string.error());
+      auto attached = heap_.attach_string(*string, std::move(text));
+      if (!attached)
+        return std::unexpected(attached.error());
+      return set_static_constant(
+          field_name, "Ljava/lang/String;",
+          Value::from_reference(*string));
+    };
+    if (canonical_name == "java/lang/Byte")
+    {
+      auto minimum = set_static_constant(
+          "MIN_VALUE", "B", Value::from_int(std::numeric_limits<i8>::min()));
+      auto maximum = set_static_constant(
+          "MAX_VALUE", "B", Value::from_int(std::numeric_limits<i8>::max()));
+      if (!minimum) return std::unexpected(minimum.error());
+      if (!maximum) return std::unexpected(maximum.error());
+    }
+    else if (canonical_name == "java/lang/Short")
+    {
+      auto minimum = set_static_constant(
+          "MIN_VALUE", "S", Value::from_int(std::numeric_limits<i16>::min()));
+      auto maximum = set_static_constant(
+          "MAX_VALUE", "S", Value::from_int(std::numeric_limits<i16>::max()));
+      if (!minimum) return std::unexpected(minimum.error());
+      if (!maximum) return std::unexpected(maximum.error());
+    }
+    else if (canonical_name == "java/lang/Integer")
+    {
+      auto minimum = set_static_constant(
+          "MIN_VALUE", "I", Value::from_int(std::numeric_limits<i32>::min()));
+      auto maximum = set_static_constant(
+          "MAX_VALUE", "I", Value::from_int(std::numeric_limits<i32>::max()));
+      if (!minimum) return std::unexpected(minimum.error());
+      if (!maximum) return std::unexpected(maximum.error());
+    }
+    else if (canonical_name == "java/lang/Long")
+    {
+      auto minimum = set_static_constant(
+          "MIN_VALUE", "J", Value::from_long(std::numeric_limits<i64>::min()));
+      auto maximum = set_static_constant(
+          "MAX_VALUE", "J", Value::from_long(std::numeric_limits<i64>::max()));
+      if (!minimum) return std::unexpected(minimum.error());
+      if (!maximum) return std::unexpected(maximum.error());
+    }
+    else if (canonical_name == "java/lang/Character")
+    {
+      const std::array<std::pair<std::string_view, i32>, 4> constants {{
+          {"MIN_RADIX", 2},
+          {"MAX_RADIX", 36},
+          {"MIN_VALUE", 0},
+          {"MAX_VALUE", 0xFFFF},
+      }};
+      for (const auto &[field_name, value] : constants)
+      {
+        const std::string_view descriptor =
+            field_name.ends_with("VALUE") ? "C" : "I";
+        auto stored = set_static_constant(
+            field_name, descriptor, Value::from_int(value));
+        if (!stored) return std::unexpected(stored.error());
+      }
+    }
+    else if (canonical_name == "java/lang/Float")
+    {
+      const std::array<std::pair<std::string_view, float>, 5> constants {{
+          {"POSITIVE_INFINITY", std::numeric_limits<float>::infinity()},
+          {"NEGATIVE_INFINITY", -std::numeric_limits<float>::infinity()},
+          {"NaN", std::numeric_limits<float>::quiet_NaN()},
+          {"MAX_VALUE", std::numeric_limits<float>::max()},
+          {"MIN_VALUE", std::numeric_limits<float>::denorm_min()},
+      }};
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_constant(
+            field_name, "F", Value::from_float(value));
+        if (!stored) return std::unexpected(stored.error());
+      }
+    }
+    else if (canonical_name == "java/lang/Double")
+    {
+      const std::array<std::pair<std::string_view, double>, 5> constants {{
+          {"POSITIVE_INFINITY", std::numeric_limits<double>::infinity()},
+          {"NEGATIVE_INFINITY", -std::numeric_limits<double>::infinity()},
+          {"NaN", std::numeric_limits<double>::quiet_NaN()},
+          {"MAX_VALUE", std::numeric_limits<double>::max()},
+          {"MIN_VALUE", std::numeric_limits<double>::denorm_min()},
+      }};
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_constant(
+            field_name, "D", Value::from_double(value));
+        if (!stored) return std::unexpected(stored.error());
+      }
+    }
+    else if (canonical_name == "java/lang/Math")
+    {
+      auto e = set_static_constant(
+          "E", "D", Value::from_double(std::numbers::e_v<double>));
+      auto pi = set_static_constant(
+          "PI", "D", Value::from_double(std::numbers::pi_v<double>));
+      if (!e) return std::unexpected(e.error());
+      if (!pi) return std::unexpected(pi.error());
+    }
+    else if (canonical_name == "java/util/Calendar")
+    {
+      const std::array<std::pair<std::string_view, i32>, 31> constants {{
+          {"YEAR", 1}, {"MONTH", 2}, {"DATE", 5},
+          {"DAY_OF_MONTH", 5}, {"DAY_OF_WEEK", 7}, {"AM_PM", 9},
+          {"HOUR", 10}, {"HOUR_OF_DAY", 11}, {"MINUTE", 12},
+          {"SECOND", 13}, {"MILLISECOND", 14},
+          {"SUNDAY", 1}, {"MONDAY", 2}, {"TUESDAY", 3},
+          {"WEDNESDAY", 4}, {"THURSDAY", 5}, {"FRIDAY", 6},
+          {"SATURDAY", 7},
+          {"JANUARY", 0}, {"FEBRUARY", 1}, {"MARCH", 2},
+          {"APRIL", 3}, {"MAY", 4}, {"JUNE", 5}, {"JULY", 6},
+          {"AUGUST", 7}, {"SEPTEMBER", 8}, {"OCTOBER", 9},
+          {"NOVEMBER", 10}, {"DECEMBER", 11}, {"AM", 0},
+      }};
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_constant(
+            field_name, "I", Value::from_int(value));
+        if (!stored) return std::unexpected(stored.error());
+      }
+      auto pm = set_static_constant("PM", "I", Value::from_int(1));
+      if (!pm) return std::unexpected(pm.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Choice")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"EXCLUSIVE", 1},
+          {"MULTIPLE", 2}, {"IMPLICIT", 3}, {"POPUP", 4},
+          {"TEXT_WRAP_DEFAULT", 0}, {"TEXT_WRAP_ON", 1},
+          {"TEXT_WRAP_OFF", 2},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Canvas")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"KEY_NUM0", 48},
+          {"KEY_NUM1", 49}, {"KEY_NUM2", 50}, {"KEY_NUM3", 51},
+          {"KEY_NUM4", 52}, {"KEY_NUM5", 53}, {"KEY_NUM6", 54},
+          {"KEY_NUM7", 55}, {"KEY_NUM8", 56}, {"KEY_NUM9", 57},
+          {"KEY_STAR", 42}, {"KEY_POUND", 35}, {"UP", 1},
+          {"DOWN", 6}, {"LEFT", 2}, {"RIGHT", 5}, {"FIRE", 8},
+          {"GAME_A", 9}, {"GAME_B", 10}, {"GAME_C", 11},
+          {"GAME_D", 12},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/game/GameCanvas")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"UP_PRESSED", 1 << 1},
+          {"DOWN_PRESSED", 1 << 6}, {"LEFT_PRESSED", 1 << 2},
+          {"RIGHT_PRESSED", 1 << 5}, {"FIRE_PRESSED", 1 << 8},
+          {"GAME_A_PRESSED", 1 << 9}, {"GAME_B_PRESSED", 1 << 10},
+          {"GAME_C_PRESSED", 1 << 11}, {"GAME_D_PRESSED", 1 << 12},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Graphics")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"HCENTER", 1},
+          {"VCENTER", 2}, {"LEFT", 4}, {"RIGHT", 8}, {"TOP", 16},
+          {"BOTTOM", 32}, {"BASELINE", 64}, {"SOLID", 0},
+          {"DOTTED", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Font")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"STYLE_PLAIN", 0},
+          {"STYLE_BOLD", 1}, {"STYLE_ITALIC", 2},
+          {"STYLE_UNDERLINED", 4}, {"SIZE_SMALL", 8},
+          {"SIZE_MEDIUM", 0}, {"SIZE_LARGE", 16}, {"FACE_SYSTEM", 0},
+          {"FACE_MONOSPACE", 32}, {"FACE_PROPORTIONAL", 64},
+          {"FONT_STATIC_TEXT", 0}, {"FONT_INPUT_TEXT", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Command")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"SCREEN", 1}, {"BACK", 2},
+          {"CANCEL", 3}, {"OK", 4}, {"HELP", 5}, {"STOP", 6},
+          {"EXIT", 7}, {"ITEM", 8},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Item")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"LAYOUT_DEFAULT", 0},
+          {"LAYOUT_LEFT", 1}, {"LAYOUT_RIGHT", 2},
+          {"LAYOUT_CENTER", 3}, {"LAYOUT_TOP", 0x10},
+          {"LAYOUT_BOTTOM", 0x20}, {"LAYOUT_VCENTER", 0x30},
+          {"LAYOUT_NEWLINE_BEFORE", 0x100},
+          {"LAYOUT_NEWLINE_AFTER", 0x200}, {"LAYOUT_SHRINK", 0x400},
+          {"LAYOUT_EXPAND", 0x800}, {"LAYOUT_VSHRINK", 0x1000},
+          {"LAYOUT_VEXPAND", 0x2000}, {"LAYOUT_2", 0x4000},
+          {"PLAIN", 0}, {"HYPERLINK", 1}, {"BUTTON", 2},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/TextField")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"ANY", 0}, {"EMAILADDR", 1},
+          {"NUMERIC", 2}, {"PHONENUMBER", 3}, {"URL", 4},
+          {"DECIMAL", 5}, {"CONSTRAINT_MASK", 0xFFFF},
+          {"PASSWORD", 0x10000}, {"UNEDITABLE", 0x20000},
+          {"SENSITIVE", 0x40000}, {"NON_PREDICTIVE", 0x80000},
+          {"INITIAL_CAPS_WORD", 0x100000},
+          {"INITIAL_CAPS_SENTENCE", 0x200000},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/Gauge")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"INDEFINITE", -1},
+          {"CONTINUOUS_IDLE", 0}, {"INCREMENTAL_IDLE", 1},
+          {"CONTINUOUS_RUNNING", 2}, {"INCREMENTAL_UPDATING", 3},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/DateField")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"DATE", 1}, {"TIME", 2},
+          {"DATE_TIME", 3},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/CustomItem")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"NONE", 0},
+          {"TRAVERSE_HORIZONTAL", 1}, {"TRAVERSE_VERTICAL", 2},
+          {"KEY_PRESS", 4}, {"KEY_RELEASE", 8}, {"KEY_REPEAT", 0x10},
+          {"POINTER_PRESS", 0x20}, {"POINTER_RELEASE", 0x40},
+          {"POINTER_DRAG", 0x80},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/lcdui/game/Sprite")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"TRANS_NONE", 0},
+          {"TRANS_ROT90", 5}, {"TRANS_ROT180", 3}, {"TRANS_ROT270", 6},
+          {"TRANS_MIRROR", 2}, {"TRANS_MIRROR_ROT90", 7},
+          {"TRANS_MIRROR_ROT180", 1}, {"TRANS_MIRROR_ROT270", 4},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/Player")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"UNREALIZED", 100},
+          {"REALIZED", 200}, {"PREFETCHED", 300}, {"STARTED", 400},
+          {"CLOSED", 0},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+      auto unknown = set_static_constant(
+          "TIME_UNKNOWN", "J", Value::from_long(-1));
+      if (!unknown) return std::unexpected(unknown.error());
+    }
+    else if (canonical_name == "javax/microedition/media/control/ToneControl")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"VERSION", -2}, {"TEMPO", -3},
+          {"RESOLUTION", -4}, {"BLOCK_START", -5}, {"BLOCK_END", -6},
+          {"PLAY_BLOCK", -7}, {"SET_VOLUME", -8}, {"REPEAT", -9},
+          {"SILENCE", -1}, {"C4", 60},
+      };
+      auto stored = set_int_constants(constants, "B");
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/Manager")
+    {
+      auto stored = set_static_string("TONE_DEVICE_LOCATOR", "device://tone");
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/PlayerListener")
+    {
+      constexpr std::pair<std::string_view, std::string_view> constants[] {
+          std::pair<std::string_view, std::string_view>{"STARTED", "started"},
+          {"STOPPED", "stopped"}, {"END_OF_MEDIA", "endOfMedia"},
+          {"DURATION_UPDATED", "durationUpdated"},
+          {"DEVICE_UNAVAILABLE", "deviceUnavailable"},
+          {"DEVICE_AVAILABLE", "deviceAvailable"},
+          {"VOLUME_CHANGED", "volumeChanged"}, {"ERROR", "error"},
+          {"CLOSED", "closed"},
+      };
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_string(field_name, value);
+        if (!stored) return std::unexpected(stored.error());
+      }
+    }
+    else if (canonical_name == "javax/microedition/rms/RecordComparator")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"PRECEDES", -1},
+          {"EQUIVALENT", 0}, {"FOLLOWS", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/rms/RecordStore")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"AUTHMODE_PRIVATE", 0},
+          {"AUTHMODE_ANY", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
     }
     if (canonical_name == "java/lang/Boolean")
     {

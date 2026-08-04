@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <charconv>
 #include <chrono>
@@ -133,6 +134,64 @@ template <typename Number>
     return *reference;
 }
 
+std::atomic<u64> thread_name_sequence {0};
+
+[[nodiscard]] Result<FieldLocation> thread_name_field(Machine& machine) {
+    return machine.class_states().resolve_field(
+        "java/lang/Thread", "name", "Ljava/lang/String;", false);
+}
+
+[[nodiscard]] Result<ObjectRef> make_default_thread_name(Machine& machine) {
+    const u64 sequence =
+        thread_name_sequence.fetch_add(1U, std::memory_order_relaxed) + 1U;
+    auto suffix = integral_text(sequence);
+    if (!suffix) {
+        return std::unexpected(suffix.error());
+    }
+    std::u16string name(u"Thread-");
+    name.append(*suffix);
+    return create_java_string(machine, std::move(name));
+}
+
+[[nodiscard]] Status set_thread_name(Machine& machine,
+                                     ObjectRef thread,
+                                     ObjectRef name) {
+    auto field = thread_name_field(machine);
+    if (!field) {
+        return std::unexpected(field.error());
+    }
+    return machine.heap().set_field(
+        thread, field->index, Value::from_reference(name));
+}
+
+[[nodiscard]] Result<ObjectRef> get_thread_name(Machine& machine,
+                                                ObjectRef thread) {
+    auto field = thread_name_field(machine);
+    if (!field) {
+        return std::unexpected(field.error());
+    }
+    auto value = machine.heap().field(thread, field->index);
+    if (!value) {
+        return std::unexpected(value.error());
+    }
+    auto name = value->as_reference();
+    if (!name) {
+        return std::unexpected(name.error());
+    }
+    if (!name->is_null()) {
+        return *name;
+    }
+    auto generated = make_default_thread_name(machine);
+    if (!generated) {
+        return std::unexpected(generated.error());
+    }
+    auto stored = set_thread_name(machine, thread, *generated);
+    if (!stored) {
+        return std::unexpected(stored.error());
+    }
+    return *generated;
+}
+
 [[nodiscard]] Result<std::string> array_component_name(
     std::string_view descriptor) {
     if (descriptor.size() < 2U || descriptor.front() != '[') {
@@ -193,13 +252,58 @@ void add(NativeMethodRegistry& registry,
          std::string name,
          std::string descriptor,
          NativeMethod method) {
+    const std::string diagnostic_owner = owner;
+    const std::string diagnostic_name = name;
+    const std::string diagnostic_descriptor = descriptor;
     const auto registered = registry.register_method(std::move(owner),
                                                      std::move(name),
                                                      std::move(descriptor),
                                                      std::move(method));
     if (!registered) {
+        std::fprintf(stderr,
+                     "failed to register native %s.%s%s: %s\n",
+                     diagnostic_owner.c_str(), diagnostic_name.c_str(),
+                     diagnostic_descriptor.c_str(),
+                     registered.error().message.c_str());
         std::terminate();
     }
+}
+
+constexpr usize kBuilderCapacityField = 0U;
+
+[[nodiscard]] Result<i32> builder_capacity(Machine& machine,
+                                           ObjectRef builder) {
+    auto value = machine.heap().field(builder, kBuilderCapacityField);
+    if (!value) return std::unexpected(value.error());
+    return value->as_int();
+}
+
+[[nodiscard]] Status set_builder_capacity(Machine& machine,
+                                          ObjectRef builder,
+                                          i32 capacity) {
+    return machine.heap().set_field(
+        builder, kBuilderCapacityField, Value::from_int(capacity));
+}
+
+[[nodiscard]] Status ensure_builder_capacity(Machine& machine,
+                                             ObjectRef builder,
+                                             usize required) {
+    if (required > static_cast<usize>(std::numeric_limits<i32>::max())) {
+        return fail_java("java/lang/OutOfMemoryError",
+                         "string builder capacity exceeds int range");
+    }
+    auto current = builder_capacity(machine, builder);
+    if (!current) return std::unexpected(current.error());
+    const usize current_capacity = static_cast<usize>(std::max(*current, 0));
+    if (required <= current_capacity) return {};
+    usize grown = current_capacity;
+    if (grown <= (static_cast<usize>(std::numeric_limits<i32>::max()) - 2U) / 2U) {
+        grown = grown * 2U + 2U;
+    } else {
+        grown = static_cast<usize>(std::numeric_limits<i32>::max());
+    }
+    grown = std::max(grown, required);
+    return set_builder_capacity(machine, builder, static_cast<i32>(grown));
 }
 
 [[nodiscard]] Result<std::optional<Value>> append_builder_text(
@@ -218,11 +322,41 @@ void add(NativeMethodRegistry& registry,
         return fail(ErrorCode::overflow,
                     "Java string builder exceeds its maximum size");
     }
+    auto capacity = ensure_builder_capacity(
+        machine, *receiver, text->size() + suffix.size());
+    if (!capacity) return std::unexpected(capacity.error());
     text->append(suffix);
     auto stored = machine.heap().attach_string(*receiver, std::move(*text));
     if (!stored) {
         return std::unexpected(stored.error());
     }
+    return std::optional<Value>(Value::from_reference(*receiver));
+}
+
+[[nodiscard]] Result<std::optional<Value>> insert_builder_text(
+    Machine& machine,
+    std::span<const Value> arguments,
+    std::u16string inserted) {
+    auto receiver = require_receiver(arguments);
+    auto offset = arguments[1].as_int();
+    if (!receiver) return std::unexpected(receiver.error());
+    if (!offset) return std::unexpected(offset.error());
+    auto text = machine.heap().string_value(*receiver);
+    if (!text) return std::unexpected(text.error());
+    if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
+        return fail_java("java/lang/StringIndexOutOfBoundsException",
+                         "string builder insert offset is out of range");
+    }
+    if (inserted.size() > text->max_size() - text->size()) {
+        return fail(ErrorCode::overflow,
+                    "Java string builder exceeds its maximum size");
+    }
+    auto capacity = ensure_builder_capacity(
+        machine, *receiver, text->size() + inserted.size());
+    if (!capacity) return std::unexpected(capacity.error());
+    text->insert(static_cast<usize>(*offset), inserted);
+    auto stored = machine.heap().attach_string(*receiver, std::move(*text));
+    if (!stored) return std::unexpected(stored.error());
     return std::optional<Value>(Value::from_reference(*receiver));
 }
 
@@ -247,6 +381,8 @@ void register_text_builder(NativeMethodRegistry& registry,
             if (!attached) {
                 return std::unexpected(attached.error());
             }
+            auto capacity = set_builder_capacity(machine, *receiver, 16);
+            if (!capacity) return std::unexpected(capacity.error());
             return std::optional<Value> {};
         });
     add(registry, class_name, "<init>", "(I)V",
@@ -272,6 +408,11 @@ void register_text_builder(NativeMethodRegistry& registry,
             if (!attached) {
                 return std::unexpected(attached.error());
             }
+            auto stored_capacity = set_builder_capacity(
+                machine, *receiver, *capacity);
+            if (!stored_capacity) {
+                return std::unexpected(stored_capacity.error());
+            }
             return std::optional<Value> {};
         });
     add(registry, class_name, "<init>", "(Ljava/lang/String;)V",
@@ -294,11 +435,20 @@ void register_text_builder(NativeMethodRegistry& registry,
             if (!text) {
                 return std::unexpected(text.error());
             }
+            const usize initial_capacity = text->size() + 16U;
+            if (initial_capacity > static_cast<usize>(
+                    std::numeric_limits<i32>::max())) {
+                return fail_java("java/lang/OutOfMemoryError",
+                                 "string builder capacity exceeds int range");
+            }
             auto attached = machine.heap().attach_string(*receiver,
                                                          std::move(*text));
             if (!attached) {
                 return std::unexpected(attached.error());
             }
+            auto capacity = set_builder_capacity(
+                machine, *receiver, static_cast<i32>(initial_capacity));
+            if (!capacity) return std::unexpected(capacity.error());
             return std::optional<Value> {};
         });
 
@@ -495,6 +645,15 @@ void register_text_builder(NativeMethodRegistry& registry,
             return std::optional<Value>(
                 Value::from_int(static_cast<i32>(text->size())));
         });
+    add(registry, class_name, "capacity", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto capacity = builder_capacity(machine, *receiver);
+            if (!capacity) return std::unexpected(capacity.error());
+            return std::optional<Value>(Value::from_int(*capacity));
+        });
     add(registry, class_name, "charAt", "(I)C",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -663,25 +822,12 @@ void register_text_builder(NativeMethodRegistry& registry,
                 return fail(ErrorCode::invalid_argument,
                             "string builder insert(String) arguments are invalid");
             }
-            auto receiver = require_receiver(arguments);
-            auto offset = arguments[1].as_int();
             auto source = arguments[2].as_reference();
-            if (!receiver) return std::unexpected(receiver.error());
-            if (!offset) return std::unexpected(offset.error());
             if (!source) return std::unexpected(source.error());
-            auto text = machine.heap().string_value(*receiver);
             auto inserted = object_text(machine, *source);
-            if (!text) return std::unexpected(text.error());
             if (!inserted) return std::unexpected(inserted.error());
-            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
-                return fail_java("java/lang/StringIndexOutOfBoundsException",
-                                 "string builder insert offset is out of range");
-            }
-            text->insert(static_cast<usize>(*offset), *inserted);
-            auto stored = machine.heap().attach_string(*receiver,
-                                                       std::move(*text));
-            if (!stored) return std::unexpected(stored.error());
-            return std::optional<Value>(Value::from_reference(*receiver));
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
         });
     add(registry, class_name, "insert", "(IC)" + return_descriptor,
         [](Machine& machine, std::span<const Value> arguments)
@@ -690,24 +836,12 @@ void register_text_builder(NativeMethodRegistry& registry,
                 return fail(ErrorCode::invalid_argument,
                             "string builder insert(char) arguments are invalid");
             }
-            auto receiver = require_receiver(arguments);
-            auto offset = arguments[1].as_int();
             auto character = arguments[2].as_int();
-            if (!receiver) return std::unexpected(receiver.error());
-            if (!offset) return std::unexpected(offset.error());
             if (!character) return std::unexpected(character.error());
-            auto text = machine.heap().string_value(*receiver);
-            if (!text) return std::unexpected(text.error());
-            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
-                return fail_java("java/lang/StringIndexOutOfBoundsException",
-                                 "string builder insert offset is out of range");
-            }
-            text->insert(text->begin() + *offset,
-                         static_cast<char16_t>(static_cast<u16>(*character)));
-            auto stored = machine.heap().attach_string(*receiver,
-                                                       std::move(*text));
-            if (!stored) return std::unexpected(stored.error());
-            return std::optional<Value>(Value::from_reference(*receiver));
+            return insert_builder_text(
+                machine, arguments,
+                std::u16string(1, static_cast<char16_t>(
+                    static_cast<u16>(*character))));
         });
     add(registry, class_name, "insert", "(II)" + return_descriptor,
         [](Machine& machine, std::span<const Value> arguments)
@@ -716,25 +850,80 @@ void register_text_builder(NativeMethodRegistry& registry,
                 return fail(ErrorCode::invalid_argument,
                             "string builder insert(int) arguments are invalid");
             }
-            auto receiver = require_receiver(arguments);
-            auto offset = arguments[1].as_int();
             auto value = arguments[2].as_int();
-            if (!receiver) return std::unexpected(receiver.error());
-            if (!offset) return std::unexpected(offset.error());
             if (!value) return std::unexpected(value.error());
-            auto text = machine.heap().string_value(*receiver);
             auto inserted = integral_text(*value);
-            if (!text) return std::unexpected(text.error());
             if (!inserted) return std::unexpected(inserted.error());
-            if (*offset < 0 || static_cast<usize>(*offset) > text->size()) {
-                return fail_java("java/lang/StringIndexOutOfBoundsException",
-                                 "string builder insert offset is out of range");
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
+        });
+    add(registry, class_name, "insert",
+        "(ILjava/lang/Object;)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = arguments[2].as_reference();
+            if (!source) return std::unexpected(source.error());
+            auto inserted = object_text(machine, *source);
+            if (!inserted) return std::unexpected(inserted.error());
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
+        });
+    add(registry, class_name, "insert", "(IZ)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = arguments[2].as_int();
+            if (!value) return std::unexpected(value.error());
+            return insert_builder_text(
+                machine, arguments,
+                *value == 0 ? std::u16string(u"false")
+                            : std::u16string(u"true"));
+        });
+    add(registry, class_name, "insert", "(IJ)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = arguments[2].as_long();
+            if (!value) return std::unexpected(value.error());
+            auto inserted = integral_text(*value);
+            if (!inserted) return std::unexpected(inserted.error());
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
+        });
+    add(registry, class_name, "insert", "(IF)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = arguments[2].as_float();
+            if (!value) return std::unexpected(value.error());
+            auto inserted = floating_text(*value);
+            if (!inserted) return std::unexpected(inserted.error());
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
+        });
+    add(registry, class_name, "insert", "(ID)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = arguments[2].as_double();
+            if (!value) return std::unexpected(value.error());
+            auto inserted = floating_text(*value);
+            if (!inserted) return std::unexpected(inserted.error());
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
+        });
+    add(registry, class_name, "insert", "(I[C)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto array = arguments[2].as_reference();
+            if (!array) return std::unexpected(array.error());
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail(ErrorCode::overflow,
+                            "string builder char[] exceeds int range");
             }
-            text->insert(static_cast<usize>(*offset), *inserted);
-            auto stored = machine.heap().attach_string(*receiver,
-                                                       std::move(*text));
-            if (!stored) return std::unexpected(stored.error());
-            return std::optional<Value>(Value::from_reference(*receiver));
+            auto inserted = char_array_slice(
+                machine, *array, 0, static_cast<i32>(*length));
+            if (!inserted) return std::unexpected(inserted.error());
+            return insert_builder_text(machine, arguments,
+                                       std::move(*inserted));
         });
     add(registry, class_name, "reverse", "()" + return_descriptor,
         [](Machine& machine, std::span<const Value> arguments)
@@ -759,7 +948,7 @@ void register_text_builder(NativeMethodRegistry& registry,
             return std::optional<Value>(Value::from_reference(*receiver));
         });
     add(registry, class_name, "ensureCapacity", "(I)V",
-        [](Machine&, std::span<const Value> arguments)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto receiver = require_receiver(arguments);
             if (!receiver) return std::unexpected(receiver.error());
@@ -769,9 +958,11 @@ void register_text_builder(NativeMethodRegistry& registry,
             }
             auto minimum = arguments[1].as_int();
             if (!minimum) return std::unexpected(minimum.error());
-            // The VM stores text in a dynamically sized UTF-16 payload, so
-            // reserve capacity is an implementation hint with no observable
-            // effect. Validation and call compatibility are still preserved.
+            if (*minimum > 0) {
+                auto capacity = ensure_builder_capacity(
+                    machine, *receiver, static_cast<usize>(*minimum));
+                if (!capacity) return std::unexpected(capacity.error());
+            }
             return std::optional<Value> {};
         });
     add(registry, class_name, "setLength", "(I)V",
@@ -797,6 +988,9 @@ void register_text_builder(NativeMethodRegistry& registry,
             if (!text) {
                 return std::unexpected(text.error());
             }
+            auto capacity = ensure_builder_capacity(
+                machine, *receiver, static_cast<usize>(*length));
+            if (!capacity) return std::unexpected(capacity.error());
             text->resize(static_cast<usize>(*length), u'\0');
             auto stored = machine.heap().attach_string(*receiver,
                                                        std::move(*text));
@@ -2090,6 +2284,46 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/Object",
+        "wait",
+        "(JI)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Object.wait(long,int) expects timeout and nanos");
+            }
+            auto receiver = require_receiver(arguments);
+            auto timeout = arguments[1].as_long();
+            auto nanos = arguments[2].as_int();
+            if (!receiver || !timeout || !nanos) {
+                return fail(ErrorCode::invalid_argument,
+                            "Object.wait(long,int) arguments are invalid");
+            }
+            if (*timeout < 0 || *nanos < 0 || *nanos > 999'999) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Object.wait timeout is out of range");
+            }
+            i64 rounded_timeout = *timeout;
+            if (*nanos >= 500'000 || (*nanos != 0 && rounded_timeout == 0)) {
+                if (rounded_timeout == std::numeric_limits<i64>::max()) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Object.wait timeout overflowed");
+                }
+                ++rounded_timeout;
+            }
+            auto waited = machine.wait_on_object(*receiver, rounded_timeout);
+            if (!waited) {
+                return std::unexpected(waited.error());
+            }
+            if (*waited == MonitorWaitResult::interrupted) {
+                return fail_java("java/lang/InterruptedException",
+                                 "Object.wait was interrupted");
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Object",
         "notify",
         "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2299,6 +2533,62 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/System",
+        "linkLegacyWtChain",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "System.linkLegacyWtChain expects two objects");
+            }
+            auto current = arguments[0].as_reference();
+            auto value = arguments[1].as_reference();
+            if (!current || !value) {
+                return fail(ErrorCode::invalid_argument,
+                            "System.linkLegacyWtChain arguments are invalid");
+            }
+            if (current->is_null() || value->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            ObjectRef node = *current;
+            constexpr usize kMaximumLinks = 65'536U;
+            for (usize index = 0; index < kMaximumLinks; ++index) {
+                if (node == *value) {
+                    return std::optional<Value>(Value::from_int(1));
+                }
+                auto class_name = machine.heap().class_name(node);
+                if (!class_name) {
+                    return std::unexpected(class_name.error());
+                }
+                auto field = machine.class_states().resolve_field(
+                    *class_name, "c", "Lwt;", false);
+                if (!field) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                auto next_value = machine.heap().field(node, field->index);
+                if (!next_value) {
+                    return std::unexpected(next_value.error());
+                }
+                auto next = next_value->as_reference();
+                if (!next) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                if (next->is_null()) {
+                    auto stored = machine.heap().set_field(
+                        node, field->index, Value::from_reference(*value));
+                    if (!stored) {
+                        return std::unexpected(stored.error());
+                    }
+                    return std::optional<Value>(Value::from_int(1));
+                }
+                node = *next;
+            }
+            return std::optional<Value>(Value::from_int(0));
+        });
+
+    add(registry,
+        "java/lang/System",
         "arraycopy",
         "(Ljava/lang/Object;ILjava/lang/Object;II)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2454,22 +2744,6 @@ void register_core_natives(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_int(
                 static_cast<i32>(std::bit_cast<u32>(*value))));
-        });
-
-    add(registry,
-        "java/lang/Float",
-        "isNaN",
-        "(F)Z",
-        [](Machine&, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            if (arguments.size() != 1U) {
-                return fail(ErrorCode::invalid_argument,
-                            "Float.isNaN expects one argument");
-            }
-            auto value = arguments[0].as_float();
-            if (!value) return std::unexpected(value.error());
-            return std::optional<Value>(Value::from_int(
-                std::isnan(*value) ? 1 : 0));
         });
 
     add(registry,
@@ -2643,6 +2917,38 @@ void register_core_natives(NativeMethodRegistry& registry) {
     add(registry,
         "java/lang/Thread",
         "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(String) expects one name");
+            }
+            auto receiver = require_receiver(arguments);
+            auto name = arguments[1].as_reference();
+            if (!receiver || !name) {
+                return fail(ErrorCode::invalid_argument,
+                            "Thread(String) arguments are invalid");
+            }
+            if (name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Thread name is null");
+            }
+            auto initialized = machine.initialize_java_thread(*receiver,
+                                                              ObjectRef {});
+            if (!initialized) {
+                return std::unexpected(initialized.error());
+            }
+            auto stored = set_thread_name(machine, *receiver, *name);
+            if (!stored) {
+                return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "<init>",
         "(Ljava/lang/Runnable;)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -2688,6 +2994,8 @@ void register_core_natives(NativeMethodRegistry& registry) {
             auto initialized = machine.initialize_java_thread(*receiver,
                                                               *target);
             if (!initialized) return std::unexpected(initialized.error());
+            auto stored = set_thread_name(machine, *receiver, *name);
+            if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
 
@@ -2953,6 +3261,76 @@ void register_core_natives(NativeMethodRegistry& registry) {
                 return std::unexpected(priority.error());
             }
             return std::optional<Value>(Value::from_int(*priority));
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "getName",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto name = get_thread_name(machine, *receiver);
+            if (!name) {
+                return std::unexpected(name.error());
+            }
+            return std::optional<Value>(Value::from_reference(*name));
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "checkAccess",
+        "()V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            // phoneME CLDC's AccessController.checkPermission body is empty;
+            // preserve that behavior rather than introducing a new denial path.
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "java/lang/Thread",
+        "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto name = get_thread_name(machine, *receiver);
+            if (!name) {
+                return std::unexpected(name.error());
+            }
+            auto name_text = machine.heap().string_value(*name);
+            if (!name_text) {
+                return std::unexpected(name_text.error());
+            }
+            auto priority = machine.scheduler().priority(*receiver);
+            if (!priority) {
+                return std::unexpected(priority.error());
+            }
+            auto priority_text = integral_text(*priority);
+            if (!priority_text) {
+                return std::unexpected(priority_text.error());
+            }
+            std::u16string text(u"Thread[");
+            text.append(*name_text);
+            text.push_back(u',');
+            text.append(*priority_text);
+            text.push_back(u']');
+            auto string = create_java_string(machine, std::move(text));
+            if (!string) {
+                return std::unexpected(string.error());
+            }
+            return std::optional<Value>(Value::from_reference(*string));
         });
 
     const auto add_midlet_signal = [&registry](const char* name,

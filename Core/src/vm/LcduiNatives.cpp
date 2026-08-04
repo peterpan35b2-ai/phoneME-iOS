@@ -56,7 +56,6 @@ constexpr i32 kDateFieldMetadata = -1003;
 constexpr i32 kImageMetadata = -1004;
 constexpr i32 kItemStyleMetadata = -1005;
 constexpr i32 kScreenKindMetadata = -1006;
-constexpr i32 kScreenMetadata = kScreenKindMetadata;
 constexpr i32 kTickerMetadata = -1008;
 constexpr i32 kAlertMetadata = -1009;
 constexpr i32 kScreenKindTextBox = 2;
@@ -148,7 +147,6 @@ constexpr usize kTimeZoneIdField = 0;
 constexpr usize kTimeZoneRawOffsetField = 1;
 constexpr i32 kDateModeDate = 1;
 constexpr i32 kDateModeTime = 2;
-constexpr i32 kDateModeDateTime = 3;
 constexpr i64 kMillisecondsPerMinute = 60'000LL;
 constexpr i64 kMillisecondsPerDay = 86'400'000LL;
 
@@ -4900,6 +4898,72 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
     };
     spacer_getter("getMinimumWidth", kSpacerWidthField);
     spacer_getter("getMinimumHeight", kSpacerHeightField);
+
+    const auto alias_native = [&registry](std::string owner,
+                                          std::string base_owner,
+                                          std::string name,
+                                          std::string descriptor) {
+        const std::string alias_name = name;
+        const std::string alias_descriptor = descriptor;
+        add(registry, std::move(owner), alias_name, alias_descriptor,
+            [&registry,
+             base_owner = std::move(base_owner),
+             name = std::move(name),
+             descriptor = std::move(descriptor)](
+                Machine& machine,
+                std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                return registry.invoke(machine, base_owner, name,
+                                       descriptor, arguments);
+            });
+    };
+    const auto displayable_alias = [&alias_native](const char* owner,
+                                                   const char* name,
+                                                   const char* descriptor) {
+        alias_native(owner, "javax/microedition/lcdui/Displayable",
+                     name, descriptor);
+    };
+    const auto item_alias = [&alias_native](const char* owner,
+                                            const char* name,
+                                            const char* descriptor) {
+        alias_native(owner, "javax/microedition/lcdui/Item",
+                     name, descriptor);
+    };
+
+    for (const char* name : {"addCommand", "removeCommand"}) {
+        displayable_alias("javax/microedition/lcdui/Alert", name,
+                          "(Ljavax/microedition/lcdui/Command;)V");
+    }
+    displayable_alias("javax/microedition/lcdui/Alert",
+                      "setCommandListener",
+                      "(Ljavax/microedition/lcdui/CommandListener;)V");
+    displayable_alias("javax/microedition/lcdui/Form", "getWidth", "()I");
+    displayable_alias("javax/microedition/lcdui/Form", "getHeight", "()I");
+    displayable_alias("javax/microedition/lcdui/List", "removeCommand",
+                      "(Ljavax/microedition/lcdui/Command;)V");
+
+    for (const char* name : {"addCommand", "setDefaultCommand"}) {
+        item_alias("javax/microedition/lcdui/Gauge", name,
+                   "(Ljavax/microedition/lcdui/Command;)V");
+    }
+    item_alias("javax/microedition/lcdui/Gauge",
+               "setItemCommandListener",
+               "(Ljavax/microedition/lcdui/ItemCommandListener;)V");
+    item_alias("javax/microedition/lcdui/Gauge", "setLabel",
+               "(Ljava/lang/String;)V");
+    item_alias("javax/microedition/lcdui/Gauge", "setLayout", "(I)V");
+    item_alias("javax/microedition/lcdui/Gauge", "setPreferredSize", "(II)V");
+
+    for (const char* name : {"addCommand", "setDefaultCommand"}) {
+        item_alias("javax/microedition/lcdui/Spacer", name,
+                   "(Ljavax/microedition/lcdui/Command;)V");
+    }
+    item_alias("javax/microedition/lcdui/Spacer", "setLabel",
+               "(Ljava/lang/String;)V");
+    item_alias("javax/microedition/lcdui/ImageItem", "getLayout", "()I");
+    item_alias("javax/microedition/lcdui/ImageItem", "setLayout", "(I)V");
+    item_alias("javax/microedition/lcdui/StringItem", "setPreferredSize",
+               "(II)V");
 }
 
 Status handle_lcdui_action(Machine& machine,

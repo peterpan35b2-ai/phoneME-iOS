@@ -148,6 +148,7 @@ struct LCDUIState: Equatable, Sendable {
 
     private static let imageMetadataMarker: Int32 = -1004
     private static let screenKindMetadataMarker: Int32 = -1006
+    private static let alertMetadataMarker: Int32 = -1009
     private static let screenModeMetadataMarker: Int32 = -1007
 
     private enum EventKind: Int32 {
@@ -170,6 +171,7 @@ struct LCDUIState: Equatable, Sendable {
     }
 
     var screen: Screen?
+    private var screens: [Int32: Screen] = [:]
     var items: [Int32: Item] = [:]
     var commands: [Command] = []
     var focusedItemID: Int32?
@@ -285,11 +287,16 @@ struct LCDUIState: Equatable, Sendable {
             applyScreen(event, kind: kind)
 
         case .screenHidden:
+            if var cached = screens[event.componentID] {
+                cached.isVisible = false
+                screens[event.componentID] = cached
+            }
             if screen?.id == event.componentID {
                 screen?.isVisible = false
             }
 
         case .screenDeleted:
+            screens.removeValue(forKey: event.componentID)
             if screen?.id == event.componentID {
                 screen = nil
             }
@@ -351,9 +358,9 @@ struct LCDUIState: Equatable, Sendable {
         guard let type = ComponentType(rawValue: event.componentType) else {
             return
         }
-        var value = screen?.id == event.componentID
-            ? screen!
-            : Screen(
+        var value = screens[event.componentID]
+            ?? (screen?.id == event.componentID ? screen : nil)
+            ?? Screen(
                 id: event.componentID,
                 type: type,
                 title: "",
@@ -373,7 +380,8 @@ struct LCDUIState: Equatable, Sendable {
             value.nativeKind = ScreenKind(rawValue: event.arguments.0)
         } else if event.arguments.3 == Self.screenModeMetadataMarker {
             value.isFullScreen = event.arguments.0 != 0
-        } else if event.arguments.3 == Self.imageMetadataMarker {
+        } else if event.arguments.3 == Self.imageMetadataMarker ||
+                    event.arguments.3 == Self.alertMetadataMarker {
             // Pixel data is transferred separately through lcdUIImages.
         } else if kind == .screenShown || kind == .screenUpdated {
             value.contentWidth = max(Int(event.arguments.0), value.contentWidth)
@@ -381,9 +389,19 @@ struct LCDUIState: Equatable, Sendable {
             value.scrollPosition = max(Int(event.arguments.2), 0)
         }
         if kind == .screenShown {
+            if var previous = screen, previous.id != value.id {
+                previous.isVisible = false
+                screens[previous.id] = previous
+            }
             value.isVisible = true
+            screens[value.id] = value
+            screen = value
+        } else {
+            screens[value.id] = value
+            if screen?.id == value.id {
+                screen = value
+            }
         }
-        screen = value
     }
 
     private mutating func applyItem(

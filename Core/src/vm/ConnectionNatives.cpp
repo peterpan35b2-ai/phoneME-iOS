@@ -1553,6 +1553,36 @@ void register_server_connection(NativeMethodRegistry& registry) {
 void register_datagram_connection(NativeMethodRegistry& registry) {
     add(registry, std::string(kDatagramConnectionClass), "close", "()V",
         close_connection);
+    add(registry, std::string(kDatagramConnectionClass), "getLocalAddress",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments,
+                                       "UDPDatagramConnection.getLocalAddress");
+            if (!connection) return std::unexpected(connection.error());
+            auto token = token_from_object(machine, *connection);
+            if (!token) return std::unexpected(token.error());
+            auto endpoint = java_network_result(
+                machine.connections().local_endpoint(*token));
+            if (!endpoint) return std::unexpected(endpoint.error());
+            auto text = create_string(machine, endpoint->host);
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
+    add(registry, std::string(kDatagramConnectionClass), "getLocalPort", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto connection = receiver(arguments,
+                                       "UDPDatagramConnection.getLocalPort");
+            if (!connection) return std::unexpected(connection.error());
+            auto token = token_from_object(machine, *connection);
+            if (!token) return std::unexpected(token.error());
+            auto endpoint = java_network_result(
+                machine.connections().local_endpoint(*token));
+            if (!endpoint) return std::unexpected(endpoint.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(endpoint->port)));
+        });
     add(registry, std::string(kDatagramConnectionClass), "newDatagram",
         "(I)Ljavax/microedition/io/Datagram;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1571,6 +1601,30 @@ void register_datagram_connection(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*datagram));
         });
     add(registry, std::string(kDatagramConnectionClass), "newDatagram",
+        "(ILjava/lang/String;)Ljavax/microedition/io/Datagram;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto size = int_argument(arguments, 1, "datagram size");
+            auto address = reference_argument(arguments, 2,
+                                              "datagram address");
+            if (!size) return std::unexpected(size.error());
+            if (!address) return std::unexpected(address.error());
+            if (*size < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "datagram size is negative");
+            }
+            auto data = allocate_byte_array(machine,
+                                             static_cast<usize>(*size));
+            if (!data) return std::unexpected(data.error());
+            auto datagram = create_datagram(machine, *data, 0, 0);
+            if (!datagram) return std::unexpected(datagram.error());
+            auto stored = set_reference_field(machine, *datagram,
+                                              kDatagramAddressField,
+                                              *address);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*datagram));
+        });
+    add(registry, std::string(kDatagramConnectionClass), "newDatagram",
         "([BI)Ljavax/microedition/io/Datagram;",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1580,6 +1634,25 @@ void register_datagram_connection(NativeMethodRegistry& registry) {
             if (!size) return std::unexpected(size.error());
             auto datagram = create_datagram(machine, *data, 0, *size);
             if (!datagram) return std::unexpected(datagram.error());
+            return std::optional<Value>(Value::from_reference(*datagram));
+        });
+    add(registry, std::string(kDatagramConnectionClass), "newDatagram",
+        "([BILjava/lang/String;)Ljavax/microedition/io/Datagram;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto data = reference_argument(arguments, 1, "datagram data");
+            auto size = int_argument(arguments, 2, "datagram size");
+            auto address = reference_argument(arguments, 3,
+                                              "datagram address");
+            if (!data) return std::unexpected(data.error());
+            if (!size) return std::unexpected(size.error());
+            if (!address) return std::unexpected(address.error());
+            auto datagram = create_datagram(machine, *data, 0, *size);
+            if (!datagram) return std::unexpected(datagram.error());
+            auto stored = set_reference_field(machine, *datagram,
+                                              kDatagramAddressField,
+                                              *address);
+            if (!stored) return std::unexpected(stored.error());
             return std::optional<Value>(Value::from_reference(*datagram));
         });
     add(registry, std::string(kDatagramConnectionClass), "newDatagram",

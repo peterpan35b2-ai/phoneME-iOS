@@ -233,6 +233,34 @@ int main(int argc, char** argv) {
     }
 
     {
+        phoneme::vm::Machine retirement_machine(classes);
+        for (int iteration = 0; iteration < 256; ++iteration) {
+            auto thread_root = retirement_machine.allocate_pinned_instance(
+                "java/lang/Thread");
+            require(thread_root.has_value(),
+                    "allocate native-thread retirement fixture");
+            auto thread = thread_root->get();
+            require(thread.has_value(),
+                    "resolve native-thread retirement fixture");
+            require(retirement_machine.initialize_java_thread(
+                        *thread, phoneme::vm::ObjectRef {}).has_value(),
+                    "initialize native-thread retirement fixture");
+            require(retirement_machine.scheduler().start_native_thread(
+                        retirement_machine, *thread,
+                        [](std::stop_token)
+                            -> phoneme::Result<std::optional<
+                                phoneme::vm::ObjectRef>> {
+                            return std::optional<phoneme::vm::ObjectRef> {};
+                        }).has_value(),
+                    "start short native Java task");
+            if ((iteration & 7) == 0) {
+                std::this_thread::yield();
+            }
+        }
+        retirement_machine.shutdown();
+    }
+
+    {
         phoneme::vm::Machine callback_machine(classes);
         auto first_root = callback_machine.allocate_pinned_instance(
             "java/lang/Object");

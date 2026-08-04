@@ -16,11 +16,12 @@ using namespace builtin;
             method(kPublic, "<init>", "()V"),
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
-            method(kPublic, "getClass", "()Ljava/lang/Class;"),
-            method(kProtected, "clone", "()Ljava/lang/Object;"),
+            method(kPublic | kFinal, "getClass", "()Ljava/lang/Class;"),
+            method(kPublic, "clone", "()Ljava/lang/Object;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic | kFinal, "wait", "()V"),
             method(kPublic | kFinal, "wait", "(J)V"),
+            method(kPublic | kFinal, "wait", "(JI)V"),
             method(kPublic | kFinal, "notify", "()V"),
             method(kPublic | kFinal, "notifyAll", "()V"),
         });
@@ -105,13 +106,15 @@ using namespace builtin;
     }
     if (name == "java/lang/StringBuilder") {
         return make_class("java/lang/StringBuilder", "java/lang/Object",
-                          kOrdinary | kFinal, {},
-                          text_builder_methods("java/lang/StringBuilder", false));
+                          kOrdinary | kFinal, {
+            field(kPrivate, "capacity", "I"),
+        }, text_builder_methods("java/lang/StringBuilder", false));
     }
     if (name == "java/lang/StringBuffer") {
         return make_class("java/lang/StringBuffer", "java/lang/Object",
-                          kOrdinary | kFinal, {},
-                          text_builder_methods("java/lang/StringBuffer", true));
+                          kOrdinary | kFinal, {
+            field(kPrivate, "capacity", "I"),
+        }, text_builder_methods("java/lang/StringBuffer", true));
     }
     if (name == "java/lang/System") {
         return make_class("java/lang/System", "java/lang/Object",
@@ -131,6 +134,8 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
             method(kPublic | kStatic, "gc", "()V"),
             method(kPublic | kStatic, "exit", "(I)V"),
+            method(kPublic | kStatic, "linkLegacyWtChain",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
         });
     }
     if (name == "java/lang/Runtime") {
@@ -144,16 +149,19 @@ using namespace builtin;
             method(kPublic, "totalMemory", "()J"),
             method(kPublic, "freeMemory", "()J"),
             method(kPublic, "gc", "()V"),
+            method(kPublic, "exit", "(I)V"),
         });
     }
     if (name == "java/lang/Thread") {
         return make_class("java/lang/Thread", "java/lang/Object", kOrdinary,
                           {
+            field(kPrivate, "name", "Ljava/lang/String;"),
             field(kPublic | kStatic | kFinal, "MIN_PRIORITY", "I"),
             field(kPublic | kStatic | kFinal, "NORM_PRIORITY", "I"),
             field(kPublic | kStatic | kFinal, "MAX_PRIORITY", "I"),
                           }, {
             method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "<init>", "(Ljava/lang/Runnable;)V"),
             method(kPublic, "<init>",
                    "(Ljava/lang/Runnable;Ljava/lang/String;)V"),
@@ -171,7 +179,10 @@ using namespace builtin;
             method(kPublic, "isInterrupted", "()Z"),
             method(kPublic | kFinal, "setPriority", "(I)V"),
             method(kPublic | kFinal, "getPriority", "()I"),
-        });
+            method(kPublic | kFinal, "getName", "()Ljava/lang/String;"),
+            method(kPublic | kFinal, "checkAccess", "()V"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/lang/Runnable"});
     }
     if (name == "java/lang/Number") {
         return make_class("java/lang/Number", "java/lang/Object",
@@ -208,11 +219,38 @@ using namespace builtin;
                                     std::string super_name,
                                     const char* value_descriptor,
                                     std::vector<classfile::Method> methods) {
-        return make_class(std::move(class_name), std::move(super_name),
-                          kOrdinary | kFinal, {
+        std::vector<classfile::Field> fields {
             field(kPrivate | kFinal, "value", value_descriptor),
             field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
-        }, std::move(methods));
+        };
+        if (class_name == "java/lang/Byte") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "B"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "B"));
+        } else if (class_name == "java/lang/Short") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "S"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "S"));
+        } else if (class_name == "java/lang/Integer") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "I"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "I"));
+        } else if (class_name == "java/lang/Long") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "J"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "J"));
+        } else if (class_name == "java/lang/Float") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "POSITIVE_INFINITY", "F"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "NEGATIVE_INFINITY", "F"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "NaN", "F"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "F"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "F"));
+        } else if (class_name == "java/lang/Double") {
+            fields.push_back(field(kPublic | kStatic | kFinal, "POSITIVE_INFINITY", "D"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "NEGATIVE_INFINITY", "D"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "NaN", "D"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "D"));
+            fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "D"));
+        }
+        return make_class(std::move(class_name), std::move(super_name),
+                          kOrdinary | kFinal, std::move(fields),
+                          std::move(methods));
     };
     if (name == "java/lang/Byte") {
         return number_wrapper("java/lang/Byte", "java/lang/Number", "B", {
@@ -305,6 +343,10 @@ using namespace builtin;
                           kOrdinary | kFinal, {
             field(kPrivate | kFinal, "value", "C"),
             field(kPublic | kStatic | kFinal, "TYPE", "Ljava/lang/Class;"),
+            field(kPublic | kStatic | kFinal, "MIN_RADIX", "I"),
+            field(kPublic | kStatic | kFinal, "MAX_RADIX", "I"),
+            field(kPublic | kStatic | kFinal, "MIN_VALUE", "C"),
+            field(kPublic | kStatic | kFinal, "MAX_VALUE", "C"),
         }, {
             method(kPublic, "<init>", "(C)V"),
             method(kPublic, "charValue", "()C"),
@@ -316,6 +358,8 @@ using namespace builtin;
             method(kPublic | kStatic, "isLetter", "(C)Z"),
             method(kPublic | kStatic, "isLetterOrDigit", "(C)Z"),
             method(kPublic | kStatic, "isWhitespace", "(C)Z"),
+            method(kPublic | kStatic, "isLowerCase", "(C)Z"),
+            method(kPublic | kStatic, "isUpperCase", "(C)Z"),
             method(kPublic | kStatic, "digit", "(CI)I"),
             method(kPublic | kStatic, "toLowerCase", "(C)C"),
             method(kPublic | kStatic, "toUpperCase", "(C)C"),
@@ -324,6 +368,9 @@ using namespace builtin;
     if (name == "java/lang/Float") {
         return number_wrapper("java/lang/Float", "java/lang/Number", "F", {
             method(kPublic, "<init>", "(F)V"),
+            method(kPublic, "<init>", "(D)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
             method(kPublic, "intValue", "()I"),
             method(kPublic, "longValue", "()J"),
             method(kPublic, "floatValue", "()F"),
@@ -334,7 +381,10 @@ using namespace builtin;
             method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/Float;"),
             method(kPublic | kStatic, "valueOf", "(Ljava/lang/String;)Ljava/lang/Float;"),
             method(kPublic | kStatic, "parseFloat", "(Ljava/lang/String;)F"),
+            method(kPublic, "isNaN", "()Z"),
             method(kPublic | kStatic, "isNaN", "(F)Z"),
+            method(kPublic, "isInfinite", "()Z"),
+            method(kPublic | kStatic, "isInfinite", "(F)Z"),
             method(kPublic | kStatic, "toString", "(F)Ljava/lang/String;"),
             method(kPublic | kStatic, "floatToIntBits", "(F)I"),
             method(kPublic | kStatic, "intBitsToFloat", "(I)F"),
@@ -343,6 +393,8 @@ using namespace builtin;
     if (name == "java/lang/Double") {
         return number_wrapper("java/lang/Double", "java/lang/Number", "D", {
             method(kPublic, "<init>", "(D)V"),
+            method(kPublic, "byteValue", "()B"),
+            method(kPublic, "shortValue", "()S"),
             method(kPublic, "intValue", "()I"),
             method(kPublic, "longValue", "()J"),
             method(kPublic, "floatValue", "()F"),
@@ -353,6 +405,10 @@ using namespace builtin;
             method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/Double;"),
             method(kPublic | kStatic, "valueOf", "(Ljava/lang/String;)Ljava/lang/Double;"),
             method(kPublic | kStatic, "parseDouble", "(Ljava/lang/String;)D"),
+            method(kPublic, "isNaN", "()Z"),
+            method(kPublic | kStatic, "isNaN", "(D)Z"),
+            method(kPublic, "isInfinite", "()Z"),
+            method(kPublic | kStatic, "isInfinite", "(D)Z"),
             method(kPublic | kStatic, "toString", "(D)Ljava/lang/String;"),
             method(kPublic | kStatic, "doubleToLongBits", "(D)J"),
             method(kPublic | kStatic, "longBitsToDouble", "(J)D"),
@@ -366,7 +422,10 @@ using namespace builtin;
     }
     if (name == "java/lang/Math") {
         return make_class("java/lang/Math", "java/lang/Object",
-                          kOrdinary | kFinal, {}, {
+                          kOrdinary | kFinal, {
+            field(kPublic | kStatic | kFinal, "E", "D"),
+            field(kPublic | kStatic | kFinal, "PI", "D"),
+        }, {
             method(kPublic | kStatic, "abs", "(I)I"),
             method(kPublic | kStatic, "abs", "(J)J"),
             method(kPublic | kStatic, "abs", "(F)F"),
@@ -456,6 +515,16 @@ using namespace builtin;
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
             method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
             method(kPublic, "getException", "()Ljava/lang/Throwable;"),
+        });
+    }
+
+    if (name == "java/lang/ArrayIndexOutOfBoundsException" ||
+        name == "java/lang/StringIndexOutOfBoundsException") {
+        return make_class(name.data(), "java/lang/IndexOutOfBoundsException",
+                          kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(I)V"),
         });
     }
 

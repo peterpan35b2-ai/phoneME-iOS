@@ -902,13 +902,34 @@ void register_console_natives(NativeMethodRegistry& registry) {
             machine.request_garbage_collection();
             return std::optional<Value> {};
         });
+    const auto exit_runtime = [](Machine& machine,
+                                 std::span<const Value> arguments,
+                                 bool has_receiver)
+        -> Result<std::optional<Value>> {
+        const usize expected = has_receiver ? 2U : 1U;
+        if (arguments.size() != expected) {
+            return fail(ErrorCode::invalid_argument,
+                        "runtime exit expects one status argument");
+        }
+        if (has_receiver) {
+            auto receiver = arguments[0].as_reference();
+            if (!receiver || receiver->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Runtime.exit receiver is null");
+            }
+        }
+        auto status = arguments[has_receiver ? 1U : 0U].as_int();
+        if (!status) return std::unexpected(status.error());
+        machine.signal_midlet(MidletSignal::destroyed);
+        return std::optional<Value> {};
+    };
     add(registry, "java/lang/System", "exit", "(I)V",
-        [](Machine& machine, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto status = arguments[0].as_int();
-            if (!status) return std::unexpected(status.error());
-            machine.signal_midlet(MidletSignal::destroyed);
-            return std::optional<Value> {};
+        [exit_runtime](Machine& machine, std::span<const Value> arguments) {
+            return exit_runtime(machine, arguments, false);
+        });
+    add(registry, "java/lang/Runtime", "exit", "(I)V",
+        [exit_runtime](Machine& machine, std::span<const Value> arguments) {
+            return exit_runtime(machine, arguments, true);
         });
 }
 

@@ -1868,6 +1868,8 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
         (void)runtime.frame_snapshot();
     }
 
+    bool reset_seen = false;
+    bool lifecycle_status_seen = false;
     bool screen_created = false;
     bool screen_shown = false;
     bool screen_updated = false;
@@ -1881,6 +1883,7 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     bool hard_choice = false;
     bool date_field_shown = false;
     bool spacer_shown = false;
+    bool image_item_shown = false;
     bool action_item_shown = false;
     bool tail_item = false;
     bool ok_command = false;
@@ -1893,6 +1896,7 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     phoneme::i32 gauge_id = 0;
     phoneme::i32 choice_id = 0;
     phoneme::i32 date_field_id = 0;
+    phoneme::i32 image_item_id = 0;
     phoneme::i32 action_item_id = 0;
     phoneme::i32 ok_command_id = 0;
     phoneme::i32 menu_command_id = 0;
@@ -1901,7 +1905,18 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     phoneme::i32 bridged_event_count = 0;
 
     while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 1) {
+            require(!screen_created && !screen_shown && bridged_event_count == 0,
+                    "LCDUI reset precedes the new MIDlet screen event stream");
+            reset_seen = true;
+        }
+        if (event->kind == 0 &&
+            event->detail.find("MIDlet") != std::string::npos) {
+            lifecycle_status_seen = true;
+        }
         if (event->kind >= 2 && event->kind <= 16) {
+            require(reset_seen,
+                    "LCDUI bridge events are emitted after presentation reset");
             ++bridged_event_count;
             require(event->component_id == 0 ||
                         event->component_id >= app_id.value * 100'000,
@@ -1977,6 +1992,13 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             spacer_shown = true;
         }
         if ((event->kind == 7 || event->kind == 9) &&
+            event->component_type == 8 && event->text == "Preview" &&
+            event->detail == "preview" && event->arguments[0] == 2 &&
+            event->arguments[1] == 3 && event->arguments[3] == -1004) {
+            image_item_shown = true;
+            image_item_id = event->component_id;
+        }
+        if ((event->kind == 7 || event->kind == 9) &&
             event->component_type == 14 && event->text == "Action" &&
             event->detail == "Tap") {
             action_item_shown = true;
@@ -2014,6 +2036,10 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
         }
     }
 
+    require(reset_seen,
+            "LCDUI fixture emits a presentation reset before its screen");
+    require(lifecycle_status_seen,
+            "LCDUI fixture keeps launch diagnostics separate from reset");
     require(bridged_event_count >= 32,
             "LCDUI fixture emits a complete screen and item event stream");
     require(screen_created && screen_shown && screen_updated,
@@ -2030,6 +2056,8 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             "DateField epoch mode and timezone metadata are bridged");
     require(spacer_shown,
             "Spacer minimum dimensions are bridged");
+    require(image_item_shown,
+            "ImageItem dimensions and generation are bridged");
     require(action_item_shown,
             "button StringItem and item command owner are bridged");
     require(tail_item, "Form.append(String) creates a native StringItem");
@@ -2037,10 +2065,26 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
                 alert_command,
             "MIDP commands preserve labels types priorities and long labels");
     require(status_id != 0 && text_field_id != 0 && gauge_id != 0 &&
-                choice_id != 0 && date_field_id != 0 && action_item_id != 0 &&
-                ok_command_id != 0 && menu_command_id != 0 &&
+                choice_id != 0 && date_field_id != 0 && image_item_id != 0 &&
+                action_item_id != 0 && ok_command_id != 0 &&
+                menu_command_id != 0 &&
                 text_command_id != 0 && alert_command_id != 0,
             "LCDUI bridge registers interactive component IDs");
+
+    const auto image_metadata = runtime.copy_lcdui_image_rgba(
+        image_item_id, {});
+    require(image_metadata.dimensions.width == 2 &&
+                image_metadata.dimensions.height == 3 &&
+                image_metadata.byte_count == 24U &&
+                image_metadata.generation > 0U,
+            "LCDUI image query exposes dimensions generation and byte count");
+    std::vector<phoneme::u8> image_rgba(image_metadata.byte_count, 0U);
+    const auto copied_image = runtime.copy_lcdui_image_rgba(
+        image_item_id, image_rgba);
+    require(copied_image.byte_count == image_rgba.size() &&
+                image_rgba[0] == 0x10U && image_rgba[1] == 0x34U &&
+                image_rgba[2] == 0x52U && image_rgba[3] == 0xFFU,
+            "LCDUI image bridge copies native RGBA pixels");
 
     runtime.ui_set_text(text_field_id, "Người", 5);
     runtime.ui_set_gauge(gauge_id, 9);
@@ -2771,6 +2815,174 @@ void test_machine_m3g() {
     count_value = count->return_value->as_int();
     require(count_value.has_value() && *count_value == 0,
             "M3G Group removes child with void signature");
+
+    auto world = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/World");
+    auto background = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Background");
+    require(world.has_value() && background.has_value(),
+            "allocate M3G World reference graph");
+    invoke_void(*world, "javax/microedition/m3g/World", "<init>", "()V");
+    invoke_void(*background, "javax/microedition/m3g/Background",
+                "<init>", "()V");
+    const phoneme::vm::Value user_id = phoneme::vm::Value::from_int(153);
+    invoke_void(*background, "javax/microedition/m3g/Object3D",
+                "setUserID", "(I)V",
+                std::span<const phoneme::vm::Value>(&user_id, 1U));
+    const phoneme::vm::Value background_argument =
+        phoneme::vm::Value::from_reference(*background);
+    invoke_void(*world, "javax/microedition/m3g/World", "setBackground",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &background_argument, 1U));
+
+    auto found = machine.invoke_instance(
+        *world, "javax/microedition/m3g/Object3D", "find",
+        "(I)Ljavax/microedition/m3g/Object3D;",
+        std::span<const phoneme::vm::Value>(&user_id, 1U));
+    require(found.has_value() && found->completed_normally() &&
+                found->return_value.has_value() &&
+                found->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == *background,
+            "Object3D.find traverses non-child M3G references");
+
+    auto references = machine.heap().allocate_array(
+        "[Ljavax/microedition/m3g/Object3D;", 4U,
+        phoneme::vm::Value::from_reference({}));
+    require(references.has_value(), "allocate Object3D reference result");
+    const phoneme::vm::Value references_argument =
+        phoneme::vm::Value::from_reference(*references);
+    auto reference_count = machine.invoke_instance(
+        *world, "javax/microedition/m3g/Object3D", "getReferences",
+        "([Ljavax/microedition/m3g/Object3D;)I",
+        std::span<const phoneme::vm::Value>(&references_argument, 1U));
+    require(reference_count.has_value() &&
+                reference_count->completed_normally() &&
+                reference_count->return_value.has_value() &&
+                reference_count->return_value->as_int().value_or(0) >= 1,
+            "Object3D.getReferences reports World state references");
+    auto first_reference = machine.heap().element(*references, 0U);
+    require(first_reference.has_value() &&
+                first_reference->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == *background,
+            "Object3D.getReferences writes reachable World objects");
+
+    auto graphics3d = machine.invoke_static(
+        "javax/microedition/m3g/Graphics3D", "getInstance",
+        "()Ljavax/microedition/m3g/Graphics3D;");
+    require(graphics3d.has_value() && graphics3d->completed_normally() &&
+                graphics3d->return_value.has_value(),
+            "obtain Graphics3D singleton");
+    auto graphics3d_object = graphics3d->return_value->as_reference();
+    require(graphics3d_object.has_value() &&
+                !graphics3d_object->is_null(),
+            "Graphics3D singleton is non-null");
+
+    auto light = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Light");
+    auto light_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(light.has_value() && light_transform.has_value(),
+            "allocate Graphics3D light state");
+    invoke_void(*light, "javax/microedition/m3g/Light", "<init>", "()V");
+    invoke_void(*light_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    invoke_void(*light_transform, "javax/microedition/m3g/Transform",
+                "postTranslate", "(FFF)V", translation);
+    const std::array<phoneme::vm::Value, 2> add_light_arguments {
+        phoneme::vm::Value::from_reference(*light),
+        phoneme::vm::Value::from_reference(*light_transform),
+    };
+    auto light_index = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "addLight",
+        "(Ljavax/microedition/m3g/Light;"
+        "Ljavax/microedition/m3g/Transform;)I",
+        add_light_arguments);
+    require(light_index.has_value() && light_index->completed_normally() &&
+                light_index->return_value.has_value() &&
+                light_index->return_value->as_int().value_or(-1) == 0,
+            "Graphics3D.addLight stores the first light");
+
+    auto returned_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(returned_transform.has_value(),
+            "allocate Graphics3D light transform destination");
+    invoke_void(*returned_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 2> get_light_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*returned_transform),
+    };
+    auto returned_light = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getLight",
+        "(ILjavax/microedition/m3g/Transform;)"
+        "Ljavax/microedition/m3g/Light;",
+        get_light_arguments);
+    require(returned_light.has_value() &&
+                returned_light->completed_normally() &&
+                returned_light->return_value.has_value() &&
+                returned_light->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == *light,
+            "Graphics3D.getLight returns the stored light");
+    auto returned_matrix = machine.heap().allocate_array(
+        "[F", 16U, phoneme::vm::Value::from_float(0.0F));
+    require(returned_matrix.has_value(),
+            "allocate returned light matrix destination");
+    const phoneme::vm::Value returned_matrix_argument =
+        phoneme::vm::Value::from_reference(*returned_matrix);
+    invoke_void(*returned_transform, "javax/microedition/m3g/Transform",
+                "get", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &returned_matrix_argument, 1U));
+    auto returned_translation = machine.heap().element(*returned_matrix, 3U);
+    require(returned_translation.has_value() &&
+                std::abs(returned_translation->as_float().value_or(0.0F) -
+                         4.0F) < 0.0001F,
+            "Graphics3D.getLight copies the stored transform");
+
+    auto replacement_light = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Light");
+    require(replacement_light.has_value(),
+            "allocate replacement Graphics3D light");
+    invoke_void(*replacement_light, "javax/microedition/m3g/Light",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> set_light_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*replacement_light),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "setLight",
+                "(ILjavax/microedition/m3g/Light;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                set_light_arguments);
+    returned_light = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getLight",
+        "(ILjavax/microedition/m3g/Transform;)"
+        "Ljavax/microedition/m3g/Light;",
+        get_light_arguments);
+    require(returned_light.has_value() &&
+                returned_light->completed_normally() &&
+                returned_light->return_value.has_value() &&
+                returned_light->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == *replacement_light,
+            "Graphics3D.setLight replaces stored state");
+
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "resetLights", "()V");
+    returned_light = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getLight",
+        "(ILjavax/microedition/m3g/Transform;)"
+        "Ljavax/microedition/m3g/Light;",
+        get_light_arguments);
+    require(returned_light.has_value() &&
+                !returned_light->completed_normally() &&
+                returned_light->throwable.has_value(),
+            "Graphics3D.resetLights removes indexed light state");
 }
 
 void test_framebuffer_sizes() {

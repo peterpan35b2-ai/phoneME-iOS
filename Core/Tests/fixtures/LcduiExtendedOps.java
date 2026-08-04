@@ -83,8 +83,10 @@ public final class LcduiExtendedOps extends MIDlet
         styledItem = new StringItem("Styled", "font");
         styledItem.setFont(customFont);
         gauge = new Gauge("Gauge", true, 10, 1);
+        Image image = Image.createImage(2, 3);
         choice = new ChoiceGroup("Choice", Choice.MULTIPLE,
-                                 new String[] {"zero", "one"}, null);
+                                 new String[] {"zero", "one"},
+                                 new Image[] {image, null});
         choice.setFont(1, customFont);
         choice.insert(0, "inserted", null);
         choiceFontPassed = choice.getFont(2) == customFont;
@@ -94,7 +96,6 @@ public final class LcduiExtendedOps extends MIDlet
                                   TimeZone.getTimeZone("GMT+07:00"));
         dateOnly = new DateField("Date", DateField.DATE);
         timeOnly = new DateField("Time", DateField.TIME);
-        Image image = Image.createImage(2, 3);
         imageItem = new ImageItem("Image", image, 0, "image-alt", 2);
         spacer = new Spacer(4, 5);
         customItem = new Probe("Custom");

@@ -138,6 +138,9 @@ public:
     [[nodiscard]] FrameMetadata frame_metadata();
     [[nodiscard]] FrameMetadata copy_current_frame_rgba(
         std::span<u8> destination) const noexcept;
+    [[nodiscard]] FrameMetadata copy_lcdui_image_rgba(
+        i32 component_id,
+        std::span<u8> destination);
     [[nodiscard]] FrameSnapshot frame_snapshot();
     [[nodiscard]] std::optional<UiEvent> poll_ui_event();
 
