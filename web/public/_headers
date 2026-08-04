@@ -1,0 +1,11 @@
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+
+/wasm/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/wasm/*.js
+  Cache-Control: no-cache, no-store, must-revalidate

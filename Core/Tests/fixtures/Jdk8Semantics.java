@@ -826,7 +826,7 @@ public final class Jdk8Semantics {
         }
         try {
             java.util.Calendar.getInstance().get(99);
-        } catch (IllegalArgumentException expected) {
+        } catch (ArrayIndexOutOfBoundsException expected) {
             result |= 2;
         }
         try {

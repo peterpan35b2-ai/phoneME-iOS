@@ -7,6 +7,7 @@
 #include "phoneme/filesystem/FileSystem.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/Descriptor.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/Verifier.hpp"
 
 namespace phoneme::vm
@@ -71,6 +72,7 @@ namespace phoneme::vm
       method_cache_.clear();
       declared_method_cache_.clear();
       assignability_cache_.clear();
+      metadata_.clear();
     }
     return {};
   }
@@ -89,13 +91,20 @@ namespace phoneme::vm
     if (const auto iterator = cache_.find(internal_name);
         iterator != cache_.end())
     {
+      PerformanceCounters::record_class_cache(true);
       return iterator->second;
     }
+    PerformanceCounters::record_class_cache(false);
 
     auto loaded = load_uncached(internal_name);
     if (!loaded)
     {
       return std::unexpected(loaded.error());
+    }
+    auto published = metadata_.publish_class(*loaded);
+    if (!published)
+    {
+      return std::unexpected(published.error());
     }
     cache_.insert_or_assign(internal_name, *loaded);
     return *loaded;
@@ -113,6 +122,7 @@ namespace phoneme::vm
     }
 
     std::string current = normalize_name(binary_name);
+    PerformanceCounters::record_metadata_key_construction();
     const std::string cache_key = method_resolution_key(
         current, method_name, descriptor);
     {
@@ -120,9 +130,11 @@ namespace phoneme::vm
       if (const auto cached = method_cache_.find(cache_key);
           cached != method_cache_.end())
       {
+        PerformanceCounters::record_method_resolution(true, false);
         return cached->second;
       }
     }
+    PerformanceCounters::record_method_resolution(false, false);
     const auto cache_method = [this, &cache_key](ResolvedMethod resolved) {
       std::scoped_lock lock(mutex_);
       const auto [iterator, inserted] = method_cache_.emplace(
@@ -158,9 +170,15 @@ namespace phoneme::vm
               (*loaded)->find_method(method_name, descriptor);
           method != nullptr)
       {
+        auto runtime = metadata_.publish_method(*loaded, *method);
+        if (!runtime)
+        {
+          return std::unexpected(runtime.error());
+        }
         return cache_method(ResolvedMethod{
             .owner = *loaded,
             .method = method,
+            .runtime = std::move(*runtime),
         });
       }
       for (const std::string &interface_name : (*loaded)->interfaces())
@@ -192,9 +210,15 @@ namespace phoneme::vm
               (*loaded)->find_method(method_name, descriptor);
           method != nullptr)
       {
+        auto runtime = metadata_.publish_method(*loaded, *method);
+        if (!runtime)
+        {
+          return std::unexpected(runtime.error());
+        }
         return cache_method(ResolvedMethod{
             .owner = *loaded,
             .method = method,
+            .runtime = std::move(*runtime),
         });
       }
       for (const std::string &parent_interface : (*loaded)->interfaces())
@@ -220,6 +244,7 @@ namespace phoneme::vm
                   "method name and descriptor must not be empty");
     }
     const std::string normalized = normalize_name(binary_name);
+    PerformanceCounters::record_metadata_key_construction();
     const std::string cache_key = method_resolution_key(
         normalized, method_name, descriptor);
     {
@@ -227,9 +252,11 @@ namespace phoneme::vm
       if (const auto cached = declared_method_cache_.find(cache_key);
           cached != declared_method_cache_.end())
       {
+        PerformanceCounters::record_method_resolution(true, true);
         return cached->second;
       }
     }
+    PerformanceCounters::record_method_resolution(false, true);
     auto loaded = load(normalized);
     if (!loaded)
     {
@@ -244,9 +271,15 @@ namespace phoneme::vm
                       normalize_name(binary_name) + "." +
                       std::string(method_name) + std::string(descriptor));
     }
+    auto runtime = metadata_.publish_method(*loaded, *method);
+    if (!runtime)
+    {
+      return std::unexpected(runtime.error());
+    }
     ResolvedMethod resolved {
         .owner = *loaded,
         .method = method,
+        .runtime = std::move(*runtime),
     };
     std::scoped_lock lock(mutex_);
     const auto [iterator, inserted] = declared_method_cache_.emplace(
@@ -266,15 +299,18 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "assignability requires non-empty class names");
     }
+    PerformanceCounters::record_metadata_key_construction();
     const std::string cache_key = assignability_key(source, target);
     {
       std::scoped_lock lock(mutex_);
       if (const auto cached = assignability_cache_.find(cache_key);
           cached != assignability_cache_.end())
       {
+        PerformanceCounters::record_assignability_cache(true);
         return cached->second;
       }
     }
+    PerformanceCounters::record_assignability_cache(false);
     const auto cache_result = [this, &cache_key](bool value) {
       std::scoped_lock lock(mutex_);
       assignability_cache_.insert_or_assign(cache_key, value);
@@ -423,6 +459,7 @@ namespace phoneme::vm
     method_cache_.clear();
     declared_method_cache_.clear();
     assignability_cache_.clear();
+    metadata_.clear();
   }
 
   Result<std::shared_ptr<const classfile::ClassFile>>

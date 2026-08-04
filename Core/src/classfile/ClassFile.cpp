@@ -1169,6 +1169,11 @@ namespace phoneme::classfile
         }
       }
     }
+    auto indexed = result.rebuild_method_index();
+    if (!indexed)
+    {
+      return std::unexpected(indexed.error());
+    }
     return result;
   }
 
@@ -1188,6 +1193,7 @@ namespace phoneme::classfile
     result.interfaces_ = std::move(interfaces);
     result.fields_ = std::move(fields);
     result.methods_ = std::move(methods);
+    static_cast<void>(result.rebuild_method_index());
     return result;
   }
 
@@ -1459,13 +1465,39 @@ namespace phoneme::classfile
   const Method *ClassFile::find_method(std::string_view name,
                                        std::string_view descriptor) const noexcept
   {
-    const auto iterator = std::find_if(methods_.begin(), methods_.end(),
-                                       [name, descriptor](const Method &method)
-                                       {
-                                         return method.name == name &&
-                                                method.descriptor == descriptor;
-                                       });
-    return iterator == methods_.end() ? nullptr : &*iterator;
+    const auto iterator = method_index_.find(MethodSignatureView{
+        .name = name,
+        .descriptor = descriptor,
+    });
+    if (iterator == method_index_.end() || iterator->second >= methods_.size())
+    {
+      return nullptr;
+    }
+    return &methods_[iterator->second];
+  }
+
+  Status ClassFile::rebuild_method_index()
+  {
+    method_index_.clear();
+    method_index_.reserve(methods_.size());
+    for (usize index = 0; index < methods_.size(); ++index)
+    {
+      const Method &method = methods_[index];
+      const auto [iterator, inserted] = method_index_.emplace(
+          MethodSignatureKey{
+              .name = method.name,
+              .descriptor = method.descriptor,
+          },
+          index);
+      (void)iterator;
+      if (!inserted)
+      {
+        return fail(ErrorCode::malformed_class,
+                    "class contains a duplicate method signature: " +
+                        method.name + method.descriptor);
+      }
+    }
+    return {};
   }
 
 } // namespace phoneme::classfile

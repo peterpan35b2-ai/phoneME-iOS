@@ -64,10 +64,15 @@ std::atomic<i32> g_last_suite_store_stage {0};
     return PHONEME_ERROR_SYSTEM_START;
 }
 
-[[nodiscard]] i32 status_code(const phoneme::Status& status) noexcept {
-    if (status) return PHONEME_OK;
+[[nodiscard]] i32 status_code(Runtime* runtime,
+                              const phoneme::Status& status) {
+    if (status) {
+        runtime->clear_error();
+        return PHONEME_OK;
+    }
 
     const phoneme::Error& error = status.error();
+    runtime->record_error(error);
     const i32 code = map_error(error);
     std::fprintf(
         stderr,
@@ -91,6 +96,20 @@ void copy_utf8(char* destination,
     const std::size_t count = std::min(source.size(), capacity - 1);
     std::memcpy(destination, source.data(), count);
     destination[count] = '\0';
+}
+
+[[nodiscard]] i32 copy_diagnostic(const std::string& message,
+                                  char* destination,
+                                  i32 capacity) noexcept {
+    if (capacity < 0 || (capacity > 0 && destination == nullptr) ||
+        message.size() > static_cast<std::size_t>(
+            std::numeric_limits<i32>::max())) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    if (capacity > 0) {
+        copy_utf8(destination, static_cast<std::size_t>(capacity), message);
+    }
+    return static_cast<i32>(message.size());
 }
 
 [[nodiscard]] phoneme::security::PermissionDecision permission_decision(
@@ -206,9 +225,11 @@ int32_t phoneme_configure(PhoneMERuntimeRef runtime,
     if (instance == nullptr || runtime_home == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->configure(
-        runtime_home,
-        classes_zip == nullptr ? std::string {} : std::string(classes_zip)));
+    return status_code(
+        instance,
+        instance->configure(
+            runtime_home,
+            classes_zip == nullptr ? std::string {} : std::string(classes_zip)));
 }
 
 int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
@@ -223,8 +244,10 @@ int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
     if (instance == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->configure_keymap(
-        std::array<i32, 7> {up, down, left, right, fire, soft1, soft2}));
+    return status_code(
+        instance,
+        instance->configure_keymap(
+            std::array<i32, 7> {up, down, left, right, fire, soft1, soft2}));
 }
 
 int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
@@ -235,12 +258,14 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
     if (instance == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->configure_translation(
-        enabled != 0,
-        source_language == nullptr ? std::string("auto")
-                                   : std::string(source_language),
-        target_language == nullptr ? std::string("vi")
-                                   : std::string(target_language)));
+    return status_code(
+        instance,
+        instance->configure_translation(
+            enabled != 0,
+            source_language == nullptr ? std::string("auto")
+                                       : std::string(source_language),
+            target_language == nullptr ? std::string("vi")
+                                       : std::string(target_language)));
 }
 
 int32_t phoneme_configure_app_translation(
@@ -253,13 +278,15 @@ int32_t phoneme_configure_app_translation(
     if (instance == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->configure_app_translation(
-        phoneme::AppId {app_id},
-        enabled != 0,
-        source_language == nullptr ? std::string("auto")
-                                   : std::string(source_language),
-        target_language == nullptr ? std::string("vi")
-                                   : std::string(target_language)));
+    return status_code(
+        instance,
+        instance->configure_app_translation(
+            phoneme::AppId {app_id},
+            enabled != 0,
+            source_language == nullptr ? std::string("auto")
+                                       : std::string(source_language),
+            target_language == nullptr ? std::string("vi")
+                                       : std::string(target_language)));
 }
 
 int32_t phoneme_configure_permission_prompt(
@@ -271,10 +298,11 @@ int32_t phoneme_configure_permission_prompt(
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     if (callback == nullptr) {
-        return status_code(instance->configure_permission_prompt({}));
+        return status_code(
+            instance, instance->configure_permission_prompt({}));
     }
 
-    return status_code(instance->configure_permission_prompt(
+    return status_code(instance, instance->configure_permission_prompt(
         [callback, context](const phoneme::security::PermissionRequest& request) {
             const PhoneMEPermissionRequest native_request {
                 .suite_id = request.suite_id.value,
@@ -302,11 +330,13 @@ int32_t phoneme_set_suite_trust(PhoneMERuntimeRef runtime,
          trust != PHONEME_SUITE_TRUSTED)) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->set_suite_trust(
-        phoneme::SuiteId {suite_id},
-        trust == PHONEME_SUITE_TRUSTED
-            ? phoneme::security::SuiteTrust::trusted
-            : phoneme::security::SuiteTrust::untrusted));
+    return status_code(
+        instance,
+        instance->set_suite_trust(
+            phoneme::SuiteId {suite_id},
+            trust == PHONEME_SUITE_TRUSTED
+                ? phoneme::security::SuiteTrust::trusted
+                : phoneme::security::SuiteTrust::untrusted));
 }
 
 int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
@@ -321,8 +351,10 @@ int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
     auto suite = instance->install_jar(jar_path);
     if (!suite) {
         g_last_install_stage.store(-1, std::memory_order_relaxed);
+        instance->record_error(suite.error());
         return map_error(suite.error());
     }
+    instance->clear_error();
     *suite_id_out = suite->value;
     g_last_suite_store_stage.store(1, std::memory_order_relaxed);
     g_last_install_stage.store(2, std::memory_order_relaxed);
@@ -336,9 +368,11 @@ int32_t phoneme_uninstall_suite(PhoneMERuntimeRef runtime,
     if (instance == nullptr || suite_id <= 0) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->uninstall_suite(
-        phoneme::SuiteId {suite_id},
-        remove_data != 0));
+    return status_code(
+        instance,
+        instance->uninstall_suite(
+            phoneme::SuiteId {suite_id},
+            remove_data != 0));
 }
 
 int32_t phoneme_last_install_stage(void) {
@@ -351,8 +385,9 @@ int32_t phoneme_last_suite_store_stage(void) {
 
 int32_t phoneme_start_system(PhoneMERuntimeRef runtime) {
     Runtime* instance = cast_runtime(runtime);
-    return instance == nullptr ? PHONEME_ERROR_INVALID_ARGUMENT
-                               : status_code(instance->start_system());
+    return instance == nullptr
+        ? PHONEME_ERROR_INVALID_ARGUMENT
+        : status_code(instance, instance->start_system());
 }
 
 int32_t phoneme_start_midlet(PhoneMERuntimeRef runtime,
@@ -365,11 +400,13 @@ int32_t phoneme_start_midlet(PhoneMERuntimeRef runtime,
     if (instance == nullptr || main_class == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->start_midlet(
-        phoneme::SuiteId {suite_id},
-        main_class,
-        phoneme::AppId {app_id},
-        phoneme::Dimensions {screen_width, screen_height}));
+    return status_code(
+        instance,
+        instance->start_midlet(
+            phoneme::SuiteId {suite_id},
+            main_class,
+            phoneme::AppId {app_id},
+            phoneme::Dimensions {screen_width, screen_height}));
 }
 
 int32_t phoneme_set_foreground(PhoneMERuntimeRef runtime,
@@ -380,30 +417,35 @@ int32_t phoneme_set_foreground(PhoneMERuntimeRef runtime,
     if (instance == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->set_foreground(
-        phoneme::AppId {app_id},
-        phoneme::Dimensions {screen_width, screen_height}));
+    return status_code(
+        instance,
+        instance->set_foreground(
+            phoneme::AppId {app_id},
+            phoneme::Dimensions {screen_width, screen_height}));
 }
 
 int32_t phoneme_pause_midlet(PhoneMERuntimeRef runtime, int32_t app_id) {
     Runtime* instance = cast_runtime(runtime);
     return instance == nullptr
         ? PHONEME_ERROR_INVALID_ARGUMENT
-        : status_code(instance->pause_midlet(phoneme::AppId {app_id}));
+        : status_code(
+              instance, instance->pause_midlet(phoneme::AppId {app_id}));
 }
 
 int32_t phoneme_resume_midlet(PhoneMERuntimeRef runtime, int32_t app_id) {
     Runtime* instance = cast_runtime(runtime);
     return instance == nullptr
         ? PHONEME_ERROR_INVALID_ARGUMENT
-        : status_code(instance->resume_midlet(phoneme::AppId {app_id}));
+        : status_code(
+              instance, instance->resume_midlet(phoneme::AppId {app_id}));
 }
 
 int32_t phoneme_destroy_midlet(PhoneMERuntimeRef runtime, int32_t app_id) {
     Runtime* instance = cast_runtime(runtime);
     return instance == nullptr
         ? PHONEME_ERROR_INVALID_ARGUMENT
-        : status_code(instance->destroy_midlet(phoneme::AppId {app_id}));
+        : status_code(
+              instance, instance->destroy_midlet(phoneme::AppId {app_id}));
 }
 
 int32_t phoneme_push_set_background_policy(PhoneMERuntimeRef runtime,
@@ -418,8 +460,10 @@ int32_t phoneme_push_set_background_policy(PhoneMERuntimeRef runtime,
     const auto native_policy = policy == PHONEME_PUSH_SYSTEM_MANAGED
         ? phoneme::push::BackgroundPolicy::system_managed
         : phoneme::push::BackgroundPolicy::foreground_only;
-    return status_code(instance->set_push_background_policy(
-        phoneme::SuiteId {suite_id}, native_policy));
+    return status_code(
+        instance,
+        instance->set_push_background_policy(
+            phoneme::SuiteId {suite_id}, native_policy));
 }
 
 int32_t phoneme_push_notify_connection_available(
@@ -431,8 +475,10 @@ int32_t phoneme_push_notify_connection_available(
     if (instance == nullptr || connection == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->notify_push_connection_available(
-        phoneme::SuiteId {suite_id}, connection, received_at_millis));
+    return status_code(
+        instance,
+        instance->notify_push_connection_available(
+            phoneme::SuiteId {suite_id}, connection, received_at_millis));
 }
 
 int32_t phoneme_push_notify_connection_available_from_source(
@@ -446,9 +492,11 @@ int32_t phoneme_push_notify_connection_available_from_source(
         source_address == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
-    return status_code(instance->notify_push_connection_available(
-        phoneme::SuiteId {suite_id}, connection, source_address,
-        received_at_millis));
+    return status_code(
+        instance,
+        instance->notify_push_connection_available(
+            phoneme::SuiteId {suite_id}, connection, source_address,
+            received_at_millis));
 }
 
 int32_t phoneme_push_poll_launch_requests(
@@ -473,7 +521,11 @@ int32_t phoneme_push_poll_launch_requests(
         now_millis,
         background_execution_granted != 0,
         limit);
-    if (!requests) return map_error(requests.error());
+    if (!requests) {
+        instance->record_error(requests.error());
+        return map_error(requests.error());
+    }
+    instance->clear_error();
 
     if (requests->size() >
         static_cast<phoneme::usize>(std::numeric_limits<int32_t>::max())) {
@@ -506,8 +558,10 @@ int32_t phoneme_push_acknowledge_launch_request(
     Runtime* instance = cast_runtime(runtime);
     return instance == nullptr
         ? PHONEME_ERROR_INVALID_ARGUMENT
-        : status_code(instance->acknowledge_push_launch_request(
-              phoneme::SuiteId {suite_id}, request_id));
+        : status_code(
+              instance,
+              instance->acknowledge_push_launch_request(
+                  phoneme::SuiteId {suite_id}, request_id));
 }
 
 int32_t phoneme_midlet_state(PhoneMERuntimeRef runtime, int32_t app_id) {
@@ -582,6 +636,29 @@ int32_t phoneme_last_exit_code(PhoneMERuntimeRef runtime) {
     Runtime* instance = cast_runtime(runtime);
     return instance == nullptr ? PHONEME_ERROR_INVALID_ARGUMENT
                                : instance->last_exit_code();
+}
+
+int32_t phoneme_copy_last_error_message(PhoneMERuntimeRef runtime,
+                                        char* destination,
+                                        int32_t capacity) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) return PHONEME_ERROR_INVALID_ARGUMENT;
+    return copy_diagnostic(
+        instance->last_error_message(), destination, capacity);
+}
+
+int32_t phoneme_copy_midlet_error_message(PhoneMERuntimeRef runtime,
+                                          int32_t app_id,
+                                          char* destination,
+                                          int32_t capacity) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || app_id <= 0) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return copy_diagnostic(
+        instance->app_error_message(phoneme::AppId {app_id}),
+        destination,
+        capacity);
 }
 
 void phoneme_send_key(PhoneMERuntimeRef runtime,
@@ -666,6 +743,16 @@ void phoneme_lcdui_select_command(PhoneMERuntimeRef runtime,
                                   int32_t command_id) {
     if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
         instance->ui_select_command(command_id);
+    }
+}
+
+void phoneme_lcdui_select_list_item_command(PhoneMERuntimeRef runtime,
+                                            int32_t component_id,
+                                            int32_t element_index,
+                                            int32_t command_id) {
+    if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
+        instance->ui_select_list_item_command(
+            component_id, element_index, command_id);
     }
 }
 

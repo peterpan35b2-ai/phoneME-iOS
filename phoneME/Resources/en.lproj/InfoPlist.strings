@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "J2ME Loader";
+"NSPhotoLibraryAddUsageDescription" = "Allow J2ME Loader to save game screenshots to your photo library.";
+"NSLocationWhenInUseUsageDescription" = "J2ME Loader uses low-accuracy location updates only to keep active games and their network connections running when the app is in the background.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Allow background location access so J2ME Loader can keep active games and their network connections running while the app is not on screen.";

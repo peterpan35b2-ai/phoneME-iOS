@@ -41,6 +41,7 @@ public final class LcduiApp extends MIDlet
     private ChoiceGroup modes;
     private DateField dateField;
     private Command menuCommand;
+    private Command listItemCommand;
     private Command textCommand;
     private Command alertCommand;
     private int serialRuns;
@@ -138,9 +139,13 @@ public final class LcduiApp extends MIDlet
     public void commandAction(Command command, Displayable displayable) {
         if (displayable instanceof List) {
             List list = (List) displayable;
-            status.setText(command == List.SELECT_COMMAND
-                    ? "List " + list.getSelectedIndex()
-                    : "Wrong list command");
+            if (command == listItemCommand) {
+                status.setText("List item " + list.getSelectedIndex());
+            } else {
+                status.setText(command == List.SELECT_COMMAND
+                        ? "List " + list.getSelectedIndex()
+                        : "Wrong list command");
+            }
             display.callSerially(new Runnable() {
                 public void run() {
                     display.setCurrent(form);
@@ -164,6 +169,8 @@ public final class LcduiApp extends MIDlet
         if (command == menuCommand) {
             List list = new MenuList("Menu", Choice.IMPLICIT,
                     new String[] {"One", "Two"});
+            listItemCommand = new Command("Use", Command.ITEM, 1);
+            list.addCommand(listItemCommand);
             list.setCommandListener(this);
             display.setCurrent(list);
             return;

@@ -9,9 +9,9 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .light: return "Light"
-        case .dark: return "Dark"
-        case .system: return "System"
+        case .light: return L10n.string("Light")
+        case .dark: return L10n.string("Dark")
+        case .system: return L10n.string("System")
         }
     }
 
@@ -32,6 +32,8 @@ struct SettingsView: View {
     @EnvironmentObject private var session: EmulatorSession
     @EnvironmentObject private var backgroundExecution: BackgroundExecutionController
 
+    @AppStorage(AppLanguage.preferenceKey) private var appLanguage =
+        AppLanguage.defaultLanguage.rawValue
     @AppStorage("appTheme") private var appTheme = AppTheme.system.rawValue
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
@@ -40,6 +42,19 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Language", selection: $appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title)
+                            .tag(language.rawValue)
+                    }
+                }
+            } header: {
+                Text("Language")
+            } footer: {
+                Text("Language changes are applied immediately.")
+            }
+
             Section {
                 Picker("Appearance", selection: $appTheme) {
                     ForEach(AppTheme.allCases) { theme in
@@ -62,10 +77,24 @@ struct SettingsView: View {
 #if os(iOS)
             Section {
                 Toggle("Run in Background", isOn: backgroundExecutionBinding)
+
+                if backgroundExecution.isEnabled {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(backgroundExecution.status.description)
+                            .foregroundStyle(.secondary)
+
+                        if backgroundExecution.status.requiresSystemSettings {
+                            Button("Open Location Settings") {
+                                backgroundExecution.openSystemSettings()
+                            }
+                        }
+                    }
+                    .font(.footnote)
+                }
             } header: {
                 Text("Background Execution")
             } footer: {
-                Text("iOS requires low-accuracy Location Services while this option is enabled.")
+                Text("When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background.")
             }
 #endif
 
@@ -121,7 +150,9 @@ struct SettingsView: View {
     private func switchStorage(to location: PhoneMEStorageLocation) {
         guard location != storage.activeLocation else { return }
         guard session.runningApplications.isEmpty else {
-            storageErrorMessage = "Close all running J2ME apps before changing the data location."
+            storageErrorMessage = L10n.string(
+                "Close all running J2ME apps before changing the data location."
+            )
             return
         }
 

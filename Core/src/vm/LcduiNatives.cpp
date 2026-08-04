@@ -28,6 +28,8 @@ constexpr i32 kEventItemDeleted = 11;
 constexpr i32 kEventCommandsReset = 14;
 constexpr i32 kEventCommand = 15;
 
+constexpr i32 kCommandTypeItem = 8;
+
 constexpr i32 kTypeExclusiveChoice = 1;
 constexpr i32 kTypeMultipleChoice = 3;
 constexpr i32 kTypeCustomItem = 4;
@@ -5399,6 +5401,62 @@ Status handle_lcdui_action(Machine& machine,
     }
     auto component = machine.ui_component(component_id);
     if (!component) return std::unexpected(component.error());
+
+    if (kind == static_cast<i32>(
+            LcduiActionKind::select_list_item_command)) {
+        if (value64 < std::numeric_limits<i32>::min() ||
+            value64 > std::numeric_limits<i32>::max()) {
+            return fail(ErrorCode::overflow,
+                        "LCDUI list item command ID is out of range");
+        }
+        auto is_list = machine.object_is_instance(
+            *component, "javax/microedition/lcdui/List");
+        if (!is_list) return std::unexpected(is_list.error());
+        if (!*is_list) {
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI list item command target is not a List");
+        }
+        auto current = current_displayable(machine);
+        if (!current) return std::unexpected(current.error());
+        if (current->is_null() || *current != *component) return {};
+
+        const i32 command_id = static_cast<i32>(value64);
+        auto command = machine.ui_component(command_id);
+        if (!command) return std::unexpected(command.error());
+        auto is_command = machine.object_is_instance(
+            *command, "javax/microedition/lcdui/Command");
+        if (!is_command) return std::unexpected(is_command.error());
+        if (!*is_command) {
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI list item action target is not a Command");
+        }
+        auto type = int_field(machine, *command, kCommandTypeField);
+        auto owner = int_field(machine, *command, kCommandOwnerItemField);
+        if (!type) return std::unexpected(type.error());
+        if (!owner) return std::unexpected(owner.error());
+        if (*type != kCommandTypeItem || *owner != 0) {
+            return fail(ErrorCode::invalid_argument,
+                        "LCDUI list context action requires Command.ITEM");
+        }
+        auto commands = reference_field(machine, *component,
+                                        kDisplayableCommandsField);
+        auto count = int_field(machine, *component,
+                               kDisplayableCommandCountField);
+        if (!commands) return std::unexpected(commands.error());
+        if (!count) return std::unexpected(count.error());
+        auto attached = reference_array_contains(
+            machine, *commands, *count, *command);
+        if (!attached) return std::unexpected(attached.error());
+        if (!*attached) {
+            return fail(ErrorCode::out_of_range,
+                        "LCDUI list item command action is stale");
+        }
+
+        auto selected = handle_choice_action(
+            machine, *component, first, true);
+        if (!selected) return selected;
+        return dispatch_command_listener(machine, *command, *component);
+    }
 
     if (kind == static_cast<i32>(LcduiActionKind::custom_item_key)) {
         auto valid = machine.object_is_instance(

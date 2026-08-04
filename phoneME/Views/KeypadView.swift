@@ -206,7 +206,7 @@ enum KeyboardLayoutCatalog {
                 id: "menu",
                 label: "M",
                 keys: [],
-                accessibilityLabel: "Menu",
+                accessibilityLabel: L10n.string("Menu"),
                 emphasized: false,
                 groupID: "soft-keys",
                 column: 1,
@@ -385,7 +385,7 @@ enum KeyboardLayoutCatalog {
             id: id,
             label: label,
             keys: keys,
-            accessibilityLabel: id.replacingOccurrences(of: "-", with: " "),
+            accessibilityLabel: diagonalAccessibilityLabel(for: id),
             emphasized: false,
             groupID: "directions",
             column: column,
@@ -415,15 +415,25 @@ enum KeyboardLayoutCatalog {
         )
     }
 
+    private static func diagonalAccessibilityLabel(for id: String) -> String {
+        switch id {
+        case "up-left": return L10n.string("Up left")
+        case "up-right": return L10n.string("Up right")
+        case "down-left": return L10n.string("Down left")
+        case "down-right": return L10n.string("Down right")
+        default: return id.replacingOccurrences(of: "-", with: " ")
+        }
+    }
+
     private static func accessibilityLabel(for key: J2MEKey) -> String {
         switch key {
-        case .up: return "Up"
-        case .down: return "Down"
-        case .left: return "Left"
-        case .right: return "Right"
-        case .fire: return "Fire"
-        case .softLeft: return "Left soft key"
-        case .softRight: return "Right soft key"
+        case .up: return L10n.string("Up")
+        case .down: return L10n.string("Down")
+        case .left: return L10n.string("Left")
+        case .right: return L10n.string("Right")
+        case .fire: return L10n.string("Fire")
+        case .softLeft: return L10n.string("Left soft key")
+        case .softRight: return L10n.string("Right soft key")
         default: return key.title
         }
     }
@@ -714,6 +724,77 @@ struct KeypadView: View {
     }
 }
 
+#if canImport(UIKit)
+private struct KeyboardEditPanGestureView: UIViewRepresentable {
+    let onChanged: (CGSize) -> Void
+    let onEnded: (CGSize) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onChanged: onChanged,
+            onEnded: onEnded,
+            onCancelled: onCancelled
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isAccessibilityElement = false
+
+        let recognizer = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePan(_:))
+        )
+        recognizer.minimumNumberOfTouches = 1
+        recognizer.maximumNumberOfTouches = 1
+        recognizer.cancelsTouchesInView = true
+        view.addGestureRecognizer(recognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onChanged = onChanged
+        context.coordinator.onEnded = onEnded
+        context.coordinator.onCancelled = onCancelled
+    }
+
+    final class Coordinator: NSObject {
+        var onChanged: (CGSize) -> Void
+        var onEnded: (CGSize) -> Void
+        var onCancelled: () -> Void
+
+        init(
+            onChanged: @escaping (CGSize) -> Void,
+            onEnded: @escaping (CGSize) -> Void,
+            onCancelled: @escaping () -> Void
+        ) {
+            self.onChanged = onChanged
+            self.onEnded = onEnded
+            self.onCancelled = onCancelled
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            let translation = recognizer.translation(in: recognizer.view?.window)
+            let size = CGSize(width: translation.x, height: translation.y)
+
+            switch recognizer.state {
+            case .began, .changed:
+                onChanged(size)
+            case .ended:
+                onEnded(size)
+            case .cancelled, .failed:
+                onCancelled()
+            default:
+                break
+            }
+        }
+    }
+}
+#endif
+
 private struct VirtualKeyButton: View {
     @EnvironmentObject private var session: EmulatorSession
     @Environment(\.colorScheme) private var colorScheme
@@ -735,7 +816,7 @@ private struct VirtualKeyButton: View {
     let onResizeDragEnded: (GameProfile.KeyboardGroupScale) -> Void
 
     @State private var isPressed = false
-    @GestureState private var editTranslation = CGSize.zero
+    @State private var editTranslation = CGSize.zero
 
     var body: some View {
         Group {
@@ -777,57 +858,94 @@ private struct VirtualKeyButton: View {
                 if editMode != .none {
                     editOutline
                         .opacity(editMode == .size && !isGroupSelected ? 0.55 : 1)
+
+                    keyboardEditGestureLayer
                 }
             }
             .contentShape(Rectangle())
             .scaleEffect(isPressed && editMode == .none ? 0.96 : 1)
             .animation(.easeOut(duration: 0.06), value: isPressed)
             .highPriorityGesture(
-                DragGesture(
-                    minimumDistance: editMode == .none ? 0 : 3,
-                    // A stable coordinate space prevents the preview transform
-                    // from changing the reported translation on iOS 16.
-                    coordinateSpace: editMode == .none ? .local : .global
-                )
-                    .updating($editTranslation) { value, state, _ in
-                        if editMode == .position {
-                            state = value.translation
-                        }
-                    }
-                    .onChanged { value in
-                        switch editMode {
-                        case .none:
-                            guard !isPressed else { return }
-                            isPressed = true
-                            press()
-                        case .position:
-                            break
-                        case .size:
-                            resizePreview.update(
-                                translation: value.translation,
-                                baseScale: baseGroupScale,
-                                divisor: min(containerSize.width, containerSize.height),
-                                matchingScales: matchingGroupScales
-                            )
-                        }
-                    }
-                    .onEnded { value in
-                        switch editMode {
-                        case .none:
-                            guard isPressed else { return }
-                            isPressed = false
-                            release()
-                        case .position:
-                            onPositionDragEnded(value.translation)
-                        case .size:
-                            if let scale = resizePreview.finish() {
-                                onResizeDragEnded(scale)
-                            }
-                        }
-                    }
+                keyPressGesture,
+                including: editMode == .none ? .all : .none
             )
             .accessibilityLabel(control.accessibilityLabel)
             .accessibilityAddTraits(.isButton)
+    }
+
+    private var keyPressGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { _ in
+                guard !isPressed else { return }
+                isPressed = true
+                press()
+            }
+            .onEnded { _ in
+                guard isPressed else { return }
+                isPressed = false
+                release()
+            }
+    }
+
+    @ViewBuilder
+    private var keyboardEditGestureLayer: some View {
+#if canImport(UIKit)
+        // SwiftUI on iOS 15/16 can cancel a DragGesture when the same view is
+        // offset during the drag. UIPanGestureRecognizer retains ownership of
+        // the touch while SwiftUI redraws the key preview.
+        KeyboardEditPanGestureView(
+            onChanged: handleEditDragChanged,
+            onEnded: handleEditDragEnded,
+            onCancelled: cancelEditDrag
+        )
+#else
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                    .onChanged { value in
+                        handleEditDragChanged(value.translation)
+                    }
+                    .onEnded { value in
+                        handleEditDragEnded(value.translation)
+                    }
+            )
+#endif
+    }
+
+    private func handleEditDragChanged(_ translation: CGSize) {
+        switch editMode {
+        case .none:
+            break
+        case .position:
+            editTranslation = translation
+        case .size:
+            resizePreview.update(
+                translation: translation,
+                baseScale: baseGroupScale,
+                divisor: min(containerSize.width, containerSize.height),
+                matchingScales: matchingGroupScales
+            )
+        }
+    }
+
+    private func handleEditDragEnded(_ translation: CGSize) {
+        switch editMode {
+        case .none:
+            break
+        case .position:
+            editTranslation = .zero
+            onPositionDragEnded(translation)
+        case .size:
+            if let scale = resizePreview.finish() {
+                onResizeDragEnded(scale)
+            }
+        }
+    }
+
+    private func cancelEditDrag() {
+        editTranslation = .zero
+        resizePreview.reset()
     }
 
     private var positionPreviewTranslation: CGSize {

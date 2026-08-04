@@ -25,11 +25,12 @@ namespace {
 constexpr usize kMaximumTextCodePoints = 262'144U;
 constexpr usize kMaximumFontGlyphs = 256U;
 constexpr usize kAsciiGlyphCount = 128U;
+constexpr i32 kPhoneMEFontCellWidth = 9;
 constexpr i32 kPhoneMEFontAscent = 11;
-constexpr i32 kPhoneMEFontDescent = 2;
+constexpr i32 kPhoneMEFontDescent = 3;
 constexpr i32 kPhoneMEFontHeight =
     kPhoneMEFontAscent + kPhoneMEFontDescent;
-constexpr i32 kExpectedFontHeight = 13;
+constexpr i32 kEmbeddedFontHeight = 13;
 constexpr i32 kInvalidGlyphIndex = -1;
 
 struct PhoneMEFontBin final {
@@ -129,7 +130,7 @@ struct PhoneMEFontBin final {
     }
 
     font.height = bytes[charset_end];
-    if (font.height != kExpectedFontHeight) {
+    if (font.height != kEmbeddedFontHeight) {
         return font;
     }
 
@@ -194,27 +195,15 @@ struct PhoneMEFontBin final {
     return kInvalidGlyphIndex;
 }
 
-[[nodiscard]] i32 style_horizontal_padding(const Font& font) noexcept {
-    i32 padding = 0;
-    if (font.is_bold()) {
-        ++padding;
-    }
-    if (font.is_italic()) {
-        padding += 2;
-    }
-    return padding;
-}
-
-[[nodiscard]] i32 glyph_advance(const PhoneMEFontBin& font,
-                                i32 glyph_index,
-                                const Font& logical_font) noexcept {
-    return static_cast<i32>(font.widths[static_cast<usize>(glyph_index)]) +
-           style_horizontal_padding(logical_font);
+[[nodiscard]] i32 glyph_advance(char32_t character) noexcept {
+    return character > 0xFFFF ? kPhoneMEFontCellWidth * 2
+                              : kPhoneMEFontCellWidth;
 }
 
 [[nodiscard]] std::optional<i32> bitmap_text_width(
     const Font& logical_font,
     std::span<const char32_t> text) noexcept {
+    static_cast<void>(logical_font);
     if (text.empty()) {
         return 0;
     }
@@ -229,7 +218,7 @@ struct PhoneMEFontBin final {
         if (glyph_index == kInvalidGlyphIndex) {
             return std::nullopt;
         }
-        const i32 advance = glyph_advance(font, glyph_index, logical_font);
+        const i32 advance = glyph_advance(character);
         if (width > std::numeric_limits<i32>::max() - advance) {
             return std::nullopt;
         }
@@ -257,6 +246,7 @@ struct PhoneMEFontBin final {
                                       i32 top,
                                       Pixel color,
                                       const Rect& clip) {
+    static_cast<void>(logical_font);
     const PhoneMEFontBin& font = phone_me_font();
     if (!font.valid) {
         return fail(ErrorCode::unsupported_feature,
@@ -287,9 +277,7 @@ struct PhoneMEFontBin final {
                 destination_y >= clip_bottom) {
                 continue;
             }
-            const i32 italic_shift = logical_font.is_italic()
-                ? (font.height - 1 - glyph_y) / 6
-                : 0;
+            const i32 italic_shift = 0;
             for (i32 glyph_x = 0; glyph_x < glyph_width; ++glyph_x) {
                 if (!bitmap_pixel_is_set(font,
                                          glyph_index,
@@ -309,20 +297,9 @@ struct PhoneMEFontBin final {
                 if (!stored) {
                     return stored;
                 }
-                if (logical_font.is_bold() &&
-                    destination_x + 1 < clip_right) {
-                    stored = target.set_pixel(
-                        static_cast<i32>(destination_x + 1),
-                        static_cast<i32>(destination_y),
-                        color,
-                        true);
-                    if (!stored) {
-                        return stored;
-                    }
-                }
             }
         }
-        pen_x += glyph_advance(font, glyph_index, logical_font);
+        pen_x += glyph_advance(character);
     }
     return {};
 }
@@ -429,6 +406,79 @@ struct CachedFont final {
             0xD800U | ((value >> 10U) & 0x3FFU)));
         output.push_back(static_cast<UniChar>(
             0xDC00U | (value & 0x3FFU)));
+    }
+    return output;
+}
+
+[[nodiscard]] bool contains_combining_mark(
+    std::span<const char32_t> text) noexcept {
+    for (const char32_t character : text) {
+        const u32 value = static_cast<u32>(character);
+        if ((value >= 0x0300U && value <= 0x036FU) ||
+            (value >= 0x1AB0U && value <= 0x1AFFU) ||
+            (value >= 0x1DC0U && value <= 0x1DFFU) ||
+            (value >= 0x20D0U && value <= 0x20FFU) ||
+            (value >= 0xFE20U && value <= 0xFE2FU)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<std::vector<char32_t>> normalize_nfc_if_needed(
+    std::span<const char32_t> text) {
+    if (!contains_combining_mark(text)) {
+        return std::nullopt;
+    }
+
+    const std::vector<UniChar> characters = utf16_text(text);
+    CFMutableStringRef string = CFStringCreateMutable(kCFAllocatorDefault, 0);
+    if (string == nullptr) {
+        return std::nullopt;
+    }
+    if (!characters.empty()) {
+        CFStringAppendCharacters(string,
+                                 characters.data(),
+                                 static_cast<CFIndex>(characters.size()));
+    }
+    CFStringNormalize(string, kCFStringNormalizationFormC);
+
+    const CFIndex length = CFStringGetLength(string);
+    if (length < 0 ||
+        static_cast<unsigned long long>(length) >
+            static_cast<unsigned long long>(kMaximumTextCodePoints * 2U)) {
+        CFRelease(string);
+        return std::nullopt;
+    }
+
+    std::vector<UniChar> normalized_utf16(static_cast<usize>(length));
+    if (length > 0) {
+        CFStringGetCharacters(string,
+                              CFRangeMake(0, length),
+                              normalized_utf16.data());
+    }
+    CFRelease(string);
+
+    std::vector<char32_t> output;
+    output.reserve(normalized_utf16.size());
+    for (usize index = 0U; index < normalized_utf16.size(); ++index) {
+        const u32 first = normalized_utf16[index];
+        if (first >= 0xD800U && first <= 0xDBFFU &&
+            index + 1U < normalized_utf16.size()) {
+            const u32 second = normalized_utf16[index + 1U];
+            if (second >= 0xDC00U && second <= 0xDFFFU) {
+                output.push_back(static_cast<char32_t>(
+                    0x10000U + ((first - 0xD800U) << 10U) +
+                    (second - 0xDC00U)));
+                ++index;
+                continue;
+            }
+        }
+        if (first >= 0xD800U && first <= 0xDFFFU) {
+            output.push_back(U'\uFFFD');
+        } else {
+            output.push_back(static_cast<char32_t>(first));
+        }
     }
     return output;
 }
@@ -650,6 +700,92 @@ struct CachedFont final {
     return {};
 }
 
+[[nodiscard]] std::optional<i32> mixed_text_width(
+    const Font& font,
+    std::span<const char32_t> text) noexcept {
+    i64 total_width = 0;
+    usize run_start = 0U;
+    while (run_start < text.size()) {
+        const bool use_bitmap =
+            lookup_glyph(phone_me_font(), text[run_start]) !=
+            kInvalidGlyphIndex;
+        usize run_end = run_start + 1U;
+        while (run_end < text.size() &&
+               (lookup_glyph(phone_me_font(), text[run_end]) !=
+                kInvalidGlyphIndex) == use_bitmap) {
+            ++run_end;
+        }
+
+        const auto run = text.subspan(run_start, run_end - run_start);
+        const std::optional<i32> run_width = use_bitmap
+            ? bitmap_text_width(font, run)
+            : core_text_width(font, run);
+        if (!run_width || *run_width < 0 ||
+            total_width > std::numeric_limits<i32>::max() - *run_width) {
+            return std::nullopt;
+        }
+        total_width += *run_width;
+        run_start = run_end;
+    }
+    return static_cast<i32>(total_width);
+}
+
+[[nodiscard]] Status draw_mixed_text(Image& target,
+                                     const Font& font,
+                                     std::span<const char32_t> text,
+                                     i32 x,
+                                     i32 top,
+                                     Pixel color,
+                                     const Rect& clip) {
+    i64 pen_x = x;
+    usize run_start = 0U;
+    while (run_start < text.size()) {
+        const bool use_bitmap =
+            lookup_glyph(phone_me_font(), text[run_start]) !=
+            kInvalidGlyphIndex;
+        usize run_end = run_start + 1U;
+        while (run_end < text.size() &&
+               (lookup_glyph(phone_me_font(), text[run_end]) !=
+                kInvalidGlyphIndex) == use_bitmap) {
+            ++run_end;
+        }
+
+        const auto run = text.subspan(run_start, run_end - run_start);
+        const std::optional<i32> run_width = use_bitmap
+            ? bitmap_text_width(font, run)
+            : core_text_width(font, run);
+        if (!run_width) {
+            return fail(ErrorCode::unsupported_feature,
+                        "text run could not be measured");
+        }
+        if (pen_x > std::numeric_limits<i32>::max()) {
+            return {};
+        }
+
+        const Status status = use_bitmap
+            ? draw_bitmap_text(target,
+                               font,
+                               run,
+                               static_cast<i32>(pen_x),
+                               top,
+                               color,
+                               clip)
+            : draw_core_text_fallback(target,
+                                      font,
+                                      run,
+                                      static_cast<i32>(pen_x),
+                                      top,
+                                      color,
+                                      clip);
+        if (!status) {
+            return status;
+        }
+        pen_x += *run_width;
+        run_start = run_end;
+    }
+    return {};
+}
+
 #endif
 
 } // namespace
@@ -675,13 +811,14 @@ std::optional<i32> platform_text_width(
     if (text.size() > kMaximumTextCodePoints) {
         return std::nullopt;
     }
-    if (auto bitmap_width = bitmap_text_width(font, text)) {
-        return bitmap_width;
-    }
 #if defined(__APPLE__)
-    return core_text_width(font, text);
+    auto normalized = normalize_nfc_if_needed(text);
+    if (normalized) {
+        text = *normalized;
+    }
+    return mixed_text_width(font, text);
 #else
-    return std::nullopt;
+    return bitmap_text_width(font, text);
 #endif
 }
 
@@ -703,12 +840,16 @@ Status draw_platform_text(Image& target,
         return fail(ErrorCode::overflow,
                     "text input exceeds the bounded glyph budget");
     }
+#if defined(__APPLE__)
+    auto normalized = normalize_nfc_if_needed(text);
+    if (normalized) {
+        text = *normalized;
+    }
+    return draw_mixed_text(target, font, text, x, top, color, clip);
+#else
     if (bitmap_text_width(font, text).has_value()) {
         return draw_bitmap_text(target, font, text, x, top, color, clip);
     }
-#if defined(__APPLE__)
-    return draw_core_text_fallback(target, font, text, x, top, color, clip);
-#else
     return fail(ErrorCode::unsupported_feature,
                 "platform text fallback is unavailable");
 #endif

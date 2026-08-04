@@ -480,6 +480,44 @@ final class PhoneMECAPI: @unchecked Sendable {
         phoneme_last_exit_code(runtime?.rawValue)
     }
 
+    func lastErrorMessage(_ runtime: RuntimeHandle?) -> String? {
+        Self.copyDiagnostic { destination, capacity in
+            phoneme_copy_last_error_message(
+                runtime?.rawValue,
+                destination,
+                capacity
+            )
+        }
+    }
+
+    func midletErrorMessage(
+        _ runtime: RuntimeHandle?,
+        appID: Int32
+    ) -> String? {
+        Self.copyDiagnostic { destination, capacity in
+            phoneme_copy_midlet_error_message(
+                runtime?.rawValue,
+                appID,
+                destination,
+                capacity
+            )
+        }
+    }
+
+    func failure(
+        status: Int32,
+        runtime: RuntimeHandle?,
+        appID: Int32? = nil
+    ) -> PhoneMECoreError {
+        let message = appID.flatMap {
+            midletErrorMessage(runtime, appID: $0)
+        } ?? lastErrorMessage(runtime)
+        guard let message, !message.isEmpty else {
+            return .launchFailed(status)
+        }
+        return .runtimeFailure(code: status, message: message)
+    }
+
     func sendKey(_ runtime: RuntimeHandle?, key: J2MEKey, pressed: Bool) {
         phoneme_send_key(runtime?.rawValue, key.rawValue, pressed ? 1 : 0)
     }
@@ -536,6 +574,20 @@ final class PhoneMECAPI: @unchecked Sendable {
 
     func selectLCDUICommand(_ runtime: RuntimeHandle?, id: Int32) {
         phoneme_lcdui_select_command(runtime?.rawValue, id)
+    }
+
+    func selectLCDUIListItemCommand(
+        _ runtime: RuntimeHandle?,
+        componentID: Int32,
+        index: Int,
+        commandID: Int32
+    ) {
+        phoneme_lcdui_select_list_item_command(
+            runtime?.rawValue,
+            componentID,
+            Int32(clamping: index),
+            commandID
+        )
     }
 
     func focusLCDUIItem(_ runtime: RuntimeHandle?, componentID: Int32) {
@@ -729,6 +781,26 @@ final class PhoneMECAPI: @unchecked Sendable {
         return (image, generation)
     }
 
+    private static func copyDiagnostic(
+        _ copy: (UnsafeMutablePointer<CChar>?, Int32) -> Int32
+    ) -> String? {
+        let requiredCount = copy(nil, 0)
+        guard requiredCount > 0 else { return nil }
+
+        var buffer = Array<CChar>(
+            repeating: 0,
+            count: Int(requiredCount) + 1
+        )
+        let copiedCount = buffer.withUnsafeMutableBufferPointer { storage in
+            copy(storage.baseAddress, Int32(clamping: storage.count))
+        }
+        guard copiedCount >= 0 else { return nil }
+        return buffer.withUnsafeBufferPointer { storage in
+            guard let baseAddress = storage.baseAddress else { return nil }
+            return String(validatingCString: baseAddress)
+        }
+    }
+
     private static func makeImage(
         lease: PhoneMEPixelBufferLease,
         byteCount: Int,
@@ -790,25 +862,38 @@ enum PhoneMECoreError: LocalizedError {
     case tooManyApplications
     case foregroundActivationFailed
     case launchFailed(Int32)
+    case runtimeFailure(code: Int32, message: String)
 
     var errorDescription: String? {
         switch self {
         case .runtimeNotLinked:
-            return "Runtime is not available."
+            return L10n.string("Runtime is not available.")
         case .runtimeResourcesMissing:
-            return "The bundled phoneME runtime resources are missing."
+            return L10n.string(
+                "The bundled phoneME runtime resources are missing."
+            )
         case .runtimeCreationFailed:
-            return "Failed to create runtime."
+            return L10n.string("Failed to create runtime.")
         case .mainClassMissing:
-            return "The JAR manifest does not contain a valid MIDlet-1 class."
+            return L10n.string(
+                "The JAR manifest does not contain a valid MIDlet-1 class."
+            )
         case .applicationNotPrepared:
-            return "This application was imported after multitasking started. Close the running applications once so it can be prepared."
+            return L10n.string(
+                "This application was imported after multitasking started. Close the running applications once so it can be prepared."
+            )
         case .tooManyApplications:
-            return "The maximum of 64 simultaneous J2ME applications has been reached."
+            return L10n.string(
+                "The maximum of 64 simultaneous J2ME applications has been reached."
+            )
         case .foregroundActivationFailed:
-            return "The J2ME application could not become active in the foreground."
+            return L10n.string(
+                "The J2ME application could not become active in the foreground."
+            )
         case let .launchFailed(code):
-            return "Failed to start application (error \(code))."
+            return L10n.format("Failed to start application (error %d).", code)
+        case let .runtimeFailure(_, message):
+            return message
         }
     }
 }

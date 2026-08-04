@@ -14,9 +14,9 @@ enum LibrarySort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .name: return "Name"
-        case .date: return "Date"
-        case .vendor: return "Vendor"
+        case .name: return L10n.string("Name")
+        case .date: return L10n.string("Date")
+        case .vendor: return L10n.string("Vendor")
         }
     }
 }
@@ -48,7 +48,7 @@ struct LibraryView: View {
     @State private var isImportingRMS = false
     @State private var rmsExportDocument: RMSBackupDocument?
     @State private var isExportingRMS = false
-    @State private var rmsExportFileName = "RMS Backup"
+    @State private var rmsExportFileName = L10n.string("RMS Backup")
     @State private var showSettings = false
     @State private var showProfiles = false
     @State private var searchText = ""
@@ -176,7 +176,7 @@ struct LibraryView: View {
             }
         }
         .confirmationDialog(
-            "Uninstall \(deleteGame?.title ?? "this app")?",
+            uninstallDialogTitle,
             isPresented: deleteDialogBinding,
             titleVisibility: .visible
         ) {
@@ -340,22 +340,34 @@ struct LibraryView: View {
         }
     }
 
+    private var uninstallDialogTitle: String {
+        guard let title = deleteGame?.title else {
+            return L10n.string("Uninstall this app?")
+        }
+        return L10n.format("Uninstall %@?", title)
+    }
+
     private var emptyLibraryMessage: String {
         if showRunningOnly {
-            return "No J2ME apps are currently running."
+            return L10n.string("No J2ME apps are currently running.")
         }
         return searchText.isEmpty
-            ? "No apps match the current filter."
-            : "No apps match “\(searchText)”."
+            ? L10n.string("No apps match the current filter.")
+            : L10n.format("No apps match “%@”.", searchText)
     }
 
     private var libraryCountTitle: String {
         let count = library.games.count
-        return "\(count) \(count == 1 ? "App" : "Apps")"
+        return count == 1
+            ? L10n.format("%d App", count)
+            : L10n.format("%d Apps", count)
     }
 
     private var sortAccessibilityValue: String {
-        "\(sort.title), \(sortDescending ? "descending" : "ascending")"
+        let order = sortDescending
+            ? L10n.string("descending")
+            : L10n.string("ascending")
+        return L10n.format("%@, %@", sort.title, order)
     }
 
     private func sectionTitle(for game: Game) -> String {
@@ -409,7 +421,9 @@ struct LibraryView: View {
             )
         }
         .accessibilityLabel("Show Running Apps Only")
-        .accessibilityValue(showRunningOnly ? "On" : "Off")
+        .accessibilityValue(
+            showRunningOnly ? L10n.string("On") : L10n.string("Off")
+        )
     }
 
     private var importToolbarButton: some View {
@@ -577,7 +591,10 @@ struct LibraryView: View {
             ) { result in
                 switch result {
                 case .success:
-                    noticeMessage = "RMS data was imported for \(game.title)."
+                    noticeMessage = L10n.format(
+                        "RMS data was imported for %@.",
+                        game.title
+                    )
                 case .failure(let error):
                     errorMessage = error.localizedDescription
                 }
@@ -593,7 +610,7 @@ struct LibraryView: View {
         let safeTitle = components
             .filter { !$0.isEmpty }
             .joined(separator: "-")
-        let baseName = safeTitle.isEmpty ? "Game" : safeTitle
+        let baseName = safeTitle.isEmpty ? L10n.string("Game") : safeTitle
         return String(baseName.prefix(80)) + "-RMS"
     }
 
@@ -736,15 +753,15 @@ private struct GameRow: View {
 
         switch runningState {
         case .background:
-            details.append("Running in background")
+            details.append(L10n.string("Running in background"))
         case .paused:
-            details.append("Paused in background")
+            details.append(L10n.string("Paused in background"))
         case .foreground:
-            details.append("Currently open")
+            details.append(L10n.string("Currently open"))
         case .starting:
-            details.append("Starting")
+            details.append(L10n.string("Starting"))
         case .failed:
-            details.append("Stopped with an error")
+            details.append(L10n.string("Stopped with an error"))
         case nil:
             break
         }

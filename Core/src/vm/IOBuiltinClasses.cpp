@@ -266,6 +266,8 @@ using namespace builtin;
             method(kPublic | kSynchronized, "toByteArray", "()[B"),
             method(kPublic | kSynchronized, "size", "()I"),
             method(kPublic | kSynchronized, "toString", "()Ljava/lang/String;"),
+            method(kPublic | kSynchronized, "toString",
+                   "(Ljava/lang/String;)Ljava/lang/String;"),
             method(kPublic, "close", "()V"),
         });
     }

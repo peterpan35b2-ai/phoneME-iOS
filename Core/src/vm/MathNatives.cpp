@@ -10,6 +10,8 @@
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
+#include "OpenJdkFdlibm.hpp"
+
 namespace phoneme::vm {
 namespace {
 
@@ -180,10 +182,10 @@ void register_math_natives(NativeMethodRegistry& registry) {
     add_unary("sin", std::sin);
     add_unary("cos", std::cos);
     add_unary("tan", std::tan);
-    add_unary("asin", std::asin);
-    add_unary("acos", std::acos);
-    add_unary("atan", std::atan);
-    add_unary("exp", std::exp);
+    add_unary("asin", openjdk_fdlibm::asin);
+    add_unary("acos", openjdk_fdlibm::acos);
+    add_unary("atan", openjdk_fdlibm::atan);
+    add_unary("exp", openjdk_fdlibm::exp);
     add_unary("log", std::log);
     add_unary("sqrt", std::sqrt);
     add_unary("ceil", std::ceil);

@@ -1,0 +1,281 @@
+/* App language */
+"Language" = "Language";
+"Language changes are applied immediately." = "Language changes are applied immediately.";
+"Vietnamese" = "Vietnamese";
+"English" = "English";
+
+/* General */
+"Add" = "Add";
+"Add profile" = "Add profile";
+"Back" = "Back";
+"Cancel" = "Cancel";
+"Custom" = "Custom";
+"Default" = "Default";
+"Delete" = "Delete";
+"Done" = "Done";
+"Edit" = "Edit";
+"Error" = "Error";
+"Exit" = "Exit";
+"Help" = "Help";
+"Idle" = "Idle";
+"Item" = "Item";
+"Loading" = "Loading";
+"Loading…" = "Loading…";
+"More" = "More";
+"More options" = "More options";
+"OK" = "OK";
+"Opening" = "Opening";
+"Options" = "Options";
+"Paused" = "Paused";
+"Progress" = "Progress";
+"Rename" = "Rename";
+"Save" = "Save";
+"Select" = "Select";
+"Selection" = "Selection";
+"Start" = "Start";
+"Starting" = "Starting";
+"Stop" = "Stop";
+"Unavailable" = "Unavailable";
+"Value" = "Value";
+"On" = "On";
+"Off" = "Off";
+"%@, %@" = "%@, %@";
+"%d of %d characters" = "%d of %d characters";
+"Options, %d commands" = "Options, %d commands";
+
+/* Appearance */
+"Appearance" = "Appearance";
+"Light" = "Light";
+"Dark" = "Dark";
+"System" = "System";
+"System follows the appearance selected in iOS Settings." = "System follows the appearance selected in iOS Settings.";
+
+/* Library */
+"Library" = "Library";
+"J2ME Loader" = "J2ME Loader";
+"No Apps" = "No Apps";
+"Import a J2ME JAR file to add it to your library." = "Import a J2ME JAR file to add it to your library.";
+"Import JAR" = "Import JAR";
+"Search Apps" = "Search Apps";
+"Search Running Apps" = "Search Running Apps";
+"No J2ME apps are currently running." = "No J2ME apps are currently running.";
+"No apps match the current filter." = "No apps match the current filter.";
+"No apps match “%@”." = "No apps match “%@”.";
+"%d App" = "%d App";
+"%d Apps" = "%d Apps";
+"Name" = "Name";
+"Date" = "Date";
+"Vendor" = "Vendor";
+"Sort by" = "Sort by";
+"Order" = "Order";
+"Ascending" = "Ascending";
+"Descending" = "Descending";
+"ascending" = "ascending";
+"descending" = "descending";
+"Show Running Apps Only" = "Show Running Apps Only";
+"App name" = "App name";
+"Export RMS" = "Export RMS";
+"Import RMS" = "Import RMS";
+"RMS" = "RMS";
+"RMS Backup" = "RMS Backup";
+"RMS data was imported for %@." = "RMS data was imported for %@.";
+"Uninstall" = "Uninstall";
+"Uninstall %@?" = "Uninstall %@?";
+"Uninstall this app?" = "Uninstall this app?";
+"Uninstall App & Delete Data" = "Uninstall App & Delete Data";
+"Uninstall App Only" = "Uninstall App Only";
+"Keep data to restore saves and settings when the same JAR is imported again, or delete all RMS, files and app settings permanently." = "Keep data to restore saves and settings when the same JAR is imported again, or delete all RMS, files and app settings permanently.";
+"Game" = "Game";
+"Running in background" = "Running in background";
+"Paused in background" = "Paused in background";
+"Currently open" = "Currently open";
+"Stopped with an error" = "Stopped with an error";
+"Opens the app" = "Opens the app";
+"Touch and hold for actions" = "Touch and hold for actions";
+
+/* Profiles */
+"Profiles" = "Profiles";
+"No Profiles" = "No Profiles";
+"Create a reusable profile for display, font and input settings." = "Create a reusable profile for display, font and input settings.";
+"Create Profile" = "Create Profile";
+"New Profile" = "New Profile";
+"Rename Profile" = "Rename Profile";
+"Profile Name" = "Profile Name";
+"Default profile" = "Default profile";
+"Set as Default" = "Set as Default";
+
+/* Settings */
+"Settings" = "Settings";
+"Player" = "Player";
+"Action Bar" = "Action Bar";
+"Status Bar" = "Status Bar";
+"Keep Screen Awake" = "Keep Screen Awake";
+
+/* Background execution */
+"Background Execution" = "Background Execution";
+"Run in Background" = "Run in Background";
+"Open Location Settings" = "Open Location Settings";
+"When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background." = "When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background.";
+"Disabled" = "Disabled";
+"Starts when a J2ME application is running" = "Starts when a J2ME application is running";
+"Ready for background use" = "Ready for background use";
+"Allow Location, then choose Always Allow" = "Allow Location, then choose Always Allow";
+"Choose Always in Location Services" = "Choose Always in Location Services";
+"Background execution is active" = "Background execution is active";
+"Location access is denied" = "Location access is denied";
+"Location access is restricted" = "Location access is restricted";
+"Location Services are turned off" = "Location Services are turned off";
+
+/* Storage */
+"Storage" = "Storage";
+"Data Storage" = "Data Storage";
+"On My iPhone" = "On My iPhone";
+"iCloud Drive" = "iCloud Drive";
+"Moving library and game data…" = "Moving library and game data…";
+"Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location." = "Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location.";
+"Keep the library and game data in the Files app on this device." = "Keep the library and game data in the Files app on this device.";
+"Sync the library, profiles, RMS and game files through iCloud Drive." = "Sync the library, profiles, RMS and game files through iCloud Drive.";
+"Close all running J2ME apps before changing the data location." = "Close all running J2ME apps before changing the data location.";
+"iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again." = "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again.";
+"Could not move phoneME data: %@" = "Could not move phoneME data: %@";
+"Files › On My iPhone › J2ME Loader › phoneME" = "Files › On My iPhone › J2ME Loader › phoneME";
+"Files › iCloud Drive › J2ME Loader › phoneME" = "Files › iCloud Drive › J2ME Loader › phoneME";
+
+/* Display profile */
+"Display" = "Display";
+"Screen size" = "Screen size";
+"Screen size presets" = "Screen size presets";
+"Width" = "Width";
+"Height" = "Height";
+"Swap width and height" = "Swap width and height";
+"Keep Canvas aspect ratio" = "Keep Canvas aspect ratio";
+"Canvas scale" = "Canvas scale";
+"Screen orientation" = "Screen orientation";
+"Canvas gravity" = "Canvas gravity";
+"Canvas scale type" = "Canvas scale type";
+"Image filtering" = "Image filtering";
+"Force Canvas fullscreen" = "Force Canvas fullscreen";
+"Show FPS" = "Show FPS";
+"Frame rate limit" = "Frame rate limit";
+"Auto (60)" = "Auto (60)";
+"Configure Canvas size, scaling and rendering. Frame rate supports up to 60 FPS; enter 0 to use the default." = "Configure Canvas size, scaling and rendering. Frame rate supports up to 60 FPS; enter 0 to use the default.";
+"Auto" = "Auto";
+"Portrait" = "Portrait";
+"Landscape" = "Landscape";
+"Left" = "Left";
+"Top" = "Top";
+"Center" = "Center";
+"Right" = "Right";
+"Bottom" = "Bottom";
+"As is" = "As is";
+"Fit to window" = "Fit to window";
+"Fill window (ignore aspect ratio)" = "Fill window (ignore aspect ratio)";
+
+/* Fonts */
+"Fonts" = "Fonts";
+"Small" = "Small";
+"Medium" = "Medium";
+"Large" = "Large";
+"Font size preset" = "Font size preset";
+"Font size presets" = "Font size presets";
+"Use Dynamic Type scaling" = "Use Dynamic Type scaling";
+"Font sizes apply to native LCDUI and Canvas text." = "Font sizes apply to native LCDUI and Canvas text.";
+
+/* Input profile */
+"Input" = "Input";
+"Touch input" = "Touch input";
+"J2ME key layout" = "J2ME key layout";
+"Key mappings" = "Key mappings";
+"Key Mappings" = "Key Mappings";
+"Virtual keyboard" = "Virtual keyboard";
+"Virtual keyboard layout" = "Virtual keyboard layout";
+"Button shape" = "Button shape";
+"Haptic feedback" = "Haptic feedback";
+"Keyboard opacity" = "Keyboard opacity";
+"Keep off-screen keys fully visible" = "Keep off-screen keys fully visible";
+"Auto-hide delay" = "Auto-hide delay";
+"ms" = "ms";
+"Configure touch input, MIDP key mappings and virtual controls." = "Configure touch input, MIDP key mappings and virtual controls.";
+"Layout" = "Layout";
+"MIDP Key Codes" = "MIDP Key Codes";
+"Enter the Java ME key code for each control." = "Enter the Java ME key code for each control.";
+"Choose Custom to edit these values." = "Choose Custom to edit these values.";
+"Reset custom mappings" = "Reset custom mappings";
+"Reset Settings" = "Reset Settings";
+"Reset Key Layout" = "Reset Key Layout";
+"Nokia/SE" = "Nokia/SE";
+"Siemens" = "Siemens";
+"Motorola" = "Motorola";
+"Phone" = "Phone";
+"Phone (arrows)" = "Phone (arrows)";
+"Numbers & arrows" = "Numbers & arrows";
+"Arrows & numbers" = "Arrows & numbers";
+"Numbers" = "Numbers";
+"Arrows" = "Arrows";
+"Oval" = "Oval";
+"Rectangle" = "Rectangle";
+"Rounded rectangle" = "Rounded rectangle";
+
+/* Emulator */
+"Move Virtual Keys" = "Move Virtual Keys";
+"Resize Key Groups" = "Resize Key Groups";
+"Keys snap to a 4-point grid." = "Keys snap to a 4-point grid.";
+"Drag horizontally or vertically in 5% steps." = "Drag horizontally or vertically in 5% steps.";
+"Starting %@" = "Starting %@";
+"Switch keylayout" = "Switch keylayout";
+"Screenshot saved" = "Screenshot saved";
+"The screenshot was added to Photos." = "The screenshot was added to Photos.";
+"Exit application?" = "Exit application?";
+"Unsaved progress may be lost." = "Unsaved progress may be lost.";
+"Unable to capture the current screen." = "Unable to capture the current screen.";
+"Unable to save the screenshot to Photos." = "Unable to save the screenshot to Photos.";
+"Photos access is required to save screenshots." = "Photos access is required to save screenshots.";
+"Keyboard (IME)" = "Keyboard (IME)";
+"Take screenshot" = "Take screenshot";
+"Hide application" = "Hide application";
+"Unlock screen rotation" = "Unlock screen rotation";
+"Lock screen rotation" = "Lock screen rotation";
+"Auto translate" = "Auto translate";
+"Move keys" = "Move keys";
+"Resize key groups" = "Resize key groups";
+"Finish editing" = "Finish editing";
+"Choose layout" = "Choose layout";
+"Visible buttons" = "Visible buttons";
+"Reset keyboard layout" = "Reset keyboard layout";
+"Visible Controls" = "Visible Controls";
+"Virtual Buttons" = "Virtual Buttons";
+"Turn off controls you do not need for this game." = "Turn off controls you do not need for this game.";
+"J2ME display" = "J2ME display";
+
+/* Virtual keyboard accessibility */
+"Menu" = "Menu";
+"Up" = "Up";
+"Down" = "Down";
+"Fire" = "Fire";
+"Left soft key" = "Left soft key";
+"Right soft key" = "Right soft key";
+"Up left" = "Up left";
+"Up right" = "Up right";
+"Down left" = "Down left";
+"Down right" = "Down right";
+
+/* Native LCDUI */
+"LCDUI" = "LCDUI";
+"Empty list" = "Empty list";
+
+/* RMS and runtime errors */
+"Unsupported file." = "Unsupported file.";
+"The game JAR is missing from the library." = "The game JAR is missing from the library.";
+"This game does not have any RMS data yet." = "This game does not have any RMS data yet.";
+"The selected file is not a valid phoneME RMS backup." = "The selected file is not a valid phoneME RMS backup.";
+"This RMS backup belongs to a different game." = "This RMS backup belongs to a different game.";
+"Stop all running games before importing or exporting RMS data." = "Stop all running games before importing or exporting RMS data.";
+"The RMS backup is too large." = "The RMS backup is too large.";
+"Runtime is not available." = "Runtime is not available.";
+"The bundled phoneME runtime resources are missing." = "The bundled phoneME runtime resources are missing.";
+"Failed to create runtime." = "Failed to create runtime.";
+"The JAR manifest does not contain a valid MIDlet-1 class." = "The JAR manifest does not contain a valid MIDlet-1 class.";
+"This application was imported after multitasking started. Close the running applications once so it can be prepared." = "This application was imported after multitasking started. Close the running applications once so it can be prepared.";
+"The maximum of 64 simultaneous J2ME applications has been reached." = "The maximum of 64 simultaneous J2ME applications has been reached.";
+"The J2ME application could not become active in the foreground." = "The J2ME application could not become active in the foreground.";
+"Failed to start application (error %d)." = "Failed to start application (error %d).";

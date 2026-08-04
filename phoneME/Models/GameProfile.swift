@@ -10,10 +10,10 @@ struct GameProfile: Codable, Equatable {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .defaultValue: return "Default"
-            case .auto: return "Auto"
-            case .portrait: return "Portrait"
-            case .landscape: return "Landscape"
+            case .defaultValue: return L10n.string("Default")
+            case .auto: return L10n.string("Auto")
+            case .portrait: return L10n.string("Portrait")
+            case .landscape: return L10n.string("Landscape")
             }
         }
     }
@@ -26,7 +26,15 @@ struct GameProfile: Codable, Equatable {
         case bottom
 
         var id: String { rawValue }
-        var title: String { rawValue.capitalized }
+        var title: String {
+            switch self {
+            case .left: return L10n.string("Left")
+            case .top: return L10n.string("Top")
+            case .center: return L10n.string("Center")
+            case .right: return L10n.string("Right")
+            case .bottom: return L10n.string("Bottom")
+            }
+        }
     }
 
     enum ScaleType: String, Codable, CaseIterable, Identifiable {
@@ -37,9 +45,9 @@ struct GameProfile: Codable, Equatable {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .asIs: return "As is"
-            case .fit: return "Fit to window"
-            case .fill: return "Fill window (ignore aspect ratio)"
+            case .asIs: return L10n.string("As is")
+            case .fit: return L10n.string("Fit to window")
+            case .fill: return L10n.string("Fill window (ignore aspect ratio)")
             }
         }
     }
@@ -56,7 +64,7 @@ struct GameProfile: Codable, Equatable {
             case .nokiaSE: return "Nokia/SE"
             case .siemens: return "Siemens"
             case .motorola: return "Motorola"
-            case .custom: return "Custom"
+            case .custom: return L10n.string("Custom")
             }
         }
     }
@@ -73,13 +81,13 @@ struct GameProfile: Codable, Equatable {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .custom: return "Custom"
-            case .phone: return "Phone"
-            case .phoneArrows: return "Phone (arrows)"
-            case .numbersArrows: return "Numbers & arrows"
-            case .arrowsNumbers: return "Arrows & numbers"
-            case .numbers: return "Numbers"
-            case .arrows: return "Arrows"
+            case .custom: return L10n.string("Custom")
+            case .phone: return L10n.string("Phone")
+            case .phoneArrows: return L10n.string("Phone (arrows)")
+            case .numbersArrows: return L10n.string("Numbers & arrows")
+            case .arrowsNumbers: return L10n.string("Arrows & numbers")
+            case .numbers: return L10n.string("Numbers")
+            case .arrows: return L10n.string("Arrows")
             }
         }
     }
@@ -92,9 +100,9 @@ struct GameProfile: Codable, Equatable {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .oval: return "Oval"
-            case .rectangle: return "Rectangle"
-            case .roundedRectangle: return "Rounded rectangle"
+            case .oval: return L10n.string("Oval")
+            case .rectangle: return L10n.string("Rectangle")
+            case .roundedRectangle: return L10n.string("Rounded rectangle")
             }
         }
     }

@@ -9,6 +9,10 @@ public final class VmDifferentialOracle {
         long run();
     }
 
+    private interface StringCall {
+        String run();
+    }
+
     private interface ThrowingCall {
         void run() throws Throwable;
     }
@@ -22,6 +26,10 @@ public final class VmDifferentialOracle {
 
     private static void emitLong(String id, LongCall call) {
         System.out.println(id + "\tJ\t" + call.run());
+    }
+
+    private static void emitString(String id, StringCall call) {
+        System.out.println(id + "\tS\t" + call.run());
     }
 
     private static void emitException(String id, ThrowingCall call) {
@@ -163,6 +171,51 @@ public final class VmDifferentialOracle {
         });
         emitInt("thread-synchronized", new IntCall() {
             public int run() { return VmDifferentialOps.synchronizedThreadCounters(); }
+        });
+        emitString("exception-constructors", new StringCall() {
+            public String run() { return VmDifferentialOps.exceptionConstructorSurfaceTrace(); }
+        });
+        emitString("print-writer-surface", new StringCall() {
+            public String run() { return VmDifferentialOps.printWriterSurfaceTrace(); }
+        });
+        emitString("reader-input-surface", new StringCall() {
+            public String run() { return VmDifferentialOps.readerInputSurfaceTrace(); }
+        });
+        emitString("throwable-thread-permission-file", new StringCall() {
+            public String run() { return VmDifferentialOps.throwableThreadPermissionFileTrace(); }
+        });
+        emitString("legacy-util-full", new StringCall() {
+            public String run() { return VmDifferentialOps.legacyUtilFullTrace(); }
+        });
+        emitString("local-time", new StringCall() {
+            public String run() { return VmDifferentialOps.localTimeTrace(); }
+        });
+        emitString("wrapper-full", new StringCall() {
+            public String run() { return VmDifferentialOps.wrapperFullTrace(); }
+        });
+        emitString("math-full", new StringCall() {
+            public String run() { return VmDifferentialOps.mathFullTrace(); }
+        });
+        emitString("string-api", new StringCall() {
+            public String run() { return VmDifferentialOps.stringApiTrace(); }
+        });
+        emitString("string-builder-api", new StringCall() {
+            public String run() { return VmDifferentialOps.stringBuilderTrace(); }
+        });
+        emitString("string-buffer-api", new StringCall() {
+            public String run() { return VmDifferentialOps.stringBufferExtendedTrace(); }
+        });
+        emitString("headless-collections", new StringCall() {
+            public String run() { return VmDifferentialOps.headlessCollectionsTrace(); }
+        });
+        emitString("headless-arrays", new StringCall() {
+            public String run() { return VmDifferentialOps.headlessArraysTrace(); }
+        });
+        emitString("headless-base64-objects", new StringCall() {
+            public String run() { return VmDifferentialOps.headlessBase64ObjectsTrace(); }
+        });
+        emitString("headless-io", new StringCall() {
+            public String run() { return VmDifferentialOps.headlessIoTrace(); }
         });
         emitException("exception-npe", new ThrowingCall() {
             public void run() { VmDifferentialOps.uncaughtNullPointer(); }

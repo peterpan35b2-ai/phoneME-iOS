@@ -5,9 +5,11 @@
 #include <limits>
 #include <vector>
 
+#if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
+#endif
 
 #include "phoneme/graphics/Color.hpp"
 #include "phoneme/graphics/PngDecoder.hpp"
@@ -36,6 +38,7 @@ constexpr std::array<u8, 8> kPngSignature {
     return has_prefix(bytes, kGif87a) || has_prefix(bytes, kGif89a);
 }
 
+#if defined(__APPLE__)
 [[nodiscard]] Result<i32> image_property_dimension(
     CFDictionaryRef properties,
     CFStringRef key,
@@ -184,14 +187,24 @@ constexpr std::array<u8, 8> kPngSignature {
     }
     return Image::create_immutable(*width, *height, pixels);
 }
+#endif
 
 } // namespace
 
 Result<Image> decode_image(std::span<const u8> bytes) {
     if (has_prefix(bytes, kPngSignature)) return decode_png(bytes);
+#if defined(__APPLE__)
     if (is_jpeg(bytes) || is_gif(bytes)) return decode_apple_raster(bytes);
     return fail(ErrorCode::unsupported_feature,
                 "unsupported LCDUI image format; expected PNG, JPEG or GIF");
+#else
+    if (is_jpeg(bytes) || is_gif(bytes)) {
+        return fail(ErrorCode::unsupported_feature,
+                    "JPEG/GIF decoding is unavailable on this platform");
+    }
+    return fail(ErrorCode::unsupported_feature,
+                "unsupported LCDUI image format; expected PNG");
+#endif
 }
 
 } // namespace phoneme::graphics

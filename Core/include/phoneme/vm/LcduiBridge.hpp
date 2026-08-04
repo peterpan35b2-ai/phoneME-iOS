@@ -18,6 +18,7 @@ enum class LcduiActionKind : i32 {
     set_date = 106,
     set_scroll_position = 107,
     custom_item_key = 108,
+    select_list_item_command = 109,
 };
 
 enum class CustomItemKeyPhase : i64 {

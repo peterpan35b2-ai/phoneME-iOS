@@ -270,6 +270,15 @@ void phoneme_resume(PhoneMERuntimeRef runtime);
 int32_t phoneme_is_running(PhoneMERuntimeRef runtime);
 int32_t phoneme_is_suspended(PhoneMERuntimeRef runtime);
 int32_t phoneme_last_exit_code(PhoneMERuntimeRef runtime);
+/* Returns the full UTF-8 byte count excluding the trailing NUL. Pass NULL and
+ * capacity 0 to query the required size before copying. */
+int32_t phoneme_copy_last_error_message(PhoneMERuntimeRef runtime,
+                                        char* destination,
+                                        int32_t capacity);
+int32_t phoneme_copy_midlet_error_message(PhoneMERuntimeRef runtime,
+                                          int32_t app_id,
+                                          char* destination,
+                                          int32_t capacity);
 
 void phoneme_ios_media_set_application_metadata(const char* title,
                                                 const char* artist,
@@ -300,6 +309,10 @@ int32_t phoneme_poll_lcdui_event(PhoneMERuntimeRef runtime,
                                  PhoneMELCDUIEvent* event_out);
 void phoneme_lcdui_select_command(PhoneMERuntimeRef runtime,
                                   int32_t command_id);
+void phoneme_lcdui_select_list_item_command(PhoneMERuntimeRef runtime,
+                                            int32_t component_id,
+                                            int32_t element_index,
+                                            int32_t command_id);
 void phoneme_lcdui_focus_item(PhoneMERuntimeRef runtime,
                               int32_t component_id);
 void phoneme_lcdui_activate_item(PhoneMERuntimeRef runtime,

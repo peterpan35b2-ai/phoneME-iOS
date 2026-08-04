@@ -19,10 +19,19 @@ namespace {
 constexpr usize kArrayListDataField = 0U;
 constexpr usize kArrayListSizeField = 1U;
 constexpr usize kArrayListCapacityIncrementField = 2U;
+constexpr usize kArrayListMutationModeField = 3U;
+constexpr i32 kArrayListMutable = 0;
+constexpr i32 kArrayListImmutable = 1;
+constexpr i32 kArrayListFixedSize = 2;
 
 constexpr usize kIteratorValuesField = 0U;
 constexpr usize kIteratorIndexField = 1U;
 constexpr usize kIteratorSizeField = 2U;
+constexpr usize kIteratorOwnerField = 3U;
+constexpr usize kIteratorLastReturnedField = 4U;
+constexpr usize kIteratorRemoveKindField = 5U;
+constexpr i32 kIteratorRemoveUnsupported = 0;
+constexpr i32 kIteratorRemoveArrayList = 1;
 
 constexpr usize kHashMapKeysField = 0U;
 constexpr usize kHashMapValuesField = 1U;
@@ -132,6 +141,47 @@ void add(NativeMethodRegistry& registry,
     return *object;
 }
 
+[[nodiscard]] Result<std::string> utf8_text(Machine& machine,
+                                            ObjectRef string) {
+    if (string.is_null()) return std::string {};
+    auto text = machine.heap().string_value(string);
+    if (!text) return std::unexpected(text.error());
+    std::string result;
+    result.reserve(text->size());
+    for (usize index = 0U; index < text->size(); ++index) {
+        u32 code_point = static_cast<u16>((*text)[index]);
+        if (code_point >= 0xD800U && code_point <= 0xDBFFU &&
+            index + 1U < text->size()) {
+            const u32 low = static_cast<u16>((*text)[index + 1U]);
+            if (low >= 0xDC00U && low <= 0xDFFFU) {
+                code_point = 0x10000U +
+                    ((code_point - 0xD800U) << 10U) +
+                    (low - 0xDC00U);
+                ++index;
+            }
+        }
+        if (code_point <= 0x7FU) {
+            result.push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7FFU) {
+            result.push_back(static_cast<char>(0xC0U | (code_point >> 6U)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        } else if (code_point <= 0xFFFFU) {
+            result.push_back(static_cast<char>(0xE0U | (code_point >> 12U)));
+            result.push_back(static_cast<char>(0x80U |
+                                               ((code_point >> 6U) & 0x3FU)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        } else {
+            result.push_back(static_cast<char>(0xF0U | (code_point >> 18U)));
+            result.push_back(static_cast<char>(0x80U |
+                                               ((code_point >> 12U) & 0x3FU)));
+            result.push_back(static_cast<char>(0x80U |
+                                               ((code_point >> 6U) & 0x3FU)));
+            result.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        }
+    }
+    return result;
+}
+
 [[nodiscard]] Result<std::optional<Value>> invoke_checked(
     Machine& machine,
     ObjectRef object,
@@ -206,9 +256,12 @@ void add(NativeMethodRegistry& registry,
     auto stored_size = set_int_field(machine, list, kArrayListSizeField, 0);
     auto stored_increment = set_int_field(
         machine, list, kArrayListCapacityIncrementField, 0);
+    auto stored_mode = set_int_field(
+        machine, list, kArrayListMutationModeField, kArrayListMutable);
     if (!stored_data) return stored_data;
     if (!stored_size) return stored_size;
-    return stored_increment;
+    if (!stored_increment) return stored_increment;
+    return stored_mode;
 }
 
 [[nodiscard]] Result<ObjectRef> array_list_data(Machine& machine,
@@ -264,9 +317,12 @@ void add(NativeMethodRegistry& registry,
     return set_int_field(machine, list, kArrayListSizeField, *size + 1);
 }
 
-[[nodiscard]] Result<ObjectRef> create_array_iterator(Machine& machine,
-                                                       ObjectRef values,
-                                                       i32 size) {
+[[nodiscard]] Result<ObjectRef> create_array_iterator(
+    Machine& machine,
+    ObjectRef values,
+    i32 size,
+    ObjectRef owner = {},
+    i32 remove_kind = kIteratorRemoveUnsupported) {
     if (size < 0) {
         return fail(ErrorCode::invalid_state,
                     "iterator size is negative");
@@ -280,9 +336,18 @@ void add(NativeMethodRegistry& registry,
                                      kIteratorIndexField, 0);
     auto size_stored = set_int_field(machine, *iterator,
                                     kIteratorSizeField, size);
+    auto owner_stored = set_reference_field(machine, *iterator,
+                                            kIteratorOwnerField, owner);
+    auto last_stored = set_int_field(machine, *iterator,
+                                     kIteratorLastReturnedField, -1);
+    auto kind_stored = set_int_field(machine, *iterator,
+                                     kIteratorRemoveKindField, remove_kind);
     if (!values_stored) return std::unexpected(values_stored.error());
     if (!index_stored) return std::unexpected(index_stored.error());
     if (!size_stored) return std::unexpected(size_stored.error());
+    if (!owner_stored) return std::unexpected(owner_stored.error());
+    if (!last_stored) return std::unexpected(last_stored.error());
+    if (!kind_stored) return std::unexpected(kind_stored.error());
     return *iterator;
 }
 
@@ -781,15 +846,17 @@ void register_comparable_bridges(NativeMethodRegistry& registry) {
 void register_objects_extensions(NativeMethodRegistry& registry) {
     add(registry, "java/util/Objects", "requireNonNull",
         "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
-        [](Machine&, std::span<const Value> arguments)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto object = reference_argument(arguments, 0U, true);
             auto message = reference_argument(arguments, 1U, true);
             if (!object) return std::unexpected(object.error());
             if (!message) return std::unexpected(message.error());
             if (object->is_null()) {
+                auto text = utf8_text(machine, *message);
+                if (!text) return std::unexpected(text.error());
                 return fail_java("java/lang/NullPointerException",
-                                 "Objects.requireNonNull received null");
+                                 std::move(*text));
             }
             return std::optional<Value>(Value::from_reference(*object));
         });
@@ -894,16 +961,82 @@ void register_array_iterator(NativeMethodRegistry& registry) {
             auto value = machine.heap().element(
                 *values, static_cast<usize>(*index));
             if (!value) return std::unexpected(value.error());
+            auto last = set_int_field(machine, *object,
+                                      kIteratorLastReturnedField, *index);
             auto updated = set_int_field(machine, *object,
                                          kIteratorIndexField, *index + 1);
+            if (!last) return std::unexpected(last.error());
             if (!updated) return std::unexpected(updated.error());
             return std::optional<Value>(*value);
         });
     add(registry, "java/util/ArrayIterator", "remove", "()V",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            return fail_java("java/lang/UnsupportedOperationException",
-                             "snapshot iterator is read-only");
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto kind = int_field(machine, *object, kIteratorRemoveKindField);
+            auto last = int_field(machine, *object,
+                                  kIteratorLastReturnedField);
+            auto size = int_field(machine, *object, kIteratorSizeField);
+            auto index = int_field(machine, *object, kIteratorIndexField);
+            if (!kind || !last || !size || !index) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayIterator remove state is invalid");
+            }
+            if (*kind == kIteratorRemoveUnsupported) {
+                return fail_java("java/lang/UnsupportedOperationException",
+                                 "iterator does not support remove");
+            }
+            if (*last < 0) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "next() has not been called or element already removed");
+            }
+            if (*kind != kIteratorRemoveArrayList) {
+                return fail_java("java/lang/UnsupportedOperationException",
+                                 "iterator remove kind is unsupported");
+            }
+            auto owner = reference_field(machine, *object,
+                                         kIteratorOwnerField);
+            auto values = reference_field(machine, *object,
+                                          kIteratorValuesField);
+            if (!owner || owner->is_null() || !values || values->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList iterator owner is invalid");
+            }
+            auto owner_size = int_field(machine, *owner,
+                                        kArrayListSizeField);
+            if (!owner_size || *owner_size != *size || *last >= *size) {
+                return fail_java("java/util/ConcurrentModificationException",
+                                 "ArrayList changed during iteration");
+            }
+            for (i32 current = *last; current + 1 < *size; ++current) {
+                auto next = machine.heap().element(
+                    *values, static_cast<usize>(current + 1));
+                if (!next) return std::unexpected(next.error());
+                auto shifted = machine.heap().set_element(
+                    *values, static_cast<usize>(current), *next);
+                if (!shifted) return std::unexpected(shifted.error());
+            }
+            auto cleared = machine.heap().set_element(
+                *values, static_cast<usize>(*size - 1),
+                Value::from_reference({}));
+            auto owner_updated = set_int_field(machine, *owner,
+                                               kArrayListSizeField,
+                                               *size - 1);
+            auto size_updated = set_int_field(machine, *object,
+                                              kIteratorSizeField,
+                                              *size - 1);
+            auto index_updated = set_int_field(machine, *object,
+                                               kIteratorIndexField,
+                                               *last);
+            auto last_updated = set_int_field(machine, *object,
+                                              kIteratorLastReturnedField, -1);
+            if (!cleared) return std::unexpected(cleared.error());
+            if (!owner_updated) return std::unexpected(owner_updated.error());
+            if (!size_updated) return std::unexpected(size_updated.error());
+            if (!index_updated) return std::unexpected(index_updated.error());
+            if (!last_updated) return std::unexpected(last_updated.error());
+            return std::optional<Value> {};
         });
 }
 
@@ -935,17 +1068,15 @@ void register_array_list_extensions(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             auto data = array_list_data(machine, *object);
             auto size = int_field(machine, *object, kArrayListSizeField);
+            auto mode = int_field(machine, *object, kArrayListMutationModeField);
             if (!data) return std::unexpected(data.error());
             if (!size) return std::unexpected(size.error());
-            auto snapshot = allocate_object_array(machine,
-                                                  static_cast<usize>(*size));
-            if (!snapshot) return std::unexpected(snapshot.error());
-            if (*size > 0) {
-                auto copied = machine.heap().copy_array_range(
-                    *data, 0U, *snapshot, 0U, static_cast<usize>(*size));
-                if (!copied) return std::unexpected(copied.error());
-            }
-            auto iterator = create_array_iterator(machine, *snapshot, *size);
+            if (!mode) return std::unexpected(mode.error());
+            const i32 remove_kind = *mode == kArrayListMutable
+                ? kIteratorRemoveArrayList
+                : kIteratorRemoveUnsupported;
+            auto iterator = create_array_iterator(
+                machine, *data, *size, *object, remove_kind);
             if (!iterator) return std::unexpected(iterator.error());
             return std::optional<Value>(Value::from_reference(*iterator));
         });
@@ -977,6 +1108,12 @@ void register_array_list_extensions(NativeMethodRegistry& registry) {
             auto source = reference_argument(arguments, 1U);
             if (!object) return std::unexpected(object.error());
             if (!source) return std::unexpected(source.error());
+            auto mode = int_field(machine, *object, kArrayListMutationModeField);
+            if (!mode) return std::unexpected(mode.error());
+            if (*mode != kArrayListMutable) {
+                return fail_java("java/lang/UnsupportedOperationException",
+                                 "list does not support structural modification");
+            }
             auto elements = collection_elements(machine, *source);
             if (!elements) return std::unexpected(elements.error());
             for (const ObjectRef element : *elements) {
@@ -1753,17 +1890,23 @@ void register_arrays(NativeMethodRegistry& registry) {
             if (!array) return std::unexpected(array.error());
             auto length = machine.heap().array_length(*array);
             if (!length) return std::unexpected(length.error());
-            auto list = create_array_list(machine,
-                                          static_cast<i32>(*length));
-            if (!list) return std::unexpected(list.error());
-            for (usize index = 0U; index < *length; ++index) {
-                auto value = machine.heap().element(*array, index);
-                if (!value) return std::unexpected(value.error());
-                auto reference = value->as_reference();
-                if (!reference) return std::unexpected(reference.error());
-                auto appended = array_list_append(machine, *list, *reference);
-                if (!appended) return std::unexpected(appended.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail(ErrorCode::overflow,
+                            "Arrays.asList input exceeds integer size");
             }
+            auto list = create_array_list(machine, 0);
+            if (!list) return std::unexpected(list.error());
+            auto data_stored = set_reference_field(
+                machine, *list, kArrayListDataField, *array);
+            auto size_stored = set_int_field(
+                machine, *list, kArrayListSizeField,
+                static_cast<i32>(*length));
+            auto mode_stored = set_int_field(
+                machine, *list, kArrayListMutationModeField,
+                kArrayListFixedSize);
+            if (!data_stored) return std::unexpected(data_stored.error());
+            if (!size_stored) return std::unexpected(size_stored.error());
+            if (!mode_stored) return std::unexpected(mode_stored.error());
             return std::optional<Value>(Value::from_reference(*list));
         });
 }
@@ -1893,6 +2036,10 @@ void register_collections(NativeMethodRegistry& registry) {
                     auto appended = array_list_append(machine, *list, *value);
                     if (!appended) return std::unexpected(appended.error());
                 }
+                auto immutable = set_int_field(
+                    machine, *list, kArrayListMutationModeField,
+                    kArrayListImmutable);
+                if (!immutable) return std::unexpected(immutable.error());
                 return std::optional<Value>(Value::from_reference(*list));
             });
     };

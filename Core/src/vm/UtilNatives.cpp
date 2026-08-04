@@ -19,11 +19,18 @@ namespace {
 constexpr usize kVectorDataField = 0;
 constexpr usize kVectorCountField = 1;
 constexpr usize kVectorIncrementField = 2;
+constexpr usize kArrayListMutationModeField = 3;
+constexpr i32 kArrayListImmutable = 1;
+constexpr i32 kArrayListFixedSize = 2;
 constexpr usize kHashtableKeysField = 0;
 constexpr usize kHashtableValuesField = 1;
 constexpr usize kHashtableCountField = 2;
 constexpr usize kHashtableHashesField = 3;
 constexpr usize kHashtableBucketsField = 4;
+constexpr usize kHashtableIterationOrderField = 5;
+constexpr usize kHashtableTableCapacityField = 6;
+constexpr usize kHashtableThresholdField = 7;
+constexpr usize kHashtableLoadFactorField = 8;
 constexpr usize kEnumerationArrayField = 0;
 constexpr usize kEnumerationIndexField = 1;
 constexpr usize kEnumerationSizeField = 2;
@@ -137,6 +144,14 @@ void add(NativeMethodRegistry& registry,
     return value->as_long();
 }
 
+[[nodiscard]] Result<float> float_field(Machine& machine,
+                                        ObjectRef object,
+                                        usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_float();
+}
+
 [[nodiscard]] Result<ObjectRef> reference_field(Machine& machine,
                                                  ObjectRef object,
                                                  usize index) {
@@ -159,12 +174,35 @@ void add(NativeMethodRegistry& registry,
     return machine.heap().set_field(object, index, Value::from_long(value));
 }
 
+[[nodiscard]] Status set_float_field(Machine& machine,
+                                     ObjectRef object,
+                                     usize index,
+                                     float value) {
+    return machine.heap().set_field(object, index, Value::from_float(value));
+}
+
 [[nodiscard]] Status set_reference_field(Machine& machine,
                                          ObjectRef object,
                                          usize index,
                                          ObjectRef value) {
     return machine.heap().set_field(object, index,
                                     Value::from_reference(value));
+}
+
+[[nodiscard]] Status require_array_list_mutation(
+    Machine& machine,
+    ObjectRef list,
+    bool structural) {
+    auto mode = int_field(machine, list, kArrayListMutationModeField);
+    if (!mode) return std::unexpected(mode.error());
+    if (*mode == kArrayListImmutable ||
+        (structural && *mode == kArrayListFixedSize)) {
+        return fail_java("java/lang/UnsupportedOperationException",
+                         structural
+                             ? "list does not support structural modification"
+                             : "list is immutable");
+    }
+    return {};
 }
 
 [[nodiscard]] Result<ObjectRef> create_string(Machine& machine,
@@ -950,6 +988,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             if (!index) return std::unexpected(index.error());
             if (!replacement) return std::unexpected(replacement.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, false);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto count = int_field(machine, *object, kVectorCountField);
             auto data = vector_data(machine, *object);
             if (!count || !data) {
@@ -977,6 +1018,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             auto value = reference_argument(arguments, 1U, true);
             if (!object) return std::unexpected(object.error());
             if (!value) return std::unexpected(value.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, true);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto count = int_field(machine, *object, kVectorCountField);
             if (!count) return std::unexpected(count.error());
             auto capacity = ensure_vector_capacity(machine, *object, *count + 1);
@@ -1002,6 +1046,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             if (!index) return std::unexpected(index.error());
             if (!value) return std::unexpected(value.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, true);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto count = int_field(machine, *object, kVectorCountField);
             if (!count) return std::unexpected(count.error());
             if (*index < 0 || *index > *count) {
@@ -1037,6 +1084,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             auto index = int_argument(arguments, 1U);
             if (!object) return std::unexpected(object.error());
             if (!index) return std::unexpected(index.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, true);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto count = int_field(machine, *object, kVectorCountField);
             auto data = vector_data(machine, *object);
             if (!count || !data) {
@@ -1062,6 +1112,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             auto target = reference_argument(arguments, 1U, true);
             if (!object) return std::unexpected(object.error());
             if (!target) return std::unexpected(target.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, true);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto index = vector_index_of(machine, *object, *target, 0, false);
             if (!index) return std::unexpected(index.error());
             if (*index < 0) {
@@ -1076,6 +1129,9 @@ void register_array_list(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, true);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
             auto count = int_field(machine, *object, kVectorCountField);
             auto data = vector_data(machine, *object);
             if (!count || !data) {
@@ -1701,9 +1757,145 @@ void register_vector(NativeMethodRegistry& registry) {
         "[I", length, Value::from_int(0));
 }
 
+[[nodiscard]] i32 hashtable_threshold(i32 capacity,
+                                      float load_factor) noexcept {
+    const double product = static_cast<double>(capacity) *
+                           static_cast<double>(load_factor);
+    if (product >= static_cast<double>(std::numeric_limits<i32>::max())) {
+        return std::numeric_limits<i32>::max();
+    }
+    return static_cast<i32>(product);
+}
+
+[[nodiscard]] Result<std::vector<i32>> hashtable_iteration_order(
+    Machine& machine,
+    ObjectRef table) {
+    auto count = int_field(machine, table, kHashtableCountField);
+    auto order = reference_field(machine, table,
+                                 kHashtableIterationOrderField);
+    if (!count || !order || order->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable iteration order is invalid");
+    }
+    std::vector<i32> result;
+    result.reserve(static_cast<usize>(*count));
+    for (i32 index = 0; index < *count; ++index) {
+        auto value = machine.heap().element(
+            *order, static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto entry = value->as_int();
+        if (!entry) return std::unexpected(entry.error());
+        result.push_back(*entry);
+    }
+    return result;
+}
+
+[[nodiscard]] Status store_hashtable_iteration_order(
+    Machine& machine,
+    ObjectRef table,
+    std::span<const i32> order) {
+    auto array = reference_field(machine, table,
+                                 kHashtableIterationOrderField);
+    if (!array || array->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable iteration order storage is invalid");
+    }
+    auto length = machine.heap().array_length(*array);
+    if (!length) return std::unexpected(length.error());
+    if (order.size() > *length) {
+        return fail(ErrorCode::overflow,
+                    "Hashtable iteration order exceeds capacity");
+    }
+    for (usize index = 0; index < order.size(); ++index) {
+        auto stored = machine.heap().set_element(
+            *array, index, Value::from_int(order[index]));
+        if (!stored) return stored;
+    }
+    for (usize index = order.size(); index < *length; ++index) {
+        auto cleared = machine.heap().set_element(
+            *array, index, Value::from_int(0));
+        if (!cleared) return cleared;
+    }
+    return {};
+}
+
+[[nodiscard]] usize java_hashtable_bucket_unchecked(i32 hash,
+                                                     i32 capacity) noexcept {
+    return static_cast<usize>(
+        (static_cast<u32>(hash) & 0x7fffffffU) %
+        static_cast<u32>(capacity));
+}
+
+[[nodiscard]] Result<std::vector<i32>> rehashed_iteration_order(
+    Machine& machine,
+    ObjectRef table,
+    i32 new_capacity) {
+    auto order = hashtable_iteration_order(machine, table);
+    auto hashes = reference_field(machine, table, kHashtableHashesField);
+    if (!order) return std::unexpected(order.error());
+    if (!hashes || hashes->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable hashes are invalid");
+    }
+    std::vector<std::vector<i32>> buckets(
+        static_cast<usize>(new_capacity));
+    for (const i32 entry : *order) {
+        auto value = machine.heap().element(
+            *hashes, static_cast<usize>(entry));
+        if (!value) return std::unexpected(value.error());
+        auto hash = value->as_int();
+        if (!hash) return std::unexpected(hash.error());
+        auto& bucket = buckets[java_hashtable_bucket_unchecked(
+            *hash, new_capacity)];
+        bucket.insert(bucket.begin(), entry);
+    }
+    std::vector<i32> result;
+    result.reserve(order->size());
+    for (usize bucket = buckets.size(); bucket > 0U; --bucket) {
+        result.insert(result.end(), buckets[bucket - 1U].begin(),
+                      buckets[bucket - 1U].end());
+    }
+    return result;
+}
+
+[[nodiscard]] Result<std::vector<i32>> iteration_order_with_insert(
+    Machine& machine,
+    ObjectRef table,
+    i32 entry_index,
+    i32 hash) {
+    auto order = hashtable_iteration_order(machine, table);
+    auto hashes = reference_field(machine, table, kHashtableHashesField);
+    auto capacity = int_field(machine, table,
+                              kHashtableTableCapacityField);
+    if (!order) return std::unexpected(order.error());
+    if (!hashes || hashes->is_null() || !capacity || *capacity <= 0) {
+        return fail(ErrorCode::invalid_state,
+                    "Hashtable iteration state is invalid");
+    }
+    const usize target_bucket = java_hashtable_bucket_unchecked(
+        hash, *capacity);
+    auto position = order->end();
+    for (auto iterator = order->begin(); iterator != order->end(); ++iterator) {
+        auto value = machine.heap().element(
+            *hashes, static_cast<usize>(*iterator));
+        if (!value) return std::unexpected(value.error());
+        auto existing_hash = value->as_int();
+        if (!existing_hash) return std::unexpected(existing_hash.error());
+        const usize existing_bucket = java_hashtable_bucket_unchecked(
+            *existing_hash, *capacity);
+        if (existing_bucket <= target_bucket) {
+            position = iterator;
+            break;
+        }
+    }
+    order->insert(position, entry_index);
+    return *order;
+}
+
 [[nodiscard]] Status initialize_hashtable(Machine& machine,
                                           ObjectRef object,
-                                          i32 capacity) {
+                                          i32 capacity,
+                                          float load_factor) {
     if (capacity < 0) {
         return fail_java("java/lang/IllegalArgumentException",
                          "Hashtable capacity is negative");
@@ -1715,10 +1907,12 @@ void register_vector(NativeMethodRegistry& registry) {
     auto values = allocate_object_array(machine, actual);
     auto hashes = allocate_int_array(machine, actual);
     auto buckets = allocate_int_array(machine, *bucket_capacity);
+    auto order = allocate_int_array(machine, actual);
     if (!keys) return std::unexpected(keys.error());
     if (!values) return std::unexpected(values.error());
     if (!hashes) return std::unexpected(hashes.error());
     if (!buckets) return std::unexpected(buckets.error());
+    if (!order) return std::unexpected(order.error());
     auto keys_stored = set_reference_field(machine, object,
                                            kHashtableKeysField, *keys);
     auto values_stored = set_reference_field(machine, object,
@@ -1727,12 +1921,26 @@ void register_vector(NativeMethodRegistry& registry) {
                                              kHashtableHashesField, *hashes);
     auto buckets_stored = set_reference_field(machine, object,
                                               kHashtableBucketsField, *buckets);
+    auto order_stored = set_reference_field(
+        machine, object, kHashtableIterationOrderField, *order);
+    const i32 actual_capacity = static_cast<i32>(actual);
+    auto capacity_stored = set_int_field(
+        machine, object, kHashtableTableCapacityField, actual_capacity);
+    auto threshold_stored = set_int_field(
+        machine, object, kHashtableThresholdField,
+        hashtable_threshold(actual_capacity, load_factor));
+    auto factor_stored = set_float_field(
+        machine, object, kHashtableLoadFactorField, load_factor);
     auto count_stored = set_int_field(machine, object,
                                       kHashtableCountField, 0);
     if (!keys_stored) return keys_stored;
     if (!values_stored) return values_stored;
     if (!hashes_stored) return hashes_stored;
     if (!buckets_stored) return buckets_stored;
+    if (!order_stored) return order_stored;
+    if (!capacity_stored) return capacity_stored;
+    if (!threshold_stored) return threshold_stored;
+    if (!factor_stored) return factor_stored;
     return count_stored;
 }
 
@@ -1746,8 +1954,8 @@ void register_vector(NativeMethodRegistry& registry) {
         return fail(ErrorCode::invalid_state,
                     "Hashtable has no hash buckets");
     }
-    usize bucket = static_cast<usize>(static_cast<u32>(hash)) %
-                   *bucket_count;
+    usize bucket = static_cast<usize>(
+        static_cast<u32>(hash) & 0x7fffffffU) % *bucket_count;
     for (usize probe = 0; probe < *bucket_count; ++probe) {
         auto marker = machine.heap().element(buckets, bucket);
         if (!marker) return std::unexpected(marker.error());
@@ -1838,8 +2046,8 @@ void register_vector(NativeMethodRegistry& registry) {
     if (!bucket_count) return std::unexpected(bucket_count.error());
     if (*bucket_count == 0U) return -1;
 
-    usize bucket = static_cast<usize>(static_cast<u32>(*hash)) %
-                   *bucket_count;
+    usize bucket = static_cast<usize>(
+        static_cast<u32>(*hash) & 0x7fffffffU) % *bucket_count;
     for (usize probe = 0; probe < *bucket_count; ++probe) {
         auto marker = machine.heap().element(*buckets, bucket);
         if (!marker) return std::unexpected(marker.error());
@@ -1891,12 +2099,17 @@ void register_vector(NativeMethodRegistry& registry) {
     usize new_capacity = *capacity * 2U + 1U;
     if (new_capacity < static_cast<usize>(minimum))
         new_capacity = static_cast<usize>(minimum);
+    auto new_order_values = rehashed_iteration_order(
+        machine, table, static_cast<i32>(new_capacity));
+    if (!new_order_values) return std::unexpected(new_order_values.error());
     auto new_keys = allocate_object_array(machine, new_capacity);
     auto new_values = allocate_object_array(machine, new_capacity);
     auto new_hashes = allocate_int_array(machine, new_capacity);
+    auto new_order = allocate_int_array(machine, new_capacity);
     if (!new_keys) return std::unexpected(new_keys.error());
     if (!new_values) return std::unexpected(new_values.error());
     if (!new_hashes) return std::unexpected(new_hashes.error());
+    if (!new_order) return std::unexpected(new_order.error());
     auto count = int_field(machine, table, kHashtableCountField);
     if (!count) return std::unexpected(count.error());
     for (i32 index = 0; index < *count; ++index) {
@@ -1919,15 +2132,33 @@ void register_vector(NativeMethodRegistry& registry) {
         if (!value_stored) return value_stored;
         if (!hash_stored) return hash_stored;
     }
+    for (usize index = 0; index < new_order_values->size(); ++index) {
+        auto stored = machine.heap().set_element(
+            *new_order, index, Value::from_int((*new_order_values)[index]));
+        if (!stored) return stored;
+    }
     auto keys_stored = set_reference_field(machine, table,
                                            kHashtableKeysField, *new_keys);
     auto values_stored = set_reference_field(machine, table,
                                              kHashtableValuesField, *new_values);
     auto hashes_stored = set_reference_field(machine, table,
                                              kHashtableHashesField, *new_hashes);
+    auto order_stored = set_reference_field(
+        machine, table, kHashtableIterationOrderField, *new_order);
+    auto factor = float_field(machine, table, kHashtableLoadFactorField);
+    if (!factor) return std::unexpected(factor.error());
+    auto capacity_stored = set_int_field(
+        machine, table, kHashtableTableCapacityField,
+        static_cast<i32>(new_capacity));
+    auto threshold_stored = set_int_field(
+        machine, table, kHashtableThresholdField,
+        hashtable_threshold(static_cast<i32>(new_capacity), *factor));
     if (!keys_stored) return keys_stored;
     if (!values_stored) return values_stored;
     if (!hashes_stored) return hashes_stored;
+    if (!order_stored) return order_stored;
+    if (!capacity_stored) return capacity_stored;
+    if (!threshold_stored) return threshold_stored;
     return rebuild_hashtable_buckets(machine, table);
 }
 
@@ -1937,7 +2168,8 @@ void register_hashtable(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
-            auto initialized = initialize_hashtable(machine, *object, 11);
+            auto initialized = initialize_hashtable(
+                machine, *object, 11, 0.75F);
             if (!initialized) return std::unexpected(initialized.error());
             return std::optional<Value> {};
         });
@@ -1948,8 +2180,8 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto capacity = arguments[1].as_int();
             if (!object) return std::unexpected(object.error());
             if (!capacity) return std::unexpected(capacity.error());
-            auto initialized = initialize_hashtable(machine, *object,
-                                                    *capacity);
+            auto initialized = initialize_hashtable(
+                machine, *object, *capacity, 0.75F);
             if (!initialized) return std::unexpected(initialized.error());
             return std::optional<Value> {};
         });
@@ -1967,8 +2199,8 @@ void register_hashtable(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "Hashtable load factor is invalid");
             }
-            auto initialized = initialize_hashtable(machine, *object,
-                                                    *capacity);
+            auto initialized = initialize_hashtable(
+                machine, *object, *capacity, *load_factor);
             if (!initialized) return std::unexpected(initialized.error());
             return std::optional<Value> {};
         });
@@ -2063,9 +2295,25 @@ void register_hashtable(NativeMethodRegistry& registry) {
                 return std::optional<Value>(*old);
             }
             auto count = int_field(machine, *object, kHashtableCountField);
-            if (!count) return std::unexpected(count.error());
-            auto capacity = ensure_hashtable_capacity(machine, *object,
-                                                      *count + 1);
+            auto threshold = int_field(machine, *object,
+                                       kHashtableThresholdField);
+            auto table_capacity = int_field(
+                machine, *object, kHashtableTableCapacityField);
+            if (!count || !threshold || !table_capacity) {
+                return fail(ErrorCode::invalid_state,
+                            "Hashtable sizing state is invalid");
+            }
+            i32 required_capacity = *count + 1;
+            if (*count >= *threshold) {
+                if (*table_capacity >
+                    (std::numeric_limits<i32>::max() - 1) / 2) {
+                    return fail_java("java/lang/OutOfMemoryError",
+                                     "Hashtable capacity overflowed");
+                }
+                required_capacity = *table_capacity * 2 + 1;
+            }
+            auto capacity = ensure_hashtable_capacity(
+                machine, *object, required_capacity);
             if (!capacity) return std::unexpected(capacity.error());
             auto keys = reference_field(machine, *object,
                                         kHashtableKeysField);
@@ -2090,6 +2338,12 @@ void register_hashtable(NativeMethodRegistry& registry) {
             if (!key_stored) return std::unexpected(key_stored.error());
             if (!value_stored) return std::unexpected(value_stored.error());
             if (!hash_stored) return std::unexpected(hash_stored.error());
+            auto order = iteration_order_with_insert(
+                machine, *object, *count, *hash);
+            if (!order) return std::unexpected(order.error());
+            auto order_stored = store_hashtable_iteration_order(
+                machine, *object, *order);
+            if (!order_stored) return std::unexpected(order_stored.error());
             auto bucket_stored = hashtable_insert_bucket(
                 machine, *buckets, *hash, *count);
             if (!bucket_stored) return std::unexpected(bucket_stored.error());
@@ -2126,6 +2380,13 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto old = machine.heap().element(
                 *values, static_cast<usize>(*index));
             if (!old) return std::unexpected(old.error());
+            auto order = hashtable_iteration_order(machine, *object);
+            if (!order) return std::unexpected(order.error());
+            order->erase(std::remove(order->begin(), order->end(), *index),
+                         order->end());
+            for (i32& entry : *order) {
+                if (entry > *index) --entry;
+            }
             for (i32 current = *index; current + 1 < *count; ++current) {
                 auto next_key = machine.heap().element(
                     *keys, static_cast<usize>(current + 1));
@@ -2161,6 +2422,9 @@ void register_hashtable(NativeMethodRegistry& registry) {
             if (!value_cleared) return std::unexpected(value_cleared.error());
             if (!hash_cleared) return std::unexpected(hash_cleared.error());
             if (!updated) return std::unexpected(updated.error());
+            auto order_stored = store_hashtable_iteration_order(
+                machine, *object, *order);
+            if (!order_stored) return std::unexpected(order_stored.error());
             auto rebuilt = rebuild_hashtable_buckets(machine, *object);
             if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value>(*old);
@@ -2196,6 +2460,10 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto updated = set_int_field(machine, *object,
                                          kHashtableCountField, 0);
             if (!updated) return std::unexpected(updated.error());
+            const std::span<const i32> empty_order;
+            auto order_stored = store_hashtable_iteration_order(
+                machine, *object, empty_order);
+            if (!order_stored) return std::unexpected(order_stored.error());
             auto rebuilt = rebuild_hashtable_buckets(machine, *object);
             if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value> {};
@@ -2212,14 +2480,15 @@ void register_hashtable(NativeMethodRegistry& registry) {
                 auto array = reference_field(
                     machine, *object,
                     values ? kHashtableValuesField : kHashtableKeysField);
-                if (!count || !array)
+                auto order = hashtable_iteration_order(machine, *object);
+                if (!count || !array || !order)
                     return fail(ErrorCode::invalid_state,
                                 "Hashtable state is invalid");
                 std::vector<ObjectRef> snapshot;
                 snapshot.reserve(static_cast<usize>(*count));
-                for (i32 index = 0; index < *count; ++index) {
+                for (const i32 entry : *order) {
                     auto value = machine.heap().element(
-                        *array, static_cast<usize>(index));
+                        *array, static_cast<usize>(entry));
                     if (!value) return std::unexpected(value.error());
                     auto reference = value->as_reference();
                     if (!reference) return std::unexpected(reference.error());
@@ -2261,17 +2530,19 @@ void register_hashtable(NativeMethodRegistry& registry) {
             auto keys = reference_field(machine, *object, kHashtableKeysField);
             auto values = reference_field(machine, *object,
                                           kHashtableValuesField);
-            if (!count || !keys || !values) {
+            auto order = hashtable_iteration_order(machine, *object);
+            if (!count || !keys || !values || !order) {
                 return fail(ErrorCode::invalid_state,
                             "Hashtable state is invalid");
             }
             std::u16string text(u"{");
-            for (i32 index = 0; index < *count; ++index) {
-                if (index != 0) text.append(u", ");
+            for (usize position = 0; position < order->size(); ++position) {
+                if (position != 0U) text.append(u", ");
+                const i32 entry = (*order)[position];
                 auto key_value = machine.heap().element(
-                    *keys, static_cast<usize>(index));
+                    *keys, static_cast<usize>(entry));
                 auto mapped_value = machine.heap().element(
-                    *values, static_cast<usize>(index));
+                    *values, static_cast<usize>(entry));
                 if (!key_value || !mapped_value) {
                     return fail(ErrorCode::invalid_state,
                                 "Hashtable entry is invalid");

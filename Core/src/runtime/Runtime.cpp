@@ -101,6 +101,33 @@ struct UiTranslationReplayState final {
     }
 };
 
+[[nodiscard]] std::string format_error_message(const Error& error) {
+    std::string message;
+    if (!error.java_exception_class.empty()) {
+        message = error.java_exception_class;
+        std::replace(message.begin(), message.end(), '/', '.');
+        if (!error.message.empty()) {
+            message += ": ";
+            message += error.message;
+        }
+    } else {
+        message = error.message;
+    }
+    if (message.empty()) {
+        message = "Unknown phoneME runtime error";
+    }
+    return message;
+}
+
+[[nodiscard]] std::vector<vm::NativeMethodInvocationCount>
+nonzero_native_invocation_counts(vm::Machine& machine) {
+    auto counts = machine.natives().invocation_counts();
+    std::erase_if(counts, [](const vm::NativeMethodInvocationCount& entry) {
+        return entry.count == 0U;
+    });
+    return counts;
+}
+
 struct AsyncLifecycleState final {
     std::atomic<bool> completed {false};
     std::mutex mutex;
@@ -871,6 +898,7 @@ Status Runtime::configure(std::string runtime_home,
     permission_policies_.clear();
     configured_ = true;
     last_exit_code_ = 0;
+    last_error_message_.clear();
     return {};
 }
 
@@ -1162,6 +1190,7 @@ Status Runtime::start_system() {
     running_ = true;
     suspended_ = false;
     last_exit_code_ = 0;
+    last_error_message_.clear();
     return {};
 }
 
@@ -1240,14 +1269,17 @@ Status Runtime::start_midlet(SuiteId suite_id,
 
     std::shared_ptr<ApplicationVM> application_vm;
     const auto fail_start = [&](Error error) -> Status {
+        const std::string diagnostic = format_error_message(error);
         std::unique_lock lock(mutex_);
         App* app = find_app_unlocked(app_id);
         if (app != nullptr && app->lifecycle_token == lifecycle_token) {
             app->state = AppState::error;
             app->lifecycle_busy = false;
             if (application_vm != nullptr) app->vm = application_vm;
+            app->error_message = diagnostic;
             app->generation = ++sequence_;
             last_exit_code_ = -1;
+            last_error_message_ = diagnostic;
         }
         return std::unexpected(std::move(error));
     };
@@ -1423,6 +1455,28 @@ Status Runtime::start_midlet(SuiteId suite_id,
         if (!completion) return fail_start(completion.error());
     }
 
+    bool start_app_deferred = false;
+    vm::MidletSignal launch_signal = vm::MidletSignal::none;
+#if defined(PHONEME_WEB)
+    // Emscripten cannot start a newly-created pthread until the current WASM
+    // entrypoint yields back to the worker event loop. Waiting synchronously
+    // for that pthread here deadlocks launch. The browser host already invokes
+    // the complete runtime from a dedicated Web Worker, so running startApp on
+    // this worker keeps the UI responsive and lets Java threads created by the
+    // MIDlet begin as soon as the launch call returns.
+    {
+        std::scoped_lock application_operation(application_vm->operation_mutex);
+        ScopedUnpacedExecution unpaced(application_vm->machine.scheduler());
+        auto started = application_vm->machine.invoke_instance(
+            *receiver, main_class, "startApp", "()V", {},
+            kMidletLifecycleInstructionBudget);
+        if (!started) return fail_start(started.error());
+        auto completion = require_normal_completion(
+            application_vm->machine, *started, "MIDlet startApp");
+        if (!completion) return fail_start(completion.error());
+        launch_signal = application_vm->machine.consume_midlet_signal();
+    }
+#else
     // MIDP lifecycle callbacks and LCDUI event dispatch run on independent
     // threads in phoneME. A number of legacy games keep startApp() on-stack
     // while an intro Canvas paints and waits for the first key. Running the
@@ -1478,7 +1532,6 @@ Status Runtime::start_midlet(SuiteId suite_id,
         });
     if (!scheduled_lifecycle) return fail_start(scheduled_lifecycle.error());
 
-    bool start_app_deferred = false;
     for (;;) {
         if (lifecycle_state->completed.load(std::memory_order_acquire)) break;
         auto pumped = application_vm->canvas.try_pump();
@@ -1496,7 +1549,6 @@ Status Runtime::start_midlet(SuiteId suite_id,
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    vm::MidletSignal launch_signal = vm::MidletSignal::none;
     if (!start_app_deferred) {
         std::optional<Error> lifecycle_failure;
         {
@@ -1512,10 +1564,14 @@ Status Runtime::start_midlet(SuiteId suite_id,
             return fail_start(std::move(*lifecycle_failure));
         }
     }
+#endif
     std::string launch_console;
+    std::vector<vm::NativeMethodInvocationCount> launch_native_counts;
     if (launch_signal == vm::MidletSignal::destroyed) {
         append_utf8(launch_console,
                     application_vm->machine.console_output());
+        launch_native_counts = nonzero_native_invocation_counts(
+            application_vm->machine);
     }
     std::shared_ptr<ApplicationVM> previous_vm;
     AppId previous_id;
@@ -1572,6 +1628,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         if (launch_signal == vm::MidletSignal::destroyed) {
             app->state = AppState::destroyed;
             app->console_output = std::move(launch_console);
+            app->native_invocation_counts = std::move(launch_native_counts);
             app->vm.reset();
         } else if (launch_signal == vm::MidletSignal::paused) {
             app->state = AppState::paused;
@@ -1580,9 +1637,11 @@ Status Runtime::start_midlet(SuiteId suite_id,
             app->state = AppState::active;
             foreground_app_id_ = app_id;
         }
+        app->error_message.clear();
         app->generation = ++sequence_;
         event_generation = sequence_;
         last_exit_code_ = 0;
+        last_error_message_.clear();
     }
 
     // This is lifecycle diagnostics, not an LCDUI reset. Kind NONE keeps it
@@ -2278,6 +2337,28 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
     return static_cast<i64>(estimated);
 }
 
+std::string Runtime::app_error_message(AppId app_id) const {
+    std::scoped_lock lock(mutex_);
+    const App* app = find_app_unlocked(app_id);
+    return app == nullptr ? std::string {} : app->error_message;
+}
+
+std::vector<vm::NativeMethodInvocationCount>
+Runtime::app_native_invocation_counts(AppId app_id) const {
+    std::shared_ptr<ApplicationVM> application_vm;
+    std::vector<vm::NativeMethodInvocationCount> retained;
+    {
+        std::scoped_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr) return {};
+        application_vm = app->vm;
+        retained = app->native_invocation_counts;
+    }
+    if (application_vm == nullptr) return retained;
+    std::scoped_lock vm_operation(application_vm->operation_mutex);
+    return application_vm->machine.natives().invocation_counts();
+}
+
 std::string Runtime::app_console_output(AppId app_id) const {
     std::shared_ptr<ApplicationVM> application_vm;
     std::string retained_console;
@@ -2299,6 +2380,21 @@ std::string Runtime::app_console_output(AppId app_id) const {
     utf8.reserve(console.size());
     append_utf8(utf8, console);
     return utf8;
+}
+
+void Runtime::record_error(const Error& error) {
+    std::scoped_lock lock(mutex_);
+    last_error_message_ = format_error_message(error);
+}
+
+void Runtime::clear_error() {
+    std::scoped_lock lock(mutex_);
+    last_error_message_.clear();
+}
+
+std::string Runtime::last_error_message() const {
+    std::scoped_lock lock(mutex_);
+    return last_error_message_;
 }
 
 void Runtime::stop() noexcept {
@@ -2598,6 +2694,16 @@ void Runtime::ui_select_command(i32 command_id) {
     push_ui_action(100, command_id, 0, 0);
 }
 
+void Runtime::ui_select_list_item_command(i32 component_id,
+                                          i32 element_index,
+                                          i32 command_id) {
+    push_ui_action(
+        static_cast<i32>(vm::LcduiActionKind::select_list_item_command),
+        component_id,
+        element_index,
+        command_id);
+}
+
 void Runtime::ui_focus_item(i32 component_id) {
     push_ui_action(101, component_id, 0, 0);
 }
@@ -2728,19 +2834,21 @@ void Runtime::finalize_deferred_start(
     }
 
     if (failure.has_value()) {
+        const std::string diagnostic = format_error_message(*failure);
         std::unique_lock lock(mutex_);
         App* app = find_app_unlocked(app_id);
         if (app == nullptr || app->vm != vm) return;
         app->state = AppState::error;
         app->lifecycle_busy = false;
+        app->error_message = diagnostic;
         app->generation = ++sequence_;
         last_exit_code_ = -1;
+        last_error_message_ = diagnostic;
         ui_queue_.push(UiEvent {
             .kind = -1,
             .component_id = app_id.value,
             .generation = sequence_,
-            .detail = "Deferred MIDlet startApp failed: " +
-                      failure->message,
+            .detail = "Deferred MIDlet startApp failed: " + diagnostic,
         });
         return;
     }
@@ -2764,6 +2872,8 @@ void Runtime::finalize_deferred_start(
     }
 
     std::optional<Error> transition_error;
+    std::string console_output;
+    std::vector<vm::NativeMethodInvocationCount> native_counts;
     {
         std::scoped_lock vm_operation(vm->operation_mutex);
         if (was_foreground) {
@@ -2777,6 +2887,10 @@ void Runtime::finalize_deferred_start(
             vm->machine.scheduler().set_host_foreground(false);
         }
         vm->machine.media().suspend();
+        if (signal == vm::MidletSignal::destroyed) {
+            append_utf8(console_output, vm->machine.console_output());
+            native_counts = nonzero_native_invocation_counts(vm->machine);
+        }
     }
 
     std::unique_lock lock(mutex_);
@@ -2792,6 +2906,8 @@ void Runtime::finalize_deferred_start(
     app->generation = ++sequence_;
     if (signal == vm::MidletSignal::destroyed) {
         app->state = AppState::destroyed;
+        app->console_output = std::move(console_output);
+        app->native_invocation_counts = std::move(native_counts);
         app->vm.reset();
         if (foreground_app_id_ == app_id) {
             foreground_app_id_ = {};
@@ -2828,6 +2944,7 @@ void Runtime::finalize_pending_destruction(
     }
 
     std::string console_output;
+    std::vector<vm::NativeMethodInvocationCount> native_counts;
     {
         std::scoped_lock vm_operation(vm->operation_mutex);
         if (!vm->machine.consume_midlet_destroyed_signal()) return;
@@ -2853,6 +2970,7 @@ void Runtime::finalize_pending_destruction(
         vm->machine.media().suspend();
         vm->machine.close_connections();
         append_utf8(console_output, vm->machine.console_output());
+        native_counts = nonzero_native_invocation_counts(vm->machine);
     }
 
     std::unique_lock lock(mutex_);
@@ -2863,6 +2981,7 @@ void Runtime::finalize_pending_destruction(
     app->lifecycle_busy = false;
     app->generation = ++sequence_;
     app->console_output = std::move(console_output);
+    app->native_invocation_counts = std::move(native_counts);
     app->vm.reset();
     if (foreground_app_id_ == app_id) {
         foreground_app_id_ = {};
@@ -2877,6 +2996,7 @@ void Runtime::finalize_pending_destruction(
 }
 
 void Runtime::mark_canvas_failure_unlocked(App& app, const Error& error) {
+    const std::string diagnostic = format_error_message(error);
     char message[1536] {};
     std::snprintf(message,
                   sizeof(message),
@@ -2893,13 +3013,15 @@ void Runtime::mark_canvas_failure_unlocked(App& app, const Error& error) {
 #endif
 
     app.state = AppState::error;
+    app.error_message = diagnostic;
     app.generation = ++sequence_;
     last_exit_code_ = -1;
+    last_error_message_ = diagnostic;
     ui_queue_.push(UiEvent {
         .kind = -1,
         .component_id = app.id.value,
         .generation = sequence_,
-        .detail = "Canvas dispatcher failed: " + error.message,
+        .detail = "Canvas dispatcher failed: " + diagnostic,
     });
 }
 

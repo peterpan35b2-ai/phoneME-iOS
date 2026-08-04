@@ -9,7 +9,7 @@ enum PhoneMEStorageLocation: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .local:
-            return "On My iPhone"
+            return L10n.string("On My iPhone")
         case .iCloud:
             return "iCloud Drive"
         }
@@ -18,9 +18,13 @@ enum PhoneMEStorageLocation: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .local:
-            return "Keep the library and game data in the Files app on this device."
+            return L10n.string(
+                "Keep the library and game data in the Files app on this device."
+            )
         case .iCloud:
-            return "Sync the library, profiles, RMS and game files through iCloud Drive."
+            return L10n.string(
+                "Sync the library, profiles, RMS and game files through iCloud Drive."
+            )
         }
     }
 }
@@ -32,9 +36,11 @@ enum PhoneMEStorageError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .iCloudUnavailable:
-            return "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again."
+            return L10n.string(
+                "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again."
+            )
         case .migrationFailed(let message):
-            return "Could not move phoneME data: \(message)"
+            return L10n.format("Could not move phoneME data: %@", message)
         }
     }
 }
@@ -102,9 +108,9 @@ final class PhoneMEStorageController: ObservableObject {
     var locationDescription: String {
         switch activeLocation {
         case .local:
-            return "Files › On My iPhone › J2ME Loader › phoneME"
+            return L10n.string("Files › On My iPhone › J2ME Loader › phoneME")
         case .iCloud:
-            return "Files › iCloud Drive › J2ME Loader › phoneME"
+            return L10n.string("Files › iCloud Drive › J2ME Loader › phoneME")
         }
     }
 

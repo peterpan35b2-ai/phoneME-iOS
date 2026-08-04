@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Pinned JAR corpus for repeatable phoneME core performance runs. Hashes must match before a result is accepted.",
+  "benchmarks": [
+    {
+      "id": "canvas-3d-brick-breaker",
+      "category": "2d-canvas-game",
+      "jar": "jar_test/3dbrickbreaker.jar",
+      "sha256": "2c6dfc1f84a4126d47fbe85847a0f2cc0b6af1fa853c6cceb93e579e8cb1653a",
+      "target_milestone": "first-interactive-frame",
+      "timeout_seconds": 45
+    },
+    {
+      "id": "m3g-4x4-offroad",
+      "category": "3d-m3g-game",
+      "jar": "jar_test/4x4extremeoffroad.jar",
+      "sha256": "8962c78c65669c98f039cd483f7f60ea9d577c9026b8bb6d5edf712dd53f9737",
+      "target_milestone": "first-interactive-frame",
+      "timeout_seconds": 90
+    },
+    {
+      "id": "online-ninja-school",
+      "category": "online-game",
+      "jar": "jar_test/Nicknsonet_E72_x1_graphics.jar",
+      "sha256": "c50eeda8e7fda44088abf8678a65e9ae7f84549a1c196a588d60d129f79596d3",
+      "target_milestone": "login-screen",
+      "timeout_seconds": 90
+    },
+    {
+      "id": "midplay-http-app",
+      "category": "network-application",
+      "jar": "jar_test/MIDPlay.jar",
+      "sha256": "48bead28f61f11ca0a910e33875f3bfd6f5a7be75af1c38a7b4fa8710f6bf699",
+      "target_milestone": "first-displayable",
+      "timeout_seconds": 60
+    },
+    {
+      "id": "opera-mini-socket",
+      "category": "socket-application",
+      "jar": "jar_test/Opera 4.2 mod EN.jar",
+      "sha256": "b3ced4db87a223d8fb02fe47740eee7c65abdff2ebaeeb8ec42884500894e20d",
+      "target_milestone": "connection-screen",
+      "timeout_seconds": 90
+    },
+    {
+      "id": "large-obfuscated-clinit",
+      "category": "startup-stress",
+      "jar": "jar_test/148_TrungDucTV_Premium1.jar",
+      "sha256": "5359b580524fc3a1b309e7d02c006e6f77d1b7ed80e5b825cf3dbd9eb45bc3b7",
+      "target_milestone": "first-displayable",
+      "timeout_seconds": 120
+    },
+    {
+      "id": "avatar-rms-online",
+      "category": "rms-network-game",
+      "jar": "jar_test/Avatar_LAPRO_293.jar",
+      "sha256": "f888cc71889679c3e3ec6f29ba0de74b696ab9a12391384ce8d01c5de5438160",
+      "target_milestone": "login-screen",
+      "timeout_seconds": 120
+    }
+  ]
+}

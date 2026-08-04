@@ -15,6 +15,12 @@ private let backgroundExecutionLogger = Logger(
 final class BackgroundExecutionController: NSObject, ObservableObject {
     static let preferenceKey = "keepJ2MERunningInBackground"
 
+    enum ApplicationPhase: String {
+        case active
+        case inactive
+        case background
+    }
+
     enum Status: Equatable {
         case disabled
         case waitingForApplication
@@ -30,23 +36,23 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         var description: String {
             switch self {
             case .disabled:
-                return "Disabled"
+                return L10n.string("Disabled")
             case .waitingForApplication:
-                return "Starts when a J2ME application is running"
+                return L10n.string("Starts when a J2ME application is running")
             case .readyForBackground:
-                return "Ready for background use"
+                return L10n.string("Ready for background use")
             case .requestingPermission:
-                return "Choose Always Allow for background execution"
+                return L10n.string("Allow Location, then choose Always Allow")
             case .alwaysPermissionRequired:
-                return "Always Location access is required"
+                return L10n.string("Choose Always in Location Services")
             case .active:
-                return "Background execution is active"
+                return L10n.string("Background execution is active")
             case .denied:
-                return "Location access is denied"
+                return L10n.string("Location access is denied")
             case .restricted:
-                return "Location access is restricted"
+                return L10n.string("Location access is restricted")
             case .locationServicesDisabled:
-                return "Location Services are turned off"
+                return L10n.string("Location Services are turned off")
             case .failed(let message):
                 return message
             }
@@ -69,8 +75,9 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
     private let locationManager: CLLocationManager
     private var runningApplicationCount = 0
-    private var isApplicationInBackground = false
+    private var applicationPhase: ApplicationPhase = .active
     private var isRequestingAuthorization = false
+    private var didRequestAlwaysAuthorization = false
 
     override init() {
         let defaults = UserDefaults.standard
@@ -85,8 +92,17 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
         locationManager.delegate = self
         locationManager.activityType = .other
+
+        // This feature does not consume location coordinates. Three-kilometre
+        // accuracy lets Core Location avoid powering high-accuracy GPS while
+        // retaining the continuous background execution contract.
         locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         locationManager.distanceFilter = 3_000
+
+        // Automatic pauses can end the background execution window until the
+        // app is launched again. Keep them disabled for connection stability;
+        // energy is instead saved by coarse accuracy and by running this
+        // manager only during the inactive/background scene phases.
         locationManager.pausesLocationUpdatesAutomatically = false
         locationManager.allowsBackgroundLocationUpdates = false
         locationManager.showsBackgroundLocationIndicator = false
@@ -100,25 +116,30 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
         isEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.preferenceKey)
+        if !enabled {
+            isRequestingAuthorization = false
+        }
         reevaluate()
     }
 
     func setRunningApplicationCount(_ count: Int) {
-        let normalizedCount = max(0, count)
-        guard runningApplicationCount != normalizedCount else {
-            return
-        }
-
-        runningApplicationCount = normalizedCount
+        runningApplicationCount = max(0, count)
         reevaluate()
     }
 
-    func setApplicationInBackground(_ isInBackground: Bool) {
-        guard isApplicationInBackground != isInBackground else {
-            return
+    func setApplicationPhase(_ phase: ApplicationPhase) {
+        let previousPhase = applicationPhase
+        applicationPhase = phase
+
+        // Returning to active after a permission sheet means the user has
+        // finished that interaction. If authorization is still When In Use,
+        // reevaluate() will expose the Settings action instead of remaining in
+        // a permanent "requesting" state.
+        if phase == .active, previousPhase != .active,
+           isRequestingAuthorization {
+            isRequestingAuthorization = false
         }
 
-        isApplicationInBackground = isInBackground
         reevaluate()
     }
 
@@ -135,11 +156,6 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
             return
         }
 
-        guard runningApplicationCount > 0 else {
-            stopLocationUpdates(status: .waitingForApplication)
-            return
-        }
-
         guard CLLocationManager.locationServicesEnabled() else {
             stopLocationUpdates(status: .locationServicesDisabled)
             return
@@ -147,37 +163,83 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
 
         switch locationManager.authorizationStatus {
         case .authorizedAlways:
-            guard isApplicationInBackground else {
+            isRequestingAuthorization = false
+
+            guard runningApplicationCount > 0 else {
+                stopLocationUpdates(status: .waitingForApplication)
+                return
+            }
+
+            // Start while the scene is still inactive, before iOS completes
+            // the foreground-to-background transition. Starting standard
+            // location services only after entering background is unreliable
+            // and may be rejected by the system.
+            guard applicationPhase != .active else {
                 stopLocationUpdates(status: .readyForBackground)
                 return
             }
+
             startLocationUpdatesIfNeeded()
 
         case .authorizedWhenInUse:
-            stopLocationUpdates(status: .alwaysPermissionRequired)
+            stopLocationUpdates(
+                status: isRequestingAuthorization
+                    ? .requestingPermission
+                    : .alwaysPermissionRequired
+            )
+            requestAlwaysAuthorizationIfPossible()
 
         case .notDetermined:
             stopLocationUpdates(status: .requestingPermission)
-            guard
-                !isRequestingAuthorization,
-                UIApplication.shared.applicationState == .active
-            else {
-                return
-            }
-            isRequestingAuthorization = true
-            locationManager.requestAlwaysAuthorization()
+            requestWhenInUseAuthorizationIfPossible()
 
         case .denied:
+            isRequestingAuthorization = false
             stopLocationUpdates(status: .denied)
 
         case .restricted:
+            isRequestingAuthorization = false
             stopLocationUpdates(status: .restricted)
 
         @unknown default:
+            isRequestingAuthorization = false
             stopLocationUpdates(
                 status: .failed("Unknown location authorization state")
             )
         }
+    }
+
+    private func requestWhenInUseAuthorizationIfPossible() {
+        guard
+            !isRequestingAuthorization,
+            applicationPhase == .active,
+            UIApplication.shared.applicationState == .active
+        else {
+            return
+        }
+
+        isRequestingAuthorization = true
+        status = .requestingPermission
+        locationManager.requestWhenInUseAuthorization()
+    }
+
+    private func requestAlwaysAuthorizationIfPossible() {
+        guard
+            !didRequestAlwaysAuthorization,
+            !isRequestingAuthorization,
+            applicationPhase == .active,
+            UIApplication.shared.applicationState == .active
+        else {
+            return
+        }
+
+        // iOS presents the Always option as an upgrade after When In Use has
+        // been granted. Calling requestAlwaysAuthorization() directly from the
+        // not-determined state can leave the app with only provisional access.
+        didRequestAlwaysAuthorization = true
+        isRequestingAuthorization = true
+        status = .requestingPermission
+        locationManager.requestAlwaysAuthorization()
     }
 
     private func startLocationUpdatesIfNeeded() {
@@ -193,12 +255,11 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         isKeepingAlive = true
         status = .active
         backgroundExecutionLogger.info(
-            "Background execution keeper started for \(self.runningApplicationCount) J2ME application(s)"
+            "Background keeper started during \(self.applicationPhase.rawValue, privacy: .public) for \(self.runningApplicationCount) J2ME application(s)"
         )
     }
 
     private func stopLocationUpdates(status: Status) {
-        isRequestingAuthorization = false
         locationManager.stopUpdatingLocation()
         locationManager.allowsBackgroundLocationUpdates = false
         if isKeepingAlive {
@@ -223,9 +284,14 @@ extension BackgroundExecutionController: @preconcurrency CLLocationManagerDelega
         _ manager: CLLocationManager,
         didUpdateLocations locations: [CLLocation]
     ) {
-        // The emulator does not consume location data. Receiving a coarse
-        // location update keeps iOS background execution available while a
-        // J2ME application is running, matching UTM's optional behavior.
+        // The emulator does not consume location data. A location event can be
+        // the final signal that provisional Always authorization became
+        // permanent, and some iOS versions do not send another authorization
+        // callback for that transition.
+        if manager.authorizationStatus == .authorizedAlways,
+           status != .active {
+            reevaluate()
+        }
     }
 
     func locationManager(
@@ -251,10 +317,16 @@ extension BackgroundExecutionController: @preconcurrency CLLocationManagerDelega
 final class BackgroundExecutionController: ObservableObject {
     static let preferenceKey = "keepJ2MERunningInBackground"
 
+    enum ApplicationPhase {
+        case active
+        case inactive
+        case background
+    }
+
     enum Status: Equatable {
         case disabled
 
-        var description: String { "Unavailable" }
+        var description: String { L10n.string("Unavailable") }
         var requiresSystemSettings: Bool { false }
     }
 
@@ -264,7 +336,7 @@ final class BackgroundExecutionController: ObservableObject {
 
     func setEnabled(_ enabled: Bool) {}
     func setRunningApplicationCount(_ count: Int) {}
-    func setApplicationInBackground(_ isInBackground: Bool) {}
+    func setApplicationPhase(_ phase: ApplicationPhase) {}
     func openSystemSettings() {}
 }
 

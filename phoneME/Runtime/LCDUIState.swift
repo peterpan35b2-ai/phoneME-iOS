@@ -70,9 +70,11 @@ struct LCDUIState: Equatable, Sendable {
         var type: Int
         var priority: Int
         var scope: Int
+        var ownerID: Int32
         var order: Int
 
-        var isItemCommand: Bool { scope == 1 }
+        var isItemScoped: Bool { scope == 1 || ownerID != 0 }
+        var isListItemCommand: Bool { type == 8 }
 
         var negativeSoftKeyRank: Int? {
             switch type {
@@ -258,8 +260,15 @@ struct LCDUIState: Equatable, Sendable {
         }
     }
 
+    var listItemCommands: [Command] {
+        guard screenKind == .list else { return [] }
+        return orderedCommands.filter(\.isListItemCommand)
+    }
+
     var commandLayout: CommandLayout {
-        let ordered = orderedCommands
+        let ordered = screenKind == .list
+            ? orderedCommands.filter { !$0.isListItemCommand }
+            : orderedCommands
         let rightCommand = ordered
             .filter { $0.negativeSoftKeyRank != nil }
             .min {
@@ -350,6 +359,7 @@ struct LCDUIState: Equatable, Sendable {
                 type: Int(event.arguments.0),
                 priority: Int(event.arguments.1),
                 scope: Int(event.arguments.2),
+                ownerID: event.arguments.3,
                 order: Int(event.index)
             )
             commands.removeAll { $0.id == command.id }

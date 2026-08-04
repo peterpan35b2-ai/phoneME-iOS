@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "J2ME Loader";
+"NSPhotoLibraryAddUsageDescription" = "Cho phép J2ME Loader lưu ảnh chụp màn hình trò chơi vào thư viện ảnh của bạn.";
+"NSLocationWhenInUseUsageDescription" = "J2ME Loader chỉ sử dụng cập nhật vị trí có độ chính xác thấp để duy trì trò chơi đang chạy và kết nối mạng của chúng khi ứng dụng hoạt động trong nền.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Cho phép truy cập vị trí trong nền để J2ME Loader có thể duy trì trò chơi đang chạy và kết nối mạng của chúng khi ứng dụng không hiển thị trên màn hình.";

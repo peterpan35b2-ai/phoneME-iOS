@@ -296,10 +296,10 @@ private struct NativeProfilePicker<Value>: View where
     Value.AllCases: RandomAccessCollection,
     Value.RawValue == String
 {
-    let title: String
+    let title: LocalizedStringKey
     @Binding var selection: Value
 
-    init(_ title: String, selection: Binding<Value>) {
+    init(_ title: LocalizedStringKey, selection: Binding<Value>) {
         self.title = title
         _selection = selection
     }
@@ -327,7 +327,7 @@ private struct NativeProfilePicker<Value>: View where
 
 private struct IntegerTextField: View {
     @Binding var value: Int
-    let placeholder: String
+    let placeholder: LocalizedStringKey
     var width: CGFloat? = nil
 
     var body: some View {
@@ -388,8 +388,10 @@ private struct KeyMappingsView: View {
             } footer: {
                 Text(
                     profile.keyLayout == .custom
-                        ? "Enter the Java ME key code for each control."
-                        : "Choose Custom to edit these values."
+                        ? L10n.string(
+                            "Enter the Java ME key code for each control."
+                        )
+                        : L10n.string("Choose Custom to edit these values.")
                 )
             }
 

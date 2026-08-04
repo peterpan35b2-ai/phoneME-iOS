@@ -187,8 +187,8 @@ struct EmulatorView: View {
                                 VStack(alignment: .leading) {
                                     Label(
                                         keyboardAdjustmentMode == .position
-                                            ? "Move Virtual Keys"
-                                            : "Resize Key Groups",
+                                            ? L10n.string("Move Virtual Keys")
+                                            : L10n.string("Resize Key Groups"),
                                         systemImage: keyboardAdjustmentMode == .position
                                             ? "arrow.up.and.down.and.arrow.left.and.right"
                                             : "arrow.up.left.and.arrow.down.right"
@@ -197,8 +197,10 @@ struct EmulatorView: View {
 
                                     Text(
                                         keyboardAdjustmentMode == .position
-                                            ? "Keys snap to a 4-point grid."
-                                            : "Drag horizontally or vertically in 5% steps."
+                                            ? L10n.string("Keys snap to a 4-point grid.")
+                                            : L10n.string(
+                                                "Drag horizontally or vertically in 5% steps."
+                                            )
                                     )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -226,7 +228,9 @@ struct EmulatorView: View {
                     }
 
                     if session.state == .starting {
-                        EmulatorLoadingOverlay(title: "Starting \(game.title)")
+                        EmulatorLoadingOverlay(
+                            title: L10n.format("Starting %@", game.title)
+                        )
                     }
                 }
                 .coordinateSpace(name: "emulatorSurface")
@@ -575,7 +579,7 @@ struct EmulatorView: View {
     private func saveScreenshot() {
 #if os(iOS)
         guard let image = captureCurrentScreen() else {
-            errorMessage = "Unable to capture the current screen."
+            errorMessage = L10n.string("Unable to capture the current screen.")
             showError = true
             return
         }
@@ -589,7 +593,9 @@ struct EmulatorView: View {
                         showScreenshotSaved = true
                     } else {
                         errorMessage = error?.localizedDescription
-                            ?? "Unable to save the screenshot to Photos."
+                            ?? L10n.string(
+                                "Unable to save the screenshot to Photos."
+                            )
                         showError = true
                     }
                 }
@@ -605,13 +611,17 @@ struct EmulatorView: View {
                     if status == .authorized || status == .limited {
                         saveImage()
                     } else {
-                        errorMessage = "Photos access is required to save screenshots."
+                        errorMessage = L10n.string(
+                            "Photos access is required to save screenshots."
+                        )
                         showError = true
                     }
                 }
             }
         default:
-            errorMessage = "Photos access is required to save screenshots."
+            errorMessage = L10n.string(
+                "Photos access is required to save screenshots."
+            )
             showError = true
         }
 #endif
@@ -862,8 +872,8 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                         Button(action: toggleRotationLockAction) {
                             Label(
                                 isRotationLocked
-                                    ? "Unlock screen rotation"
-                                    : "Lock screen rotation",
+                                    ? L10n.string("Unlock screen rotation")
+                                    : L10n.string("Lock screen rotation"),
                                 systemImage: isRotationLocked
                                     ? "lock.rotation.open"
                                     : "lock.rotation"
@@ -934,7 +944,7 @@ private struct KeyboardVisibilityEditor: View {
             Section {
                 ForEach(controls) { control in
                     Toggle(
-                        control.accessibilityLabel.capitalized,
+                        control.accessibilityLabel,
                         isOn: visibilityBinding(for: control.id)
                     )
                 }

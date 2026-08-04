@@ -7,7 +7,7 @@ public final class FailingLifecycleApp extends MIDlet {
     }
 
     protected void startApp() {
-        throw new IllegalStateException();
+        throw new IllegalStateException("fixture start failure");
     }
 
     protected void pauseApp() {

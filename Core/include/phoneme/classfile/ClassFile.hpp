@@ -1,9 +1,11 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "phoneme/base/Error.hpp"
@@ -189,6 +191,63 @@ namespace phoneme::classfile
                                             std::string_view descriptor) const noexcept;
 
   private:
+    struct MethodSignatureView final
+    {
+      std::string_view name;
+      std::string_view descriptor;
+    };
+
+    struct MethodSignatureKey final
+    {
+      std::string name;
+      std::string descriptor;
+    };
+
+    struct MethodSignatureHash final
+    {
+      using is_transparent = void;
+
+      [[nodiscard]] usize operator()(const MethodSignatureKey &key) const noexcept
+      {
+        return (*this)(MethodSignatureView{key.name, key.descriptor});
+      }
+
+      [[nodiscard]] usize operator()(MethodSignatureView key) const noexcept
+      {
+        const usize first = std::hash<std::string_view>{}(key.name);
+        const usize second = std::hash<std::string_view>{}(key.descriptor);
+        return first ^ (second + static_cast<usize>(0x9E3779B9U) +
+                        (first << 6U) + (first >> 2U));
+      }
+    };
+
+    struct MethodSignatureEqual final
+    {
+      using is_transparent = void;
+
+      [[nodiscard]] bool operator()(const MethodSignatureKey &left,
+                                    const MethodSignatureKey &right) const noexcept
+      {
+        return left.name == right.name &&
+               left.descriptor == right.descriptor;
+      }
+
+      [[nodiscard]] bool operator()(const MethodSignatureKey &left,
+                                    MethodSignatureView right) const noexcept
+      {
+        return left.name == right.name &&
+               left.descriptor == right.descriptor;
+      }
+
+      [[nodiscard]] bool operator()(MethodSignatureView left,
+                                    const MethodSignatureKey &right) const noexcept
+      {
+        return (*this)(right, left);
+      }
+    };
+
+    [[nodiscard]] Status rebuild_method_index();
+
     u16 minor_version_{0};
     u16 major_version_{0};
     u16 access_flags_{0};
@@ -197,6 +256,10 @@ namespace phoneme::classfile
     std::vector<std::string> interfaces_;
     std::vector<Field> fields_;
     std::vector<Method> methods_;
+    std::unordered_map<MethodSignatureKey,
+                       usize,
+                       MethodSignatureHash,
+                       MethodSignatureEqual> method_index_;
     std::vector<Constant> constants_;
     std::vector<BootstrapMethod> bootstrap_methods_;
   };

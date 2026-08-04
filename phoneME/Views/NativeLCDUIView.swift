@@ -142,8 +142,11 @@ struct NativeLCDUIScreenView: View {
     @ViewBuilder
     private var listContent: some View {
         if let item = state.visibleItems.first {
-            NativeLCDUIListView(item: item)
-                .environmentObject(session)
+            NativeLCDUIListView(
+                item: item,
+                itemCommands: state.listItemCommands
+            )
+            .environmentObject(session)
         } else {
             emptyContent
         }
@@ -408,7 +411,12 @@ struct LCDUICommandBar: View {
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .accessibilityLabel("Options, \(layout.leftCommands.count) commands")
+            .accessibilityLabel(
+                L10n.format(
+                    "Options, %d commands",
+                    layout.leftCommands.count
+                )
+            )
         } else {
             Spacer(minLength: 0)
         }
@@ -690,6 +698,7 @@ private struct NativeLCDUIListView: View {
     @State private var pendingImplicitChoiceIndex: Int?
 
     let item: LCDUIState.Item
+    let itemCommands: [LCDUIState.Command]
 
     var body: some View {
         let choices = item.orderedChoices
@@ -740,7 +749,33 @@ private struct NativeLCDUIListView: View {
         }
     }
 
+    @ViewBuilder
     private func choiceRow(_ choice: LCDUIState.Choice) -> some View {
+        if itemCommands.isEmpty {
+            choiceButton(choice)
+        } else {
+            choiceButton(choice)
+                .contextMenu {
+                    ForEach(itemCommands) { command in
+                        Button(role: command.buttonRole) {
+                            session.selectLCDUIListItemCommand(
+                                componentID: item.id,
+                                index: choice.index,
+                                commandID: command.id
+                            )
+                        } label: {
+                            Label(
+                                command.displayLabel,
+                                systemImage: command.systemImage
+                            )
+                        }
+                    }
+                }
+                .accessibilityHint("Touch and hold for actions")
+        }
+    }
+
+    private func choiceButton(_ choice: LCDUIState.Choice) -> some View {
         Button {
             if effectiveType == .implicitChoice {
                 showPendingFeedback(for: choice.index)
@@ -1201,7 +1236,7 @@ private struct NativeLCDUIPopupChoice: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(item.label.isEmpty ? "Selection" : item.label)
+            Text(item.label.isEmpty ? L10n.string("Selection") : item.label)
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1296,7 +1331,13 @@ private struct NativeLCDUITextField: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .accessibilityLabel("\(text.count) of \(item.maxSize) characters")
+                    .accessibilityLabel(
+                        L10n.format(
+                            "%d of %d characters",
+                            text.count,
+                            item.maxSize
+                        )
+                    )
             }
         }
         .toolbar {
@@ -1504,7 +1545,7 @@ private struct NativeLCDUIProgressGauge: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(item.label.isEmpty ? "Progress" : item.label)
+                Text(item.label.isEmpty ? L10n.string("Progress") : item.label)
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
 
@@ -1569,7 +1610,7 @@ private struct NativeLCDUIGauge: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(item.label.isEmpty ? "Value" : item.label)
+                Text(item.label.isEmpty ? L10n.string("Value") : item.label)
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
 
@@ -1719,7 +1760,7 @@ private extension LCDUIState.Item {
         if !label.isEmpty {
             return label
         }
-        return "Item"
+        return L10n.string("Item")
     }
 
     var horizontalAlignment: Alignment {
@@ -1764,14 +1805,14 @@ private extension LCDUIState.Command {
             return longLabel
         }
         switch type {
-        case 2: return "Back"
-        case 3: return "Cancel"
-        case 4: return "OK"
-        case 5: return "Help"
-        case 6: return "Stop"
-        case 7: return "Exit"
-        case 8: return "Select"
-        default: return "Select"
+        case 2: return L10n.string("Back")
+        case 3: return L10n.string("Cancel")
+        case 4: return L10n.string("OK")
+        case 5: return L10n.string("Help")
+        case 6: return L10n.string("Stop")
+        case 7: return L10n.string("Exit")
+        case 8: return L10n.string("Select")
+        default: return L10n.string("Select")
         }
     }
 

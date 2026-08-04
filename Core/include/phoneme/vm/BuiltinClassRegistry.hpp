@@ -31,6 +31,7 @@ void register_headless_compat_classes(BuiltinClassRegistry& registry);
 void register_lcdui_classes(BuiltinClassRegistry& registry);
 void register_game_classes(BuiltinClassRegistry& registry);
 void register_m3g_classes(BuiltinClassRegistry& registry);
+void register_micro3d_classes(BuiltinClassRegistry& registry);
 void register_rms_classes(BuiltinClassRegistry& registry);
 void register_security_classes(BuiltinClassRegistry& registry);
 void register_midlet_classes(BuiltinClassRegistry& registry);

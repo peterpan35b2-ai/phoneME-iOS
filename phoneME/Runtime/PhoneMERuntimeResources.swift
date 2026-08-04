@@ -23,15 +23,19 @@ enum PhoneMERMSBackupError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noData:
-            return "This game does not have any RMS data yet."
+            return L10n.string("This game does not have any RMS data yet.")
         case .invalidBackup:
-            return "The selected file is not a valid phoneME RMS backup."
+            return L10n.string(
+                "The selected file is not a valid phoneME RMS backup."
+            )
         case .incompatibleGame:
-            return "This RMS backup belongs to a different game."
+            return L10n.string("This RMS backup belongs to a different game.")
         case .runtimeBusy:
-            return "Stop all running games before importing or exporting RMS data."
+            return L10n.string(
+                "Stop all running games before importing or exporting RMS data."
+            )
         case .backupTooLarge:
-            return "The RMS backup is too large."
+            return L10n.string("The RMS backup is too large.")
         }
     }
 }

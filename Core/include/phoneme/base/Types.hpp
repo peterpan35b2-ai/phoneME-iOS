@@ -19,10 +19,17 @@ using i64 = std::int64_t;
 using usize = std::size_t;
 using isize = std::ptrdiff_t;
 
+#if defined(__EMSCRIPTEN__)
+static_assert(sizeof(void*) == sizeof(u32),
+              "phoneME Web requires the wasm32 Emscripten ABI");
+static_assert(sizeof(usize) == sizeof(u32),
+              "phoneME Web requires 32-bit size_t");
+#else
 static_assert(sizeof(void*) == sizeof(u64), "phoneME Core is arm64-only");
 static_assert(sizeof(usize) == sizeof(u64), "size_t must be 64-bit");
+#endif
 static_assert(std::endian::native == std::endian::little,
-              "phoneME Core supports little-endian iPhoneOS only");
+              "phoneME Core supports little-endian targets only");
 static_assert(std::numeric_limits<unsigned char>::digits == 8,
               "phoneME requires 8-bit bytes");
 

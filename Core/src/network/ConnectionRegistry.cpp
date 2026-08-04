@@ -14,6 +14,7 @@ namespace phoneme::network {
 namespace {
 
 constexpr i32 kTimeoutEnabledMilliseconds = 30'000;
+constexpr i32 kStreamTimeoutEnabledMilliseconds = 120'000;
 constexpr i32 kTimeoutDisabledMilliseconds = 0;
 constexpr usize kMaximumBufferedHttpBody = 16U * 1024U * 1024U;
 constexpr usize kMaximumDatagramLength = 65'507U;
@@ -478,8 +479,13 @@ Result<OpenedConnection> ConnectionRegistry::open(
         created.parsed_url = *parsed;
         created.mode = mode;
         created.timeouts = timeouts;
+        const bool long_lived_stream =
+            parsed->scheme == Scheme::socket ||
+            parsed->scheme == Scheme::server_socket;
         created.timeout_ms = timeouts
-            ? kTimeoutEnabledMilliseconds
+            ? (long_lived_stream
+                   ? kStreamTimeoutEnabledMilliseconds
+                   : kTimeoutEnabledMilliseconds)
             : kTimeoutDisabledMilliseconds;
         switch (parsed->scheme) {
         case Scheme::socket:

@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "phoneme/vm/MetadataId.hpp"
 #include "phoneme/vm/Value.hpp"
 
 namespace phoneme::vm {
@@ -20,6 +21,7 @@ using NativeMethod = std::function<Result<std::optional<Value>>(
     std::span<const Value> arguments)>;
 
 struct NativeMethodSignature final {
+    NativeMethodId id;
     std::string owner;
     std::string name;
     std::string descriptor;
@@ -36,9 +38,16 @@ public:
                                          std::string name,
                                          std::string descriptor,
                                          NativeMethod implementation);
+    [[nodiscard]] NativeMethodId resolve(std::string_view owner,
+                                         std::string_view name,
+                                         std::string_view descriptor) const noexcept;
     [[nodiscard]] bool contains(std::string_view owner,
                                 std::string_view name,
                                 std::string_view descriptor) const noexcept;
+    [[nodiscard]] Result<std::optional<Value>> invoke(
+        Machine& machine,
+        NativeMethodId method_id,
+        std::span<const Value> arguments) const;
     [[nodiscard]] Result<std::optional<Value>> invoke(
         Machine& machine,
         std::string_view owner,
@@ -50,17 +59,24 @@ public:
     [[nodiscard]] std::vector<NativeMethodInvocationCount>
     invocation_counts() const;
     void reset_invocation_counts() noexcept;
+    [[nodiscard]] u64 generation() const noexcept;
     void clear() noexcept;
 
 private:
+    struct Entry final {
+        NativeMethodSignature signature;
+        NativeMethod implementation;
+        std::size_t invocation_count {0};
+    };
+
     [[nodiscard]] static std::string key(std::string_view owner,
                                          std::string_view name,
                                          std::string_view descriptor);
 
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, NativeMethod> methods_;
-    std::unordered_map<std::string, NativeMethodSignature> signatures_;
-    mutable std::unordered_map<std::string, std::size_t> invocation_counts_;
+    std::unordered_map<std::string, NativeMethodId> ids_by_key_;
+    mutable std::vector<Entry> entries_;
+    u64 generation_ {1U};
 };
 
 void register_core_natives(NativeMethodRegistry& registry);

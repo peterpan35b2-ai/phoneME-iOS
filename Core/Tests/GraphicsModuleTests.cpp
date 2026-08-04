@@ -737,24 +737,26 @@ void test_font_unicode_and_measurement() {
                 font->height() > font->baseline() &&
                 font->chars_width(text) >= font->char_width(U'A'),
             "font flags and text metrics are internally consistent");
-    require_equal(font->height(), 13,
-                  "phoneME font.bin exposes its 13-pixel height");
+    require_equal(font->height(), 14,
+                  "phoneME logical font exposes its 14-pixel cell height");
     require_equal(font->baseline(), 11,
                   "phoneME font.bin exposes its 11-pixel baseline");
-    require_equal(font->char_width(U'A'), 8,
-                  "phoneME bold A width includes one style pixel");
-    require_equal(font->chars_width(text), 15,
-                  "phoneME variable glyph widths replace fixed 9-pixel cells");
+    require_equal(font->char_width(U'A'), 9,
+                  "phoneME logical metrics use a fixed 9-pixel cell");
+    require_equal(font->chars_width(text), 18,
+                  "phoneME style metadata does not change logical advance");
 
     auto unicode_font = phoneme::graphics::Font::create(
         static_cast<i32>(phoneme::graphics::FontFace::system),
         phoneme::graphics::style_plain,
         static_cast<i32>(phoneme::graphics::FontSize::medium));
     require(unicode_font.has_value(), "create Unicode system font");
-    require_equal(unicode_font->char_width(U'I'), 4,
-                  "phoneME atlas preserves narrow glyph width");
-    require_equal(unicode_font->char_width(U'W'), 10,
-                  "phoneME atlas preserves wide glyph width");
+    require_equal(unicode_font->char_width(U'I'), 9,
+                  "phoneME logical metrics keep narrow glyphs in one cell");
+    require_equal(unicode_font->char_width(U'W'), 9,
+                  "phoneME logical metrics keep wide glyphs in one cell");
+    require_equal(unicode_font->char_width(U'\U0001F642'), 18,
+                  "supplementary glyphs occupy two UTF-16 cells");
     constexpr std::u32string_view unicode_text = U"Tiếng Việt 日本語 \U0001F642";
     const std::span<const char32_t> characters(unicode_text.data(),
                                                unicode_text.size());
@@ -789,6 +791,85 @@ void test_font_unicode_and_measurement() {
             "Unicode rasterizer emits visible anti-aliased glyph pixels");
     require(text_image->has_dirty_region(),
             "text rasterization contributes a bounded dirty region");
+
+    constexpr std::u32string_view vietnamese_nfc = U"Tiếng Việt";
+    constexpr std::u32string_view vietnamese_nfd =
+        U"Tie\u0302\u0301ng Vie\u0323\u0302t";
+    const std::span<const char32_t> nfc_characters(vietnamese_nfc.data(),
+                                                   vietnamese_nfc.size());
+    const std::span<const char32_t> nfd_characters(vietnamese_nfd.data(),
+                                                   vietnamese_nfd.size());
+    const auto nfc_width = phoneme::graphics::platform_text_width(
+        *unicode_font, nfc_characters);
+    const auto nfd_width = phoneme::graphics::platform_text_width(
+        *unicode_font, nfd_characters);
+    require(nfc_width.has_value() && nfd_width == nfc_width,
+            "decomposed Vietnamese normalizes to the bitmap atlas width");
+
+    auto nfc_image = Image::create_mutable(*nfc_width + 4, metrics->height);
+    auto nfd_image = Image::create_mutable(*nfd_width + 4, metrics->height);
+    require(nfc_image.has_value() && nfd_image.has_value(),
+            "create Vietnamese normalization targets");
+    const auto nfc_clip = phoneme::graphics::target_bounds(*nfc_image);
+    const auto nfd_clip = phoneme::graphics::target_bounds(*nfd_image);
+    require(phoneme::graphics::draw_platform_text(*nfc_image,
+                                                   *unicode_font,
+                                                   nfc_characters,
+                                                   2,
+                                                   0,
+                                                   0xFF000000U,
+                                                   nfc_clip)
+                .has_value() &&
+                phoneme::graphics::draw_platform_text(*nfd_image,
+                                                       *unicode_font,
+                                                       nfd_characters,
+                                                       2,
+                                                       0,
+                                                       0xFF000000U,
+                                                       nfd_clip)
+                    .has_value(),
+            "rasterize precomposed and decomposed Vietnamese");
+    require(std::equal(nfc_image->pixels().begin(),
+                       nfc_image->pixels().end(),
+                       nfd_image->pixels().begin(),
+                       nfd_image->pixels().end()),
+            "Vietnamese combining marks preserve the crisp bitmap glyphs");
+
+    constexpr std::u32string_view mixed_bitmap_text = U"Tiếng Việt ⊤";
+    const std::span<const char32_t> mixed_bitmap_characters(
+        mixed_bitmap_text.data(), mixed_bitmap_text.size());
+    const auto mixed_bitmap_width = phoneme::graphics::platform_text_width(
+        *unicode_font, mixed_bitmap_characters);
+    require(mixed_bitmap_width.has_value(),
+            "measure mixed bitmap and fallback text runs");
+    auto mixed_bitmap_image = Image::create_mutable(*mixed_bitmap_width + 4,
+                                                     metrics->height);
+    require(mixed_bitmap_image.has_value(),
+            "create mixed bitmap and fallback target");
+    require(phoneme::graphics::draw_platform_text(
+                *mixed_bitmap_image,
+                *unicode_font,
+                mixed_bitmap_characters,
+                2,
+                0,
+                0xFF000000U,
+                phoneme::graphics::target_bounds(*mixed_bitmap_image))
+                .has_value(),
+            "rasterize mixed bitmap and fallback text runs");
+    usize bitmap_ink = 0U;
+    usize bitmap_gray = 0U;
+    for (i32 row = 0; row < mixed_bitmap_image->height(); ++row) {
+        for (i32 column = 2; column < 2 + *nfc_width; ++column) {
+            const Pixel pixel = mixed_bitmap_image->pixel(column, row).value();
+            if (pixel == 0xFF000000U) {
+                ++bitmap_ink;
+            } else if (pixel != 0xFFFFFFFFU) {
+                ++bitmap_gray;
+            }
+        }
+    }
+    require(bitmap_ink > 20U && bitmap_gray == 0U,
+            "unsupported glyphs do not downgrade Vietnamese to CoreText");
 
     constexpr std::array<char32_t, 1> orientation_text {U'T'};
     auto orientation_font = phoneme::graphics::Font::create(

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -25,6 +26,7 @@
 #include "phoneme/vm/Interpreter.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/SlotStorage.hpp"
 #include "phoneme/vm/Verifier.hpp"
 
@@ -37,6 +39,130 @@ void require(bool condition, const char* message) {
         std::cerr << "FAILED: " << message << '\n';
         std::abort();
     }
+}
+
+void write_performance_snapshot() {
+    const char* output_path = std::getenv("PHONEME_VM_PROFILE_JSON");
+    if (output_path == nullptr || *output_path == '\0') return;
+
+    const auto snapshot = phoneme::vm::PerformanceCounters::snapshot();
+    const std::filesystem::path path(output_path);
+    std::error_code directory_error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), directory_error);
+    }
+    require(!directory_error, "create VM profile output directory");
+
+    std::ofstream output(path, std::ios::trunc);
+    require(output.good(), "open VM profile output");
+    output << "{\n"
+           << "  \"schema_version\": 1,\n"
+           << "  \"profiling_enabled\": "
+           << (phoneme::vm::PerformanceCounters::enabled() ? "true" : "false")
+           << ",\n"
+           << "  \"interpreter\": {\n"
+           << "    \"executed_bytecodes\": " << snapshot.executed_bytecodes << ",\n"
+           << "    \"method_invocations\": " << snapshot.method_invocations << ",\n"
+           << "    \"native_invocations\": " << snapshot.native_invocations << ",\n"
+           << "    \"maximum_java_call_depth\": "
+           << snapshot.maximum_java_call_depth << ",\n"
+           << "    \"exception_dispatches\": " << snapshot.exception_dispatches << ",\n"
+           << "    \"class_initializations\": " << snapshot.class_initializations << ",\n"
+           << "    \"instruction_budget_exits\": "
+           << snapshot.instruction_budget_exits << ",\n"
+           << "    \"scheduler_quanta\": " << snapshot.scheduler_quanta << "\n"
+           << "  },\n"
+           << "  \"metadata\": {\n"
+           << "    \"class_cache_hits\": " << snapshot.class_cache_hits << ",\n"
+           << "    \"class_cache_misses\": " << snapshot.class_cache_misses << ",\n"
+           << "    \"method_resolution_hits\": "
+           << snapshot.method_resolution_hits << ",\n"
+           << "    \"method_resolution_misses\": "
+           << snapshot.method_resolution_misses << ",\n"
+           << "    \"declared_method_resolution_hits\": "
+           << snapshot.declared_method_resolution_hits << ",\n"
+           << "    \"declared_method_resolution_misses\": "
+           << snapshot.declared_method_resolution_misses << ",\n"
+           << "    \"field_resolution_hits\": "
+           << snapshot.field_resolution_hits << ",\n"
+           << "    \"field_resolution_misses\": "
+           << snapshot.field_resolution_misses << ",\n"
+           << "    \"assignability_cache_hits\": "
+           << snapshot.assignability_cache_hits << ",\n"
+           << "    \"assignability_cache_misses\": "
+           << snapshot.assignability_cache_misses << ",\n"
+           << "    \"native_registry_lookups\": "
+           << snapshot.native_registry_lookups << ",\n"
+           << "    \"metadata_key_constructions\": "
+           << snapshot.metadata_key_constructions << ",\n"
+           << "    \"virtual_inline_cache_hits\": "
+           << snapshot.virtual_inline_cache_hits << ",\n"
+           << "    \"virtual_inline_cache_misses\": "
+           << snapshot.virtual_inline_cache_misses << ",\n"
+           << "    \"direct_call_cache_hits\": "
+           << snapshot.direct_call_cache_hits << ",\n"
+           << "    \"direct_call_cache_misses\": "
+           << snapshot.direct_call_cache_misses << ",\n"
+           << "    \"operand_resolution_hits\": "
+           << snapshot.operand_resolution_hits << ",\n"
+           << "    \"operand_resolution_misses\": "
+           << snapshot.operand_resolution_misses << ",\n"
+           << "    \"operand_resolution_failures\": "
+           << snapshot.operand_resolution_failures << ",\n"
+           << "    \"descriptor_cache_hits\": "
+           << snapshot.descriptor_cache_hits << ",\n"
+           << "    \"descriptor_cache_misses\": "
+           << snapshot.descriptor_cache_misses << ",\n"
+           << "    \"decoded_methods\": "
+           << snapshot.decoded_methods << ",\n"
+           << "    \"decoded_instructions\": "
+           << snapshot.decoded_instructions << ",\n"
+           << "    \"decoded_operands\": "
+           << snapshot.decoded_operands << ",\n"
+           << "    \"decoded_switch_entries\": "
+           << snapshot.decoded_switch_entries << ",\n"
+           << "    \"decoded_opcode_dispatches\": "
+           << snapshot.decoded_opcode_dispatches << ",\n"
+           << "    \"decoded_operand_dispatches\": "
+           << snapshot.decoded_operand_dispatches << "\n"
+           << "  },\n"
+           << "  \"heap\": {\n"
+           << "    \"failed_allocations\": " << snapshot.failed_allocations << ",\n"
+           << "    \"public_locked_operations\": "
+           << snapshot.public_locked_heap_operations << ",\n"
+           << "    \"vm_fast_operations\": "
+           << snapshot.vm_fast_heap_operations << ",\n"
+           << "    \"gc_count\": " << snapshot.gc_count << ",\n"
+           << "    \"gc_total_nanoseconds\": "
+           << snapshot.gc_total_nanoseconds << ",\n"
+           << "    \"gc_max_pause_nanoseconds\": "
+           << snapshot.gc_max_pause_nanoseconds << ",\n"
+           << "    \"gc_roots_scanned\": " << snapshot.gc_roots_scanned << ",\n"
+           << "    \"gc_objects_scanned\": " << snapshot.gc_objects_scanned << ",\n"
+           << "    \"gc_objects_reclaimed\": "
+           << snapshot.gc_objects_reclaimed << ",\n"
+           << "    \"gc_primitive_bytes_scanned\": "
+           << snapshot.gc_primitive_bytes_scanned << "\n"
+           << "  },\n"
+           << "  \"scheduler\": {\n"
+           << "    \"state_transitions\": "
+           << snapshot.scheduler_state_transitions << ",\n"
+           << "    \"queue_erase_scans\": "
+           << snapshot.scheduler_queue_erase_scans << ",\n"
+           << "    \"yields\": " << snapshot.scheduler_yields << ",\n"
+           << "    \"sleeps\": " << snapshot.scheduler_sleeps << ",\n"
+           << "    \"event_wakeups\": "
+           << snapshot.scheduler_event_wakeups << ",\n"
+           << "    \"spurious_wakeups\": "
+           << snapshot.scheduler_spurious_wakeups << "\n"
+           << "  },\n"
+           << "  \"opcode_counts\": [";
+    for (std::size_t index = 0; index < snapshot.opcode_counts.size(); ++index) {
+        if (index != 0U) output << ',';
+        output << snapshot.opcode_counts[index];
+    }
+    output << "]\n}\n";
+    require(output.good(), "write VM profile output");
 }
 
 void test_archive_and_classfile(const std::string& fixture_jar) {
@@ -120,11 +246,18 @@ void test_builtin_boot_classes() {
     auto midlet = classes.load("javax/microedition/midlet/MIDlet");
     auto media_manager = classes.load("javax/microedition/media/Manager");
     auto media_player = classes.load("javax/microedition/media/Player");
+    auto micro3d_figure = classes.load(
+        "com/mascotcapsule/micro3d/v3/Figure");
+    auto micro3d_graphics = classes.load(
+        "com/mascotcapsule/micro3d/v3/Graphics3D");
     require(object.has_value(), "load C++ built-in java/lang/Object");
     require(string.has_value(), "load C++ built-in java/lang/String");
     require(midlet.has_value(), "load C++ built-in MIDlet");
     require(media_manager.has_value(), "load C++ built-in MMAPI Manager");
     require(media_player.has_value(), "load C++ built-in MMAPI Player");
+    require(micro3d_figure.has_value(), "load C++ built-in Micro3D Figure");
+    require(micro3d_graphics.has_value(),
+            "load C++ built-in Micro3D Graphics3D");
     require((*object)->super_name().empty(), "Object has no superclass");
     require((*string)->super_name() == "java/lang/Object",
             "String inherits built-in Object");
@@ -149,6 +282,29 @@ void test_class_layout(const std::string& fixture_jar) {
             "fixture layout resolves its C++ built-in parent");
     require((*arithmetic_layout)->instance_field_slots == 1,
             "fixture has one instance field");
+
+    auto value_field = states.resolve_field(
+        "corefixture/Arithmetic", "value", "I", false);
+    auto value_field_again = states.resolve_field(
+        "corefixture/Arithmetic", "value", "I", false);
+    auto initialized_field = states.resolve_field(
+        "corefixture/Arithmetic", "initializedValue", "I", true);
+    require(value_field.has_value() && value_field->id.valid(),
+            "resolved instance field has a runtime ID");
+    require(value_field_again.has_value() &&
+                value_field_again->id == value_field->id,
+            "repeated field resolution reuses the runtime ID");
+    require(initialized_field.has_value() && initialized_field->id.valid() &&
+                initialized_field->id != value_field->id,
+            "distinct fields receive unique runtime IDs");
+    require(value_field->declaring_class_id.valid() &&
+                initialized_field->declaring_class_id ==
+                    value_field->declaring_class_id,
+            "resolved fields retain their declaring ClassId");
+    require(value_field->value_kind == phoneme::vm::ValueKind::int32 &&
+                initialized_field->value_kind ==
+                    phoneme::vm::ValueKind::int32,
+            "field metadata caches its storage value kind");
 
     phoneme::vm::Heap heap(64);
     auto instance = states.allocate_instance(heap, "corefixture/Arithmetic");
@@ -878,6 +1034,24 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                 std::cerr << (throwable_class.has_value()
                                   ? *throwable_class
                                   : std::string("unknown throwable"));
+                auto message_field = machine.heap().field(
+                    *result->throwable, 0U);
+                if (message_field &&
+                    message_field->kind() == phoneme::vm::ValueKind::reference) {
+                    auto message_reference = message_field->as_reference();
+                    if (message_reference && !message_reference->is_null()) {
+                        auto throwable_message = machine.heap().string_value(
+                            *message_reference);
+                        if (throwable_message) {
+                            std::cerr << ": ";
+                            for (char16_t character : *throwable_message) {
+                                std::cerr << (character <= 0x7FU
+                                    ? static_cast<char>(character)
+                                    : '?');
+                            }
+                        }
+                    }
+                }
             } else {
                 std::cerr << "without throwable";
             }
@@ -1591,6 +1765,54 @@ void test_machine_graphics(const std::string& fixture_jar) {
             "graphics fixture preserves pixels transforms alpha and metrics");
 }
 
+void test_machine_micro3d(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add Micro3D fixture JAR to VM classpath");
+    phoneme::vm::Machine machine(classes);
+
+    const auto invoke = [&](const char* method, int expected,
+                            const char* operation) {
+        auto result = machine.invoke_static("corefixture/Micro3dOps",
+                                            method,
+                                            "()I",
+                                            {},
+                                            20'000'000);
+        if (!result) {
+            std::cerr << operation << " VM error: "
+                      << result.error().message << '\n';
+        } else if (result->throwable.has_value()) {
+            auto throwable = machine.heap().class_name(*result->throwable);
+            std::cerr << operation << " throwable: "
+                      << (throwable ? *throwable : std::string("unknown"))
+                      << '\n';
+        }
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value(),
+                operation);
+        auto value = result->return_value->as_int();
+        if (!value || *value != expected) {
+            std::cerr << operation << " result: "
+                      << (value ? std::to_string(*value) : std::string("invalid"))
+                      << " expected: " << expected << '\n';
+        }
+        require(value.has_value() && *value == expected, operation);
+    };
+
+    invoke("vectorOps", -187, "execute Micro3D vector fixture");
+    invoke("affineOps", 112233, "execute Micro3D affine fixture");
+    invoke("rotationOps", 4096, "execute Micro3D rotation fixture");
+    invoke("rotationTranslationOps", 10'411'630,
+           "execute Micro3D rotation translation-preservation fixture");
+    invoke("utilOps", 8448, "execute Micro3D fixed-point utility fixture");
+    invoke("resourceFormatOps", 1'196'708,
+           "execute Micro3D MTRA and MBAC parser fixture");
+    invoke("invalidFormatOps", 1,
+           "execute Micro3D invalid-format exception fixture");
+    invoke("classAndConstantOps", 77,
+           "execute Micro3D class and constant fixture");
+}
+
 void test_machine_game_api(const std::string& fixture_jar) {
     phoneme::vm::ClassRepository classes;
     require(classes.add_archive(fixture_jar).has_value(),
@@ -2294,6 +2516,7 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     bool first_list_choice = false;
     bool second_list_choice = false;
     phoneme::i32 list_choice_id = 0;
+    phoneme::i32 list_item_command_id = 0;
     while (auto event = runtime.poll_ui_event()) {
         if (event->kind == 2 && event->component_type == 23 &&
             event->text == "Menu") {
@@ -2313,10 +2536,50 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
             second_list_choice = true;
             list_choice_id = event->component_id;
         }
+        if (event->kind == 15 && event->text == "Use" &&
+            event->arguments[0] == 8 && event->arguments[1] == 1 &&
+            event->arguments[2] == 0 && event->arguments[3] == 0) {
+            list_item_command_id = event->component_id;
+        }
     }
     require(list_created && list_shown && first_list_choice &&
-                second_list_choice && list_choice_id != 0,
-            "List screen and implicit choices are bridged after command callback");
+                second_list_choice && list_choice_id != 0 &&
+                list_item_command_id != 0,
+            "List screen choices and Command.ITEM are bridged after callback");
+
+    runtime.ui_select_list_item_command(
+        list_choice_id, 1, list_item_command_id);
+    bool context_selection_applied = false;
+    bool list_item_callback_applied = false;
+    bool context_form_restored = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 12 && event->component_id == list_choice_id &&
+            event->text == "Two" && event->arguments[0] == 1) {
+            context_selection_applied = true;
+        }
+        if (event->kind == 8 && event->component_id == status_id &&
+            event->detail == "List item 1") {
+            list_item_callback_applied = true;
+        }
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Native Form") {
+            context_form_restored = true;
+        }
+    }
+    require(context_selection_applied && list_item_callback_applied &&
+                context_form_restored,
+            "List Command.ITEM selects the held row without SELECT_COMMAND");
+
+    runtime.ui_select_command(menu_command_id);
+    list_choice_id = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 12 && event->component_type == 2 &&
+            event->text == "Two") {
+            list_choice_id = event->component_id;
+        }
+    }
+    require(list_choice_id != 0,
+            "List can be reopened for implicit selection testing");
 
     runtime.ui_set_choice(list_choice_id, 1, true);
     bool implicit_selection_applied = false;
@@ -3023,6 +3286,14 @@ void test_runtime_failure_isolation(const std::string& fixture_jar) {
     require(runtime.app_state(phoneme::AppId {10}) ==
                 phoneme::runtime::AppState::error,
             "failed MIDlet remains isolated in error state");
+    const std::string app_error =
+        runtime.app_error_message(phoneme::AppId {10});
+    require(app_error.find("java/lang/IllegalStateException") !=
+                std::string::npos &&
+                app_error.find("fixture start failure") != std::string::npos,
+            "failed MIDlet retains Java exception class and message");
+    require(runtime.last_error_message() == app_error,
+            "runtime exposes the latest MIDlet Java exception message");
 
     auto healthy = runtime.start_midlet(*suite_id,
                                         "corefixture.LifecycleApp",
@@ -3297,8 +3568,23 @@ void test_framebuffer_sizes() {
 
 int main(int argc, char** argv) {
     require(argc == 2, "usage: CoreTests <fixture.jar>");
+    phoneme::vm::PerformanceCounters::reset();
+    require(std::atexit(write_performance_snapshot) == 0,
+            "register VM profile writer");
     const std::string fixture_jar = argv[1];
     const char* filter = std::getenv("PHONEME_TEST_FILTER");
+    if (filter != nullptr &&
+        std::string_view(filter) == "vm-invocation") {
+        test_machine_invocation(fixture_jar);
+        std::cout << "Standalone VM invocation tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr &&
+        std::string_view(filter) == "vm-extended") {
+        test_machine_extended_opcodes(fixture_jar);
+        std::cout << "Standalone VM extended opcode tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "security") {
         test_archive_and_classfile(fixture_jar);
         test_suite_permissions(fixture_jar);
@@ -3350,11 +3636,24 @@ int main(int argc, char** argv) {
         std::cout << "Standalone M3G Core tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "micro3d") {
+        test_archive_and_classfile(fixture_jar);
+        test_builtin_boot_classes();
+        test_machine_micro3d(fixture_jar);
+        std::cout << "Standalone Micro3D Core tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "game-api") {
         test_archive_and_classfile(fixture_jar);
         test_builtin_boot_classes();
         test_machine_game_api(fixture_jar);
         std::cout << "Standalone MIDP Game API tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr &&
+        std::string_view(filter) == "failure-isolation") {
+        test_runtime_failure_isolation(fixture_jar);
+        std::cout << "Standalone runtime failure isolation tests passed\n";
         return 0;
     }
     test_archive_and_classfile(fixture_jar);
@@ -3382,6 +3681,7 @@ int main(int argc, char** argv) {
     test_machine_graphics(fixture_jar);
     test_machine_game_api(fixture_jar);
     test_machine_m3g();
+    test_machine_micro3d(fixture_jar);
     test_machine_gc_roots(fixture_jar);
     test_machine_shutdown_waiter(fixture_jar);
     test_runtime_lcdui(fixture_jar);

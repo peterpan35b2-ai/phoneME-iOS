@@ -25,6 +25,7 @@ namespace {
         register_lcdui_classes(result);
         register_game_classes(result);
         register_m3g_classes(result);
+        register_micro3d_classes(result);
         register_xml_classes(result);
         register_vendor_classes(result);
         register_sensor_classes(result);

@@ -176,6 +176,63 @@ struct ParentHandle final {
     };
 }
 
+[[nodiscard]] Result<std::optional<ParentHandle>> open_parent_for_stat(
+    UniqueFd root,
+    std::string_view normalized_path) {
+    const usize slash = normalized_path.rfind('/');
+    const std::string_view parent = slash == std::string_view::npos
+                                        ? std::string_view {}
+                                        : normalized_path.substr(0, slash);
+    const std::string_view leaf = slash == std::string_view::npos
+                                      ? normalized_path
+                                      : normalized_path.substr(slash + 1U);
+    usize start = 0U;
+    while (start < parent.size()) {
+        const usize separator = parent.find('/', start);
+        const usize end = separator == std::string_view::npos
+                              ? parent.size()
+                              : separator;
+        const std::string component(parent.substr(start, end - start));
+        struct stat info {};
+        if (::fstatat(root.get(), component.c_str(), &info,
+                      AT_SYMLINK_NOFOLLOW) != 0) {
+            const int error_number = errno;
+            if (error_number == ENOENT || error_number == ENOTDIR) {
+                return std::optional<ParentHandle> {};
+            }
+            return errno_failure(
+                "cannot inspect sandbox directory component",
+                error_number, true);
+        }
+        if (S_ISLNK(info.st_mode)) {
+            return fail(ErrorCode::invalid_argument,
+                        "sandbox path contains a symbolic link");
+        }
+        if (!S_ISDIR(info.st_mode)) {
+            return std::optional<ParentHandle> {};
+        }
+        const int descriptor = ::openat(
+            root.get(), component.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (descriptor < 0) {
+            const int error_number = errno;
+            if (error_number == ENOENT || error_number == ENOTDIR) {
+                return std::optional<ParentHandle> {};
+            }
+            return errno_failure(
+                "cannot open sandbox directory component",
+                error_number, true);
+        }
+        root = UniqueFd(descriptor);
+        if (separator == std::string_view::npos) break;
+        start = separator + 1U;
+    }
+    return std::optional<ParentHandle>(ParentHandle {
+        .descriptor = std::move(root),
+        .leaf = std::string(leaf),
+    });
+}
+
 [[nodiscard]] Result<std::optional<struct stat>> stat_at(
     int parent_descriptor,
     std::string_view leaf) {
@@ -535,9 +592,11 @@ Result<std::optional<struct stat>> SandboxResolver::stat(
         }
         return std::optional<struct stat>(info);
     }
-    auto parent = open_parent(std::move(root_handle), normalized_path);
+    auto parent = open_parent_for_stat(
+        std::move(root_handle), normalized_path);
     if (!parent) return std::unexpected(parent.error());
-    return stat_at(parent->descriptor.get(), parent->leaf);
+    if (!parent->has_value()) return std::optional<struct stat> {};
+    return stat_at((*parent)->descriptor.get(), (*parent)->leaf);
 }
 
 Status SandboxResolver::create_file(std::string_view normalized_path,

@@ -9,12 +9,14 @@
 
 #include "phoneme/archive/ZipArchive.hpp"
 #include "phoneme/classfile/ClassFile.hpp"
+#include "phoneme/vm/RuntimeMetadata.hpp"
 
 namespace phoneme::vm {
 
 struct ResolvedMethod final {
     std::shared_ptr<const classfile::ClassFile> owner;
     const classfile::Method* method {nullptr};
+    std::shared_ptr<const RuntimeMethod> runtime;
 };
 
 class ClassRepository final {
@@ -35,6 +37,10 @@ public:
         std::string_view target_name);
     [[nodiscard]] Result<std::vector<u8>> read_resource(
         std::string_view resource_name) const;
+    [[nodiscard]] RuntimeMetadata& metadata() noexcept { return metadata_; }
+    [[nodiscard]] const RuntimeMetadata& metadata() const noexcept {
+        return metadata_;
+    }
     void clear() noexcept;
 
 private:
@@ -54,6 +60,7 @@ private:
     std::unordered_map<std::string, ResolvedMethod> method_cache_;
     std::unordered_map<std::string, ResolvedMethod> declared_method_cache_;
     std::unordered_map<std::string, bool> assignability_cache_;
+    RuntimeMetadata metadata_;
 };
 
 } // namespace phoneme::vm

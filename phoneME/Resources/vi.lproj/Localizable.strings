@@ -1,0 +1,281 @@
+/* Ngôn ngữ ứng dụng */
+"Language" = "Ngôn ngữ";
+"Language changes are applied immediately." = "Thay đổi ngôn ngữ được áp dụng ngay lập tức.";
+"Vietnamese" = "Tiếng Việt";
+"English" = "Tiếng Anh";
+
+/* Chung */
+"Add" = "Thêm";
+"Add profile" = "Thêm hồ sơ";
+"Back" = "Quay lại";
+"Cancel" = "Hủy";
+"Custom" = "Tùy chỉnh";
+"Default" = "Mặc định";
+"Delete" = "Xóa";
+"Done" = "Xong";
+"Edit" = "Sửa";
+"Error" = "Lỗi";
+"Exit" = "Thoát";
+"Help" = "Trợ giúp";
+"Idle" = "Đang chờ";
+"Item" = "Mục";
+"Loading" = "Đang tải";
+"Loading…" = "Đang tải…";
+"More" = "Thêm";
+"More options" = "Tùy chọn khác";
+"OK" = "OK";
+"Opening" = "Đang mở";
+"Options" = "Tùy chọn";
+"Paused" = "Tạm dừng";
+"Progress" = "Tiến trình";
+"Rename" = "Đổi tên";
+"Save" = "Lưu";
+"Select" = "Chọn";
+"Selection" = "Lựa chọn";
+"Start" = "Chạy";
+"Starting" = "Đang khởi động";
+"Stop" = "Dừng";
+"Unavailable" = "Không khả dụng";
+"Value" = "Giá trị";
+"On" = "Bật";
+"Off" = "Tắt";
+"%@, %@" = "%@, %@";
+"%d of %d characters" = "%d trên %d ký tự";
+"Options, %d commands" = "Tùy chọn, %d lệnh";
+
+/* Giao diện */
+"Appearance" = "Giao diện";
+"Light" = "Sáng";
+"Dark" = "Tối";
+"System" = "Hệ thống";
+"System follows the appearance selected in iOS Settings." = "Hệ thống sử dụng giao diện đã chọn trong Cài đặt iOS.";
+
+/* Thư viện */
+"Library" = "Thư viện";
+"J2ME Loader" = "J2ME Loader";
+"No Apps" = "Chưa có ứng dụng";
+"Import a J2ME JAR file to add it to your library." = "Nhập một tệp JAR J2ME để thêm vào thư viện.";
+"Import JAR" = "Nhập JAR";
+"Search Apps" = "Tìm ứng dụng";
+"Search Running Apps" = "Tìm ứng dụng đang chạy";
+"No J2ME apps are currently running." = "Hiện không có ứng dụng J2ME nào đang chạy.";
+"No apps match the current filter." = "Không có ứng dụng nào khớp bộ lọc hiện tại.";
+"No apps match “%@”." = "Không có ứng dụng nào khớp “%@”.";
+"%d App" = "%d ứng dụng";
+"%d Apps" = "%d ứng dụng";
+"Name" = "Tên";
+"Date" = "Ngày";
+"Vendor" = "Nhà phát hành";
+"Sort by" = "Sắp xếp theo";
+"Order" = "Thứ tự";
+"Ascending" = "Tăng dần";
+"Descending" = "Giảm dần";
+"ascending" = "tăng dần";
+"descending" = "giảm dần";
+"Show Running Apps Only" = "Chỉ hiển thị ứng dụng đang chạy";
+"App name" = "Tên ứng dụng";
+"Export RMS" = "Xuất RMS";
+"Import RMS" = "Nhập RMS";
+"RMS" = "RMS";
+"RMS Backup" = "Bản sao lưu RMS";
+"RMS data was imported for %@." = "Đã nhập dữ liệu RMS cho %@.";
+"Uninstall" = "Gỡ cài đặt";
+"Uninstall %@?" = "Gỡ cài đặt %@?";
+"Uninstall this app?" = "Gỡ cài đặt ứng dụng này?";
+"Uninstall App & Delete Data" = "Gỡ ứng dụng và xóa dữ liệu";
+"Uninstall App Only" = "Chỉ gỡ ứng dụng";
+"Keep data to restore saves and settings when the same JAR is imported again, or delete all RMS, files and app settings permanently." = "Giữ dữ liệu để khôi phục bản lưu và cài đặt khi nhập lại cùng tệp JAR, hoặc xóa vĩnh viễn toàn bộ RMS, tệp và cài đặt ứng dụng.";
+"Game" = "Trò chơi";
+"Running in background" = "Đang chạy trong nền";
+"Paused in background" = "Đã tạm dừng trong nền";
+"Currently open" = "Đang mở";
+"Stopped with an error" = "Đã dừng do lỗi";
+"Opens the app" = "Mở ứng dụng";
+"Touch and hold for actions" = "Chạm và giữ để xem thao tác";
+
+/* Hồ sơ */
+"Profiles" = "Hồ sơ";
+"No Profiles" = "Chưa có hồ sơ";
+"Create a reusable profile for display, font and input settings." = "Tạo hồ sơ dùng lại cho cài đặt hiển thị, phông chữ và điều khiển.";
+"Create Profile" = "Tạo hồ sơ";
+"New Profile" = "Hồ sơ mới";
+"Rename Profile" = "Đổi tên hồ sơ";
+"Profile Name" = "Tên hồ sơ";
+"Default profile" = "Hồ sơ mặc định";
+"Set as Default" = "Đặt làm mặc định";
+
+/* Cài đặt */
+"Settings" = "Cài đặt";
+"Player" = "Trình chơi";
+"Action Bar" = "Thanh thao tác";
+"Status Bar" = "Thanh trạng thái";
+"Keep Screen Awake" = "Giữ màn hình luôn sáng";
+
+/* Chạy trong nền */
+"Background Execution" = "Chạy trong nền";
+"Run in Background" = "Chạy trong nền";
+"Open Location Settings" = "Mở cài đặt vị trí";
+"When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background." = "Khi được hỏi, trước tiên hãy cho phép truy cập Vị trí khi dùng ứng dụng, sau đó chọn Luôn cho phép. Ứng dụng chỉ dùng vị trí có độ chính xác thấp khi một ứng dụng J2ME đang chuyển vào hoặc chạy trong nền.";
+"Disabled" = "Đã tắt";
+"Starts when a J2ME application is running" = "Bắt đầu khi có ứng dụng J2ME đang chạy";
+"Ready for background use" = "Sẵn sàng chạy trong nền";
+"Allow Location, then choose Always Allow" = "Cho phép Vị trí, sau đó chọn Luôn cho phép";
+"Choose Always in Location Services" = "Chọn Luôn luôn trong Dịch vụ định vị";
+"Background execution is active" = "Đang duy trì chạy trong nền";
+"Location access is denied" = "Quyền truy cập vị trí bị từ chối";
+"Location access is restricted" = "Quyền truy cập vị trí bị hạn chế";
+"Location Services are turned off" = "Dịch vụ định vị đang tắt";
+
+/* Lưu trữ */
+"Storage" = "Lưu trữ";
+"Data Storage" = "Nơi lưu dữ liệu";
+"On My iPhone" = "Trên iPhone của tôi";
+"iCloud Drive" = "iCloud Drive";
+"Moving library and game data…" = "Đang di chuyển thư viện và dữ liệu trò chơi…";
+"Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location." = "Bao gồm tệp JAR, hồ sơ, bản lưu RMS, tệp thẻ nhớ và dữ liệu runtime. Hãy đóng mọi ứng dụng đang chạy trước khi đổi nơi lưu trữ.";
+"Keep the library and game data in the Files app on this device." = "Lưu thư viện và dữ liệu trò chơi trong ứng dụng Tệp trên thiết bị này.";
+"Sync the library, profiles, RMS and game files through iCloud Drive." = "Đồng bộ thư viện, hồ sơ, RMS và tệp trò chơi qua iCloud Drive.";
+"Close all running J2ME apps before changing the data location." = "Hãy đóng mọi ứng dụng J2ME đang chạy trước khi đổi nơi lưu dữ liệu.";
+"iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again." = "iCloud Drive không khả dụng. Hãy đăng nhập iCloud, bật iCloud Drive rồi thử lại.";
+"Could not move phoneME data: %@" = "Không thể di chuyển dữ liệu phoneME: %@";
+"Files › On My iPhone › J2ME Loader › phoneME" = "Tệp › Trên iPhone của tôi › J2ME Loader › phoneME";
+"Files › iCloud Drive › J2ME Loader › phoneME" = "Tệp › iCloud Drive › J2ME Loader › phoneME";
+
+/* Cấu hình hiển thị */
+"Display" = "Hiển thị";
+"Screen size" = "Kích thước màn hình";
+"Screen size presets" = "Mẫu kích thước màn hình";
+"Width" = "Chiều rộng";
+"Height" = "Chiều cao";
+"Swap width and height" = "Hoán đổi chiều rộng và chiều cao";
+"Keep Canvas aspect ratio" = "Giữ tỷ lệ Canvas";
+"Canvas scale" = "Tỷ lệ Canvas";
+"Screen orientation" = "Hướng màn hình";
+"Canvas gravity" = "Vị trí Canvas";
+"Canvas scale type" = "Kiểu co giãn Canvas";
+"Image filtering" = "Lọc ảnh";
+"Force Canvas fullscreen" = "Buộc Canvas toàn màn hình";
+"Show FPS" = "Hiển thị FPS";
+"Frame rate limit" = "Giới hạn tốc độ khung hình";
+"Auto (60)" = "Tự động (60)";
+"Configure Canvas size, scaling and rendering. Frame rate supports up to 60 FPS; enter 0 to use the default." = "Cấu hình kích thước, tỷ lệ và kết xuất Canvas. Tốc độ khung hình hỗ trợ tối đa 60 FPS; nhập 0 để dùng mặc định.";
+"Auto" = "Tự động";
+"Portrait" = "Dọc";
+"Landscape" = "Ngang";
+"Left" = "Trái";
+"Top" = "Trên";
+"Center" = "Giữa";
+"Right" = "Phải";
+"Bottom" = "Dưới";
+"As is" = "Giữ nguyên";
+"Fit to window" = "Vừa cửa sổ";
+"Fill window (ignore aspect ratio)" = "Lấp đầy cửa sổ (bỏ qua tỷ lệ)";
+
+/* Phông chữ */
+"Fonts" = "Phông chữ";
+"Small" = "Nhỏ";
+"Medium" = "Vừa";
+"Large" = "Lớn";
+"Font size preset" = "Mẫu cỡ chữ";
+"Font size presets" = "Mẫu cỡ chữ";
+"Use Dynamic Type scaling" = "Co giãn theo Dynamic Type";
+"Font sizes apply to native LCDUI and Canvas text." = "Cỡ chữ áp dụng cho LCDUI native và văn bản Canvas.";
+
+/* Cấu hình điều khiển */
+"Input" = "Điều khiển";
+"Touch input" = "Điều khiển cảm ứng";
+"J2ME key layout" = "Bố cục phím J2ME";
+"Key mappings" = "Gán phím";
+"Key Mappings" = "Gán phím";
+"Virtual keyboard" = "Bàn phím ảo";
+"Virtual keyboard layout" = "Bố cục bàn phím ảo";
+"Button shape" = "Hình dạng nút";
+"Haptic feedback" = "Phản hồi xúc giác";
+"Keyboard opacity" = "Độ trong suốt bàn phím";
+"Keep off-screen keys fully visible" = "Luôn hiển thị rõ các phím nằm ngoài màn hình";
+"Auto-hide delay" = "Thời gian chờ tự ẩn";
+"ms" = "ms";
+"Configure touch input, MIDP key mappings and virtual controls." = "Cấu hình cảm ứng, gán phím MIDP và các nút điều khiển ảo.";
+"Layout" = "Bố cục";
+"MIDP Key Codes" = "Mã phím MIDP";
+"Enter the Java ME key code for each control." = "Nhập mã phím Java ME cho từng nút điều khiển.";
+"Choose Custom to edit these values." = "Chọn Tùy chỉnh để sửa các giá trị này.";
+"Reset custom mappings" = "Đặt lại gán phím tùy chỉnh";
+"Reset Settings" = "Đặt lại cài đặt";
+"Reset Key Layout" = "Đặt lại bố cục phím";
+"Nokia/SE" = "Nokia/SE";
+"Siemens" = "Siemens";
+"Motorola" = "Motorola";
+"Phone" = "Điện thoại";
+"Phone (arrows)" = "Điện thoại (mũi tên)";
+"Numbers & arrows" = "Số và mũi tên";
+"Arrows & numbers" = "Mũi tên và số";
+"Numbers" = "Số";
+"Arrows" = "Mũi tên";
+"Oval" = "Bầu dục";
+"Rectangle" = "Chữ nhật";
+"Rounded rectangle" = "Chữ nhật bo góc";
+
+/* Trình giả lập */
+"Move Virtual Keys" = "Di chuyển phím ảo";
+"Resize Key Groups" = "Đổi kích thước nhóm phím";
+"Keys snap to a 4-point grid." = "Các phím bám theo lưới 4 điểm.";
+"Drag horizontally or vertically in 5% steps." = "Kéo ngang hoặc dọc theo từng bước 5%.";
+"Starting %@" = "Đang khởi động %@";
+"Switch keylayout" = "Chuyển bố cục phím";
+"Screenshot saved" = "Đã lưu ảnh chụp";
+"The screenshot was added to Photos." = "Ảnh chụp màn hình đã được thêm vào Ảnh.";
+"Exit application?" = "Thoát ứng dụng?";
+"Unsaved progress may be lost." = "Tiến trình chưa lưu có thể bị mất.";
+"Unable to capture the current screen." = "Không thể chụp màn hình hiện tại.";
+"Unable to save the screenshot to Photos." = "Không thể lưu ảnh chụp màn hình vào Ảnh.";
+"Photos access is required to save screenshots." = "Cần quyền truy cập Ảnh để lưu ảnh chụp màn hình.";
+"Keyboard (IME)" = "Bàn phím (IME)";
+"Take screenshot" = "Chụp màn hình";
+"Hide application" = "Ẩn ứng dụng";
+"Unlock screen rotation" = "Mở khóa xoay màn hình";
+"Lock screen rotation" = "Khóa xoay màn hình";
+"Auto translate" = "Tự động dịch";
+"Move keys" = "Di chuyển phím";
+"Resize key groups" = "Đổi kích thước nhóm phím";
+"Finish editing" = "Hoàn tất chỉnh sửa";
+"Choose layout" = "Chọn bố cục";
+"Visible buttons" = "Nút hiển thị";
+"Reset keyboard layout" = "Đặt lại bố cục bàn phím";
+"Visible Controls" = "Nút đang hiển thị";
+"Virtual Buttons" = "Nút ảo";
+"Turn off controls you do not need for this game." = "Tắt những nút không cần dùng cho trò chơi này.";
+"J2ME display" = "Màn hình J2ME";
+
+/* Trợ năng bàn phím ảo */
+"Menu" = "Trình đơn";
+"Up" = "Lên";
+"Down" = "Xuống";
+"Fire" = "Phím Fire";
+"Left soft key" = "Phím mềm trái";
+"Right soft key" = "Phím mềm phải";
+"Up left" = "Chéo lên trái";
+"Up right" = "Chéo lên phải";
+"Down left" = "Chéo xuống trái";
+"Down right" = "Chéo xuống phải";
+
+/* LCDUI native */
+"LCDUI" = "LCDUI";
+"Empty list" = "Danh sách trống";
+
+/* Lỗi RMS và runtime */
+"Unsupported file." = "Tệp không được hỗ trợ.";
+"The game JAR is missing from the library." = "Tệp JAR của trò chơi không còn trong thư viện.";
+"This game does not have any RMS data yet." = "Trò chơi này chưa có dữ liệu RMS.";
+"The selected file is not a valid phoneME RMS backup." = "Tệp đã chọn không phải bản sao lưu RMS phoneME hợp lệ.";
+"This RMS backup belongs to a different game." = "Bản sao lưu RMS này thuộc về trò chơi khác.";
+"Stop all running games before importing or exporting RMS data." = "Hãy dừng mọi trò chơi đang chạy trước khi nhập hoặc xuất dữ liệu RMS.";
+"The RMS backup is too large." = "Bản sao lưu RMS quá lớn.";
+"Runtime is not available." = "Runtime không khả dụng.";
+"The bundled phoneME runtime resources are missing." = "Thiếu tài nguyên runtime phoneME đi kèm.";
+"Failed to create runtime." = "Không thể tạo runtime.";
+"The JAR manifest does not contain a valid MIDlet-1 class." = "Manifest của JAR không chứa lớp MIDlet-1 hợp lệ.";
+"This application was imported after multitasking started. Close the running applications once so it can be prepared." = "Ứng dụng này được nhập sau khi chế độ đa nhiệm đã bắt đầu. Hãy đóng các ứng dụng đang chạy một lần để chuẩn bị ứng dụng.";
+"The maximum of 64 simultaneous J2ME applications has been reached." = "Đã đạt giới hạn tối đa 64 ứng dụng J2ME chạy đồng thời.";
+"The J2ME application could not become active in the foreground." = "Ứng dụng J2ME không thể chuyển sang hoạt động ở tiền cảnh.";
+"Failed to start application (error %d)." = "Không thể khởi động ứng dụng (lỗi %d).";

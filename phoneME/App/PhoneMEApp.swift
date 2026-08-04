@@ -21,6 +21,8 @@ struct PhoneMEApp: App {
     @UIApplicationDelegateAdaptor(PhoneMEAppDelegate.self) private var appDelegate
 #endif
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppLanguage.preferenceKey) private var appLanguage =
+        AppLanguage.defaultLanguage.rawValue
 
     @StateObject private var storage: PhoneMEStorageController
     @StateObject private var library: GameLibrary
@@ -53,6 +55,11 @@ struct PhoneMEApp: App {
                 .environmentObject(profileTemplates)
                 .environmentObject(session)
                 .environmentObject(backgroundExecution)
+                .environment(
+                    \.locale,
+                    AppLanguage(rawValue: appLanguage)?.locale
+                        ?? AppLanguage.defaultLanguage.locale
+                )
                 .onAppear {
                     backgroundExecution.setRunningApplicationCount(
                         session.runningApplications.count
@@ -79,6 +86,11 @@ struct PhoneMEApp: App {
                 .environmentObject(profileTemplates)
                 .environmentObject(session)
                 .environmentObject(backgroundExecution)
+                .environment(
+                    \.locale,
+                    AppLanguage(rawValue: appLanguage)?.locale
+                        ?? AppLanguage.defaultLanguage.locale
+                )
                 .frame(width: 420)
         }
 #endif
@@ -153,16 +165,17 @@ struct PhoneMEApp: App {
     private func updateLifecycle(for phase: ScenePhase) {
         switch phase {
         case .active:
-            backgroundExecution.setApplicationInBackground(false)
+            backgroundExecution.setApplicationPhase(.active)
             session.resume()
-        case .background:
-            backgroundExecution.setApplicationInBackground(true)
-            session.suspend()
         case .inactive:
-            // Inactive also covers transient system overlays while the app is
-            // still visible. Keep Location fully stopped until the scene has
-            // actually entered the background.
-            backgroundExecution.setApplicationInBackground(false)
+            // Arm coarse Location while iOS is still completing the transition
+            // out of the foreground. This is intentionally stopped again as
+            // soon as the scene becomes active, so transient overlays cost only
+            // a very short low-accuracy location session.
+            backgroundExecution.setApplicationPhase(.inactive)
+        case .background:
+            backgroundExecution.setApplicationPhase(.background)
+            session.suspend()
         @unknown default:
             break
         }

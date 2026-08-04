@@ -52,7 +52,8 @@ using namespace builtin;
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
-        }, {"java/lang/Cloneable", "java/io/Serializable"});
+        }, {"java/lang/Cloneable", "java/io/Serializable",
+             "java/lang/Comparable"});
     }
     if (name == "java/util/TimeZone") {
         return make_class("java/util/TimeZone", "java/lang/Object",
@@ -99,6 +100,7 @@ using namespace builtin;
             field(kPrivate, "zone", "Ljava/util/TimeZone;"),
             field(kProtected, "fields", "[I"),
             field(kProtected, "isSet", "[Z"),
+            field(kPrivate, "isTimeSet", "Z"),
             field(kPublic | kStatic | kFinal, "YEAR", "I"),
             field(kPublic | kStatic | kFinal, "MONTH", "I"),
             field(kPublic | kStatic | kFinal, "DATE", "I"),
@@ -245,6 +247,7 @@ using namespace builtin;
             field(kPrivate, "elementData", "[Ljava/lang/Object;"),
             field(kPrivate, "size", "I"),
             field(kPrivate, "capacityIncrement", "I"),
+            field(kPrivate, "mutationMode", "I"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(I)V"),
@@ -335,6 +338,10 @@ using namespace builtin;
             field(kPrivate, "count", "I"),
             field(kPrivate, "hashes", "[I"),
             field(kPrivate, "buckets", "[I"),
+            field(kPrivate, "iterationOrder", "[I"),
+            field(kPrivate, "tableCapacity", "I"),
+            field(kPrivate, "threshold", "I"),
+            field(kPrivate, "loadFactor", "F"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(I)V"),

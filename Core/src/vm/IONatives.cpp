@@ -263,17 +263,130 @@ void add(NativeMethodRegistry& registry,
 }
 
 [[nodiscard]] std::u16string charset_display_name(StreamCharset charset) {
+    // InputStreamReader/OutputStreamWriter expose the historical encoding
+    // names used by the OpenJDK 8 StreamDecoder/StreamEncoder implementation.
     switch (charset) {
     case StreamCharset::utf8:
-        return u"UTF-8";
+        return u"UTF8";
     case StreamCharset::latin1:
-        return u"ISO-8859-1";
+        return u"ISO8859_1";
     case StreamCharset::ascii:
-        return u"US-ASCII";
+        return u"ASCII";
     case StreamCharset::utf16be:
-        return u"UTF-16BE";
+        return u"UnicodeBigUnmarked";
     }
-    return u"ISO-8859-1";
+    return u"UTF8";
+}
+
+[[nodiscard]] Result<std::u16string> decode_byte_array(
+    Machine& machine,
+    ObjectRef buffer,
+    i32 count,
+    StreamCharset charset) {
+    if (count < 0) {
+        return fail(ErrorCode::invalid_state,
+                    "encoded byte count is negative");
+    }
+    auto length = byte_array_length(machine, buffer);
+    if (!length) return std::unexpected(length.error());
+    if (static_cast<usize>(count) > *length) {
+        return fail(ErrorCode::invalid_state,
+                    "encoded byte count exceeds buffer length");
+    }
+    std::vector<u8> bytes;
+    bytes.reserve(static_cast<usize>(count));
+    for (i32 index = 0; index < count; ++index) {
+        auto value = byte_array_value(machine, buffer,
+                                      static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        bytes.push_back(*value);
+    }
+
+    std::u16string decoded;
+    decoded.reserve(bytes.size());
+    for (usize index = 0U; index < bytes.size();) {
+        const u8 first = bytes[index];
+        if (charset == StreamCharset::latin1) {
+            decoded.push_back(static_cast<char16_t>(first));
+            ++index;
+            continue;
+        }
+        if (charset == StreamCharset::ascii) {
+            decoded.push_back(first <= 0x7FU
+                ? static_cast<char16_t>(first)
+                : static_cast<char16_t>(0xFFFDU));
+            ++index;
+            continue;
+        }
+        if (charset == StreamCharset::utf16be) {
+            if (index + 1U >= bytes.size()) {
+                decoded.push_back(static_cast<char16_t>(0xFFFDU));
+                break;
+            }
+            decoded.push_back(static_cast<char16_t>(
+                (static_cast<u16>(first) << 8U) |
+                static_cast<u16>(bytes[index + 1U])));
+            index += 2U;
+            continue;
+        }
+        if (first <= 0x7FU) {
+            decoded.push_back(static_cast<char16_t>(first));
+            ++index;
+            continue;
+        }
+
+        u32 code_point = 0U;
+        usize continuation_count = 0U;
+        u32 minimum = 0U;
+        if ((first & 0xE0U) == 0xC0U) {
+            code_point = first & 0x1FU;
+            continuation_count = 1U;
+            minimum = 0x80U;
+        } else if ((first & 0xF0U) == 0xE0U) {
+            code_point = first & 0x0FU;
+            continuation_count = 2U;
+            minimum = 0x800U;
+        } else if ((first & 0xF8U) == 0xF0U) {
+            code_point = first & 0x07U;
+            continuation_count = 3U;
+            minimum = 0x10000U;
+        } else {
+            decoded.push_back(static_cast<char16_t>(0xFFFDU));
+            ++index;
+            continue;
+        }
+
+        bool valid = index + continuation_count < bytes.size();
+        if (valid) {
+            for (usize continuation = 1U;
+                 continuation <= continuation_count;
+                 ++continuation) {
+                const u8 next = bytes[index + continuation];
+                if ((next & 0xC0U) != 0x80U) {
+                    valid = false;
+                    break;
+                }
+                code_point = (code_point << 6U) | (next & 0x3FU);
+            }
+        }
+        if (!valid || code_point < minimum || code_point > 0x10FFFFU ||
+            (code_point >= 0xD800U && code_point <= 0xDFFFU)) {
+            decoded.push_back(static_cast<char16_t>(0xFFFDU));
+            ++index;
+            continue;
+        }
+        index += continuation_count + 1U;
+        if (code_point <= 0xFFFFU) {
+            decoded.push_back(static_cast<char16_t>(code_point));
+        } else {
+            code_point -= 0x10000U;
+            decoded.push_back(static_cast<char16_t>(
+                0xD800U | (code_point >> 10U)));
+            decoded.push_back(static_cast<char16_t>(
+                0xDC00U | (code_point & 0x3FFU)));
+        }
+    }
+    return decoded;
 }
 
 [[nodiscard]] Result<i32> stream_read_one(Machine& machine,
@@ -737,11 +850,35 @@ void add(NativeMethodRegistry& registry,
     if (!source_length) return std::unexpected(source_length.error());
     auto range = validate_range(*source_length, offset, length);
     if (!range) return range;
-    for (i32 index = 0; index < length; ++index) {
-        auto byte = byte_array_value(machine, source,
-                                     static_cast<usize>(offset + index));
-        if (!byte) return std::unexpected(byte.error());
-        auto written = stream_write_one(machine, stream, *byte, 0);
+    if (length == 0) return {};
+
+    auto bytes = machine.heap().read_byte_array(
+        source, static_cast<usize>(offset), static_cast<usize>(length));
+    if (!bytes) return std::unexpected(bytes.error());
+
+    // Native network streams must keep OutputStream.write(byte[], off, len)
+    // as one transport operation. Falling back to write(int) for every byte
+    // turns a small Opera Mini handshake into hundreds of scheduler waits and
+    // makes a healthy socket look disconnected at the splash screen.
+    auto native = connection_stream_write_bytes(machine, stream, *bytes);
+    if (!native) return std::unexpected(native.error());
+    if (native->has_value()) return {};
+
+    auto data_output = is_instance(machine, stream,
+                                   "java/io/DataOutputStream");
+    if (!data_output) return std::unexpected(data_output.error());
+    if (*data_output) {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        native = connection_stream_write_bytes(machine, *output, *bytes);
+        if (!native) return std::unexpected(native.error());
+        if (native->has_value()) {
+            return increment_data_written(machine, stream, length);
+        }
+    }
+
+    for (const u8 byte : *bytes) {
+        auto written = stream_write_one(machine, stream, byte, 0U);
         if (!written) return written;
     }
     return {};
@@ -876,11 +1013,160 @@ void add(NativeMethodRegistry& registry,
 [[nodiscard]] Status write_bytes(Machine& machine,
                                  ObjectRef output,
                                  std::span<const u8> bytes) {
+    auto native = connection_stream_write_bytes(machine, output, bytes);
+    if (!native) return std::unexpected(native.error());
+    if (native->has_value()) return {};
     for (const u8 byte : bytes) {
-        auto written = stream_write_one(machine, output, byte, 0);
+        auto written = stream_write_one(machine, output, byte, 0U);
         if (!written) return written;
     }
     return {};
+}
+
+[[nodiscard]] Result<bool> stream_mark_supported(Machine& machine,
+                                                 ObjectRef stream,
+                                                 usize depth) {
+    if (stream.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "input stream is null");
+    }
+    if (depth >= kMaximumStreamDepth) return false;
+    auto byte_array = is_instance(machine, stream,
+                                  "java/io/ByteArrayInputStream");
+    if (!byte_array) return std::unexpected(byte_array.error());
+    if (*byte_array) return true;
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    auto filter = is_instance(machine, stream,
+                              "java/io/FilterInputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*data_input || *filter) {
+        auto target = reference_field(machine, stream, kFilterStreamField);
+        if (!target) return std::unexpected(target.error());
+        return stream_mark_supported(machine, *target, depth + 1U);
+    }
+    auto runtime = machine.heap().class_name(stream);
+    if (!runtime) return std::unexpected(runtime.error());
+    auto method = machine.classes().resolve_method(
+        *runtime, "markSupported", "()Z");
+    if (method && method->owner != nullptr &&
+        method->owner->name() != "java/io/InputStream") {
+        auto invoked = machine.invoke_instance(
+            stream, *runtime, "markSupported", "()Z");
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "markSupported threw");
+        }
+        if (!invoked->return_value.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        "markSupported returned no value");
+        }
+        auto value = invoked->return_value->as_int();
+        if (!value) return std::unexpected(value.error());
+        return *value != 0;
+    }
+    return false;
+}
+
+[[nodiscard]] Status stream_mark(Machine& machine,
+                                 ObjectRef stream,
+                                 i32 read_limit,
+                                 usize depth) {
+    if (stream.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "input stream is null");
+    }
+    if (depth >= kMaximumStreamDepth) {
+        return fail_java("java/io/IOException",
+                         "input stream filter chain is too deep");
+    }
+    auto byte_array = is_instance(machine, stream,
+                                  "java/io/ByteArrayInputStream");
+    if (!byte_array) return std::unexpected(byte_array.error());
+    if (*byte_array) {
+        auto position = int_field(machine, stream, kByteInputPositionField);
+        if (!position) return std::unexpected(position.error());
+        return set_int_field(machine, stream, kByteInputMarkField, *position);
+    }
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    auto filter = is_instance(machine, stream,
+                              "java/io/FilterInputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*data_input || *filter) {
+        auto target = reference_field(machine, stream, kFilterStreamField);
+        if (!target) return std::unexpected(target.error());
+        return stream_mark(machine, *target, read_limit, depth + 1U);
+    }
+    auto runtime = machine.heap().class_name(stream);
+    if (!runtime) return std::unexpected(runtime.error());
+    auto method = machine.classes().resolve_method(*runtime, "mark", "(I)V");
+    if (method && method->owner != nullptr &&
+        method->owner->name() != "java/io/InputStream") {
+        const Value argument = Value::from_int(read_limit);
+        auto invoked = machine.invoke_instance(
+            stream, *runtime, "mark", "(I)V",
+            std::span<const Value>(&argument, 1U));
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "mark threw");
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] Status stream_reset(Machine& machine,
+                                  ObjectRef stream,
+                                  usize depth) {
+    if (stream.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "input stream is null");
+    }
+    if (depth >= kMaximumStreamDepth) {
+        return fail_java("java/io/IOException",
+                         "input stream filter chain is too deep");
+    }
+    auto byte_array = is_instance(machine, stream,
+                                  "java/io/ByteArrayInputStream");
+    if (!byte_array) return std::unexpected(byte_array.error());
+    if (*byte_array) {
+        auto mark = int_field(machine, stream, kByteInputMarkField);
+        if (!mark) return std::unexpected(mark.error());
+        return set_int_field(machine, stream, kByteInputPositionField, *mark);
+    }
+    auto data_input = is_instance(machine, stream,
+                                  "java/io/DataInputStream");
+    if (!data_input) return std::unexpected(data_input.error());
+    auto filter = is_instance(machine, stream,
+                              "java/io/FilterInputStream");
+    if (!filter) return std::unexpected(filter.error());
+    if (*data_input || *filter) {
+        auto target = reference_field(machine, stream, kFilterStreamField);
+        if (!target) return std::unexpected(target.error());
+        return stream_reset(machine, *target, depth + 1U);
+    }
+    auto runtime = machine.heap().class_name(stream);
+    if (!runtime) return std::unexpected(runtime.error());
+    auto method = machine.classes().resolve_method(*runtime, "reset", "()V");
+    if (method && method->owner != nullptr &&
+        method->owner->name() != "java/io/InputStream") {
+        auto invoked = machine.invoke_instance(stream, *runtime, "reset", "()V");
+        if (!invoked) return std::unexpected(invoked.error());
+        if (invoked->throwable.has_value()) {
+            auto thrown = machine.heap().class_name(*invoked->throwable);
+            if (!thrown) return std::unexpected(thrown.error());
+            return fail_java(*thrown, "reset threw");
+        }
+        return {};
+    }
+    return fail_java("java/io/IOException",
+                     "mark/reset is not supported");
 }
 
 [[nodiscard]] Result<ObjectRef> data_input_reference(
@@ -1037,21 +1323,15 @@ void register_base_streams(NativeMethodRegistry& registry) {
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
-            if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            if (*byte_array) {
-                auto position = int_field(machine, *target,
-                                          kByteInputPositionField);
-                if (!position) return std::unexpected(position.error());
-                auto stored = set_int_field(machine, *target,
-                                            kByteInputMarkField,
-                                            *position);
-                if (!stored) return std::unexpected(stored.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "mark read limit is missing");
             }
+            auto read_limit = arguments[1].as_int();
+            if (!input) return std::unexpected(input.error());
+            if (!read_limit) return std::unexpected(read_limit.error());
+            auto marked = stream_mark(machine, *input, *read_limit, 0U);
+            if (!marked) return std::unexpected(marked.error());
             return std::optional<Value> {};
         });
     add(registry, "java/io/FilterInputStream", "reset", "()V",
@@ -1059,19 +1339,8 @@ void register_base_streams(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
             if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            if (!*byte_array)
-                return fail_java("java/io/IOException",
-                                 "mark/reset is not supported");
-            auto mark = int_field(machine, *target, kByteInputMarkField);
-            if (!mark) return std::unexpected(mark.error());
-            auto stored = set_int_field(machine, *target,
-                                        kByteInputPositionField, *mark);
-            if (!stored) return std::unexpected(stored.error());
+            auto reset = stream_reset(machine, *input, 0U);
+            if (!reset) return std::unexpected(reset.error());
             return std::optional<Value> {};
         });
     add(registry, "java/io/FilterInputStream", "markSupported", "()Z",
@@ -1079,33 +1348,24 @@ void register_base_streams(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
             if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            return std::optional<Value>(Value::from_int(*byte_array ? 1 : 0));
+            auto supported = stream_mark_supported(machine, *input, 0U);
+            if (!supported) return std::unexpected(supported.error());
+            return std::optional<Value>(Value::from_int(*supported ? 1 : 0));
         });
 
     add(registry, "java/io/DataInputStream", "mark", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
-            if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            if (*byte_array) {
-                auto position = int_field(machine, *target,
-                                          kByteInputPositionField);
-                if (!position) return std::unexpected(position.error());
-                auto stored = set_int_field(machine, *target,
-                                            kByteInputMarkField,
-                                            *position);
-                if (!stored) return std::unexpected(stored.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "mark read limit is missing");
             }
+            auto read_limit = arguments[1].as_int();
+            if (!input) return std::unexpected(input.error());
+            if (!read_limit) return std::unexpected(read_limit.error());
+            auto marked = stream_mark(machine, *input, *read_limit, 0U);
+            if (!marked) return std::unexpected(marked.error());
             return std::optional<Value> {};
         });
     add(registry, "java/io/DataInputStream", "reset", "()V",
@@ -1113,19 +1373,8 @@ void register_base_streams(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
             if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            if (!*byte_array)
-                return fail_java("java/io/IOException",
-                                 "mark/reset is not supported");
-            auto mark = int_field(machine, *target, kByteInputMarkField);
-            if (!mark) return std::unexpected(mark.error());
-            auto stored = set_int_field(machine, *target,
-                                        kByteInputPositionField, *mark);
-            if (!stored) return std::unexpected(stored.error());
+            auto reset = stream_reset(machine, *input, 0U);
+            if (!reset) return std::unexpected(reset.error());
             return std::optional<Value> {};
         });
     add(registry, "java/io/DataInputStream", "markSupported", "()Z",
@@ -1133,12 +1382,9 @@ void register_base_streams(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto input = receiver(arguments);
             if (!input) return std::unexpected(input.error());
-            auto target = reference_field(machine, *input, kFilterStreamField);
-            if (!target) return std::unexpected(target.error());
-            auto byte_array = is_instance(machine, *target,
-                                          "java/io/ByteArrayInputStream");
-            if (!byte_array) return std::unexpected(byte_array.error());
-            return std::optional<Value>(Value::from_int(*byte_array ? 1 : 0));
+            auto supported = stream_mark_supported(machine, *input, 0U);
+            if (!supported) return std::unexpected(supported.error());
+            return std::optional<Value>(Value::from_int(*supported ? 1 : 0));
         });
 
     const auto output_write_array = [&registry](std::string owner) {
@@ -1432,29 +1678,45 @@ void register_byte_array_streams(NativeMethodRegistry& registry) {
             if (!written) return std::unexpected(written.error());
             return std::optional<Value> {};
         });
+    const auto byte_output_to_string = [](
+        Machine& machine,
+        std::span<const Value> arguments,
+        bool named) -> Result<std::optional<Value>> {
+        auto object = receiver(arguments);
+        if (!object) return std::unexpected(object.error());
+        auto count = int_field(machine, *object, kByteOutputCountField);
+        auto buffer = reference_field(machine, *object,
+                                      kByteOutputBufferField);
+        if (!count || !buffer) {
+            return fail(ErrorCode::invalid_state,
+                        "ByteArrayOutputStream state is invalid");
+        }
+        StreamCharset charset = StreamCharset::utf8;
+        if (named) {
+            auto name = arguments[1].as_reference();
+            if (!name) return std::unexpected(name.error());
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
+            charset = *resolved;
+        }
+        auto decoded = decode_byte_array(
+            machine, *buffer, *count, charset);
+        if (!decoded) return std::unexpected(decoded.error());
+        auto string = create_string(machine, std::move(*decoded));
+        if (!string) return std::unexpected(string.error());
+        return std::optional<Value>(Value::from_reference(*string));
+    };
     add(registry, "java/io/ByteArrayOutputStream", "toString",
         "()Ljava/lang/String;",
-        [](Machine& machine, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto object = receiver(arguments);
-            if (!object) return std::unexpected(object.error());
-            auto count = int_field(machine, *object, kByteOutputCountField);
-            auto buffer = reference_field(machine, *object,
-                                          kByteOutputBufferField);
-            if (!count || !buffer)
-                return fail(ErrorCode::invalid_state,
-                            "ByteArrayOutputStream state is invalid");
-            std::u16string text;
-            text.reserve(static_cast<usize>(*count));
-            for (i32 index = 0; index < *count; ++index) {
-                auto value = byte_array_value(machine, *buffer,
-                                              static_cast<usize>(index));
-                if (!value) return std::unexpected(value.error());
-                text.push_back(static_cast<char16_t>(*value));
-            }
-            auto string = create_string(machine, std::move(text));
-            if (!string) return std::unexpected(string.error());
-            return std::optional<Value>(Value::from_reference(*string));
+        [byte_output_to_string](Machine& machine,
+                                std::span<const Value> arguments) {
+            return byte_output_to_string(machine, arguments, false);
+        });
+    add(registry, "java/io/ByteArrayOutputStream", "toString",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        [byte_output_to_string](Machine& machine,
+                                std::span<const Value> arguments) {
+            return byte_output_to_string(machine, arguments, true);
         });
 }
 
@@ -2120,7 +2382,7 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "InputStreamReader input is null");
         }
-        StreamCharset charset = StreamCharset::latin1;
+        StreamCharset charset = StreamCharset::utf8;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());
@@ -2247,21 +2509,9 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_long(*skipped));
         });
     add(registry, "java/io/InputStreamReader", "markSupported", "()Z",
-        [](Machine& machine, std::span<const Value> arguments)
+        [](Machine&, std::span<const Value>)
             -> Result<std::optional<Value>> {
-            auto object = receiver(arguments);
-            if (!object) return std::unexpected(object.error());
-            auto closed = int_field(machine, *object, kReaderClosedField);
-            if (!closed) return std::unexpected(closed.error());
-            if (*closed != 0) {
-                return std::optional<Value>(Value::from_int(0));
-            }
-            auto input = reference_field(machine, *object, kReaderInputField);
-            if (!input) return std::unexpected(input.error());
-            auto supported = is_instance(machine, *input,
-                                         "java/io/ByteArrayInputStream");
-            if (!supported) return std::unexpected(supported.error());
-            return std::optional<Value>(Value::from_int(*supported ? 1 : 0));
+            return std::optional<Value>(Value::from_int(0));
         });
     add(registry, "java/io/InputStreamReader", "mark", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2272,22 +2522,8 @@ void register_reader_writer(NativeMethodRegistry& registry) {
                                        kReaderClosedField,
                                        "InputStreamReader");
             if (!opened) return std::unexpected(opened.error());
-            auto input = reference_field(machine, *object, kReaderInputField);
-            if (!input) return std::unexpected(input.error());
-            auto supported = is_instance(machine, *input,
-                                         "java/io/ByteArrayInputStream");
-            if (!supported) return std::unexpected(supported.error());
-            if (!*supported) {
-                return fail_java("java/io/IOException",
-                                 "mark() not supported");
-            }
-            auto position = int_field(machine, *input,
-                                      kByteInputPositionField);
-            if (!position) return std::unexpected(position.error());
-            auto stored = set_int_field(machine, *input,
-                                        kByteInputMarkField, *position);
-            if (!stored) return std::unexpected(stored.error());
-            return std::optional<Value> {};
+            return fail_java("java/io/IOException",
+                             "mark() not supported");
         });
     add(registry, "java/io/InputStreamReader", "reset", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2298,21 +2534,8 @@ void register_reader_writer(NativeMethodRegistry& registry) {
                                        kReaderClosedField,
                                        "InputStreamReader");
             if (!opened) return std::unexpected(opened.error());
-            auto input = reference_field(machine, *object, kReaderInputField);
-            if (!input) return std::unexpected(input.error());
-            auto supported = is_instance(machine, *input,
-                                         "java/io/ByteArrayInputStream");
-            if (!supported) return std::unexpected(supported.error());
-            if (!*supported) {
-                return fail_java("java/io/IOException",
-                                 "mark/reset is not supported");
-            }
-            auto mark = int_field(machine, *input, kByteInputMarkField);
-            if (!mark) return std::unexpected(mark.error());
-            auto stored = set_int_field(machine, *input,
-                                        kByteInputPositionField, *mark);
-            if (!stored) return std::unexpected(stored.error());
-            return std::optional<Value> {};
+            return fail_java("java/io/IOException",
+                             "reset() not supported");
         });
 
     add(registry, "java/io/InputStreamReader", "getEncoding",
@@ -2646,7 +2869,7 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "OutputStreamWriter output is null");
         }
-        StreamCharset charset = StreamCharset::latin1;
+        StreamCharset charset = StreamCharset::utf8;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());

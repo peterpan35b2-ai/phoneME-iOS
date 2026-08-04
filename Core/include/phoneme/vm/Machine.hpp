@@ -310,6 +310,8 @@ namespace phoneme::vm
     struct Invocation final
     {
       ResolvedMethod method;
+      std::shared_ptr<const CachedMethodDescriptor> descriptor;
+      NativeMethodId native_method;
       std::vector<Value> arguments;
       bool has_receiver{false};
       std::optional<Value> return_override;
@@ -370,6 +372,43 @@ namespace phoneme::vm
       i32 height{0};
     };
 
+    enum class OperandResolutionState : u8
+    {
+      unresolved,
+      resolving,
+      resolved,
+      failed,
+    };
+
+    enum class OperandResolutionKind : u8
+    {
+      none,
+      field,
+      direct_call,
+    };
+
+    struct OperandResolutionEntry final
+    {
+      OperandResolutionState state{OperandResolutionState::unresolved};
+      OperandResolutionKind kind{OperandResolutionKind::none};
+      std::shared_ptr<const FieldLocation> field;
+      MethodId target_method;
+      std::optional<Error> failure;
+    };
+
+    struct DirectCallCache final
+    {
+      MethodId target_method;
+      bool valid{false};
+    };
+
+    struct VirtualCallCache final
+    {
+      ClassId receiver_class;
+      MethodId target_method;
+      bool valid{false};
+    };
+
     struct LambdaBinding final
     {
       std::string interface_name;
@@ -392,6 +431,10 @@ namespace phoneme::vm
         ResolvedMethod method,
         std::span<const Value> arguments,
         bool has_receiver);
+    void refresh_metadata_bindings_if_needed() noexcept;
+    [[nodiscard]] Result<OperandResolutionEntry*> operand_resolution_entry(
+        MethodId method_id,
+        u32 operand_index);
     [[nodiscard]] Result<std::optional<ObjectRef>> ensure_initialized(
         std::string_view class_name,
         u64 instruction_budget);
@@ -465,6 +508,25 @@ namespace phoneme::vm
     std::unordered_map<std::string, ObjectRef> class_mirrors_;
     std::unordered_map<i32, ObjectRef> ui_components_;
     std::unordered_map<u64, LambdaBinding> lambda_bindings_;
+    u64 metadata_binding_generation_ {0U};
+    u64 native_binding_generation_ {0U};
+    std::unordered_map<const classfile::Method*, NativeMethodId> native_bindings_;
+    std::unordered_map<
+        MethodId,
+        std::vector<OperandResolutionEntry>,
+        MetadataIdHash<MethodId>> operand_resolution_tables_;
+    std::unordered_map<
+        const classfile::ClassFile*,
+        std::unordered_map<u32, std::shared_ptr<const FieldLocation>>>
+        field_bindings_;
+    std::unordered_map<
+        const classfile::ClassFile*,
+        std::unordered_map<u32, DirectCallCache>>
+        direct_call_bindings_;
+    std::unordered_map<
+        const classfile::ClassFile*,
+        std::unordered_map<u32, VirtualCallCache>>
+        virtual_call_bindings_;
     RootSet native_roots_;
     mutable std::mutex serial_callbacks_mutex_;
     std::deque<NativeRootScope> serial_callbacks_;

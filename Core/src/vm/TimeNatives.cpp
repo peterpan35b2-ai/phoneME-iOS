@@ -1,5 +1,7 @@
 #include "TimeNatives.hpp"
 
+#include "CalendarNatives.hpp"
+
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -1078,6 +1080,7 @@ void register_time_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*zone));
         });
 
+    if constexpr (false) {
     const NativeMethod calendar_constructor =
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1421,6 +1424,8 @@ void register_time_natives(NativeMethodRegistry& registry) {
             if (!zone) return std::unexpected(zone.error());
             return std::optional<Value>(Value::from_reference(*zone));
         });
+    }
+    calendar_compat::register_natives(registry);
 }
 
 } // namespace phoneme::vm

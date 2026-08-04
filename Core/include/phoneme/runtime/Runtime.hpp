@@ -14,6 +14,7 @@
 #include "phoneme/runtime/SuiteStore.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/translation/TranslationService.hpp"
+#include "phoneme/vm/NativeMethodRegistry.hpp"
 
 namespace phoneme::runtime {
 
@@ -66,6 +67,8 @@ struct App final {
     bool lifecycle_busy {false};
     std::shared_ptr<ApplicationVM> vm;
     std::string console_output;
+    std::string error_message;
+    std::vector<vm::NativeMethodInvocationCount> native_invocation_counts;
 };
 
 struct UiTranslationReplayState;
@@ -137,6 +140,13 @@ public:
     [[nodiscard]] AppId foreground_app_id() const noexcept;
     [[nodiscard]] i64 app_used_memory(AppId app_id) const noexcept;
     [[nodiscard]] std::string app_console_output(AppId app_id) const;
+    [[nodiscard]] std::string app_error_message(AppId app_id) const;
+    [[nodiscard]] std::vector<vm::NativeMethodInvocationCount>
+    app_native_invocation_counts(AppId app_id) const;
+
+    void record_error(const Error& error);
+    void clear_error();
+    [[nodiscard]] std::string last_error_message() const;
 
     void stop() noexcept;
     void suspend() noexcept;
@@ -160,6 +170,9 @@ public:
     [[nodiscard]] std::optional<UiEvent> poll_ui_event();
 
     void ui_select_command(i32 command_id);
+    void ui_select_list_item_command(i32 component_id,
+                                     i32 element_index,
+                                     i32 command_id);
     void ui_focus_item(i32 component_id);
     void ui_activate_item(i32 component_id);
     void ui_set_text(i32 component_id, std::string text, i32 caret_position);
@@ -205,6 +218,7 @@ private:
     bool running_ {false};
     bool suspended_ {false};
     i32 last_exit_code_ {0};
+    std::string last_error_message_;
     AppId foreground_app_id_ {};
     u64 sequence_ {0};
     Framebuffer framebuffer_;

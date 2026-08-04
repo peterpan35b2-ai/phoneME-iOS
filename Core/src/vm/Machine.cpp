@@ -17,7 +17,12 @@
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/Descriptor.hpp"
 #include "phoneme/vm/ModifiedUtf8.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/SlotStorage.hpp"
+
+#ifndef PHONEME_ENABLE_DECODED_EXECUTION
+#define PHONEME_ENABLE_DECODED_EXECUTION 0
+#endif
 
 namespace phoneme::vm
 {
@@ -36,6 +41,16 @@ namespace phoneme::vm
     constexpr u64 kMaintenancePollInterval = 256U;
     static_assert((kMaintenancePollInterval &
                    (kMaintenancePollInterval - 1U)) == 0U);
+
+    [[nodiscard]] bool decoded_execution_requested() noexcept
+    {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+      const char* option = std::getenv("PHONEME_USE_DECODED_EXECUTION");
+      return option == nullptr || std::string_view(option) != "0";
+#else
+      return false;
+#endif
+    }
 
     [[nodiscard]] bool translation_wrapping_space(
         char32_t character) noexcept
@@ -375,6 +390,31 @@ namespace phoneme::vm
     class ExecutionFrame final
     {
     public:
+      struct InvokeInterfaceOperands final
+      {
+        u16 constant_pool_index{0};
+        u8 count{0};
+      };
+
+      struct IncrementOperands final
+      {
+        u16 local_index{0};
+        i32 increment{0};
+      };
+
+      struct WideOperands final
+      {
+        u8 opcode{0};
+        u16 local_index{0};
+        std::optional<i16> increment;
+      };
+
+      struct MultiArrayOperands final
+      {
+        u16 constant_pool_index{0};
+        u8 dimensions{0};
+      };
+
       [[nodiscard]] static Result<ExecutionFrame> make(
           ResolvedMethod resolved,
           MethodDescriptor descriptor,
@@ -418,6 +458,28 @@ namespace phoneme::vm
         return descriptor_;
       }
 
+      [[nodiscard]] MethodId runtime_method_id() const noexcept
+      {
+        return resolved_.runtime != nullptr
+            ? resolved_.runtime->id
+            : MethodId {};
+      }
+
+      [[nodiscard]] u32 current_decoded_operand_index() const noexcept
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        if (decoded_ == nullptr ||
+            current_decoded_index_ == kInvalidDecodedIndex ||
+            current_decoded_index_ >= decoded_->instructions.size())
+        {
+          return kInvalidDecodedIndex;
+        }
+        return decoded_->instructions[current_decoded_index_].operand_index;
+#else
+        return kInvalidDecodedIndex;
+#endif
+      }
+
       [[nodiscard]] bool has_receiver() const noexcept { return has_receiver_; }
       [[nodiscard]] usize pc() const noexcept { return pc_; }
       [[nodiscard]] usize code_size() const noexcept { return code_.size(); }
@@ -436,6 +498,41 @@ namespace phoneme::vm
         current_instruction_pc_ = opcode_pc;
       }
 
+      [[nodiscard]] Result<u8> read_opcode()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        if (decoded_ != nullptr)
+        {
+          u32 instruction_index = decoded_index_;
+          if (instruction_index >= decoded_->instructions.size() ||
+              decoded_->instructions[instruction_index].bytecode_pc != pc_)
+          {
+            if (pc_ > std::numeric_limits<u32>::max())
+            {
+              return fail(ErrorCode::malformed_class,
+                          "decoded bytecode PC exceeds index space");
+            }
+            instruction_index = decoded_->instruction_index_for_bci(
+                static_cast<u32>(pc_));
+          }
+          if (instruction_index == kInvalidDecodedIndex ||
+              instruction_index >= decoded_->instructions.size())
+          {
+            return fail(ErrorCode::malformed_class,
+                        "decoded execution PC is not an instruction boundary");
+          }
+          const DecodedInstruction& instruction =
+              decoded_->instructions[instruction_index];
+          current_decoded_index_ = instruction_index;
+          pc_ = static_cast<usize>(instruction.bytecode_pc) + 1U;
+          decoded_index_ = instruction.next_index;
+          PerformanceCounters::record_decoded_opcode_dispatch();
+          return raw_opcode(instruction.opcode);
+        }
+#endif
+        return read_u8();
+      }
+
       [[nodiscard]] Status enter_exception_handler(usize handler_pc,
                                                    ObjectRef throwable)
       {
@@ -451,6 +548,9 @@ namespace phoneme::vm
           return std::unexpected(pushed.error());
         }
         pc_ = handler_pc;
+        auto synchronized = synchronize_decoded_pc(handler_pc);
+        if (!synchronized)
+          return std::unexpected(synchronized.error());
         current_instruction_pc_ = handler_pc;
         return {};
       }
@@ -473,6 +573,347 @@ namespace phoneme::vm
           return std::unexpected(value.error());
         }
         return static_cast<i8>(*value);
+      }
+
+      [[nodiscard]] Result<u16> read_constant_pool_index()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::constant_pool_index);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return (*decoded_operand)->constant_pool_index;
+        }
+#endif
+        return read_u16();
+      }
+
+      [[nodiscard]] Result<InvokeInterfaceOperands>
+      read_invokeinterface_operands()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::invokeinterface);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const InvokeInterfaceOperands result {
+              .constant_pool_index = (*decoded_operand)->constant_pool_index,
+              .count = (*decoded_operand)->auxiliary,
+          };
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return result;
+        }
+#endif
+        auto index = read_u16();
+        auto count = read_u8();
+        auto zero = read_u8();
+        if (!index || !count || !zero || *count == 0U || *zero != 0U)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "invalid invokeinterface operands");
+        }
+        return InvokeInterfaceOperands {
+            .constant_pool_index = *index,
+            .count = *count,
+        };
+      }
+
+      [[nodiscard]] Result<i32> read_immediate(bool wide)
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::immediate);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const i32 value = (*decoded_operand)->immediate;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        if (wide)
+        {
+          auto value = read_i16();
+          if (!value) return std::unexpected(value.error());
+          return static_cast<i32>(*value);
+        }
+        auto value = read_i8();
+        if (!value) return std::unexpected(value.error());
+        return static_cast<i32>(*value);
+      }
+
+      [[nodiscard]] Result<u16> read_ldc_index(bool wide)
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::constant_pool_index);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const u16 value = (*decoded_operand)->constant_pool_index;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        if (wide) return read_u16();
+        auto value = read_u8();
+        if (!value) return std::unexpected(value.error());
+        return static_cast<u16>(*value);
+      }
+
+      [[nodiscard]] Result<u16> read_local_index()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::local_index);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const u16 value = (*decoded_operand)->local_index;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        auto value = read_u8();
+        if (!value) return std::unexpected(value.error());
+        return static_cast<u16>(*value);
+      }
+
+      [[nodiscard]] Result<IncrementOperands> read_increment_operands()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::increment);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const IncrementOperands result {
+              .local_index = (*decoded_operand)->local_index,
+              .increment = (*decoded_operand)->immediate,
+          };
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return result;
+        }
+#endif
+        auto index = read_u8();
+        auto increment = read_i8();
+        if (!index || !increment)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "truncated iinc instruction");
+        }
+        return IncrementOperands {
+            .local_index = *index,
+            .increment = *increment,
+        };
+      }
+
+      [[nodiscard]] Result<i32> read_branch_offset(bool wide)
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::branch_target);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const i32 value = (*decoded_operand)->immediate;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        if (wide) return read_i32();
+        auto value = read_i16();
+        if (!value) return std::unexpected(value.error());
+        return static_cast<i32>(*value);
+      }
+
+      [[nodiscard]] Result<const DecodedSwitchTable*> read_switch_table()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::switch_table);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const u32 switch_index = (*decoded_operand)->switch_index;
+          if (switch_index >= decoded_->switches.size())
+          {
+            return fail(ErrorCode::malformed_class,
+                        "decoded switch table index is invalid");
+          }
+          const DecodedSwitchTable* table = &decoded_->switches[switch_index];
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return table;
+        }
+#endif
+        return static_cast<const DecodedSwitchTable*>(nullptr);
+      }
+
+      [[nodiscard]] Result<u16> read_invokedynamic_index()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::invokedynamic);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const u16 value = (*decoded_operand)->constant_pool_index;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        auto index = read_u16();
+        auto zero1 = read_u8();
+        auto zero2 = read_u8();
+        if (!index || !zero1 || !zero2 || *zero1 != 0U || *zero2 != 0U)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "invalid invokedynamic operands");
+        }
+        return *index;
+      }
+
+      [[nodiscard]] Result<u8> read_newarray_type()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::newarray_type);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const u8 value = (*decoded_operand)->auxiliary;
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return value;
+        }
+#endif
+        return read_u8();
+      }
+
+      [[nodiscard]] Result<WideOperands> read_wide_operands()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand_unchecked();
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          if ((*decoded_operand)->kind != DecodedOperandKind::wide_local &&
+              (*decoded_operand)->kind != DecodedOperandKind::wide_increment)
+          {
+            return fail(ErrorCode::malformed_class,
+                        "decoded wide operand kind does not match opcode");
+          }
+          WideOperands result {
+              .opcode = (*decoded_operand)->modified_opcode,
+              .local_index = (*decoded_operand)->local_index,
+              .increment = std::nullopt,
+          };
+          if ((*decoded_operand)->kind == DecodedOperandKind::wide_increment)
+          {
+            result.increment = static_cast<i16>((*decoded_operand)->immediate);
+          }
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return result;
+        }
+#endif
+        auto widened_opcode = read_u8();
+        auto index = read_u16();
+        if (!widened_opcode || !index)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "truncated wide instruction");
+        }
+        WideOperands result {
+            .opcode = *widened_opcode,
+            .local_index = *index,
+            .increment = std::nullopt,
+        };
+        if (*widened_opcode == 0x84U)
+        {
+          auto increment = read_i16();
+          if (!increment) return std::unexpected(increment.error());
+          result.increment = *increment;
+        }
+        return result;
+      }
+
+      [[nodiscard]] Result<MultiArrayOperands> read_multianewarray_operands()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        auto decoded_operand = current_decoded_operand(
+            DecodedOperandKind::multianewarray);
+        if (!decoded_operand)
+          return std::unexpected(decoded_operand.error());
+        if (*decoded_operand != nullptr)
+        {
+          const MultiArrayOperands result {
+              .constant_pool_index = (*decoded_operand)->constant_pool_index,
+              .dimensions = (*decoded_operand)->auxiliary,
+          };
+          auto advanced = finish_decoded_operand();
+          if (!advanced)
+            return std::unexpected(advanced.error());
+          PerformanceCounters::record_decoded_operand_dispatch();
+          return result;
+        }
+#endif
+        auto index = read_u16();
+        auto dimensions = read_u8();
+        if (!index || !dimensions || *dimensions == 0U)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "invalid multianewarray operands");
+        }
+        return MultiArrayOperands {
+            .constant_pool_index = *index,
+            .dimensions = *dimensions,
+        };
       }
 
       [[nodiscard]] Result<u16> read_u16()
@@ -540,7 +981,7 @@ namespace phoneme::vm
                       "bytecode absolute target is out of range");
         }
         pc_ = target;
-        return {};
+        return synchronize_decoded_pc(target);
       }
 
       [[nodiscard]] Status branch(usize opcode_pc, i64 relative_offset)
@@ -562,7 +1003,7 @@ namespace phoneme::vm
                       "bytecode branch target is out of range");
         }
         pc_ = static_cast<usize>(target);
-        return {};
+        return synchronize_decoded_pc(pc_);
       }
 
       [[nodiscard]] Status push(Value value) { return stack_.push(value); }
@@ -610,6 +1051,100 @@ namespace phoneme::vm
       }
 
     private:
+      [[nodiscard]] Result<const DecodedOperand*>
+      current_decoded_operand_unchecked() const
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        if (decoded_ == nullptr)
+          return static_cast<const DecodedOperand*>(nullptr);
+        if (current_decoded_index_ == kInvalidDecodedIndex ||
+            current_decoded_index_ >= decoded_->instructions.size())
+        {
+          return fail(ErrorCode::malformed_class,
+                      "decoded operand has no current instruction");
+        }
+        const DecodedInstruction& instruction =
+            decoded_->instructions[current_decoded_index_];
+        if (instruction.operand_index == kInvalidDecodedIndex ||
+            instruction.operand_index >= decoded_->operands.size())
+        {
+          return fail(ErrorCode::malformed_class,
+                      "decoded instruction has no operand metadata");
+        }
+        return &decoded_->operands[instruction.operand_index];
+#else
+        return static_cast<const DecodedOperand*>(nullptr);
+#endif
+      }
+
+      [[nodiscard]] Result<const DecodedOperand*> current_decoded_operand(
+          DecodedOperandKind expected_kind) const
+      {
+        auto operand = current_decoded_operand_unchecked();
+        if (!operand)
+          return std::unexpected(operand.error());
+        if (*operand != nullptr && (*operand)->kind != expected_kind)
+        {
+          return fail(ErrorCode::malformed_class,
+                      "decoded operand kind does not match opcode");
+        }
+        return *operand;
+      }
+
+      [[nodiscard]] Status finish_decoded_operand()
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        if (decoded_ == nullptr)
+          return {};
+        if (current_decoded_index_ == kInvalidDecodedIndex ||
+            current_decoded_index_ >= decoded_->instructions.size())
+        {
+          return fail(ErrorCode::malformed_class,
+                      "decoded operand cannot advance without an instruction");
+        }
+        const u32 next_index =
+            decoded_->instructions[current_decoded_index_].next_index;
+        if (next_index == decoded_->instructions.size())
+        {
+          pc_ = code_.size();
+          return {};
+        }
+        if (next_index >= decoded_->instructions.size())
+        {
+          return fail(ErrorCode::malformed_class,
+                      "decoded operand next index is outside method");
+        }
+        pc_ = decoded_->instructions[next_index].bytecode_pc;
+#endif
+        return {};
+      }
+
+      [[nodiscard]] Status synchronize_decoded_pc(usize target)
+      {
+#if PHONEME_ENABLE_DECODED_EXECUTION
+        if (decoded_ != nullptr)
+        {
+          if (target > std::numeric_limits<u32>::max())
+          {
+            return fail(ErrorCode::malformed_class,
+                        "decoded branch target exceeds index space");
+          }
+          const u32 instruction_index = decoded_->instruction_index_for_bci(
+              static_cast<u32>(target));
+          if (instruction_index == kInvalidDecodedIndex ||
+              instruction_index >= decoded_->instructions.size())
+          {
+            return fail(ErrorCode::malformed_class,
+                        "decoded branch target is not an instruction boundary");
+          }
+          decoded_index_ = instruction_index;
+        }
+#else
+        (void)target;
+#endif
+        return {};
+      }
+
       ExecutionFrame(ResolvedMethod resolved,
                      MethodDescriptor descriptor,
                      bool has_receiver)
@@ -617,6 +1152,10 @@ namespace phoneme::vm
             descriptor_(std::move(descriptor)),
             has_receiver_(has_receiver),
             code_(resolved_.method->code->bytecode),
+            decoded_(decoded_execution_requested() &&
+                             resolved_.runtime != nullptr
+                         ? resolved_.runtime->decoded.get()
+                         : nullptr),
             locals_(resolved_.method->code->max_locals),
             stack_(resolved_.method->code->max_stack) {}
 
@@ -624,6 +1163,9 @@ namespace phoneme::vm
       MethodDescriptor descriptor_;
       bool has_receiver_{false};
       std::span<const u8> code_;
+      const DecodedMethod* decoded_{nullptr};
+      [[maybe_unused]] u32 decoded_index_{0U};
+      [[maybe_unused]] u32 current_decoded_index_{kInvalidDecodedIndex};
       LocalVariables locals_;
       OperandStack stack_;
       usize pc_{0};
@@ -1378,27 +1920,23 @@ namespace phoneme::vm
         : graphics::Font::default_font();
     const i32 maximum_width = translated_available_width(
         x, anchor, clip_x, clip_width, translate_x);
-    const i32 block_height = translated_text_height(
-        font, text, maximum_width);
     const i32 original_top = translated_text_top(
         y, anchor, font, translate_y);
-    const i32 clip_bottom = clip_y + clip_height;
-    const i32 original_bottom = original_top + font.height();
-    const bool lower_half =
-        static_cast<i64>(original_top) + original_bottom >=
-        static_cast<i64>(clip_y) * 2 + clip_height;
+    const i32 block_height = translated_text_height(
+        font, text, maximum_width);
+    const i32 safe_clip_height = std::max(clip_height, 0);
+    const i32 clip_bottom = static_cast<i32>(std::clamp<i64>(
+        static_cast<i64>(clip_y) + safe_clip_height,
+        std::numeric_limits<i32>::min(),
+        std::numeric_limits<i32>::max()));
+
     i32 planned_top = original_top;
-    if (!lower_half || original_top + block_height > clip_bottom)
-    {
-      planned_top =
-          std::min(original_bottom, clip_bottom) - block_height;
-      if (planned_top < clip_y && planned_top + block_height < clip_bottom)
-      {
-        planned_top += std::min(
-            clip_y - planned_top,
-            clip_bottom - (planned_top + block_height));
-      }
-    }
+    if (safe_clip_height <= 0 || block_height >= safe_clip_height)
+      planned_top = clip_y;
+    else
+      planned_top = std::clamp(
+          original_top, clip_y, clip_bottom - block_height);
+
     TextTranslationLayoutDecision decision {
         .planned = false,
         .y = translated_y_for_top(
@@ -1459,7 +1997,7 @@ namespace phoneme::vm
       return decision;
     }
 
-    decision.planned = planned.height > 0;
+    decision.planned = true;
     decision.y = planned.y + (sample.y - expected.y);
     decision.height = planned.height;
     return decision;
@@ -1684,56 +2222,50 @@ namespace phoneme::vm
       }
 
       const i32 clip_top = first.clip_y;
-      const i32 clip_bottom = first.clip_y + first.clip_height;
-      const i32 original_group_top = original_tops.front();
-      const i32 original_group_bottom =
-          original_tops.back() + fonts.back().height();
-      i64 translated_group_height = 0;
-      for (usize index = 0U; index < block_count; ++index)
-      {
-        if (index > 0U)
-          translated_group_height += gaps[index];
-        translated_group_height += heights[index];
-      }
-      const bool lower_half =
-          static_cast<i64>(original_group_top) + original_group_bottom >=
-          static_cast<i64>(clip_top) * 2 + first.clip_height;
-      const bool fits_below =
-          static_cast<i64>(original_group_top) + translated_group_height <=
-          clip_bottom;
+      const i32 safe_clip_height = std::max(first.clip_height, 0);
+      const i32 clip_bottom = static_cast<i32>(std::clamp<i64>(
+          static_cast<i64>(clip_top) + safe_clip_height,
+          std::numeric_limits<i32>::min(),
+          std::numeric_limits<i32>::max()));
 
-      if (lower_half && fits_below)
+      planned_tops.front() = original_tops.front();
+      for (usize local_index = 1U; local_index < block_count; ++local_index)
       {
-        i32 cursor_top = original_group_top;
-        for (usize index = 0U; index < block_count; ++index)
-        {
-          if (index > 0U)
-            cursor_top += gaps[index];
-          planned_tops[index] = cursor_top;
-          cursor_top += heights[index];
-        }
+        const i64 minimum_top =
+            static_cast<i64>(planned_tops[local_index - 1U]) +
+            heights[local_index - 1U] + gaps[local_index];
+        const i32 pushed_top = static_cast<i32>(std::clamp<i64>(
+            minimum_top,
+            std::numeric_limits<i32>::min(),
+            std::numeric_limits<i32>::max()));
+        planned_tops[local_index] =
+            std::max(original_tops[local_index], pushed_top);
       }
-      else
-      {
-        i32 cursor_bottom = std::min(original_group_bottom, clip_bottom);
-        for (usize reverse = block_count; reverse > 0U; --reverse)
-        {
-          const usize local_index = reverse - 1U;
-          planned_tops[local_index] = cursor_bottom - heights[local_index];
-          if (local_index > 0U)
-            cursor_bottom = planned_tops[local_index] - gaps[local_index];
-        }
 
-        const i32 planned_bottom =
-            planned_tops.back() + heights.back();
-        if (planned_tops.front() < clip_top && planned_bottom < clip_bottom)
+      auto shift_all = [&](i64 delta)
+      {
+        for (i32 &top : planned_tops)
         {
-          const i32 shift_down = std::min(
-              clip_top - planned_tops.front(),
-              clip_bottom - planned_bottom);
-          for (i32 &top : planned_tops)
-            top += shift_down;
+          top = static_cast<i32>(std::clamp<i64>(
+              static_cast<i64>(top) + delta,
+              std::numeric_limits<i32>::min(),
+              std::numeric_limits<i32>::max()));
         }
+      };
+      auto planned_bottom = [&]() -> i64
+      {
+        return static_cast<i64>(planned_tops.back()) + heights.back();
+      };
+
+      if (planned_bottom() > clip_bottom)
+        shift_all(static_cast<i64>(clip_bottom) - planned_bottom());
+
+      if (planned_tops.front() < clip_top && planned_bottom() < clip_bottom)
+      {
+        const i64 shift_down = std::min<i64>(
+            static_cast<i64>(clip_top) - planned_tops.front(),
+            static_cast<i64>(clip_bottom) - planned_bottom());
+        shift_all(shift_down);
       }
 
       for (usize index = text_begin; index < text_end; ++index)
@@ -2643,23 +3175,79 @@ namespace phoneme::vm
     return execute(std::move(*invocation), instruction_budget, budget_mode);
   }
 
+  void Machine::refresh_metadata_bindings_if_needed() noexcept
+  {
+    const u64 metadata_generation = classes_.metadata().generation();
+    if (metadata_binding_generation_ != metadata_generation)
+    {
+      operand_resolution_tables_.clear();
+      field_bindings_.clear();
+      direct_call_bindings_.clear();
+      virtual_call_bindings_.clear();
+      metadata_binding_generation_ = metadata_generation;
+    }
+
+    const u64 native_generation = natives_.generation();
+    if (native_binding_generation_ != native_generation)
+    {
+      native_bindings_.clear();
+      native_binding_generation_ = native_generation;
+    }
+  }
+
+  Result<Machine::OperandResolutionEntry*>
+  Machine::operand_resolution_entry(MethodId method_id,
+                                    u32 operand_index)
+  {
+    if (!method_id.valid() || operand_index == kInvalidDecodedIndex)
+    {
+      return fail(ErrorCode::invalid_argument,
+                  "decoded operand resolution requires valid IDs");
+    }
+    auto runtime_method = classes_.metadata().find_method(method_id);
+    if (runtime_method == nullptr || runtime_method->decoded == nullptr)
+    {
+      return fail(ErrorCode::invalid_state,
+                  "decoded operand resolution has no runtime method");
+    }
+    if (operand_index >= runtime_method->decoded->operands.size())
+    {
+      return fail(ErrorCode::out_of_range,
+                  "decoded operand resolution index is out of range");
+    }
+
+    auto [table, inserted] = operand_resolution_tables_.try_emplace(
+        method_id,
+        runtime_method->decoded->operands.size());
+    (void)inserted;
+    return &table->second[operand_index];
+  }
+
   Result<Machine::Invocation> Machine::prepare_invocation(
       ResolvedMethod method,
       std::span<const Value> arguments,
       bool has_receiver)
   {
+    refresh_metadata_bindings_if_needed();
     if (method.method == nullptr)
     {
       return fail(ErrorCode::method_not_found,
                   "resolved method is null");
     }
-    auto descriptor = parse_method_descriptor(method.method->descriptor);
-    if (!descriptor)
+    std::shared_ptr<const CachedMethodDescriptor> descriptor =
+        method.runtime != nullptr ? method.runtime->descriptor : nullptr;
+    if (descriptor == nullptr)
     {
-      return std::unexpected(descriptor.error());
+      auto cached = classes_.metadata().method_descriptor(
+          method.method->descriptor);
+      if (!cached)
+      {
+        return std::unexpected(cached.error());
+      }
+      descriptor = std::move(*cached);
     }
 
-    const usize expected_values = descriptor->parameters.size() +
+    const usize expected_values = descriptor->argument_values +
                                   (has_receiver ? 1U : 0U);
     if (arguments.size() != expected_values)
     {
@@ -2675,18 +3263,44 @@ namespace phoneme::vm
                     "instance method receiver is invalid");
       }
     }
-    for (usize index = 0; index < descriptor->parameters.size(); ++index)
+    for (usize index = 0;
+         index < descriptor->descriptor.parameters.size();
+         ++index)
     {
       const Value &value = arguments[index + (has_receiver ? 1U : 0U)];
-      if (!value_matches(value, descriptor->parameters[index]))
+      if (!value_matches(value, descriptor->descriptor.parameters[index]))
       {
         return fail(ErrorCode::invalid_argument,
                     "method argument does not match its descriptor");
       }
     }
 
+    NativeMethodId native_method;
+    if (method.owner != nullptr)
+    {
+      const auto cached_native = native_bindings_.find(method.method);
+      if (cached_native != native_bindings_.end() &&
+          cached_native->second.valid())
+      {
+        native_method = cached_native->second;
+      }
+      else
+      {
+        native_method = natives_.resolve(method.owner->name(),
+                                         method.method->name,
+                                         method.method->descriptor);
+        if (native_method.valid())
+        {
+          native_bindings_.insert_or_assign(method.method, native_method);
+        }
+      }
+    }
+
+    PerformanceCounters::record_method_invocation();
     return Invocation{
         .method = std::move(method),
+        .descriptor = std::move(descriptor),
+        .native_method = native_method,
         .arguments = std::vector<Value>(arguments.begin(), arguments.end()),
         .has_receiver = has_receiver,
     };
@@ -3116,6 +3730,59 @@ namespace phoneme::vm
       auto stored = set_int_constants(constants);
       if (!stored) return std::unexpected(stored.error());
     }
+    else if (canonical_name == "com/mascotcapsule/micro3d/v3/Effect3D")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"NORMAL_SHADING", 0},
+          {"TOON_SHADING", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "com/mascotcapsule/micro3d/v3/Graphics3D")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{
+              "COMMAND_AFFINE_INDEX", std::bit_cast<i32>(0x87000000U)},
+          {"COMMAND_AMBIENT_LIGHT", std::bit_cast<i32>(0xA0000000U)},
+          {"COMMAND_ATTRIBUTE", std::bit_cast<i32>(0x83000000U)},
+          {"COMMAND_CENTER", std::bit_cast<i32>(0x85000000U)},
+          {"COMMAND_CLIP", std::bit_cast<i32>(0x84000000U)},
+          {"COMMAND_DIRECTION_LIGHT", std::bit_cast<i32>(0xA1000000U)},
+          {"COMMAND_END", std::bit_cast<i32>(0x80000000U)},
+          {"COMMAND_FLUSH", std::bit_cast<i32>(0x82000000U)},
+          {"COMMAND_LIST_VERSION_1_0", std::bit_cast<i32>(0xFE000001U)},
+          {"COMMAND_NOP", std::bit_cast<i32>(0x81000000U)},
+          {"COMMAND_PARALLEL_SCALE", std::bit_cast<i32>(0x90000000U)},
+          {"COMMAND_PARALLEL_SIZE", std::bit_cast<i32>(0x91000000U)},
+          {"COMMAND_PERSPECTIVE_FOV", std::bit_cast<i32>(0x92000000U)},
+          {"COMMAND_PERSPECTIVE_WH", std::bit_cast<i32>(0x93000000U)},
+          {"COMMAND_TEXTURE_INDEX", std::bit_cast<i32>(0x86000000U)},
+          {"COMMAND_THRESHOLD", std::bit_cast<i32>(0xAF000000U)},
+          {"ENV_ATTR_LIGHTING", 1}, {"ENV_ATTR_SEMI_TRANSPARENT", 8},
+          {"ENV_ATTR_SPHERE_MAP", 2}, {"ENV_ATTR_TOON_SHADING", 4},
+          {"PATTR_BLEND_ADD", 64}, {"PATTR_BLEND_HALF", 32},
+          {"PATTR_BLEND_NORMAL", 0}, {"PATTR_BLEND_SUB", 96},
+          {"PATTR_COLORKEY", 16}, {"PATTR_LIGHTING", 1},
+          {"PATTR_SPHERE_MAP", 2}, {"PDATA_COLOR_NONE", 0},
+          {"PDATA_COLOR_PER_COMMAND", 1024},
+          {"PDATA_COLOR_PER_FACE", 2048}, {"PDATA_NORMAL_NONE", 0},
+          {"PDATA_NORMAL_PER_FACE", 512},
+          {"PDATA_NORMAL_PER_VERTEX", 768},
+          {"PDATA_POINT_SPRITE_PARAMS_PER_CMD", 4096},
+          {"PDATA_POINT_SPRITE_PARAMS_PER_FACE", 8192},
+          {"PDATA_POINT_SPRITE_PARAMS_PER_VERTEX", 12288},
+          {"PDATA_TEXURE_COORD", 12288}, {"PDATA_TEXURE_COORD_NONE", 0},
+          {"POINT_SPRITE_LOCAL_SIZE", 0}, {"POINT_SPRITE_NO_PERS", 2},
+          {"POINT_SPRITE_PERSPECTIVE", 0}, {"POINT_SPRITE_PIXEL_SIZE", 1},
+          {"PRIMITVE_LINES", 0x02000000}, {"PRIMITVE_POINTS", 0x01000000},
+          {"PRIMITVE_POINT_SPRITES", 0x05000000},
+          {"PRIMITVE_QUADS", 0x04000000},
+          {"PRIMITVE_TRIANGLES", 0x03000000},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
     else if (canonical_name == "com/nokia/mid/ui/FullCanvas")
     {
       constexpr std::pair<std::string_view, i32> constants[] {
@@ -3320,6 +3987,7 @@ namespace phoneme::vm
     }
 
     initializing_classes_.insert(canonical_name);
+    PerformanceCounters::record_class_initialization();
     const auto rollback = [this, &canonical_name]()
     {
       initializing_classes_.erase(canonical_name);
@@ -3439,33 +4107,35 @@ namespace phoneme::vm
       return fail(ErrorCode::internal_error,
                   "native invocation has no resolved method");
     }
-    auto descriptor = parse_method_descriptor(
-        invocation.method.method->descriptor);
-    if (!descriptor)
+    if (invocation.descriptor == nullptr)
     {
-      return std::unexpected(descriptor.error());
+      return fail(ErrorCode::internal_error,
+                  "native invocation has no cached descriptor");
     }
+    const CachedMethodDescriptor &descriptor = *invocation.descriptor;
     const std::string &owner_name = invocation.method.owner->name();
     const std::string &method_name = invocation.method.method->name;
     const std::string &method_descriptor =
         invocation.method.method->descriptor;
-    if (!natives_.contains(owner_name, method_name, method_descriptor) &&
+    if (!invocation.native_method.valid() &&
         is_builtin_class(owner_name) && method_name == "<init>" &&
         method_descriptor == "()V")
     {
       return std::optional<Value>{};
     }
 
-    auto result = natives_.invoke(*this,
-                                  owner_name,
-                                  method_name,
-                                  method_descriptor,
-                                  invocation.arguments);
+    Result<std::optional<Value>> result = invocation.native_method.valid()
+        ? natives_.invoke(*this,
+                          invocation.native_method,
+                          invocation.arguments)
+        : fail(ErrorCode::unsupported_feature,
+               "native method is not ported: " + owner_name + "." +
+                   method_name + method_descriptor);
     if (!result)
     {
       return std::unexpected(result.error());
     }
-    if (descriptor->return_type.kind == JavaTypeKind::void_type)
+    if (descriptor.return_kind == JavaTypeKind::void_type)
     {
       if (result->has_value())
       {
@@ -3476,7 +4146,7 @@ namespace phoneme::vm
     else
     {
       if (!result->has_value() ||
-          !value_matches(**result, descriptor->return_type))
+          !value_matches(**result, descriptor.descriptor.return_type))
       {
         return fail(ErrorCode::invalid_state,
                     "native method result does not match its descriptor");
@@ -4122,6 +4792,7 @@ namespace phoneme::vm
     if (g_execution_lock_depth == 1U)
       scheduler_.begin_execution_slice();
     const u32 invocation_depth = g_execution_lock_depth;
+    PerformanceCounters::observe_java_call_depth(invocation_depth);
     const JavaThreadId invocation_thread = scheduler_.current_thread_id();
     const HeapAccessContext previous_heap_context =
         current_heap_access_context();
@@ -4140,7 +4811,10 @@ namespace phoneme::vm
       --g_execution_lock_depth;
       machine->execution_mutex_.unlock();
       if (g_execution_lock_depth == 0U)
+      {
         g_execution_machine = nullptr;
+        PerformanceCounters::flush_thread_local();
+      }
     };
     std::unique_ptr<Machine, decltype(cleanup)> execution_scope(this, cleanup);
 
@@ -4189,10 +4863,7 @@ namespace phoneme::vm
       return std::unexpected(root_monitor.error());
     }
 
-    const bool has_native_override = invocation.method.owner != nullptr &&
-                                     natives_.contains(invocation.method.owner->name(),
-                                                       invocation.method.method->name,
-                                                       invocation.method.method->descriptor);
+    const bool has_native_override = invocation.native_method.valid();
     if (has_native_override || !invocation.method.method->code.has_value())
     {
       auto native_result = invoke_native(invocation);
@@ -4245,14 +4916,13 @@ namespace phoneme::vm
       };
     }
 
-    auto root_descriptor = parse_method_descriptor(
-        invocation.method.method->descriptor);
-    if (!root_descriptor)
+    if (invocation.descriptor == nullptr)
     {
-      return std::unexpected(root_descriptor.error());
+      return fail(ErrorCode::internal_error,
+                  "VM invocation has no cached descriptor");
     }
     auto root_frame = ExecutionFrame::make(std::move(invocation.method),
-                                           std::move(*root_descriptor),
+                                           invocation.descriptor->descriptor,
                                            invocation.arguments,
                                            invocation.has_receiver);
     if (!root_frame)
@@ -4270,6 +4940,7 @@ namespace phoneme::vm
     std::vector<ExecutionFrame> frames;
     frames.reserve(32);
     frames.push_back(std::move(*root_frame));
+    PerformanceCounters::observe_java_call_depth(frames.size());
     u64 executed = 0;
     u64 watchdog_instructions = 0;
     const u64 progress_total_budget =
@@ -5018,6 +5689,7 @@ namespace phoneme::vm
         [this, &frames, &executed](ObjectRef throwable, usize throw_pc)
         -> Result<std::optional<ExecutionResult>>
     {
+      PerformanceCounters::record_exception_dispatch();
       if (throwable.is_null())
       {
         return fail(ErrorCode::internal_error,
@@ -5155,6 +5827,7 @@ namespace phoneme::vm
         if (quantum_boundary)
         {
           next_scheduler_quantum += kSchedulerQuantum;
+          PerformanceCounters::record_scheduler_quantum();
           scheduler_.cooperative_quantum(*this);
         }
       }
@@ -5167,6 +5840,7 @@ namespace phoneme::vm
           : executed >= instruction_budget;
       if (budget_exhausted)
       {
+        PerformanceCounters::record_instruction_budget_exit();
         const ExecutionFrame& exhausted_frame = frames.back();
         return fail(
             ErrorCode::invalid_state,
@@ -5206,12 +5880,13 @@ namespace phoneme::vm
             .live_bytecode_pc = &current_heap_access_pc,
         });
       }
-      auto opcode_result = frame.read_u8();
+      auto opcode_result = frame.read_opcode();
       if (!opcode_result)
       {
         return std::unexpected(opcode_result.error());
       }
       const u8 opcode = *opcode_result;
+      PerformanceCounters::record_opcode(opcode);
 
       switch (opcode)
       {
@@ -5267,7 +5942,7 @@ namespace phoneme::vm
       }
       case 0x10:
       {
-        auto immediate = frame.read_i8();
+        auto immediate = frame.read_immediate(false);
         if (!immediate)
           return std::unexpected(immediate.error());
         auto pushed = frame.push(Value::from_int(*immediate));
@@ -5277,7 +5952,7 @@ namespace phoneme::vm
       }
       case 0x11:
       {
-        auto immediate = frame.read_i16();
+        auto immediate = frame.read_immediate(true);
         if (!immediate)
           return std::unexpected(immediate.error());
         auto pushed = frame.push(Value::from_int(*immediate));
@@ -5289,10 +5964,7 @@ namespace phoneme::vm
       case 0x13:
       case 0x14:
       {
-        Result<u16> index = opcode == 0x12
-                                ? frame.read_u8().transform([](u8 value)
-                                                            { return static_cast<u16>(value); })
-                                : frame.read_u16();
+        auto index = frame.read_ldc_index(opcode != 0x12);
         if (!index)
           return std::unexpected(index.error());
         auto value = load_constant(frame.owner(), *index, opcode == 0x14);
@@ -5309,7 +5981,7 @@ namespace phoneme::vm
       case 0x18:
       case 0x19:
       {
-        auto index = frame.read_u8();
+        auto index = frame.read_local_index();
         if (!index)
           return std::unexpected(index.error());
         auto value = frame.local(*index);
@@ -5468,7 +6140,7 @@ namespace phoneme::vm
       case 0x39:
       case 0x3A:
       {
-        auto index = frame.read_u8();
+        auto index = frame.read_local_index();
         auto value = frame.pop();
         if (!index || !value)
         {
@@ -6077,14 +6749,10 @@ namespace phoneme::vm
       }
       case 0x84:
       {
-        auto index = frame.read_u8();
-        auto increment = frame.read_i8();
-        if (!index || !increment)
-        {
-          return fail(ErrorCode::malformed_class,
-                      "truncated iinc instruction");
-        }
-        auto current = frame.local(*index);
+        auto operands = frame.read_increment_operands();
+        if (!operands)
+          return std::unexpected(operands.error());
+        auto current = frame.local(operands->local_index);
         if (!current)
           return std::unexpected(current.error());
         auto integer = current->as_int();
@@ -6092,8 +6760,9 @@ namespace phoneme::vm
           return std::unexpected(integer.error());
         const i32 updated = static_cast<i32>(
             static_cast<u32>(*integer) +
-            static_cast<u32>(static_cast<i32>(*increment)));
-        auto stored = frame.set_local(*index, Value::from_int(updated));
+            static_cast<u32>(operands->increment));
+        auto stored = frame.set_local(
+            operands->local_index, Value::from_int(updated));
         if (!stored)
           return std::unexpected(stored.error());
         break;
@@ -6297,7 +6966,7 @@ namespace phoneme::vm
       case 0x9D:
       case 0x9E:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         auto value = pop_int(frame);
         if (!offset || !value)
         {
@@ -6319,7 +6988,7 @@ namespace phoneme::vm
       case 0xA3:
       case 0xA4:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         auto right = pop_int(frame);
         auto left = pop_int(frame);
         if (!offset || !right || !left)
@@ -6338,7 +7007,7 @@ namespace phoneme::vm
       case 0xA5:
       case 0xA6:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         auto right = pop_reference(frame);
         auto left = pop_reference(frame);
         if (!offset || !right || !left)
@@ -6357,7 +7026,7 @@ namespace phoneme::vm
       }
       case 0xA7:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         if (!offset)
           return std::unexpected(offset.error());
         auto branched = frame.branch(opcode_pc, *offset);
@@ -6367,7 +7036,7 @@ namespace phoneme::vm
       }
       case 0xA8:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         if (!offset)
           return std::unexpected(offset.error());
         const usize return_pc = frame.pc();
@@ -6381,7 +7050,7 @@ namespace phoneme::vm
       }
       case 0xA9:
       {
-        auto index = frame.read_u8();
+        auto index = frame.read_local_index();
         if (!index)
           return std::unexpected(index.error());
         auto address_value = frame.local(*index);
@@ -6400,6 +7069,26 @@ namespace phoneme::vm
         auto key = pop_int(frame);
         if (!key)
           return std::unexpected(key.error());
+        auto decoded_table = frame.read_switch_table();
+        if (!decoded_table)
+          return std::unexpected(decoded_table.error());
+        if (*decoded_table != nullptr)
+        {
+          const DecodedSwitchTable& table = **decoded_table;
+          u32 target_bci = table.default_target_bci;
+          const i64 entry_index = static_cast<i64>(*key) -
+                                  static_cast<i64>(table.low);
+          if (entry_index >= 0 &&
+              static_cast<u64>(entry_index) < table.entries.size())
+          {
+            target_bci = table.entries[
+                static_cast<usize>(entry_index)].target_bci;
+          }
+          auto jumped = frame.jump_absolute(target_bci);
+          if (!jumped)
+            return std::unexpected(jumped.error());
+          break;
+        }
         auto padding = frame.read_switch_padding();
         if (!padding)
           return std::unexpected(padding.error());
@@ -6446,6 +7135,28 @@ namespace phoneme::vm
         auto key = pop_int(frame);
         if (!key)
           return std::unexpected(key.error());
+        auto decoded_table = frame.read_switch_table();
+        if (!decoded_table)
+          return std::unexpected(decoded_table.error());
+        if (*decoded_table != nullptr)
+        {
+          const DecodedSwitchTable& table = **decoded_table;
+          u32 target_bci = table.default_target_bci;
+          const auto found = std::lower_bound(
+              table.entries.begin(),
+              table.entries.end(),
+              *key,
+              [](const DecodedSwitchEntry& entry, i32 match)
+              {
+                return entry.match < match;
+              });
+          if (found != table.entries.end() && found->match == *key)
+            target_bci = found->target_bci;
+          auto jumped = frame.jump_absolute(target_bci);
+          if (!jumped)
+            return std::unexpected(jumped.error());
+          break;
+        }
         auto padding = frame.read_switch_padding();
         if (!padding)
           return std::unexpected(padding.error());
@@ -6542,24 +7253,119 @@ namespace phoneme::vm
       case 0xB4:
       case 0xB5:
       {
-        auto index = frame.read_u16();
+        auto index = frame.read_constant_pool_index();
         if (!index)
           return std::unexpected(index.error());
-        auto reference = frame.owner().member_reference(*index);
-        if (!reference)
-          return std::unexpected(reference.error());
-        if (reference->kind != classfile::ConstantKind::field_ref)
-        {
-          return fail(ErrorCode::malformed_class,
-                      "field opcode references a non-field constant");
-        }
         const bool is_static = opcode == 0xB2 || opcode == 0xB3;
-        auto field = states_.resolve_field(reference->owner,
-                                           reference->name,
-                                           reference->descriptor,
-                                           is_static);
-        if (!field)
-          return std::unexpected(field.error());
+        refresh_metadata_bindings_if_needed();
+        std::shared_ptr<const FieldLocation> field;
+        const MethodId method_id = frame.runtime_method_id();
+        const u32 operand_index = frame.current_decoded_operand_index();
+        if (method_id.valid() && operand_index != kInvalidDecodedIndex)
+        {
+          auto cached_entry = operand_resolution_entry(method_id,
+                                                       operand_index);
+          if (!cached_entry)
+            return std::unexpected(cached_entry.error());
+          OperandResolutionEntry& entry = **cached_entry;
+          if (entry.state == OperandResolutionState::resolved)
+          {
+            if (entry.kind != OperandResolutionKind::field ||
+                entry.field == nullptr)
+            {
+              return fail(ErrorCode::internal_error,
+                          "decoded field operand cache has wrong kind");
+            }
+            PerformanceCounters::record_operand_resolution(true);
+            field = entry.field;
+          }
+          else if (entry.state == OperandResolutionState::failed)
+          {
+            if (entry.kind != OperandResolutionKind::field ||
+                !entry.failure.has_value())
+            {
+              return fail(ErrorCode::internal_error,
+                          "decoded failed field operand has no error");
+            }
+            PerformanceCounters::record_operand_resolution(true);
+            PerformanceCounters::record_operand_resolution_failure();
+            return std::unexpected(*entry.failure);
+          }
+          else if (entry.state == OperandResolutionState::resolving)
+          {
+            return fail(ErrorCode::invalid_state,
+                        "recursive decoded field resolution");
+          }
+          else
+          {
+            PerformanceCounters::record_operand_resolution(false);
+            entry.state = OperandResolutionState::resolving;
+            entry.kind = OperandResolutionKind::field;
+            auto reference = frame.owner().member_reference(*index);
+            if (!reference)
+            {
+              entry.failure = reference.error();
+              entry.state = OperandResolutionState::failed;
+              PerformanceCounters::record_operand_resolution_failure();
+              return std::unexpected(*entry.failure);
+            }
+            if (reference->kind != classfile::ConstantKind::field_ref)
+            {
+              entry.failure = Error::make(
+                  ErrorCode::malformed_class,
+                  "field opcode references a non-field constant");
+              entry.state = OperandResolutionState::failed;
+              PerformanceCounters::record_operand_resolution_failure();
+              return std::unexpected(*entry.failure);
+            }
+            auto resolved = states_.resolve_field(reference->owner,
+                                                  reference->name,
+                                                  reference->descriptor,
+                                                  is_static);
+            if (!resolved)
+            {
+              entry.failure = resolved.error();
+              entry.state = OperandResolutionState::failed;
+              PerformanceCounters::record_operand_resolution_failure();
+              return std::unexpected(*entry.failure);
+            }
+            entry.field = std::make_shared<const FieldLocation>(
+                std::move(*resolved));
+            entry.failure.reset();
+            entry.state = OperandResolutionState::resolved;
+            field = entry.field;
+          }
+        }
+        else
+        {
+          const u32 binding_key =
+              (static_cast<u32>(*index) << 1U) | (is_static ? 1U : 0U);
+          auto &owner_bindings = field_bindings_[&frame.owner()];
+          if (const auto cached = owner_bindings.find(binding_key);
+              cached != owner_bindings.end())
+          {
+            field = cached->second;
+          }
+          else
+          {
+            auto reference = frame.owner().member_reference(*index);
+            if (!reference)
+              return std::unexpected(reference.error());
+            if (reference->kind != classfile::ConstantKind::field_ref)
+            {
+              return fail(ErrorCode::malformed_class,
+                          "field opcode references a non-field constant");
+            }
+            auto resolved = states_.resolve_field(reference->owner,
+                                                  reference->name,
+                                                  reference->descriptor,
+                                                  is_static);
+            if (!resolved)
+              return std::unexpected(resolved.error());
+            field = std::make_shared<const FieldLocation>(std::move(*resolved));
+            owner_bindings.emplace(binding_key, field);
+          }
+        }
         if (is_static)
         {
           auto initialized = ensure_initialized(
@@ -6677,21 +7483,24 @@ namespace phoneme::vm
       case 0xB8:
       case 0xB9:
       {
-        auto index = frame.read_u16();
-        if (!index)
-          return std::unexpected(index.error());
+        std::optional<u16> index;
         std::optional<u8> interface_count;
         if (opcode == 0xB9)
         {
-          auto count = frame.read_u8();
-          auto zero = frame.read_u8();
-          if (!count || !zero || *count == 0U || *zero != 0U)
-          {
-            return fail(ErrorCode::malformed_class,
-                        "invalid invokeinterface operands");
-          }
-          interface_count = *count;
+          auto operands = frame.read_invokeinterface_operands();
+          if (!operands)
+            return std::unexpected(operands.error());
+          index = operands->constant_pool_index;
+          interface_count = operands->count;
         }
+        else
+        {
+          auto constant_pool_index = frame.read_constant_pool_index();
+          if (!constant_pool_index)
+            return std::unexpected(constant_pool_index.error());
+          index = *constant_pool_index;
+        }
+        refresh_metadata_bindings_if_needed();
         auto reference = frame.owner().member_reference(*index);
         if (!reference)
           return std::unexpected(reference.error());
@@ -6709,12 +7518,14 @@ namespace phoneme::vm
                       "invoke opcode uses an incompatible constant kind");
         }
         const bool is_static = opcode == 0xB8;
-        auto descriptor = parse_method_descriptor(reference->descriptor);
+        auto descriptor = classes_.metadata().method_descriptor(
+            reference->descriptor);
         if (!descriptor)
           return std::unexpected(descriptor.error());
         if (interface_count.has_value())
         {
-          const usize expected_slots = descriptor->parameter_slots(true);
+          const usize expected_slots =
+              (*descriptor)->argument_slots_with_receiver;
           if (expected_slots >
                   static_cast<usize>(std::numeric_limits<u8>::max()) ||
               *interface_count != static_cast<u8>(expected_slots))
@@ -6723,7 +7534,8 @@ namespace phoneme::vm
                         "invokeinterface count does not match descriptor");
           }
         }
-        auto arguments = pop_arguments(frame, *descriptor, !is_static);
+        auto arguments = pop_arguments(
+            frame, (*descriptor)->descriptor, !is_static);
         if (!arguments)
           return std::unexpected(arguments.error());
         if (!is_static)
@@ -7009,6 +7821,7 @@ namespace phoneme::vm
         if (!nested.has_value())
         {
           std::string dispatch_class = reference->owner;
+          std::shared_ptr<const RuntimeClass> dispatch_metadata;
           if (!is_static && opcode != 0xB7)
           {
             auto receiver = arguments->front().as_reference();
@@ -7039,17 +7852,214 @@ namespace phoneme::vm
               }
             }
             dispatch_class = *runtime_class;
+            dispatch_metadata = classes_.metadata().find_class(dispatch_class);
+            if (dispatch_metadata == nullptr)
+            {
+              auto loaded_dispatch_class = classes_.load(dispatch_class);
+              if (!loaded_dispatch_class)
+                return std::unexpected(loaded_dispatch_class.error());
+              dispatch_metadata = classes_.metadata().find_class(dispatch_class);
+            }
           }
-          Result<ResolvedMethod> target =
-              opcode == 0xB7 && reference->name == "<init>"
-                  ? classes_.resolve_declared_method(reference->owner,
-                                                     reference->name,
-                                                     reference->descriptor)
-                  : classes_.resolve_method(dispatch_class,
-                                            reference->name,
-                                            reference->descriptor);
+          OperandResolutionEntry* direct_operand_entry = nullptr;
+          DirectCallCache* legacy_direct_cache = nullptr;
+          VirtualCallCache* virtual_cache = nullptr;
+          std::optional<ResolvedMethod> inline_target;
+          const bool cacheable_direct_call = is_static || opcode == 0xB7;
+          if (cacheable_direct_call)
+          {
+            const MethodId caller_method_id = frame.runtime_method_id();
+            const u32 caller_operand_index =
+                frame.current_decoded_operand_index();
+            if (caller_method_id.valid() &&
+                caller_operand_index != kInvalidDecodedIndex)
+            {
+              auto cached_entry = operand_resolution_entry(
+                  caller_method_id,
+                  caller_operand_index);
+              if (!cached_entry)
+                return std::unexpected(cached_entry.error());
+              OperandResolutionEntry& entry = **cached_entry;
+              direct_operand_entry = &entry;
+              if (entry.state == OperandResolutionState::resolved)
+              {
+                if (entry.kind != OperandResolutionKind::direct_call ||
+                    !entry.target_method.valid())
+                {
+                  return fail(ErrorCode::internal_error,
+                              "decoded direct call cache has wrong kind");
+                }
+                auto runtime_target = classes_.metadata().find_method(
+                    entry.target_method);
+                if (runtime_target == nullptr)
+                {
+                  entry = {};
+                  PerformanceCounters::record_direct_call_cache(false);
+                  PerformanceCounters::record_operand_resolution(false);
+                  entry.state = OperandResolutionState::resolving;
+                  entry.kind = OperandResolutionKind::direct_call;
+                }
+                else
+                {
+                  inline_target = ResolvedMethod {
+                      .owner = runtime_target->owner,
+                      .method = runtime_target->method,
+                      .runtime = std::move(runtime_target),
+                  };
+                  PerformanceCounters::record_direct_call_cache(true);
+                  PerformanceCounters::record_operand_resolution(true);
+                }
+              }
+              else if (entry.state == OperandResolutionState::failed)
+              {
+                if (entry.kind != OperandResolutionKind::direct_call ||
+                    !entry.failure.has_value())
+                {
+                  return fail(ErrorCode::internal_error,
+                              "decoded failed direct call has no error");
+                }
+                PerformanceCounters::record_direct_call_cache(true);
+                PerformanceCounters::record_operand_resolution(true);
+                PerformanceCounters::record_operand_resolution_failure();
+                return std::unexpected(*entry.failure);
+              }
+              else if (entry.state == OperandResolutionState::resolving)
+              {
+                return fail(ErrorCode::invalid_state,
+                            "recursive decoded direct call resolution");
+              }
+              else
+              {
+                PerformanceCounters::record_direct_call_cache(false);
+                PerformanceCounters::record_operand_resolution(false);
+                entry.state = OperandResolutionState::resolving;
+                entry.kind = OperandResolutionKind::direct_call;
+              }
+            }
+            else
+            {
+              auto &cache = direct_call_bindings_[&frame.owner()][
+                  static_cast<u32>(*index)];
+              legacy_direct_cache = &cache;
+              if (cache.valid)
+              {
+                auto runtime_target = classes_.metadata().find_method(
+                    cache.target_method);
+                if (runtime_target != nullptr)
+                {
+                  inline_target = ResolvedMethod {
+                      .owner = runtime_target->owner,
+                      .method = runtime_target->method,
+                      .runtime = std::move(runtime_target),
+                  };
+                  PerformanceCounters::record_direct_call_cache(true);
+                }
+                else
+                {
+                  cache.valid = false;
+                  PerformanceCounters::record_direct_call_cache(false);
+                }
+              }
+              else
+              {
+                PerformanceCounters::record_direct_call_cache(false);
+              }
+            }
+          }
+
+          const bool cacheable_virtual_call =
+              !is_static && opcode != 0xB7 && dispatch_metadata != nullptr;
+          if (cacheable_virtual_call)
+          {
+            auto &cache = virtual_call_bindings_[&frame.owner()][
+                static_cast<u32>(*index)];
+            virtual_cache = &cache;
+            if (cache.valid &&
+                cache.receiver_class == dispatch_metadata->id)
+            {
+              auto runtime_target = classes_.metadata().find_method(
+                  cache.target_method);
+              if (runtime_target != nullptr)
+              {
+                inline_target = ResolvedMethod {
+                    .owner = runtime_target->owner,
+                    .method = runtime_target->method,
+                    .runtime = std::move(runtime_target),
+                };
+                PerformanceCounters::record_virtual_inline_cache(true);
+              }
+              else
+              {
+                cache.valid = false;
+                PerformanceCounters::record_virtual_inline_cache(false);
+              }
+            }
+            else
+            {
+              PerformanceCounters::record_virtual_inline_cache(false);
+            }
+          }
+
+          const auto resolve_target = [&]() -> Result<ResolvedMethod>
+          {
+            if (inline_target.has_value())
+              return *inline_target;
+            if (opcode == 0xB7 && reference->name == "<init>")
+            {
+              return classes_.resolve_declared_method(
+                  reference->owner,
+                  reference->name,
+                  reference->descriptor);
+            }
+            return classes_.resolve_method(dispatch_class,
+                                           reference->name,
+                                           reference->descriptor);
+          };
+          auto target = resolve_target();
           if (!target)
+          {
+            if (direct_operand_entry != nullptr &&
+                direct_operand_entry->state ==
+                    OperandResolutionState::resolving)
+            {
+              direct_operand_entry->failure = target.error();
+              direct_operand_entry->state = OperandResolutionState::failed;
+              PerformanceCounters::record_operand_resolution_failure();
+              return std::unexpected(*direct_operand_entry->failure);
+            }
             return std::unexpected(target.error());
+          }
+          if (direct_operand_entry != nullptr &&
+              !inline_target.has_value())
+          {
+            if (target->runtime == nullptr)
+            {
+              *direct_operand_entry = {};
+            }
+            else
+            {
+              direct_operand_entry->target_method = target->runtime->id;
+              direct_operand_entry->failure.reset();
+              direct_operand_entry->state = OperandResolutionState::resolved;
+            }
+          }
+          if (legacy_direct_cache != nullptr &&
+              !inline_target.has_value() && target->runtime != nullptr)
+          {
+            *legacy_direct_cache = DirectCallCache {
+                .target_method = target->runtime->id,
+                .valid = true,
+            };
+          }
+          if (virtual_cache != nullptr && !inline_target.has_value() &&
+              target->runtime != nullptr)
+          {
+            *virtual_cache = VirtualCallCache {
+                .receiver_class = dispatch_metadata->id,
+                .target_method = target->runtime->id,
+                .valid = true,
+            };
+          }
           if (((target->method->access_flags & kAccStatic) != 0) != is_static)
           {
             auto raised = raise_implicit(
@@ -7070,18 +8080,13 @@ namespace phoneme::vm
               return std::move(**raised);
             break;
           }
-          nested = Invocation{
-              .method = std::move(*target),
-              .arguments = std::move(*arguments),
-              .has_receiver = !is_static,
-          };
+          auto prepared = prepare_invocation(
+              std::move(*target), *arguments, !is_static);
+          if (!prepared)
+            return std::unexpected(prepared.error());
+          nested = std::move(*prepared);
         }
-        const bool nested_native_override =
-            nested->method.owner != nullptr &&
-            natives_.contains(nested->method.owner->name(),
-                              nested->method.method->name,
-                              nested->method.method->descriptor);
-        const bool nested_is_native = nested_native_override ||
+        const bool nested_is_native = nested->native_method.valid() ||
                                       !nested->method.method->code.has_value();
         if (!nested_is_native && frames.size() >= kMaximumCallDepth)
         {
@@ -7230,19 +8235,19 @@ namespace phoneme::vm
         }
         else
         {
-          auto nested_descriptor = parse_method_descriptor(
-              nested->method.method->descriptor);
-          if (!nested_descriptor)
+          if (nested->descriptor == nullptr)
           {
             auto released = release_synchronized_monitor(*nested_monitor);
             if (!released)
               return std::unexpected(released.error());
-            return std::unexpected(nested_descriptor.error());
+            return fail(ErrorCode::internal_error,
+                        "nested invocation has no cached descriptor");
           }
-          auto next = ExecutionFrame::make(std::move(nested->method),
-                                           std::move(*nested_descriptor),
-                                           nested->arguments,
-                                           nested->has_receiver);
+          auto next = ExecutionFrame::make(
+              std::move(nested->method),
+              nested->descriptor->descriptor,
+              nested->arguments,
+              nested->has_receiver);
           if (!next)
           {
             auto released = release_synchronized_monitor(*nested_monitor);
@@ -7259,19 +8264,15 @@ namespace phoneme::vm
             next->set_return_override(*nested->return_override);
           }
           frames.push_back(std::move(*next));
+          PerformanceCounters::observe_java_call_depth(frames.size());
         }
         break;
       }
       case 0xBA:
       {
-        auto index = frame.read_u16();
-        auto zero1 = frame.read_u8();
-        auto zero2 = frame.read_u8();
-        if (!index || !zero1 || !zero2 || *zero1 != 0U || *zero2 != 0U)
-        {
-          return fail(ErrorCode::malformed_class,
-                      "invalid invokedynamic operands");
-        }
+        auto index = frame.read_invokedynamic_index();
+        if (!index)
+          return std::unexpected(index.error());
         auto dynamic = frame.owner().invoke_dynamic_reference(*index);
         if (!dynamic)
           return std::unexpected(dynamic.error());
@@ -7330,7 +8331,7 @@ namespace phoneme::vm
       }
       case 0xBB:
       {
-        auto index = frame.read_u16();
+        auto index = frame.read_constant_pool_index();
         if (!index)
           return std::unexpected(index.error());
         auto class_name = frame.owner().class_name_constant(*index);
@@ -7387,7 +8388,7 @@ namespace phoneme::vm
       }
       case 0xBC:
       {
-        auto atype = frame.read_u8();
+        auto atype = frame.read_newarray_type();
         auto count = pop_int(frame);
         if (!atype || !count)
         {
@@ -7431,7 +8432,7 @@ namespace phoneme::vm
       }
       case 0xBD:
       {
-        auto index = frame.read_u16();
+        auto index = frame.read_constant_pool_index();
         auto count = pop_int(frame);
         if (!index || !count)
         {
@@ -7536,7 +8537,7 @@ namespace phoneme::vm
       case 0xC0:
       case 0xC1:
       {
-        auto index = frame.read_u16();
+        auto index = frame.read_constant_pool_index();
         auto reference = pop_reference(frame);
         if (!index || !reference)
         {
@@ -7654,19 +8655,17 @@ namespace phoneme::vm
       }
       case 0xC4:
       {
-        auto widened_opcode = frame.read_u8();
-        auto index = frame.read_u16();
-        if (!widened_opcode || !index)
+        auto operands = frame.read_wide_operands();
+        if (!operands)
+          return std::unexpected(operands.error());
+        const u8 widened_opcode = operands->opcode;
+        const u16 index = operands->local_index;
+        if (widened_opcode >= 0x15 && widened_opcode <= 0x19)
         {
-          return fail(ErrorCode::malformed_class,
-                      "truncated wide instruction");
-        }
-        if (*widened_opcode >= 0x15 && *widened_opcode <= 0x19)
-        {
-          auto value = frame.local(*index);
+          auto value = frame.local(index);
           if (!value)
             return std::unexpected(value.error());
-          if (!load_kind_matches(*widened_opcode, value->kind()))
+          if (!load_kind_matches(widened_opcode, value->kind()))
           {
             return fail(ErrorCode::malformed_class,
                         "wide load does not match value kind");
@@ -7675,26 +8674,28 @@ namespace phoneme::vm
           if (!pushed)
             return std::unexpected(pushed.error());
         }
-        else if (*widened_opcode >= 0x36 && *widened_opcode <= 0x3A)
+        else if (widened_opcode >= 0x36 && widened_opcode <= 0x3A)
         {
           auto value = frame.pop();
           if (!value)
             return std::unexpected(value.error());
-          if (!store_kind_matches(*widened_opcode, value->kind()))
+          if (!store_kind_matches(widened_opcode, value->kind()))
           {
             return fail(ErrorCode::malformed_class,
                         "wide store does not match value kind");
           }
-          auto stored = frame.set_local(*index, *value);
+          auto stored = frame.set_local(index, *value);
           if (!stored)
             return std::unexpected(stored.error());
         }
-        else if (*widened_opcode == 0x84)
+        else if (widened_opcode == 0x84)
         {
-          auto increment = frame.read_i16();
-          if (!increment)
-            return std::unexpected(increment.error());
-          auto current = frame.local(*index);
+          if (!operands->increment.has_value())
+          {
+            return fail(ErrorCode::malformed_class,
+                        "wide iinc has no decoded increment");
+          }
+          auto current = frame.local(index);
           if (!current)
             return std::unexpected(current.error());
           auto integer = current->as_int();
@@ -7702,14 +8703,14 @@ namespace phoneme::vm
             return std::unexpected(integer.error());
           const i32 updated = static_cast<i32>(
               static_cast<u32>(*integer) +
-              static_cast<u32>(static_cast<i32>(*increment)));
-          auto stored = frame.set_local(*index, Value::from_int(updated));
+              static_cast<u32>(static_cast<i32>(*operands->increment)));
+          auto stored = frame.set_local(index, Value::from_int(updated));
           if (!stored)
             return std::unexpected(stored.error());
         }
-        else if (*widened_opcode == 0xA9)
+        else if (widened_opcode == 0xA9)
         {
-          auto address_value = frame.local(*index);
+          auto address_value = frame.local(index);
           if (!address_value)
           {
             return std::unexpected(address_value.error());
@@ -7730,14 +8731,12 @@ namespace phoneme::vm
       }
       case 0xC5:
       {
-        auto index = frame.read_u16();
-        auto dimensions = frame.read_u8();
-        if (!index || !dimensions || *dimensions == 0U)
-        {
-          return fail(ErrorCode::malformed_class,
-                      "invalid multianewarray operands");
-        }
-        auto array_class = frame.owner().class_name_constant(*index);
+        auto operands = frame.read_multianewarray_operands();
+        if (!operands)
+          return std::unexpected(operands.error());
+        const u8 dimensions = operands->dimensions;
+        auto array_class = frame.owner().class_name_constant(
+            operands->constant_pool_index);
         if (!array_class)
           return std::unexpected(array_class.error());
         usize declared_dimensions = 0;
@@ -7747,13 +8746,13 @@ namespace phoneme::vm
           ++declared_dimensions;
         }
         if (declared_dimensions == 0U ||
-            static_cast<usize>(*dimensions) > declared_dimensions)
+            static_cast<usize>(dimensions) > declared_dimensions)
         {
           return fail(ErrorCode::malformed_class,
                       "multianewarray dimensions exceed descriptor rank");
         }
 
-        std::vector<i32> lengths(*dimensions);
+        std::vector<i32> lengths(dimensions);
         for (usize reverse = lengths.size(); reverse > 0; --reverse)
         {
           auto length = pop_int(frame);
@@ -7916,7 +8915,7 @@ namespace phoneme::vm
       case 0xC6:
       case 0xC7:
       {
-        auto offset = frame.read_i16();
+        auto offset = frame.read_branch_offset(false);
         auto reference = pop_reference(frame);
         if (!offset || !reference)
         {
@@ -7936,7 +8935,7 @@ namespace phoneme::vm
       }
       case 0xC8:
       {
-        auto offset = frame.read_i32();
+        auto offset = frame.read_branch_offset(true);
         if (!offset)
           return std::unexpected(offset.error());
         auto branched = frame.branch(opcode_pc, *offset);
@@ -7946,7 +8945,7 @@ namespace phoneme::vm
       }
       case 0xC9:
       {
-        auto offset = frame.read_i32();
+        auto offset = frame.read_branch_offset(true);
         if (!offset)
           return std::unexpected(offset.error());
         const usize return_pc = frame.pc();

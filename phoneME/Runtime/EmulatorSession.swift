@@ -588,6 +588,23 @@ final class EmulatorSession: ObservableObject {
         engine.selectLCDUICommand(id)
     }
 
+    func selectLCDUIListItemCommand(
+        componentID: Int32,
+        index: Int,
+        commandID: Int32
+    ) {
+        updateLCDUIChoiceSelection(
+            componentID: componentID,
+            index: index,
+            selected: true
+        )
+        engine.selectLCDUIListItemCommand(
+            componentID: componentID,
+            index: index,
+            commandID: commandID
+        )
+    }
+
     func focusLCDUIItem(_ componentID: Int32) {
         if lcdUI.focusedItemID != componentID,
            lcdUI.items[componentID] != nil {
@@ -617,7 +634,7 @@ final class EmulatorSession: ObservableObject {
         )
     }
 
-    func setLCDUIChoice(
+    private func updateLCDUIChoiceSelection(
         componentID: Int32,
         index: Int,
         selected: Bool
@@ -648,7 +665,18 @@ final class EmulatorSession: ObservableObject {
                 lcdUI = nextState
             }
         }
+    }
 
+    func setLCDUIChoice(
+        componentID: Int32,
+        index: Int,
+        selected: Bool
+    ) {
+        updateLCDUIChoiceSelection(
+            componentID: componentID,
+            index: index,
+            selected: selected
+        )
         engine.setLCDUIChoice(
             componentID: componentID,
             index: index,

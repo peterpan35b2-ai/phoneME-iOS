@@ -85,6 +85,9 @@ using namespace builtin;
             field(kPrivate, "values", "[Ljava/lang/Object;"),
             field(kPrivate, "index", "I"),
             field(kPrivate, "size", "I"),
+            field(kPrivate, "owner", "Ljava/lang/Object;"),
+            field(kPrivate, "lastReturned", "I"),
+            field(kPrivate, "removeKind", "I"),
         }, {
             method(kPublic, "hasNext", "()Z"),
             method(kPublic, "next", "()Ljava/lang/Object;"),

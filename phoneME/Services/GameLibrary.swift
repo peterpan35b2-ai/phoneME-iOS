@@ -415,9 +415,9 @@ enum LibraryError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupportedFile:
-            return "Unsupported file."
+            return L10n.string("Unsupported file.")
         case .missingGameFile:
-            return "The game JAR is missing from the library."
+            return L10n.string("The game JAR is missing from the library.")
         }
     }
 }

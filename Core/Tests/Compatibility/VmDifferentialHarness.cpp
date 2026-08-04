@@ -1,5 +1,7 @@
 #include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -16,6 +18,7 @@ namespace {
 enum class ResultKind : char {
     integer = 'I',
     long_integer = 'J',
+    string = 'S',
     exception = 'E',
 };
 
@@ -75,6 +78,22 @@ constexpr CaseSpec kCases[] {
     {"class-semantics", "classSemantics", "()I", ResultKind::integer},
     {"thread-runnable-join", "runnableThreadJoin", "()I", ResultKind::integer},
     {"thread-synchronized", "synchronizedThreadCounters", "()I", ResultKind::integer},
+    {"openjdk-remaining-surface", "openJdkRemainingSurfaceTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"exception-constructors", "exceptionConstructorSurfaceTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"print-writer-surface", "printWriterSurfaceTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"reader-input-surface", "readerInputSurfaceTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"throwable-thread-permission-file", "throwableThreadPermissionFileTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"legacy-util-full", "legacyUtilFullTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"local-time", "localTimeTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"wrapper-full", "wrapperFullTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"math-full", "mathFullTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"string-api", "stringApiTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"string-builder-api", "stringBuilderTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"string-buffer-api", "stringBufferExtendedTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"headless-collections", "headlessCollectionsTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"headless-arrays", "headlessArraysTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"headless-base64-objects", "headlessBase64ObjectsTrace", "()Ljava/lang/String;", ResultKind::string},
+    {"headless-io", "headlessIoTrace", "()Ljava/lang/String;", ResultKind::string},
     {"exception-npe", "uncaughtNullPointer", "()V", ResultKind::exception},
     {"exception-array-bounds", "uncaughtArrayBounds", "()V", ResultKind::exception},
     {"exception-class-cast", "uncaughtClassCast", "()V", ResultKind::exception},
@@ -214,6 +233,65 @@ constexpr CaseSpec kCases[] {
     return true;
 }
 
+[[nodiscard]] bool compare_string(const OracleRecord& record,
+                                  const phoneme::vm::ExecutionResult& result,
+                                  phoneme::vm::Machine& machine) {
+    if (!result.completed_normally() || !result.return_value.has_value()) {
+        std::cerr << "DIFF " << record.spec->id
+                  << ": VM did not return a String normally";
+        if (result.throwable.has_value()) {
+            const auto throwable_class = machine.heap().class_name(*result.throwable);
+            if (throwable_class.has_value()) {
+                std::cerr << " [" << *throwable_class << ']';
+            }
+            const auto message = machine.heap().field(*result.throwable, 0U);
+            if (message.has_value()) {
+                const auto reference = message->as_reference();
+                if (reference.has_value() && !reference->is_null()) {
+                    const auto text = machine.heap().string_value(*reference);
+                    if (text.has_value()) {
+                        std::cerr << " message=";
+                        for (const char16_t unit : *text) {
+                            std::cerr << static_cast<char>(unit <= 0x7FU ? unit : '?');
+                        }
+                    }
+                }
+            }
+        }
+        std::cerr << '\n';
+        return false;
+    }
+    const auto reference = result.return_value->as_reference();
+    if (!reference.has_value() || reference->is_null()) {
+        std::cerr << "DIFF " << record.spec->id
+                  << ": VM returned a non-String/null value\n";
+        return false;
+    }
+    const auto text = machine.heap().string_value(*reference);
+    if (!text.has_value()) {
+        std::cerr << "DIFF " << record.spec->id
+                  << ": VM String has no payload\n";
+        return false;
+    }
+    std::string actual;
+    actual.reserve(text->size());
+    for (char16_t unit : *text) {
+        if (unit > 0x7FU) {
+            std::cerr << "DIFF " << record.spec->id
+                      << ": trace contains non-ASCII data\n";
+            return false;
+        }
+        actual.push_back(static_cast<char>(unit));
+    }
+    if (actual != record.expected) {
+        std::cerr << "DIFF " << record.spec->id << ": Java="
+                  << record.expected << " C++VM=" << actual << '\n';
+        return false;
+    }
+    std::cout << "MATCH " << record.spec->id << " = " << actual << '\n';
+    return true;
+}
+
 [[nodiscard]] bool compare_exception(const OracleRecord& record,
                                      const phoneme::vm::ExecutionResult& result,
                                      phoneme::vm::Machine& machine) {
@@ -279,6 +357,32 @@ int main(int argc, char** argv) {
     }
 
     phoneme::vm::Machine machine(classes);
+    const auto unique = std::chrono::steady_clock::now()
+        .time_since_epoch().count();
+    const auto sandbox = std::filesystem::temp_directory_path() /
+        ("phoneme-vm-differential-" + std::to_string(unique));
+    const auto sandbox_files = sandbox / "files";
+    const auto sandbox_temp = sandbox / "tmp";
+    std::error_code directory_error;
+    std::filesystem::create_directories(sandbox_files, directory_error);
+    if (directory_error) {
+        std::cerr << "Cannot create differential filesystem sandbox: "
+                  << directory_error.message() << '\n';
+        return 2;
+    }
+    std::filesystem::create_directories(sandbox_temp, directory_error);
+    if (directory_error) {
+        std::cerr << "Cannot create differential temporary directory: "
+                  << directory_error.message() << '\n';
+        return 2;
+    }
+    const auto filesystem_configured = machine.configure_filesystem(
+        sandbox_files.string(), sandbox_temp.string());
+    if (!filesystem_configured) {
+        std::cerr << "Cannot configure differential filesystem sandbox: "
+                  << filesystem_configured.error().message << '\n';
+        return 2;
+    }
     std::size_t passed = 0;
     std::size_t failed = 0;
     for (const auto& record : records) {
@@ -301,7 +405,9 @@ int main(int argc, char** argv) {
 
         const bool matches = record.spec->kind == ResultKind::exception
             ? compare_exception(record, *invocation, machine)
-            : compare_numeric(record, *invocation);
+            : (record.spec->kind == ResultKind::string
+                ? compare_string(record, *invocation, machine)
+                : compare_numeric(record, *invocation));
         if (matches) {
             ++passed;
         } else {
@@ -314,6 +420,8 @@ int main(int argc, char** argv) {
         coverage_written = write_native_coverage(argv[3], machine.natives());
     }
     machine.shutdown();
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(sandbox, cleanup_error);
     std::cout << "VM differential summary: " << passed << '/' << records.size()
               << " matched";
     if (failed != 0U) {

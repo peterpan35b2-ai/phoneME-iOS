@@ -454,24 +454,62 @@ int main() {
         };
 
         machine.begin_character_translation_frame();
-        require(!capture_layout(first_line, 20).planned &&
-                    !capture_layout(second_line, 34).planned,
+        require(!capture_layout(first_line, 8).planned &&
+                    !capture_layout(second_line, 22).planned,
                 "first translated paragraph frame captures its text blocks");
         machine.end_character_translation_frame();
 
         machine.begin_character_translation_frame();
-        const auto first_layout = capture_layout(first_line, 20);
-        const auto second_layout = capture_layout(second_line, 34);
+        const auto first_layout = capture_layout(first_line, 8);
+        const auto second_layout = capture_layout(second_line, 22);
         require(first_layout.planned && second_layout.planned,
                 "next frame replays translated paragraph positions");
-        require(first_layout.y < 20 && second_layout.y < 34,
-                "long translated blocks grow upward from their original lines");
         require(first_layout.y + first_layout.height < second_layout.y,
-                "translated paragraph blocks are stacked without overlap");
+                "translated text blocks are moved without overlap");
+        require(first_layout.y != 8 || second_layout.y != 22,
+                "overlapping translated text is shifted vertically");
         machine.end_character_translation_frame();
 
+        constexpr std::u32string_view threshold_text = U"Một\nhai";
+        const auto above_quarter = machine.plan_translated_text(
+            7U,
+            std::span<const char32_t>(threshold_text.data(),
+                                     threshold_text.size()),
+            6,
+            29,
+            0,
+            0,
+            0,
+            8,
+            0,
+            0,
+            120,
+            120,
+            0,
+            0);
+        const auto at_quarter = machine.plan_translated_text(
+            7U,
+            std::span<const char32_t>(threshold_text.data(),
+                                     threshold_text.size()),
+            6,
+            30,
+            0,
+            0,
+            0,
+            8,
+            0,
+            0,
+            120,
+            120,
+            0,
+            0);
+        require(above_quarter.y == 29 && at_quarter.y == 30,
+                "middle text keeps its source position without quarter zones");
+        require(above_quarter.height == at_quarter.height,
+                "layout does not change at a fractional screen threshold");
+
         constexpr std::u32string_view lower_first_line =
-            U"Đăng nhập vào trò chơi ngay";
+            U"Đăng nhập\nvào trò chơi ngay";
         constexpr std::u32string_view lower_second_line = U"Tiếp tục";
         const auto capture_lower_layout = [&](std::u32string_view text,
                                               phoneme::i32 y) {
@@ -503,11 +541,49 @@ int main() {
         const auto lower_second = capture_lower_layout(lower_second_line, 74);
         require(lower_first.planned && lower_second.planned,
                 "lower dialogue layout replays on the next frame");
-        require(lower_first.height > 13 && lower_first.y == 60 &&
-                    lower_second.y > 74,
-                "lower dialogue grows into free space below before moving up");
+        require(lower_first.y == 60,
+                "first lower text block keeps its source position");
+        require(lower_second.y > 74,
+                "overlapping lower text is pushed downward");
         require(lower_first.y + lower_first.height < lower_second.y,
-                "downward lower dialogue layout still prevents overlap");
+                "lower text blocks remain independent and do not overlap");
+        require(lower_second.y + lower_second.height <= 110,
+                "downward-shifted text remains inside the clip");
+        machine.end_character_translation_frame();
+
+        constexpr std::u32string_view overflowing_lower_dialogue =
+            U"Đây là một đoạn hội thoại dài cần nhiều dòng để hiển thị "
+            U"nhưng vẫn phải tận dụng toàn bộ khoảng trống phía dưới";
+        const auto capture_overflowing_lower_layout = [&] {
+            return machine.plan_translated_text(
+                7U,
+                std::span<const char32_t>(overflowing_lower_dialogue.data(),
+                                          overflowing_lower_dialogue.size()),
+                6,
+                82,
+                0,
+                0,
+                0,
+                8,
+                0,
+                0,
+                120,
+                110,
+                0,
+                0);
+        };
+
+        machine.begin_character_translation_frame();
+        require(!capture_overflowing_lower_layout().planned,
+                "first overflowing lower dialogue frame captures its layout");
+        machine.end_character_translation_frame();
+
+        machine.begin_character_translation_frame();
+        const auto overflowing_lower = capture_overflowing_lower_layout();
+        require(overflowing_lower.planned && overflowing_lower.y < 82,
+                "overflowing lower dialogue moves upward only when required");
+        require(overflowing_lower.y + overflowing_lower.height == 110,
+                "upward-shifted text reuses the full clip height");
         machine.end_character_translation_frame();
     }
 

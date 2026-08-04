@@ -1,0 +1,31 @@
+{
+  "name": "phoneme-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:wasm": "bash ../Core/Tools/build-wasm.sh",
+    "build": "npm run build:wasm && tsc -b && vite build",
+    "check": "tsc -b --pretty false",
+    "preview": "vite preview",
+    "test:browser": "node scripts/smoke-browser.mjs"
+  },
+  "dependencies": {
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@fontsource-variable/google-sans": "5.3.1",
+    "@mui/icons-material": "9.2.0",
+    "@mui/material": "9.2.0",
+    "fflate": "0.8.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.5",
+    "typescript": "7.0.2",
+    "vite": "8.2.0"
+  }
+}

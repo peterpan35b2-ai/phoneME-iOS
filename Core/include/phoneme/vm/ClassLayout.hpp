@@ -15,10 +15,13 @@
 namespace phoneme::vm {
 
 struct FieldLocation final {
+    FieldId id;
+    ClassId declaring_class_id;
     std::string declaring_class;
     std::string name;
     std::string descriptor;
     usize index {0};
+    ValueKind value_kind {ValueKind::int32};
     bool is_static {false};
     std::optional<u16> constant_value_index;
     std::string storage_key;
@@ -66,7 +69,9 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<const ClassLayout>> layouts_;
     std::unordered_map<std::string, FieldLocation> resolved_fields_;
-    std::unordered_map<std::string, Value> static_fields_;
+    std::unordered_map<std::string, FieldId> field_ids_;
+    std::unordered_map<FieldId, Value, MetadataIdHash<FieldId>> static_fields_;
+    u32 next_field_id_ {1U};
 };
 
 } // namespace phoneme::vm

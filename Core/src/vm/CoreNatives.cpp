@@ -31,6 +31,7 @@
 #include "LcduiNatives.hpp"
 #include "MathNatives.hpp"
 #include "M3gNatives.hpp"
+#include "Micro3dNatives.hpp"
 #include "MediaNatives.hpp"
 #include "PushNatives.hpp"
 #include "ReferenceNatives.hpp"
@@ -2226,6 +2227,7 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_lcdui_natives(registry);
     register_math_natives(registry);
     register_m3g_natives(registry);
+    register_micro3d_natives(registry);
     register_media_natives(registry);
     register_push_natives(registry);
     register_reference_natives(registry);

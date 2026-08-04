@@ -1,10 +1,12 @@
 #include "phoneme/vm/Heap.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <utility>
 
 #include "phoneme/base/Checked.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -66,6 +68,7 @@ Heap::Heap(HeapLimits limits) : limits_(limits) {
 
 Result<ObjectRef> Heap::allocate_object(std::string class_name,
                                         usize field_count) {
+    PerformanceCounters::record_locked_heap_operation();
     if (class_name.empty()) {
         return fail(ErrorCode::invalid_argument,
                     "object class name must not be empty");
@@ -75,6 +78,7 @@ Result<ObjectRef> Heap::allocate_object(std::string class_name,
     auto object_bytes = estimate_object_bytes(class_name, field_count, 0U, 0U);
     if (!object_bytes) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         return std::unexpected(object_bytes.error());
     }
     auto capacity = ensure_capacity_unlocked(*object_bytes);
@@ -92,12 +96,18 @@ Result<ObjectRef> Heap::allocate_object(std::string class_name,
         .is_string = false,
         .marked = false,
     };
-    return allocate_unlocked(std::move(object), *object_bytes);
+    auto allocated = allocate_unlocked(std::move(object), *object_bytes);
+    if (allocated) {
+        PerformanceCounters::record_allocation(
+            AllocationPayloadKind::object, *object_bytes);
+    }
+    return allocated;
 }
 
 Result<ObjectRef> Heap::allocate_array(std::string class_name,
                                        usize length,
                                        Value initial_value) {
+    PerformanceCounters::record_locked_heap_operation();
     if (class_name.empty()) {
         return fail(ErrorCode::invalid_argument,
                     "array class name must not be empty");
@@ -107,6 +117,7 @@ Result<ObjectRef> Heap::allocate_array(std::string class_name,
     auto object_bytes = estimate_object_bytes(class_name, 0U, length, 0U);
     if (!object_bytes) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         return std::unexpected(object_bytes.error());
     }
     auto capacity = ensure_capacity_unlocked(*object_bytes);
@@ -124,10 +135,16 @@ Result<ObjectRef> Heap::allocate_array(std::string class_name,
         .is_string = false,
         .marked = false,
     };
-    return allocate_unlocked(std::move(object), *object_bytes);
+    auto allocated = allocate_unlocked(std::move(object), *object_bytes);
+    if (allocated) {
+        PerformanceCounters::record_allocation(
+            AllocationPayloadKind::array, *object_bytes);
+    }
+    return allocated;
 }
 
 Result<ObjectRef> Heap::clone_object(ObjectRef reference) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -142,11 +159,17 @@ Result<ObjectRef> Heap::clone_object(ObjectRef reference) {
 
     Object clone = source;
     clone.marked = false;
-    return allocate_unlocked(std::move(clone),
-                             slots_[*slot].accounted_bytes);
+    const usize clone_bytes = slots_[*slot].accounted_bytes;
+    auto allocated = allocate_unlocked(std::move(clone), clone_bytes);
+    if (allocated) {
+        PerformanceCounters::record_allocation(
+            AllocationPayloadKind::clone, clone_bytes);
+    }
+    return allocated;
 }
 
 Result<Value> Heap::field(ObjectRef reference, usize index) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -160,6 +183,7 @@ Result<Value> Heap::field(ObjectRef reference, usize index) const {
 }
 
 Status Heap::set_field(ObjectRef reference, usize index, Value value) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -174,6 +198,7 @@ Status Heap::set_field(ObjectRef reference, usize index, Value value) {
 }
 
 Result<Value> Heap::element(ObjectRef reference, usize index) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -187,6 +212,7 @@ Result<Value> Heap::element(ObjectRef reference, usize index) const {
 }
 
 Status Heap::set_element(ObjectRef reference, usize index, Value value) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -205,6 +231,7 @@ Status Heap::copy_array_range(ObjectRef source,
                               ObjectRef destination,
                               usize destination_index,
                               usize length) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto source_slot = resolve_slot_unlocked(source);
     if (!source_slot) {
@@ -253,6 +280,7 @@ Status Heap::copy_array_range(ObjectRef source,
 Result<std::vector<u8>> Heap::read_byte_array(ObjectRef reference,
                                                usize offset,
                                                usize length) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -283,6 +311,7 @@ Result<std::vector<u8>> Heap::read_byte_array(ObjectRef reference,
 Status Heap::write_byte_array(ObjectRef reference,
                               usize offset,
                               std::span<const u8> bytes) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -308,6 +337,7 @@ Status Heap::write_byte_array(ObjectRef reference,
 }
 
 Result<usize> Heap::array_length(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -321,6 +351,7 @@ Result<usize> Heap::array_length(ObjectRef reference) const {
 }
 
 Result<std::string> Heap::class_name(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -330,6 +361,7 @@ Result<std::string> Heap::class_name(ObjectRef reference) const {
 }
 
 Status Heap::attach_string(ObjectRef reference, std::u16string value) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -348,12 +380,14 @@ Status Heap::attach_string(ObjectRef reference, std::u16string value) {
                                                value.size());
     if (!updated_bytes) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         return std::unexpected(updated_bytes.error());
     }
     if (*updated_bytes > target.accounted_bytes) {
         const usize growth = *updated_bytes - target.accounted_bytes;
         if (growth > limits_.maximum_bytes - live_bytes_) {
             ++failed_allocations_;
+            PerformanceCounters::record_failed_allocation();
             return fail(ErrorCode::overflow, "Java heap byte limit reached");
         }
         live_bytes_ += growth;
@@ -362,13 +396,20 @@ Status Heap::attach_string(ObjectRef reference, std::u16string value) {
         live_bytes_ -= target.accounted_bytes - *updated_bytes;
     }
 
+    const usize previous_bytes = target.accounted_bytes;
     object.string_payload = std::move(value);
     object.is_string = true;
     target.accounted_bytes = *updated_bytes;
+    if (*updated_bytes > previous_bytes) {
+        PerformanceCounters::record_allocation(
+            AllocationPayloadKind::string_payload,
+            *updated_bytes - previous_bytes);
+    }
     return {};
 }
 
 Result<std::u16string> Heap::string_value(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -383,6 +424,7 @@ Result<std::u16string> Heap::string_value(ObjectRef reference) const {
 }
 
 Status Heap::set_weak_referent(ObjectRef reference, ObjectRef referent) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -401,6 +443,7 @@ Status Heap::set_weak_referent(ObjectRef reference, ObjectRef referent) {
 }
 
 Result<ObjectRef> Heap::weak_referent(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -418,6 +461,7 @@ Result<ObjectRef> Heap::weak_referent(ObjectRef reference) const {
 }
 
 Status Heap::clear_weak_referent(ObjectRef reference) {
+    PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
@@ -428,9 +472,22 @@ Status Heap::clear_weak_referent(ObjectRef reference) {
 }
 
 Status Heap::collect(std::span<const ObjectRef> roots) {
+    PerformanceCounters::record_locked_heap_operation();
+    const auto collection_started = std::chrono::steady_clock::now();
     std::scoped_lock lock(mutex_);
+    usize objects_scanned = 0U;
+    usize primitive_bytes_scanned = 0U;
     for (Slot& slot : slots_) {
         if (slot.occupied) {
+            ++objects_scanned;
+            if (slot.object.is_array && slot.object.class_name.size() >= 2U &&
+                slot.object.class_name.front() == '[' &&
+                slot.object.class_name[1U] != 'L' &&
+                slot.object.class_name[1U] != '[') {
+                primitive_bytes_scanned = saturated_add(
+                    primitive_bytes_scanned,
+                    slot.object.elements.size() * sizeof(Value));
+            }
             slot.object.marked = false;
         }
     }
@@ -470,11 +527,13 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         }
     }
 
+    usize objects_reclaimed = 0U;
     for (usize index = 0; index < slots_.size(); ++index) {
         Slot& slot = slots_[index];
         if (!slot.occupied || slot.object.marked) {
             continue;
         }
+        ++objects_reclaimed;
         live_bytes_ -= slot.accounted_bytes;
         slot.object = {};
         slot.accounted_bytes = 0U;
@@ -486,6 +545,15 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         free_slots_.push_back(index);
     }
     ++collections_;
+    const auto collection_finished = std::chrono::steady_clock::now();
+    const auto pause = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        collection_finished - collection_started).count();
+    PerformanceCounters::record_gc(
+        pause > 0 ? static_cast<u64>(pause) : 0U,
+        roots.size(),
+        objects_scanned,
+        objects_reclaimed,
+        primitive_bytes_scanned);
     return {};
 }
 
@@ -562,6 +630,7 @@ Result<ObjectRef> Heap::allocate_unlocked(Object object,
     auto slot32 = checked_narrow<u32>(encoded_slot);
     if (!slot32) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         if (index + 1U == slots_.size()) {
             slots_.pop_back();
         } else {
@@ -582,11 +651,13 @@ Result<ObjectRef> Heap::allocate_unlocked(Object object,
 Status Heap::ensure_capacity_unlocked(usize object_bytes) noexcept {
     if (free_slots_.empty() && slots_.size() >= limits_.maximum_objects) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         return fail(ErrorCode::overflow, "Java heap object limit reached");
     }
     if (live_bytes_ > limits_.maximum_bytes ||
         object_bytes > limits_.maximum_bytes - live_bytes_) {
         ++failed_allocations_;
+        PerformanceCounters::record_failed_allocation();
         return fail(ErrorCode::overflow, "Java heap byte limit reached");
     }
     return {};

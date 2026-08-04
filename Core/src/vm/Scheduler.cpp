@@ -11,6 +11,7 @@
 
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 
 namespace phoneme::vm {
 
@@ -512,6 +513,7 @@ void Scheduler::cooperative_quantum(Machine& machine) {
 }
 
 void Scheduler::cooperative_yield(Machine& machine) {
+    PerformanceCounters::record_scheduler_yield();
     auto current = current_thread_record();
     if (!current) {
         return;
@@ -562,6 +564,7 @@ Result<SchedulerWaitResult> Scheduler::sleep_current(
         return SchedulerWaitResult::completed;
     }
 
+    PerformanceCounters::record_scheduler_sleep();
     {
         std::scoped_lock lock(current->mutex_);
         if (current->interrupted_) {
@@ -691,6 +694,7 @@ Status Scheduler::interrupt(ObjectRef thread_object) {
     // regardless of the current blocking reason.
     for (const auto& candidate : wake_targets) {
         candidate->condition_.notify_all();
+        PerformanceCounters::record_scheduler_event_wakeup();
     }
     return {};
 }
@@ -784,11 +788,13 @@ Result<i32> Scheduler::priority(ObjectRef thread_object) const {
 
 void Scheduler::erase_id(std::deque<JavaThreadId>& queue,
                          JavaThreadId id) noexcept {
+    PerformanceCounters::record_scheduler_queue_erase_scan(queue.size());
     queue.erase(std::remove(queue.begin(), queue.end(), id), queue.end());
 }
 
 void Scheduler::update_queue_membership_locked(JavaThreadId id,
                                                 JavaThreadState state) {
+    PerformanceCounters::record_scheduler_state_transition();
     erase_id(runnable_queue_, id);
     erase_id(blocked_queue_, id);
     erase_id(sleeping_queue_, id);

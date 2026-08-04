@@ -28,6 +28,7 @@ struct Options final {
     std::string runtime_home;
     std::string result_path;
     std::string frame_path;
+    std::string native_coverage_path;
     phoneme::i32 width {320};
     phoneme::i32 height {240};
     phoneme::i32 observe_ms {0};
@@ -76,7 +77,8 @@ struct HarnessResult final {
         if (argument == "--help") {
             error = "usage: CompatibilityHarness --jar FILE --main CLASS "
                     "--runtime-home DIR --result FILE --frame FILE "
-                    "[--width N --height N --observe-ms N]";
+                    "[--native-coverage FILE --width N --height N "
+                    "--observe-ms N]";
             return false;
         }
         if (index + 1 >= argc) {
@@ -94,6 +96,8 @@ struct HarnessResult final {
             options.result_path = value;
         } else if (argument == "--frame") {
             options.frame_path = value;
+        } else if (argument == "--native-coverage") {
+            options.native_coverage_path = value;
         } else if (argument == "--width") {
             const auto parsed = parse_i32(value);
             if (!parsed.has_value() || *parsed <= 0 || *parsed > 8192) {
@@ -242,6 +246,38 @@ void emit_string_array(std::ostream& output,
     return static_cast<bool>(output);
 }
 
+[[nodiscard]] bool write_native_coverage(
+    const Options& options,
+    std::span<const phoneme::vm::NativeMethodInvocationCount> counts) {
+    if (options.native_coverage_path.empty()) return true;
+    std::error_code directory_error;
+    const auto parent = std::filesystem::path(
+        options.native_coverage_path).parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, directory_error);
+        if (directory_error) {
+            std::cerr << "cannot create native coverage directory: "
+                      << directory_error.message() << '\n';
+            return false;
+        }
+    }
+    std::ofstream output(options.native_coverage_path,
+                         std::ios::binary | std::ios::trunc);
+    if (!output) {
+        std::cerr << "cannot open native coverage file: "
+                  << options.native_coverage_path << '\n';
+        return false;
+    }
+    output << "owner\tname\tdescriptor\tinvocations\n";
+    for (const auto& entry : counts) {
+        output << entry.signature.owner << '\t'
+               << entry.signature.name << '\t'
+               << entry.signature.descriptor << '\t'
+               << entry.count << '\n';
+    }
+    return static_cast<bool>(output);
+}
+
 [[nodiscard]] bool write_ppm(const Options& options,
                              const phoneme::runtime::FrameSnapshot& frame,
                              HarnessResult& result) {
@@ -341,9 +377,12 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     HarnessResult result;
     const auto started_at = Clock::now();
     phoneme::runtime::Runtime runtime;
+    constexpr phoneme::AppId kAppId {17};
 
     const auto finish = [&](int code) {
         result.exit_code = static_cast<phoneme::i32>(code);
+        const auto native_counts = runtime.app_native_invocation_counts(kAppId);
+        if (!write_native_coverage(options, native_counts)) return 91;
         if (!write_result(options, result)) return 90;
         return code;
     };
@@ -384,7 +423,6 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     result.system_started = true;
     add_milestone(result, "system-started");
 
-    constexpr phoneme::AppId kAppId {17};
     auto midlet_started = runtime.start_midlet(
         *suite_id,
         options.main_class,
@@ -431,6 +469,7 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
         while (Clock::now() < deadline &&
                runtime.app_state(kAppId) !=
                    phoneme::runtime::AppState::destroyed) {
+            runtime.pump_events();
             collect_ui_events(runtime, result);
             auto frame = runtime.frame_snapshot();
             if (frame.generation != last_generation) {
@@ -440,12 +479,15 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+        runtime.pump_events();
         if (result.canvas_event_count != 0U && !latest_frame.rgba.empty()) {
             (void)write_ppm(options, latest_frame, result);
         }
         add_milestone(result, "observation-end");
     }
 
+    runtime.pump_events();
+    result.app_state = app_state_name(runtime.app_state(kAppId));
     const auto console_output = runtime.app_console_output(kAppId);
     if (!console_output.empty()) {
         std::cout << console_output;
@@ -465,8 +507,9 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     } else {
         result.destroyed = true;
     }
+    const int result_code = finish(0);
     runtime.stop();
-    return finish(0);
+    return result_code;
 }
 
 } // namespace

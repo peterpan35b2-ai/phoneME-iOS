@@ -28,7 +28,7 @@ else
   JDK8=""
 fi
 
-[[ -x "$JDK8/bin/javac" && -x "$JDK8/bin/jar" ]] || {
+[[ -x "$JDK8/bin/java" && -x "$JDK8/bin/javac" && -x "$JDK8/bin/jar" ]] || {
   echo "A JDK 8 installation is required to emit CLDC-compatible classfile 48 bytecode." >&2
   echo "Set JAVA8_HOME to a JDK 8 home." >&2
   exit 2
@@ -46,7 +46,9 @@ done
 }
 
 SOURCE="$SCRIPT_DIR/fixtures/src/compat/javame/JavaMeDifferentialMIDlet.java"
+CALENDAR_ORACLE_SOURCE="$SCRIPT_DIR/fixtures/src/compat/javame/JavaMeCalendarOracle.java"
 CLASSES="$TEST_ROOT/classes"
+CALENDAR_ORACLE_CLASSES="$TEST_ROOT/calendar-oracle-classes"
 PREVERIFIED="$TEST_ROOT/preverified"
 FIXTURE_JAR="$TEST_ROOT/javame-differential.jar"
 MANIFEST="$TEST_ROOT/MANIFEST.MF"
@@ -55,10 +57,14 @@ CPP_HOME="$TEST_ROOT/cpp-home"
 REFERENCE_RAW="$TEST_ROOT/reference.raw.log"
 CPP_RAW="$TEST_ROOT/cpp.raw.log"
 REFERENCE_RESULTS="$TEST_ROOT/reference.tsv"
+REFERENCE_ORIGINAL_RESULTS="$TEST_ROOT/reference.phoneME.tsv"
+CALENDAR_ORACLE_RESULTS="$TEST_ROOT/calendar-oracle.tsv"
 CPP_RESULTS="$TEST_ROOT/cpp.tsv"
+NATIVE_COVERAGE="$TEST_ROOT/native-handler-coverage.tsv"
 HARNESS="$TEST_ROOT/CompatibilityHarness"
 
-mkdir -p "$CLASSES" "$PREVERIFIED" "$REFERENCE_HOME" "$CPP_HOME"
+mkdir -p "$CLASSES" "$CALENDAR_ORACLE_CLASSES" "$PREVERIFIED" \
+  "$REFERENCE_HOME" "$CPP_HOME"
 cp -R "$REFERENCE_TEMPLATE/appdb" "$REFERENCE_HOME/appdb"
 cp -R "$REFERENCE_TEMPLATE/lib" "$REFERENCE_HOME/lib"
 
@@ -69,6 +75,15 @@ cp -R "$REFERENCE_TEMPLATE/lib" "$REFERENCE_HOME/lib"
   -classpath "$REFERENCE_CLASSES" \
   -d "$CLASSES" \
   "$SOURCE"
+
+"$JDK8/bin/javac" \
+  -source 1.4 \
+  -target 1.4 \
+  -Xlint:-options \
+  -d "$CALENDAR_ORACLE_CLASSES" \
+  "$CALENDAR_ORACLE_SOURCE"
+"$JDK8/bin/java" -cp "$CALENDAR_ORACLE_CLASSES" \
+  compat.javame.JavaMeCalendarOracle > "$CALENDAR_ORACLE_RESULTS"
 
 "$REFERENCE_PREVERIFY" \
   -classpath "$REFERENCE_CLASSES" \
@@ -102,6 +117,23 @@ grep $'^JME_DIFF\t' "$REFERENCE_RAW" > "$REFERENCE_RESULTS" || {
   cat "$REFERENCE_RAW" >&2
   exit 1
 }
+cp "$REFERENCE_RESULTS" "$REFERENCE_ORIGINAL_RESULTS"
+
+REFERENCE_LCMP="$(awk -F '\t' \
+  '$2 == "long-cutover-compare" { print $4 }' \
+  "$REFERENCE_RESULTS")"
+if [[ "$REFERENCE_LCMP" == "0" ]]; then
+  echo "phoneME reference long-comparison defect detected; using the independent JDK 8 Calendar oracle for affected rows." >&2
+  awk -F '\t' -v OFS='\t' '
+    NR == FNR { replacement[$2] = $0; next }
+    ($2 in replacement) { print replacement[$2]; next }
+    { print }
+  ' "$CALENDAR_ORACLE_RESULTS" "$REFERENCE_ORIGINAL_RESULTS" \
+    > "$REFERENCE_RESULTS"
+elif [[ "$REFERENCE_LCMP" != "1" ]]; then
+  echo "phoneME reference health probe is missing or malformed: $REFERENCE_LCMP" >&2
+  exit 1
+fi
 
 CXX="${CXX:-$(xcrun --sdk macosx --find clang++)}"
 SDK_ROOT="$(xcrun --sdk macosx --show-sdk-path)"
@@ -141,8 +173,10 @@ phoneme_run_with_timeout "${PHONEME_TEST_TIMEOUT:-180}" \
   --runtime-home "$CPP_HOME" \
   --result "$TEST_ROOT/cpp-result.json" \
   --frame "$TEST_ROOT/cpp-frame.ppm" \
+  --native-coverage "$NATIVE_COVERAGE" \
   --width 320 \
   --height 240 \
+  --observe-ms "${PHONEME_JAVAME_OBSERVE_MS:-30000}" \
   >"$CPP_RAW" 2>&1
 
 grep $'^JME_DIFF\t' "$CPP_RAW" > "$CPP_RESULTS" || {
@@ -163,3 +197,4 @@ COUNT="$(wc -l < "$CPP_RESULTS" | tr -d ' ')"
 echo "Java ME differential summary: $COUNT/$COUNT matched"
 echo "Reference runtime: $REFERENCE_RUNNER"
 echo "CLDC classfile: major version 48, preverified by phoneME"
+echo "Native handler coverage: $NATIVE_COVERAGE"

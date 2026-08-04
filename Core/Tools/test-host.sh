@@ -91,6 +91,8 @@ done < <(find "$CORE_ROOT/src" -type f -name '*.cpp' -print | LC_ALL=C sort)
 
 "$CXX" \
   -std=c++23 \
+  -DPHONEME_ENABLE_VM_PROFILING="${PHONEME_ENABLE_VM_PROFILING:-0}" \
+  -DPHONEME_ENABLE_DECODED_EXECUTION="${PHONEME_ENABLE_DECODED_EXECUTION:-0}" \
   -isysroot "$SDK_ROOT" \
   -I"$CORE_ROOT/include" \
   -fno-exceptions \

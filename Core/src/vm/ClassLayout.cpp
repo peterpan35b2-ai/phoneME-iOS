@@ -4,6 +4,8 @@
 #include <bit>
 #include <utility>
 
+#include "phoneme/vm/PerformanceCounters.hpp"
+
 namespace phoneme::vm
 {
   namespace
@@ -18,6 +20,39 @@ namespace phoneme::vm
       std::string normalized(name);
       std::replace(normalized.begin(), normalized.end(), '.', '/');
       return normalized;
+    }
+
+    [[nodiscard]] Result<ValueKind> field_value_kind(
+        std::string_view descriptor)
+    {
+      auto parsed = parse_field_descriptor(descriptor);
+      if (!parsed)
+      {
+        return std::unexpected(parsed.error());
+      }
+      switch (parsed->kind)
+      {
+      case JavaTypeKind::boolean:
+      case JavaTypeKind::byte:
+      case JavaTypeKind::character:
+      case JavaTypeKind::short_integer:
+      case JavaTypeKind::integer:
+        return ValueKind::int32;
+      case JavaTypeKind::float32:
+        return ValueKind::float32;
+      case JavaTypeKind::long_integer:
+        return ValueKind::int64;
+      case JavaTypeKind::float64:
+        return ValueKind::float64;
+      case JavaTypeKind::reference:
+      case JavaTypeKind::array:
+        return ValueKind::reference;
+      case JavaTypeKind::void_type:
+        return fail(ErrorCode::malformed_class,
+                    "field descriptor cannot use void");
+      }
+      return fail(ErrorCode::internal_error,
+                  "field descriptor has an unknown value kind");
     }
 
     [[nodiscard]] std::string field_resolution_key(
@@ -83,6 +118,7 @@ namespace phoneme::vm
     }
 
     std::string current = normalize_name(owner);
+    PerformanceCounters::record_metadata_key_construction();
     const std::string cache_key = field_resolution_key(
         current, name, descriptor, require_static);
     {
@@ -90,11 +126,35 @@ namespace phoneme::vm
       if (const auto cached = resolved_fields_.find(cache_key);
           cached != resolved_fields_.end())
       {
+        PerformanceCounters::record_field_resolution(true);
         return cached->second;
       }
     }
-    const auto cache_location = [this, &cache_key](FieldLocation location) {
+    PerformanceCounters::record_field_resolution(false);
+    const auto cache_location = [this, &cache_key](FieldLocation location)
+        -> Result<FieldLocation>
+    {
       std::scoped_lock lock(mutex_);
+      if (const auto cached = resolved_fields_.find(cache_key);
+          cached != resolved_fields_.end())
+      {
+        return cached->second;
+      }
+      if (const auto canonical = field_ids_.find(location.storage_key);
+          canonical != field_ids_.end())
+      {
+        location.id = canonical->second;
+      }
+      else
+      {
+        if (next_field_id_ == 0U)
+        {
+          return fail(ErrorCode::overflow,
+                      "runtime field ID space is exhausted");
+        }
+        location.id = FieldId {next_field_id_++};
+        field_ids_.emplace(location.storage_key, location.id);
+      }
       const auto [iterator, inserted] = resolved_fields_.emplace(
           cache_key, std::move(location));
       (void)inserted;
@@ -129,13 +189,27 @@ namespace phoneme::vm
                       "field staticness does not match the bytecode opcode");
         }
 
+        auto value_kind = field_value_kind(descriptor);
+        if (!value_kind)
+        {
+          return std::unexpected(value_kind.error());
+        }
+        const auto runtime_class = classes_.metadata().find_class(current);
+        if (runtime_class == nullptr)
+        {
+          return fail(ErrorCode::internal_error,
+                      "loaded field owner has no runtime class metadata");
+        }
+
         if (is_static)
         {
           return cache_location(FieldLocation{
+              .declaring_class_id = runtime_class->id,
               .declaring_class = current,
               .name = std::string(name),
               .descriptor = std::string(descriptor),
               .index = 0,
+              .value_kind = *value_kind,
               .is_static = true,
               .constant_value_index = field.constant_value_index,
               .storage_key = field_key(current, name, descriptor),
@@ -155,10 +229,12 @@ namespace phoneme::vm
                       "instance field is absent from its class layout");
         }
         return cache_location(FieldLocation{
+            .declaring_class_id = runtime_class->id,
             .declaring_class = current,
             .name = std::string(name),
             .descriptor = std::string(descriptor),
             .index = offset->second,
+            .value_kind = *value_kind,
             .is_static = false,
             .constant_value_index = std::nullopt,
             .storage_key = key,
@@ -220,19 +296,15 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "requested field is not static");
     }
-    std::string fallback_key;
-    const std::string* key = &field.storage_key;
-    if (key->empty())
+    if (!field.id.valid())
     {
-      fallback_key = field_key(field.declaring_class,
-                               field.name,
-                               field.descriptor);
-      key = &fallback_key;
+      return fail(ErrorCode::invalid_argument,
+                  "static field has no runtime field ID");
     }
 
     {
       std::scoped_lock lock(mutex_);
-      if (const auto iterator = static_fields_.find(*key);
+      if (const auto iterator = static_fields_.find(field.id);
           iterator != static_fields_.end())
       {
         return iterator->second;
@@ -278,7 +350,7 @@ namespace phoneme::vm
     }
 
     std::scoped_lock lock(mutex_);
-    const auto [iterator, inserted] = static_fields_.emplace(*key, *initial);
+    const auto [iterator, inserted] = static_fields_.emplace(field.id, *initial);
     (void)inserted;
     return iterator->second;
   }
@@ -291,52 +363,19 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "requested field is not static");
     }
-    if (field.descriptor.empty())
+    if (!field.id.valid())
     {
-      return fail(ErrorCode::malformed_class,
-                  "static field descriptor is empty");
+      return fail(ErrorCode::invalid_argument,
+                  "static field has no runtime field ID");
     }
-    const bool compatible = [&]() noexcept
-    {
-      switch (field.descriptor.front())
-      {
-      case 'Z':
-      case 'B':
-      case 'C':
-      case 'S':
-      case 'I':
-        return value.kind() == ValueKind::int32;
-      case 'F':
-        return value.kind() == ValueKind::float32;
-      case 'J':
-        return value.kind() == ValueKind::int64;
-      case 'D':
-        return value.kind() == ValueKind::float64;
-      case 'L':
-      case '[':
-        return value.kind() == ValueKind::reference;
-      default:
-        return false;
-      }
-    }();
-
-    if (!compatible)
+    if (value.kind() != field.value_kind)
     {
       return fail(ErrorCode::invalid_argument,
                   "static field value does not match its descriptor");
     }
 
-    std::string fallback_key;
-    const std::string* key = &field.storage_key;
-    if (key->empty())
-    {
-      fallback_key = field_key(field.declaring_class,
-                               field.name,
-                               field.descriptor);
-      key = &fallback_key;
-    }
     std::scoped_lock lock(mutex_);
-    static_fields_.insert_or_assign(*key, value);
+    static_fields_.insert_or_assign(field.id, value);
     return {};
   }
 
@@ -362,7 +401,9 @@ namespace phoneme::vm
     std::scoped_lock lock(mutex_);
     layouts_.clear();
     resolved_fields_.clear();
+    field_ids_.clear();
     static_fields_.clear();
+    next_field_id_ = 1U;
   }
 
   Result<std::shared_ptr<const ClassLayout>> ClassStateRegistry::build_layout(

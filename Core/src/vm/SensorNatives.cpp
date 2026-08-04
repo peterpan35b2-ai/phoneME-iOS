@@ -17,10 +17,6 @@ namespace {
 
 constexpr std::string_view kMeasurementRange =
     "javax/microedition/sensor/MeasurementRange";
-constexpr std::string_view kChannelInfo =
-    "javax/microedition/sensor/ChannelInfo";
-constexpr std::string_view kSensorInfo =
-    "javax/microedition/sensor/SensorInfo";
 constexpr std::string_view kSensorManager =
     "javax/microedition/sensor/SensorManager";
 constexpr std::string_view kChannelImpl = "phoneme/sensor/ChannelInfoImpl";

@@ -1637,7 +1637,18 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 if (!index) return std::unexpected(index.error());
                 auto text = signed_text(*index, 10);
                 if (!text) return std::unexpected(text.error());
-                auto message = create_string(machine, std::move(*text));
+                auto runtime_class = machine.heap().class_name(*object);
+                if (!runtime_class) {
+                    return std::unexpected(runtime_class.error());
+                }
+                std::u16string message_text =
+                    *runtime_class ==
+                            "java/lang/ArrayIndexOutOfBoundsException"
+                        ? std::u16string(u"Array index out of range: ")
+                        : std::u16string(u"String index out of range: ");
+                message_text.append(*text);
+                auto message = create_string(
+                    machine, std::move(message_text));
                 if (!message) return std::unexpected(message.error());
                 auto initialized = initialize_throwable(
                     machine, *object, *message, {}, false);

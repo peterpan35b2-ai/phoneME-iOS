@@ -200,3 +200,11 @@ Artifacts/
 .agent-derived*/
 build/
 tmp*/
+
+# phoneME Web generated output
+.DS_Store
+*.tsbuildinfo
+web/node_modules/
+web/dist/
+web/public/wasm/
+__pycache__/
