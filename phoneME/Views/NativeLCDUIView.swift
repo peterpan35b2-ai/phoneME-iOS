@@ -3,14 +3,13 @@ import SwiftUI
 #if os(iOS)
 import UIKit
 
-private enum LCDUIVisualMetrics {
-    static let horizontalInset: CGFloat = 16
-    static let verticalInset: CGFloat = 12
-    static let contentMaxWidth: CGFloat = 680
-    static let alertMaxWidth: CGFloat = 520
-    static let cardCornerRadius: CGFloat = 16
+private enum LCDUIStyle {
+    static let rowIconSize: CGFloat = 32
+    static let rowIconCornerRadius: CGFloat = 7
+    static let cardCornerRadius: CGFloat = 18
     static let controlCornerRadius: CGFloat = 10
-    static let minimumRowHeight: CGFloat = 50
+    static let contentInset: CGFloat = 16
+    static let maximumContentWidth: CGFloat = 560
 }
 
 private struct LCDUIEmptyState: View {
@@ -55,8 +54,7 @@ struct NativeLCDUIScreenView: View {
 
     let imageStore: LCDUIImageStore
     let state: LCDUIState
-    let profile: GameProfile
-    let showsListTitleInContent: Bool
+    let showsTitleInContent: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,7 +62,7 @@ struct NativeLCDUIScreenView: View {
                 if state.screenKind != .alert {
                     screenHeader(
                         screen,
-                        showsTitle: state.screenKind != .list || showsListTitleInContent
+                        showsTitle: showsTitleInContent
                     )
                 }
 
@@ -91,16 +89,13 @@ struct NativeLCDUIScreenView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environmentObject(imageStore)
-        .environment(
-            \.font,
-            .system(size: resolvedFontSize(profile.fontMedium, style: .body))
-        )
+        .environment(\.font, Font.body)
         .background(surfaceBackground.ignoresSafeArea())
     }
 
     private var surfaceBackground: Color {
         switch state.screenKind {
-        case .form, .menu:
+        case .form, .list, .menu:
             return Color(uiColor: .systemGroupedBackground)
         default:
             return Color(uiColor: .systemBackground)
@@ -116,15 +111,7 @@ struct NativeLCDUIScreenView: View {
             VStack(alignment: .leading, spacing: 6) {
                 if showsTitle && !screen.title.isEmpty {
                     Text(screen.title)
-                        .font(
-                            .system(
-                                size: resolvedFontSize(
-                                    profile.fontLarge,
-                                    style: .headline
-                                ),
-                                weight: .semibold
-                            )
-                        )
+                        .font(.headline)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
@@ -132,29 +119,18 @@ struct NativeLCDUIScreenView: View {
 
                 if !screen.detail.isEmpty {
                     Text(screen.detail)
-                        .font(
-                            .system(
-                                size: resolvedFontSize(
-                                    profile.fontSmall,
-                                    style: .caption1
-                                )
-                            )
-                        )
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
             }
-            .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth, alignment: .leading)
+            .frame(maxWidth: LCDUIStyle.maximumContentWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-            .padding(.top, 10)
-            .padding(.bottom, 11)
+            .padding(.horizontal, LCDUIStyle.contentInset)
+            .padding(.vertical, 12)
             .background(surfaceBackground)
-            .overlay(alignment: .bottom) {
-                Divider()
-            }
         }
     }
 
@@ -184,81 +160,54 @@ struct NativeLCDUIScreenView: View {
     }
 
     private var menuContent: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(state.orderedCommands.enumerated()), id: \.element.id) {
-                    index,
-                    command in
-                    VStack(spacing: 0) {
-                        Button(role: command.buttonRole) {
-                            session.selectLCDUICommand(command.id)
-                        } label: {
-                            HStack(spacing: 13) {
-                                Image(systemName: command.systemImage)
-                                    .font(.body.weight(.semibold))
-                                    .frame(width: 24)
-                                    .foregroundStyle(command.tintStyle)
-                                    .accessibilityHidden(true)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(command.displayLabel)
-                                        .font(.body.weight(.medium))
-                                        .foregroundStyle(command.tintStyle)
-
-                                    if !command.longLabel.isEmpty,
-                                       command.longLabel != command.label {
-                                        Text(command.longLabel)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-
-                                Spacer(minLength: 12)
-
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                                    .accessibilityHidden(true)
-                            }
-                            .frame(
-                                maxWidth: .infinity,
-                                minHeight: LCDUIVisualMetrics.minimumRowHeight,
-                                alignment: .leading
+        List(state.orderedCommands) { command in
+            Button(role: command.buttonRole) {
+                session.selectLCDUICommand(command.id)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: command.systemImage)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(command.tintStyle)
+                        .frame(
+                            width: LCDUIStyle.rowIconSize,
+                            height: LCDUIStyle.rowIconSize
+                        )
+                        .background(
+                            command.iconBackground,
+                            in: RoundedRectangle(
+                                cornerRadius: LCDUIStyle.rowIconCornerRadius,
+                                style: .continuous
                             )
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(LCDUIImmediateFeedbackButtonStyle())
+                        )
 
-                        if index < state.orderedCommands.count - 1 {
-                            Divider()
-                                .padding(.leading, 51)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(command.displayLabel)
+                            .font(.headline)
+                            .foregroundStyle(command.tintStyle)
+                            .lineLimit(1)
+
+                        if !command.longLabel.isEmpty,
+                           command.longLabel != command.label {
+                            Text(command.longLabel)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
                         }
                     }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
                 }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
             }
-            .background(
-                Color(uiColor: .secondarySystemGroupedBackground),
-                in: RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                    style: .continuous
-                )
-                .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 0.5)
-            }
-            .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth)
-            .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-            .padding(.vertical, LCDUIVisualMetrics.verticalInset)
-            .frame(maxWidth: .infinity)
+            .buttonStyle(.plain)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .listStyle(.insetGrouped)
     }
 
     private var emptyContent: some View {
@@ -277,46 +226,56 @@ struct NativeLCDUIScreenView: View {
                 VStack(spacing: 16) {
                     alertIcon(for: screen)
 
-                    if !screen.title.isEmpty {
-                        Text(screen.title)
-                            .font(.title3.weight(.semibold))
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityAddTraits(.isHeader)
+                    VStack(spacing: 8) {
+                        if !screen.title.isEmpty {
+                            Text(screen.title)
+                                .font(.title3.weight(.semibold))
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+
+                        if !screen.detail.isEmpty {
+                            Text(screen.detail)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
                     }
 
-                    if !screen.detail.isEmpty {
-                        Text(screen.detail)
-                            .frame(maxWidth: .infinity)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
+                    if !state.visibleItems.isEmpty {
+                        Divider()
 
-                    ForEach(state.visibleItems) { item in
-                        NativeLCDUIItemView(item: item)
-                            .environmentObject(session)
-                            .frame(maxWidth: .infinity)
+                        VStack(spacing: 12) {
+                            ForEach(state.visibleItems) { item in
+                                NativeLCDUIItemView(item: item)
+                                    .environmentObject(session)
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
                     }
                 }
-                .padding(24)
-                .frame(maxWidth: LCDUIVisualMetrics.alertMaxWidth)
+                .padding(20)
+                .frame(maxWidth: 420)
                 .background(
                     Color(uiColor: .secondarySystemGroupedBackground),
                     in: RoundedRectangle(
-                        cornerRadius: LCDUIVisualMetrics.cardCornerRadius + 4,
+                        cornerRadius: LCDUIStyle.cardCornerRadius,
                         style: .continuous
                     )
                 )
                 .overlay {
                     RoundedRectangle(
-                        cornerRadius: LCDUIVisualMetrics.cardCornerRadius + 4,
+                        cornerRadius: LCDUIStyle.cardCornerRadius,
                         style: .continuous
                     )
-                    .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 0.5)
+                    .stroke(Color(uiColor: .separator).opacity(0.25), lineWidth: 0.5)
                 }
-                .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-                .padding(.vertical, 20)
+                .shadow(color: Color.black.opacity(0.08), radius: 18, y: 8)
+                .padding(.horizontal, LCDUIStyle.contentInset)
                 .frame(
                     maxWidth: .infinity,
                     minHeight: geometry.size.height,
@@ -327,6 +286,7 @@ struct NativeLCDUIScreenView: View {
             .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
         .layoutPriority(1)
     }
 
@@ -348,15 +308,6 @@ struct NativeLCDUIScreenView: View {
         case .confirmationAlert: return "questionmark.circle.fill"
         default: return "bell.fill"
         }
-    }
-
-    private func resolvedFontSize(
-        _ value: Int,
-        style: UIFont.TextStyle
-    ) -> CGFloat {
-        let base = CGFloat(min(max(value, 1), 128))
-        guard profile.fontValuesAreScaledPixels else { return base }
-        return UIFontMetrics(forTextStyle: style).scaledValue(for: base)
     }
 
     private func alertTint(for type: LCDUIState.ComponentType) -> Color {
@@ -398,11 +349,11 @@ private struct NativeLCDUIAlertIcon: View {
                     .scaledToFit()
             } else {
                 Image(systemName: fallbackSymbol)
-                    .font(.system(size: 48, weight: .semibold))
+                    .font(.system(size: 36, weight: .semibold))
                     .foregroundStyle(fallbackTint)
             }
         }
-        .frame(width: 72, height: 72)
+        .frame(width: 56, height: 56)
         .accessibilityHidden(true)
     }
 }
@@ -421,16 +372,16 @@ struct LCDUICommandBar: View {
                 leftCommand(layout)
                 rightCommand(layout)
             }
-            .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth)
+            .frame(maxWidth: LCDUIStyle.maximumContentWidth)
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-            .padding(.vertical, 7)
-            .background(.ultraThinMaterial)
+            .padding(.horizontal, LCDUIStyle.contentInset)
+            .padding(.vertical, 10)
+            .background(.regularMaterial)
             .overlay(alignment: .top) {
                 Divider()
             }
             .confirmationDialog(
-                "Commands",
+                "Options",
                 isPresented: $isShowingCommandMenu,
                 titleVisibility: .visible
             ) {
@@ -439,101 +390,74 @@ struct LCDUICommandBar: View {
                         session.selectLCDUICommand(command.id)
                     }
                 }
-                Button("Dismiss", role: .cancel) { }
+                Button("Cancel", role: .cancel) { }
             }
         }
     }
 
     @ViewBuilder
     private func leftCommand(_ layout: LCDUIState.CommandLayout) -> some View {
-        if layout.leftCommands.isEmpty {
-            softKeyPlaceholder
-        } else if layout.leftCommands.count == 1,
-                  let command = layout.leftCommands.first {
-            Button(role: command.buttonRole) {
-                session.selectLCDUICommand(command.id)
-            } label: {
-                softKeyLabel(
-                    command.displayLabel,
-                    systemImage: command.systemImage,
-                    isTrailing: false
-                )
-            }
-            .buttonStyle(LCDUISoftKeyButtonStyle())
-            .foregroundStyle(command.softKeyTint)
-            .accessibilityHint("Activates the left soft key")
-        } else {
+        if layout.leftCommands.count == 1,
+           let command = layout.leftCommands.first {
+            commandButton(command, prominent: command.buttonRole == nil)
+        } else if layout.leftCommands.count > 1 {
             Button {
                 isShowingCommandMenu = true
             } label: {
-                softKeyLabel(
-                    "Options",
-                    systemImage: "ellipsis.circle",
-                    isTrailing: false
-                )
+                commandLabel("Options", systemImage: "ellipsis.circle")
             }
-            .buttonStyle(LCDUISoftKeyButtonStyle())
-            .foregroundStyle(Color.accentColor)
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
             .accessibilityLabel("Options, \(layout.leftCommands.count) commands")
-            .accessibilityHint("Shows available commands")
+        } else {
+            Spacer(minLength: 0)
         }
     }
 
     @ViewBuilder
     private func rightCommand(_ layout: LCDUIState.CommandLayout) -> some View {
         if let command = layout.rightCommand {
+            commandButton(command, prominent: false)
+        } else {
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func commandButton(
+        _ command: LCDUIState.Command,
+        prominent: Bool
+    ) -> some View {
+        if prominent {
             Button(role: command.buttonRole) {
                 session.selectLCDUICommand(command.id)
             } label: {
-                softKeyLabel(
-                    command.displayLabel,
-                    systemImage: command.systemImage,
-                    isTrailing: true
-                )
+                commandLabel(command.displayLabel, systemImage: command.systemImage)
             }
-            .buttonStyle(LCDUISoftKeyButtonStyle())
-            .foregroundStyle(command.softKeyTint)
-            .accessibilityHint("Activates the right soft key")
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
         } else {
-            softKeyPlaceholder
+            Button(role: command.buttonRole) {
+                session.selectLCDUICommand(command.id)
+            } label: {
+                commandLabel(command.displayLabel, systemImage: command.systemImage)
+            }
+            .buttonStyle(.bordered)
+            .tint(command.softKeyTint)
+            .frame(maxWidth: .infinity)
         }
     }
 
-    private var softKeyPlaceholder: some View {
-        Color.clear
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .accessibilityHidden(true)
-    }
-
-    private func softKeyLabel(
+    private func commandLabel(
         _ title: String,
-        systemImage: String,
-        isTrailing: Bool
+        systemImage: String
     ) -> some View {
-        HStack(spacing: 7) {
-            if isTrailing {
-                Spacer(minLength: 0)
-            }
-
-            Image(systemName: systemImage)
-                .font(.subheadline.weight(.semibold))
-                .accessibilityHidden(true)
-
-            Text(title)
-                .font(.body.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-
-            if !isTrailing {
-                Spacer(minLength: 0)
-            }
-        }
-        .frame(
-            maxWidth: .infinity,
-            minHeight: 44,
-            alignment: isTrailing ? .trailing : .leading
-        )
-        .contentShape(Rectangle())
+        Label(title, systemImage: systemImage)
+            .font(.body.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity, minHeight: 32)
+            .contentShape(Rectangle())
     }
 }
 
@@ -560,69 +484,49 @@ private struct NativeLCDUIFormView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        GeometryReader { geometry in
-                            Color.clear.preference(
-                                key: LCDUIScrollOffsetPreferenceKey.self,
-                                value: max(
-                                    Int(
-                                        -geometry.frame(
-                                            in: .named("lcdui-scroll")
-                                        ).minY
-                                    ),
-                                    0
+                        LazyVStack(spacing: 0) {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: LCDUIScrollOffsetPreferenceKey.self,
+                                    value: max(
+                                        Int(
+                                            -geometry.frame(
+                                                in: .named("lcdui-scroll")
+                                            ).minY
+                                        ),
+                                        0
+                                    )
                                 )
-                            )
-                        }
-                        .frame(height: 0)
+                            }
+                            .frame(height: 0)
 
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(
-                                Array(items.enumerated()),
-                                id: \.element.id
-                            ) { index, item in
-                                VStack(spacing: 0) {
-                                    NativeLCDUIItemView(item: item)
-                                        .environmentObject(session)
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, item.formVerticalPadding)
-                                        .id(item.id)
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                NativeLCDUIItemView(item: item)
+                                    .environmentObject(session)
+                                    .id(item.id)
+                                    .padding(item.formRowInsets)
 
-                                    if index < items.count - 1,
-                                       item.type != .spacer {
-                                        Divider()
-                                            .padding(.leading, 14)
-                                    }
+                                if index < items.count - 1,
+                                   !item.hidesFormRowSeparator {
+                                    Divider()
+                                        .padding(.leading, 16)
                                 }
                             }
                         }
-                        .background(
-                            Color(uiColor: .secondarySystemGroupedBackground),
-                            in: RoundedRectangle(
-                                cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(
+                            RoundedRectangle(
+                                cornerRadius: LCDUIStyle.controlCornerRadius,
                                 style: .continuous
                             )
                         )
-                        .overlay {
-                            RoundedRectangle(
-                                cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                                style: .continuous
-                            )
-                            .stroke(
-                                Color(uiColor: .separator).opacity(0.35),
-                                lineWidth: 0.5
-                            )
-                        }
-                        .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth)
-                        .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-                        .padding(.vertical, LCDUIVisualMetrics.verticalInset)
-                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, LCDUIStyle.contentInset)
+                        .padding(.top, 4)
+                        .padding(.bottom, LCDUIStyle.contentInset)
                     }
-                    .background(Color(uiColor: .systemGroupedBackground))
                     .coordinateSpace(name: "lcdui-scroll")
                     .phoneMEScrollDismissesKeyboardInteractively()
                     .onPreferenceChange(LCDUIScrollOffsetPreferenceKey.self) { value in
-                        // Do not mutate SwiftUI state for every few pixels: that used
-                        // to re-evaluate the complete native Form while scrolling.
                         guard abs(value - scrollReporter.lastReportedPosition) >= 12 else {
                             return
                         }
@@ -645,8 +549,7 @@ private struct NativeLCDUIFormView: View {
         guard let requested = state.screen?.scrollPosition, requested > 0 else {
             return
         }
-        let target = state.visibleItems.last(where: { $0.frame.y <= requested })
-        if let target {
+        if let target = state.visibleItems.last(where: { $0.frame.y <= requested }) {
             proxy.scrollTo(target.id, anchor: .top)
         }
     }
@@ -663,43 +566,7 @@ private struct LCDUIScrollOffsetPreferenceKey: PreferenceKey {
 private struct LCDUIImmediateFeedbackButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(
-                configuration.isPressed
-                    ? Color.accentColor.opacity(0.14)
-                    : Color.clear
-            )
-            .opacity(configuration.isPressed ? 0.86 : 1)
-            .contentShape(Rectangle())
-            .transaction { transaction in
-                transaction.animation = nil
-            }
-    }
-}
-
-private struct LCDUISoftKeyButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding(.horizontal, 12)
-            .background(
-                configuration.isPressed
-                    ? Color.accentColor.opacity(0.16)
-                    : Color(uiColor: .secondarySystemBackground),
-                in: RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-                .stroke(
-                    Color(uiColor: .separator).opacity(0.32),
-                    lineWidth: 0.5
-                )
-            }
-            .opacity(configuration.isPressed ? 0.9 : 1)
+            .opacity(configuration.isPressed ? 0.55 : 1)
             .contentShape(Rectangle())
             .transaction { transaction in
                 transaction.animation = nil
@@ -730,32 +597,91 @@ private struct NativeLCDUIChoiceImage: View {
     }
 }
 
-private struct NativeLCDUIChoiceLabel: View {
-    @EnvironmentObject private var imageStore: LCDUIImageStore
+private enum LCDUIChoiceCellAccessory {
+    case disclosure
+    case checkbox(Bool)
+    case radio(Bool)
+    case progress
+}
 
+private struct LCDUIChoiceCell: View {
+    let imageStore: LCDUIImageStore
     let choice: LCDUIState.Choice
     let fitPolicy: Int
+    let accessory: LCDUIChoiceCellAccessory
+    var usesRegularListFont = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            if let imageKey = choice.imageKey {
-                NativeLCDUIChoiceImage(
-                    imageStore: imageStore,
-                    imageKey: imageKey
+        HStack(spacing: 12) {
+            choiceIcon
+                .frame(
+                    width: LCDUIStyle.rowIconSize,
+                    height: LCDUIStyle.rowIconSize
                 )
-            }
 
-            styledText
-                .fixedSize(horizontal: false, vertical: true)
+            Text(choice.text)
+                .font(usesRegularListFont ? choice.swiftUIListFont : choice.swiftUIFont)
+                .foregroundStyle(.primary)
+                .lineLimit(fitPolicy == 2 ? 1 : 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            accessoryView
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var choiceIcon: some View {
+        if let imageKey = choice.imageKey {
+            NativeLCDUIChoiceImage(
+                imageStore: imageStore,
+                imageKey: imageKey
+            )
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: LCDUIStyle.rowIconCornerRadius,
+                    style: .continuous
+                )
+            )
+        } else {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    Color(uiColor: .tertiarySystemFill),
+                    in: RoundedRectangle(
+                        cornerRadius: LCDUIStyle.rowIconCornerRadius,
+                        style: .continuous
+                    )
+                )
         }
     }
 
-    private var styledText: some View {
-        Text(choice.text)
-            .font(choice.swiftUIFont)
-            .underline(choice.fontStyle & 4 != 0)
-            .lineLimit(fitPolicy == 2 ? 1 : nil)
+    @ViewBuilder
+    private var accessoryView: some View {
+        switch accessory {
+        case .disclosure:
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        case .checkbox(let isSelected):
+            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                .font(.body)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .accessibilityHidden(true)
+        case .radio(let isSelected):
+            Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                .font(.body)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .accessibilityHidden(true)
+        case .progress:
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Opening")
+        }
     }
 }
 
@@ -777,46 +703,10 @@ private struct NativeLCDUIListView: View {
                 )
                 .accessibilityLabel("Empty list")
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(choices.enumerated()), id: \.element.id) {
-                            index,
-                            choice in
-                            VStack(spacing: 0) {
-                                choiceRow(choice)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 3)
-
-                                if index < choices.count - 1 {
-                                    Divider()
-                                        .padding(.leading, 50)
-                                }
-                            }
-                        }
-                    }
-                    .background(
-                        Color(uiColor: .secondarySystemGroupedBackground),
-                        in: RoundedRectangle(
-                            cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                            style: .continuous
-                        )
-                    )
-                    .overlay {
-                        RoundedRectangle(
-                            cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                            style: .continuous
-                        )
-                        .stroke(
-                            Color(uiColor: .separator).opacity(0.35),
-                            lineWidth: 0.5
-                        )
-                    }
-                    .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth)
-                    .padding(.horizontal, LCDUIVisualMetrics.horizontalInset)
-                    .padding(.vertical, LCDUIVisualMetrics.verticalInset)
-                    .frame(maxWidth: .infinity)
+                List(choices) { choice in
+                    choiceRow(choice)
                 }
-                .background(Color(uiColor: .systemGroupedBackground))
+                .listStyle(.insetGrouped)
             }
         }
     }
@@ -850,7 +740,6 @@ private struct NativeLCDUIListView: View {
         }
     }
 
-    @ViewBuilder
     private func choiceRow(_ choice: LCDUIState.Choice) -> some View {
         Button {
             if effectiveType == .implicitChoice {
@@ -858,42 +747,15 @@ private struct NativeLCDUIListView: View {
             }
             select(choice)
         } label: {
-            HStack(spacing: 12) {
-                if effectiveType != .implicitChoice {
-                    selectionIndicator(for: choice)
-                        .frame(width: 22)
-                }
-
-                choiceLabel(choice)
-
-                if effectiveType == .implicitChoice {
-                    if pendingImplicitChoiceIndex == choice.index {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel("Opening")
-                    } else {
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                            .accessibilityHidden(true)
-                    }
-                }
-            }
-            .frame(
-                maxWidth: .infinity,
-                minHeight: LCDUIVisualMetrics.minimumRowHeight,
-                alignment: .leading
+            LCDUIChoiceCell(
+                imageStore: session.lcdUIImageStore,
+                choice: choice,
+                fitPolicy: item.fitPolicy,
+                accessory: listAccessory(for: choice),
+                usesRegularListFont: true
             )
-            .background(
-                rowBackground(for: choice),
-                in: RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(LCDUIImmediateFeedbackButtonStyle())
+        .buttonStyle(.plain)
         .accessibilityValue(
             effectiveType == .implicitChoice
                 ? ""
@@ -901,44 +763,22 @@ private struct NativeLCDUIListView: View {
         )
     }
 
-    private func rowBackground(for choice: LCDUIState.Choice) -> Color {
-        if effectiveType == .implicitChoice,
-           pendingImplicitChoiceIndex == choice.index {
-            return Color.accentColor.opacity(0.12)
+    private func listAccessory(
+        for choice: LCDUIState.Choice
+    ) -> LCDUIChoiceCellAccessory {
+        if effectiveType == .implicitChoice {
+            return pendingImplicitChoiceIndex == choice.index
+                ? .progress
+                : .disclosure
         }
-        if effectiveType != .implicitChoice, choice.isSelected {
-            return Color.accentColor.opacity(0.08)
-        }
-        return .clear
-    }
-
-    @ViewBuilder
-    private func selectionIndicator(for choice: LCDUIState.Choice) -> some View {
         switch effectiveType {
         case .multipleChoice:
-            Image(systemName: choice.isSelected ? "checkmark.square.fill" : "square")
-                .foregroundStyle(choice.isSelected ? Color.accentColor : .secondary)
-                .accessibilityHidden(true)
-
+            return .checkbox(choice.isSelected)
         case .exclusiveChoice:
-            Image(
-                systemName: choice.isSelected
-                    ? "largecircle.fill.circle"
-                    : "circle"
-            )
-            .foregroundStyle(choice.isSelected ? Color.accentColor : .secondary)
-            .accessibilityHidden(true)
-
+            return .radio(choice.isSelected)
         default:
-            Color.clear
-                .accessibilityHidden(true)
+            return .disclosure
         }
-    }
-
-    @ViewBuilder
-    private func choiceLabel(_ choice: LCDUIState.Choice) -> some View {
-        NativeLCDUIChoiceLabel(choice: choice, fitPolicy: item.fitPolicy)
-            .environmentObject(session)
     }
 }
 
@@ -980,27 +820,37 @@ private struct NativeLCDUIItemView: View {
                     .environmentObject(session)
 
             case .buttonString:
-                Button {
-                    session.activateLCDUIItem(item.id)
-                } label: {
-                    styledString(item.contentLabel)
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                labeledContent {
+                    Button {
+                        session.activateLCDUIItem(item.id)
+                    } label: {
+                        styledString(item.contentLabel)
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
 
             case .hyperlinkString:
-                Button {
-                    session.activateLCDUIItem(item.id)
-                } label: {
-                    HStack(spacing: 6) {
-                        styledString(item.contentLabel)
-                        Image(systemName: "arrow.up.right")
-                            .font(.caption.weight(.semibold))
-                            .accessibilityHidden(true)
+                labeledContent {
+                    Button {
+                        session.activateLCDUIItem(item.id)
+                    } label: {
+                        HStack(spacing: 8) {
+                            styledString(item.contentLabel)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption.weight(.semibold))
+                                .accessibilityHidden(true)
+                        }
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                     }
-                    .frame(minHeight: 44)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tint)
                 }
-                .buttonStyle(.borderless)
 
             case .plainString:
                 labeledContent {
@@ -1031,7 +881,7 @@ private struct NativeLCDUIItemView: View {
                     } label: {
                         nativePixelImage
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
                 }
 
             case .customItem:
@@ -1042,39 +892,13 @@ private struct NativeLCDUIItemView: View {
 
             case .spacer:
                 Color.clear
-                    .frame(height: CGFloat(max(item.frame.height, 8)))
+                    .frame(height: CGFloat(min(max(item.frame.height, 8), 48)))
 
             default:
                 EmptyView()
             }
         }
-        .frame(
-            maxWidth: item.expandsHorizontally ? .infinity : nil,
-            alignment: item.horizontalAlignment
-        )
-        .frame(
-            minHeight: item.frame.height > 0
-                ? CGFloat(min(item.frame.height, 1_024))
-                : nil
-        )
-        .background(
-            item.isFocused && item.isInteractiveControl
-                ? Color.accentColor.opacity(0.08)
-                : Color.clear,
-            in: RoundedRectangle(
-                cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                style: .continuous
-            )
-        )
-        .overlay {
-            if item.isFocused && item.isInteractiveControl {
-                RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-                .stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
-            }
-        }
+        .frame(maxWidth: .infinity, alignment: item.horizontalAlignment)
     }
 
     private var nativePixelImage: some View {
@@ -1098,30 +922,20 @@ private struct NativeLCDUIItemView: View {
                             selected: true
                         )
                     } label: {
-                        HStack(spacing: 12) {
-                            Image(
-                                systemName: choice.isSelected
-                                    ? "largecircle.fill.circle"
-                                    : "circle"
-                            )
-                            .foregroundStyle(
-                                choice.isSelected ? Color.accentColor : .secondary
-                            )
-                            NativeLCDUIChoiceLabel(
-                                choice: choice,
-                                fitPolicy: item.fitPolicy
-                            )
-                            .environmentObject(session)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
+                        LCDUIChoiceCell(
+                            imageStore: session.lcdUIImageStore,
+                            choice: choice,
+                            fitPolicy: item.fitPolicy,
+                            accessory: .radio(choice.isSelected)
+                        )
+                        .frame(minHeight: 44)
                     }
                     .buttonStyle(LCDUIImmediateFeedbackButtonStyle())
                     .accessibilityValue(choice.isSelected ? "Selected" : "Not selected")
 
                     if index < choices.count - 1 {
                         Divider()
-                            .padding(.leading, 34)
+                            .padding(.leading, 44)
                     }
                 }
             }
@@ -1132,7 +946,7 @@ private struct NativeLCDUIItemView: View {
         let choices = item.orderedChoices
         return labeledContent {
             VStack(spacing: 0) {
-                ForEach(choices) { choice in
+                ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
                     Button {
                         session.focusLCDUIItem(item.id)
                         showPendingFeedback(for: choice.index)
@@ -1142,35 +956,21 @@ private struct NativeLCDUIItemView: View {
                             selected: true
                         )
                     } label: {
-                        HStack {
-                            NativeLCDUIChoiceLabel(
-                                choice: choice,
-                                fitPolicy: item.fitPolicy
-                            )
-                            .environmentObject(session)
-                            if pendingImplicitChoiceIndex == choice.index {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .accessibilityLabel("Opening")
-                            } else {
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 4)
-                        .background(
-                            pendingImplicitChoiceIndex == choice.index
-                                ? Color.accentColor.opacity(0.12)
-                                : Color.clear
+                        LCDUIChoiceCell(
+                            imageStore: session.lcdUIImageStore,
+                            choice: choice,
+                            fitPolicy: item.fitPolicy,
+                            accessory: pendingImplicitChoiceIndex == choice.index
+                                ? .progress
+                                : .disclosure
                         )
-                        .contentShape(Rectangle())
+                        .frame(minHeight: 44)
                     }
                     .buttonStyle(LCDUIImmediateFeedbackButtonStyle())
 
-                    if choice.index != choices.last?.index {
+                    if index < choices.count - 1 {
                         Divider()
+                            .padding(.leading, 44)
                     }
                 }
             }
@@ -1200,23 +1000,13 @@ private struct NativeLCDUIItemView: View {
                             selected: !choice.isSelected
                         )
                     } label: {
-                        HStack(spacing: 12) {
-                            Image(
-                                systemName: choice.isSelected
-                                    ? "checkmark.square.fill"
-                                    : "square"
-                            )
-                            .foregroundStyle(
-                                choice.isSelected ? Color.accentColor : .secondary
-                            )
-                            NativeLCDUIChoiceLabel(
-                                choice: choice,
-                                fitPolicy: item.fitPolicy
-                            )
-                            .environmentObject(session)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
+                        LCDUIChoiceCell(
+                            imageStore: session.lcdUIImageStore,
+                            choice: choice,
+                            fitPolicy: item.fitPolicy,
+                            accessory: .checkbox(choice.isSelected)
+                        )
+                        .frame(minHeight: 44)
                     }
                     .buttonStyle(LCDUIImmediateFeedbackButtonStyle())
                     .accessibilityValue(
@@ -1225,7 +1015,7 @@ private struct NativeLCDUIItemView: View {
 
                     if index < choices.count - 1 {
                         Divider()
-                            .padding(.leading, 34)
+                            .padding(.leading, 44)
                     }
                 }
             }
@@ -1245,7 +1035,7 @@ private struct NativeLCDUIItemView: View {
         VStack(alignment: .leading, spacing: 8) {
             if !item.label.isEmpty {
                 Text(item.label)
-                    .font(.caption.weight(.semibold))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                     .textCase(nil)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1286,7 +1076,16 @@ private struct NativeLCDUIItemImage: View {
                     .accessibilityLabel(item.contentLabel)
             } else {
                 Label(item.contentLabel, systemImage: placeholderSymbol)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 72)
+                    .background(
+                        Color(uiColor: .tertiarySystemFill),
+                        in: RoundedRectangle(
+                            cornerRadius: LCDUIStyle.controlCornerRadius,
+                            style: .continuous
+                        )
+                    )
             }
         }
         .frame(
@@ -1294,19 +1093,23 @@ private struct NativeLCDUIItemImage: View {
             minHeight: minimumPlaceholderHeight,
             alignment: item.horizontalAlignment
         )
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: LCDUIStyle.controlCornerRadius,
+                style: .continuous
+            )
+        )
     }
 
     @ViewBuilder
     private func renderedImage(_ image: CGImage) -> some View {
-        if scalesToFitContainer {
+        if scalesToFitContainer || image.width > 320 {
             Image(decorative: image, scale: 1)
                 .resizable()
                 .interpolation(.none)
                 .scaledToFit()
+                .frame(maxHeight: 320)
         } else {
-            // MIDP ImageItem uses the source image's native pixel dimensions.
-            // Keeping the image non-resizable prevents a small Form icon from
-            // being expanded to the full width offered by the Form row.
             Image(decorative: image, scale: 1)
                 .interpolation(.none)
         }
@@ -1336,7 +1139,9 @@ private struct NativeLCDUICustomItem: View {
             imageStore: session.lcdUIImageStore,
             item: item,
             placeholderSymbol: "rectangle.dashed",
-            minimumPlaceholderHeight: CGFloat(max(item.frame.height, 44)),
+            minimumPlaceholderHeight: CGFloat(
+                min(max(item.frame.height, 80), 320)
+            ),
             scalesToFitContainer: true
         )
     }
@@ -1395,9 +1200,13 @@ private struct NativeLCDUIPopupChoice: View {
     let item: LCDUIState.Item
 
     var body: some View {
-        PhoneMELabeledContent {
+        HStack(spacing: 12) {
+            Text(item.label.isEmpty ? "Selection" : item.label)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             Picker(
-                item.label,
+                "",
                 selection: Binding(
                     get: {
                         item.orderedChoices.first(where: \.isSelected)?.index
@@ -1415,59 +1224,14 @@ private struct NativeLCDUIPopupChoice: View {
                 )
             ) {
                 ForEach(item.orderedChoices) { choice in
-                    NativeLCDUIChoiceLabel(
-                        choice: choice,
-                        fitPolicy: item.fitPolicy
-                    )
-                    .environmentObject(session)
-                    .tag(choice.index)
+                    Text(choice.text)
+                        .tag(choice.index)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
-        } label: {
-            if !item.label.isEmpty {
-                Text(item.label)
-            }
         }
-    }
-}
-
-private struct NativeLCDUIInputSurface: ViewModifier {
-    let isFocused: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .foregroundStyle(Color(uiColor: .label))
-            .tint(Color(uiColor: .systemBlue))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(minHeight: 44)
-            .background(
-                Color(uiColor: .secondarySystemBackground),
-                in: RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.controlCornerRadius,
-                    style: .continuous
-                )
-                .stroke(
-                    isFocused
-                        ? Color(uiColor: .systemBlue)
-                        : Color(uiColor: .separator).opacity(0.7),
-                    lineWidth: isFocused ? 1.5 : 0.5
-                )
-            }
-    }
-}
-
-private extension View {
-    func nativeLCDUIInputSurface(isFocused: Bool = false) -> some View {
-        modifier(NativeLCDUIInputSurface(isFocused: isFocused))
+        .frame(minHeight: 44)
     }
 }
 
@@ -1484,39 +1248,47 @@ private struct NativeLCDUITextField: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             if !item.label.isEmpty {
                 Text(item.label)
-                    .font(.caption.weight(.semibold))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if isUneditable {
                 Text(text)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .nativeLCDUIInputSurface()
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .background(
+                        Color(uiColor: .tertiarySystemFill),
+                        in: RoundedRectangle(
+                            cornerRadius: LCDUIStyle.controlCornerRadius,
+                            style: .continuous
+                        )
+                    )
                     .accessibilityAddTraits(.isStaticText)
             } else if isPassword {
                 SecureField("", text: binding)
                     .textFieldStyle(.plain)
+                    .lcdUIInputSurface()
                     .keyboardType(keyboardType)
                     .textInputAutocapitalization(capitalization)
                     .autocorrectionDisabled(isNonPredictive || isSensitive)
                     .submitLabel(.done)
                     .focused($isFocused)
                     .onSubmit { isFocused = false }
-                    .nativeLCDUIInputSurface(isFocused: isFocused)
             } else {
                 TextField("", text: binding)
                     .textFieldStyle(.plain)
+                    .lcdUIInputSurface()
                     .keyboardType(keyboardType)
                     .textInputAutocapitalization(capitalization)
                     .autocorrectionDisabled(isNonPredictive || isSensitive)
                     .submitLabel(.done)
                     .focused($isFocused)
                     .onSubmit { isFocused = false }
-                    .nativeLCDUIInputSurface(isFocused: isFocused)
             }
 
             if item.maxSize > 0, !isUneditable {
@@ -1603,74 +1375,63 @@ private struct NativeLCDUITextBox: View {
     }
 
     var body: some View {
-        ZStack {
-            Color(uiColor: .systemGroupedBackground)
-
+        VStack(spacing: 8) {
             Group {
                 if item.constraints & 0x20000 != 0 {
                     ScrollView {
                         Text(text)
-                            .foregroundStyle(Color(uiColor: .label))
                             .frame(maxWidth: .infinity, alignment: .topLeading)
                             .textSelection(.enabled)
                             .padding(12)
                     }
-                    .background(Color(uiColor: .tertiarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(
+                        Color(uiColor: .secondarySystemGroupedBackground),
+                        in: RoundedRectangle(
+                            cornerRadius: LCDUIStyle.controlCornerRadius,
+                            style: .continuous
+                        )
+                    )
                 } else if item.constraints & 0x10000 != 0 {
                     SecureField("", text: binding)
                         .textFieldStyle(.plain)
+                        .lcdUIInputSurface()
                         .keyboardType(keyboardType)
                         .textInputAutocapitalization(capitalization)
                         .autocorrectionDisabled(isNonPredictive || isSensitive)
                         .submitLabel(.done)
                         .focused($isFocused)
                         .onSubmit { isFocused = false }
-                        .nativeLCDUIInputSurface(isFocused: isFocused)
-                        .padding(12)
                         .frame(maxHeight: .infinity, alignment: .top)
                 } else {
                     TextEditor(text: binding)
-                        .foregroundStyle(Color(uiColor: .label))
-                        .tint(Color(uiColor: .systemBlue))
                         .focused($isFocused)
                         .keyboardType(keyboardType)
                         .textInputAutocapitalization(capitalization)
                         .autocorrectionDisabled(isNonPredictive || isSensitive)
                         .phoneMEScrollContentBackgroundHidden()
-                        .background(Color(uiColor: .tertiarySystemGroupedBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(
-                                    isFocused
-                                        ? Color(uiColor: .systemBlue)
-                                        : Color(uiColor: .separator),
-                                    lineWidth: isFocused ? 1.5 : 0.5
-                                )
-                        }
-                        .padding(12)
+                        .padding(8)
+                        .background(
+                            Color(uiColor: .secondarySystemGroupedBackground),
+                            in: RoundedRectangle(
+                                cornerRadius: LCDUIStyle.controlCornerRadius,
+                                style: .continuous
+                            )
+                        )
                 }
             }
-            .background(
-                Color(uiColor: .secondarySystemGroupedBackground),
-                in: RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: LCDUIVisualMetrics.cardCornerRadius,
-                    style: .continuous
-                )
-                .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 0.5)
+
+            if item.maxSize > 0, item.constraints & 0x20000 == 0 {
+                Text("\(text.count) / \(item.maxSize)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .frame(maxWidth: LCDUIVisualMetrics.contentMaxWidth)
-            .frame(maxWidth: .infinity)
-            .padding(LCDUIVisualMetrics.horizontalInset)
         }
+        .frame(maxWidth: LCDUIStyle.maximumContentWidth, maxHeight: .infinity)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, LCDUIStyle.contentInset)
+        .padding(.vertical, 12)
+        .background(Color(uiColor: .systemGroupedBackground))
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
@@ -1741,11 +1502,19 @@ private struct NativeLCDUIProgressGauge: View {
     let item: LCDUIState.Item
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if !item.label.isEmpty {
-                Text(item.label)
-                    .font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(item.label.isEmpty ? "Progress" : item.label)
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if item.maxValue > 0 {
+                    Text(progressValue)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if item.maxValue == -1 {
@@ -1760,12 +1529,22 @@ private struct NativeLCDUIProgressGauge: View {
         }
     }
 
+    private var progressValue: String {
+        let maximum = max(item.maxValue, 1)
+        let percent = Int((Double(max(item.value, 0)) / Double(maximum) * 100).rounded())
+        return "\(min(percent, 100))%"
+    }
+
     @ViewBuilder
     private var indefiniteProgress: some View {
         switch item.value {
         case 2, 3:
-            ProgressView()
-                .accessibilityLabel("Loading")
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Loading…")
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("Loading")
         case 1:
             ProgressView(value: 1, total: 1)
                 .accessibilityLabel("Paused")
@@ -1788,12 +1567,19 @@ private struct NativeLCDUIGauge: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if !item.label.isEmpty {
-                Text(item.label)
-                    .font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(item.label.isEmpty ? "Value" : item.label)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("\(Int(value)) / \(max(item.maxValue, 1))")
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+
             Slider(
                 value: Binding(
                     get: { value },
@@ -1829,7 +1615,7 @@ private struct NativeLCDUIDateField: View {
 
     var body: some View {
         DatePicker(
-            item.label,
+            item.label.isEmpty ? "Date & Time" : item.label,
             selection: Binding(
                 get: { date },
                 set: { newValue in
@@ -1839,6 +1625,7 @@ private struct NativeLCDUIDateField: View {
             ),
             displayedComponents: displayedComponents
         )
+        .datePickerStyle(.compact)
         .environment(\.timeZone, resolvedTimeZone)
         .onChange(of: item.date) { newValue in
             date = newValue
@@ -1858,8 +1645,37 @@ private struct NativeLCDUIDateField: View {
     }
 }
 
+private extension View {
+    func lcdUIInputSurface() -> some View {
+        padding(.horizontal, 12)
+            .frame(minHeight: 44)
+            .background(
+                Color(uiColor: .tertiarySystemFill),
+                in: RoundedRectangle(
+                    cornerRadius: LCDUIStyle.controlCornerRadius,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: LCDUIStyle.controlCornerRadius,
+                    style: .continuous
+                )
+                .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 0.5)
+            }
+    }
+}
+
 private extension LCDUIState.Choice {
     var swiftUIFont: Font {
+        resolvedFont(weight: fontStyle & 1 != 0 ? .bold : .regular)
+    }
+
+    var swiftUIListFont: Font {
+        resolvedFont(weight: .regular)
+    }
+
+    private func resolvedFont(weight: Font.Weight) -> Font {
         let pointSize: CGFloat
         switch fontSize {
         case 8: pointSize = 13
@@ -1867,7 +1683,6 @@ private extension LCDUIState.Choice {
         default: pointSize = 17
         }
 
-        let weight: Font.Weight = fontStyle & 1 != 0 ? .bold : .regular
         let design: Font.Design = fontFace == 32 ? .monospaced : .default
         var font = Font.system(size: pointSize, weight: weight, design: design)
         if fontStyle & 2 != 0 {
@@ -1880,8 +1695,6 @@ private extension LCDUIState.Choice {
 private extension LCDUIState.Item {
     static let layoutRight = 2
     static let layoutCenter = 3
-    static let layoutExpand = 2_048
-
     var swiftUIFont: Font {
         let pointSize: CGFloat
         switch fontSize {
@@ -1917,26 +1730,18 @@ private extension LCDUIState.Item {
         }
     }
 
-    var expandsHorizontally: Bool {
-        layout & Self.layoutExpand != 0
-    }
-
-    var formVerticalPadding: CGFloat {
+    var formRowInsets: EdgeInsets {
         switch type {
         case .spacer:
-            return 0
-        case .plainString, .plainImage:
-            return 10
+            return EdgeInsets()
         default:
-            return 12
+            return EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16)
         }
     }
 
-    var isInteractiveControl: Bool {
+    var hidesFormRowSeparator: Bool {
         switch type {
-        case .hyperlinkImage, .buttonImage, .hyperlinkString, .buttonString,
-             .textField, .interactiveGauge, .dateField,
-             .exclusiveChoice, .multipleChoice, .implicitChoice, .popupChoice,
+        case .spacer, .exclusiveChoice, .multipleChoice, .implicitChoice,
              .customItem:
             return true
         default:
@@ -2009,6 +1814,15 @@ private extension LCDUIState.Command {
         default: return .accentColor
         }
     }
+
+    var iconBackground: Color {
+        switch type {
+        case 6, 7:
+            return Color.red.opacity(0.12)
+        default:
+            return Color.accentColor.opacity(0.12)
+        }
+    }
 }
 
 private extension CGImage {
@@ -2045,8 +1859,7 @@ private extension CGImage {
 struct NativeLCDUIScreenView: View {
     @ObservedObject var imageStore: LCDUIImageStore
     let state: LCDUIState
-    let profile: GameProfile
-    let showsListTitleInContent: Bool
+    let showsTitleInContent: Bool
 
     var body: some View {
         Text(state.screen?.title ?? "LCDUI")

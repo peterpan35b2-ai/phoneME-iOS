@@ -243,6 +243,25 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                    : std::string(target_language)));
 }
 
+int32_t phoneme_configure_app_translation(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t enabled,
+    const char* source_language,
+    const char* target_language) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(instance->configure_app_translation(
+        phoneme::AppId {app_id},
+        enabled != 0,
+        source_language == nullptr ? std::string("auto")
+                                   : std::string(source_language),
+        target_language == nullptr ? std::string("vi")
+                                   : std::string(target_language)));
+}
+
 int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,
     PhoneMEPermissionPromptCallback callback,

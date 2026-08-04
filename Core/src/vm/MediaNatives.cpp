@@ -1279,6 +1279,23 @@ void register_player(NativeMethodRegistry& registry) {
 
     add(registry,
         "javax/microedition/media/IOSPlayer",
+        "setMediaTime",
+        "(J)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto player = receiver(arguments);
+            auto time = long_argument(arguments, 1U);
+            if (!player) return std::unexpected(player.error());
+            if (!time) return std::unexpected(time.error());
+            auto id = player_id(machine, *player);
+            if (!id) return std::unexpected(id.error());
+            auto result = machine.media().set_media_time(*id, *time);
+            if (!result) return map_media_error(result.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry,
+        "javax/microedition/media/IOSPlayer",
         "getMediaTime",
         "()J",
         [](Machine& machine, std::span<const Value> arguments)

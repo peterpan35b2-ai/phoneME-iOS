@@ -367,7 +367,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         frameRateLimit: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
-        translateChineseToVietnamese: Bool,
+        autoTranslateToVietnamese: Bool,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -435,7 +435,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 let translationResult = loadedAPI.configureTranslation(
                     createdRuntime,
-                    enabled: translateChineseToVietnamese
+                    enabled: autoTranslateToVietnamese
                 )
                 guard translationResult == 0 else {
                     loadedAPI.destroyRuntime(createdRuntime)
@@ -677,9 +677,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
-    func deleteStoredData(
+    func uninstallApplication(
         gameID: UUID,
         jarURL: URL,
+        removeData: Bool,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         let context = runtimeContext
@@ -699,7 +700,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 let status = loadedAPI.uninstallSuite(
                     createdRuntime,
                     suiteID: suiteID,
-                    removeData: true
+                    removeData: removeData
                 )
                 guard status == PHONEME_OK else {
                     throw PhoneMECoreError.launchFailed(status)
@@ -740,7 +741,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         frameRateLimit: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
-        translateChineseToVietnamese: Bool,
+        autoTranslateToVietnamese: Bool,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -838,7 +839,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 let translationResult = loadedAPI.configureTranslation(
                     createdRuntime,
-                    enabled: translateChineseToVietnamese
+                    enabled: autoTranslateToVietnamese
                 )
                 guard translationResult == 0 else {
                     throw PhoneMECoreError.launchFailed(translationResult)
@@ -1010,6 +1011,36 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    func setApplicationTranslation(
+        gameID: UUID,
+        enabled: Bool,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let context = runtimeContext
+        runtimeQueue.async {
+            let result: Result<Void, Error>
+            if let loadedAPI = context.api,
+               let createdRuntime = context.runtime,
+               let appID = context.appIDs[gameID] {
+                let status = loadedAPI.configureApplicationTranslation(
+                    createdRuntime,
+                    appID: appID,
+                    enabled: enabled
+                )
+                result = status == 0
+                    ? .success(())
+                    : .failure(PhoneMECoreError.launchFailed(status))
+            } else {
+                // The per-game preference is still persisted by the caller and
+                // will be applied when this MIDlet starts next time.
+                result = .success(())
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
     func hideCurrentApplication() {
         guard let gameID = foregroundGameID ?? pendingForegroundGameID else {
             return
@@ -1105,44 +1136,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     self.runtimeIsSuspended = false
                     self.runtimeSuspensionRequested = false
                 }
-            }
-        }
-    }
-
-    func measureApplicationMemoryUsage(
-        gameIDs: Set<UUID>,
-        completion: @escaping ([UUID: UInt64]) -> Void
-    ) {
-        guard !gameIDs.isEmpty else {
-            completion([:])
-            return
-        }
-
-        let context = runtimeContext
-        runtimeQueue.async {
-            guard
-                let loadedAPI = context.api,
-                let createdRuntime = context.runtime
-            else {
-                DispatchQueue.main.async { completion([:]) }
-                return
-            }
-
-            var usageByGameID: [UUID: UInt64] = [:]
-            usageByGameID.reserveCapacity(gameIDs.count)
-            for gameID in gameIDs {
-                guard let appID = context.appIDs[gameID] else { continue }
-                if let usedMemory = loadedAPI.midletUsedMemory(
-                    createdRuntime,
-                    appID: appID,
-                    timeoutMilliseconds: 150
-                ) {
-                    usageByGameID[gameID] = usedMemory
-                }
-            }
-
-            DispatchQueue.main.async {
-                completion(usageByGameID)
             }
         }
     }

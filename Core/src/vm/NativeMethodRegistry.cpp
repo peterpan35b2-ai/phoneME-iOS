@@ -1,5 +1,7 @@
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 
+#include <algorithm>
+#include <tuple>
 #include <utility>
 
 #include "phoneme/vm/Machine.hpp"
@@ -23,6 +25,12 @@ Status NativeMethodRegistry::register_method(
                     "native method is already registered");
     }
     methods_.emplace(method_key, std::move(implementation));
+    signatures_.emplace(method_key, NativeMethodSignature {
+        .owner = std::move(owner),
+        .name = std::move(name),
+        .descriptor = std::move(descriptor),
+    });
+    invocation_counts_.emplace(method_key, 0U);
     return {};
 }
 
@@ -50,6 +58,10 @@ Result<std::optional<Value>> NativeMethodRegistry::invoke(
                             std::string(descriptor));
         }
         implementation = iterator->second;
+        auto count = invocation_counts_.find(key(owner, name, descriptor));
+        if (count != invocation_counts_.end()) {
+            ++count->second;
+        }
     }
     auto result = implementation(machine, arguments);
     if (!result) {
@@ -61,9 +73,55 @@ Result<std::optional<Value>> NativeMethodRegistry::invoke(
     return result;
 }
 
+std::vector<NativeMethodSignature>
+NativeMethodRegistry::registered_methods() const {
+    std::scoped_lock lock(mutex_);
+    std::vector<NativeMethodSignature> result;
+    result.reserve(signatures_.size());
+    for (const auto& [method_key, signature] : signatures_) {
+        static_cast<void>(method_key);
+        result.push_back(signature);
+    }
+    std::ranges::sort(result, {}, [](const NativeMethodSignature& signature) {
+        return std::tie(signature.owner, signature.name, signature.descriptor);
+    });
+    return result;
+}
+
+std::vector<NativeMethodInvocationCount>
+NativeMethodRegistry::invocation_counts() const {
+    std::scoped_lock lock(mutex_);
+    std::vector<NativeMethodInvocationCount> result;
+    result.reserve(signatures_.size());
+    for (const auto& [method_key, signature] : signatures_) {
+        const auto count = invocation_counts_.find(method_key);
+        result.push_back(NativeMethodInvocationCount {
+            .signature = signature,
+            .count = count == invocation_counts_.end() ? 0U : count->second,
+        });
+    }
+    std::ranges::sort(result, {},
+        [](const NativeMethodInvocationCount& entry) {
+            return std::tie(entry.signature.owner,
+                            entry.signature.name,
+                            entry.signature.descriptor);
+        });
+    return result;
+}
+
+void NativeMethodRegistry::reset_invocation_counts() noexcept {
+    std::scoped_lock lock(mutex_);
+    for (auto& [method_key, count] : invocation_counts_) {
+        static_cast<void>(method_key);
+        count = 0U;
+    }
+}
+
 void NativeMethodRegistry::clear() noexcept {
     std::scoped_lock lock(mutex_);
     methods_.clear();
+    signatures_.clear();
+    invocation_counts_.clear();
 }
 
 std::string NativeMethodRegistry::key(std::string_view owner,

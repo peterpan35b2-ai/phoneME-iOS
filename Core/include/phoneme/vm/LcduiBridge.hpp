@@ -33,5 +33,6 @@ enum class CustomItemKeyPhase : i64 {
                                          i64 value64,
                                          std::string text);
 [[nodiscard]] Status pump_lcdui_alert_timeouts(Machine& machine);
+[[nodiscard]] Status replay_current_lcdui(Machine& machine);
 
 } // namespace phoneme::vm

@@ -2,6 +2,8 @@ package corefixture;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -95,6 +97,89 @@ public final class FileOps {
         file.close();
         directory.delete();
         directory.close();
+        return 1;
+    }
+
+    public static int javaIoFileCompatibility() throws Exception {
+        File directory = new File("jdk8-file");
+        if (directory.exists()) {
+            directory.delete();
+        }
+        if (!directory.mkdir() || !directory.exists()
+                || !directory.isDirectory()) {
+            return 0;
+        }
+
+        File file = new File("jdk8-file/data.bin");
+        FileOutputStream output = new FileOutputStream(file);
+        output.write(new byte[] {1, 2, 3, 4});
+        output.close();
+        if (!file.exists() || !file.isFile() || file.length() != 4L) {
+            return 0;
+        }
+        FileInputStream input = new FileInputStream(file);
+        int total = 0;
+        int value;
+        while ((value = input.read()) >= 0) {
+            total += value;
+        }
+        input.close();
+        if (total != 10) {
+            return 0;
+        }
+
+        File renamed = new File("jdk8-file/renamed.bin");
+        if (!file.renameTo(renamed) || file.exists()
+                || !renamed.exists() || renamed.length() != 4L) {
+            return 0;
+        }
+
+        FileConnection connection = (FileConnection) Connector.open(
+            "file:///jdk8-file", Connector.READ_WRITE);
+        connection.setFileConnection("renamed.bin");
+        if (!"renamed.bin".equals(connection.getName())
+                || connection.fileSize() != 4L) {
+            return 0;
+        }
+        connection.setFileConnection("..");
+        if (!connection.isDirectory()) {
+            return 0;
+        }
+        connection.close();
+
+        if (!renamed.delete() || !directory.delete()) {
+            return 0;
+        }
+        return 1;
+    }
+
+    public static int suppressedExceptions() {
+        Throwable primary = new Exception("primary");
+        Throwable first = new IOException("first");
+        Throwable second = new IllegalStateException("second");
+        primary.addSuppressed(first);
+        primary.addSuppressed(second);
+        Throwable[] suppressed = primary.getSuppressed();
+        if (suppressed.length != 2 || suppressed[0] != first
+                || suppressed[1] != second) {
+            return 0;
+        }
+        suppressed[0] = second;
+        if (primary.getSuppressed()[0] != first) {
+            return 0;
+        }
+        try {
+            primary.addSuppressed(null);
+            return 0;
+        } catch (NullPointerException expected) {
+            // Expected.
+        }
+        try {
+            primary.addSuppressed(primary);
+            return 0;
+        } catch (IllegalArgumentException expected) {
+            // Expected.
+        }
         return 1;
     }
 

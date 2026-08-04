@@ -44,6 +44,13 @@ Result<std::optional<bool>> connection_stream_write_one(Machine&,
     return std::optional<bool> {};
 }
 
+Result<std::optional<bool>> connection_stream_write_bytes(
+    Machine&,
+    ObjectRef,
+    std::span<const u8>) {
+    return std::optional<bool> {};
+}
+
 Result<std::optional<bool>> connection_stream_flush(Machine&, ObjectRef) {
     return std::optional<bool> {};
 }

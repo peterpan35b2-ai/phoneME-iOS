@@ -58,6 +58,7 @@ constexpr i32 kItemStyleMetadata = -1005;
 constexpr i32 kScreenKindMetadata = -1006;
 constexpr i32 kTickerMetadata = -1008;
 constexpr i32 kAlertMetadata = -1009;
+constexpr i32 kScreenKindList = 1;
 constexpr i32 kScreenKindTextBox = 2;
 constexpr i32 kScreenKindAlert = 3;
 
@@ -135,6 +136,8 @@ constexpr usize kImageItemGenerationField = 14;
 constexpr usize kCustomItemPaintImageField = 11;
 constexpr usize kCustomItemPaintGenerationField = 12;
 
+constexpr usize kListPeerIdField = 9;
+constexpr usize kListChoiceTypeField = 10;
 constexpr usize kTextBoxPeerIdField = 9;
 constexpr usize kTextBoxTextField = 10;
 constexpr usize kTextBoxMaxSizeField = 11;
@@ -2451,8 +2454,15 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto singleton_field = machine.class_states().resolve_field(
                 "javax/microedition/lcdui/Display", "singleton",
                 "Ljavax/microedition/lcdui/Display;", true);
+            auto owner_field = machine.class_states().resolve_field(
+                "javax/microedition/lcdui/Display", "ownerMidlet",
+                "Ljavax/microedition/midlet/MIDlet;", true);
             if (!singleton_field)
                 return std::unexpected(singleton_field.error());
+            if (!owner_field) return std::unexpected(owner_field.error());
+            auto owner_stored = machine.class_states().set_static_field(
+                *owner_field, Value::from_reference(*midlet));
+            if (!owner_stored) return std::unexpected(owner_stored.error());
             auto singleton = machine.class_states().static_field(
                 *singleton_field);
             if (!singleton) return std::unexpected(singleton.error());
@@ -5230,6 +5240,115 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
     item_alias("javax/microedition/lcdui/ImageItem", "setLayout", "(I)V");
     item_alias("javax/microedition/lcdui/StringItem", "setPreferredSize",
                "(II)V");
+}
+
+Status replay_current_lcdui(Machine& machine) {
+    auto current = current_displayable(machine);
+    if (!current) return std::unexpected(current.error());
+    if (current->is_null()) {
+        machine.emit_ui_event(UiBridgeEvent {.kind = kEventCommandsReset});
+        return {};
+    }
+
+    // Re-assigning an already-running MIDlet to the host foreground does not
+    // call Display.setCurrent() again, so no native bridge events are normally
+    // emitted. Re-publish the live Displayable from VM fields instead of
+    // relying on the iOS host to retain a process-global Form/List snapshot.
+    // Do not emit RESET: keeping unrelated cached screens preserves native
+    // focus/scroll state, while SCREEN_SHOWN deterministically selects this
+    // MIDlet's current screen.
+    auto shown = screen_event(machine, *current, kEventScreenShown);
+    if (!shown) return std::unexpected(shown.error());
+    machine.emit_ui_event(std::move(*shown));
+
+    auto is_text_box = machine.object_is_instance(
+        *current, "javax/microedition/lcdui/TextBox");
+    auto is_list = machine.object_is_instance(
+        *current, "javax/microedition/lcdui/List");
+    auto is_form = machine.object_is_instance(
+        *current, "javax/microedition/lcdui/Form");
+    auto is_alert = machine.object_is_instance(
+        *current, "javax/microedition/lcdui/Alert");
+    if (!is_text_box) return std::unexpected(is_text_box.error());
+    if (!is_list) return std::unexpected(is_list.error());
+    if (!is_form) return std::unexpected(is_form.error());
+    if (!is_alert) return std::unexpected(is_alert.error());
+
+    if (*is_text_box) {
+        auto metadata = screen_event(machine, *current, kEventScreenUpdated);
+        if (!metadata) return std::unexpected(metadata.error());
+        metadata->arguments = {kScreenKindTextBox, 0, 0,
+                               kScreenKindMetadata};
+        machine.emit_ui_event(std::move(*metadata));
+        auto emitted = emit_text_box(machine, *current, kEventItemShown);
+        if (!emitted) return emitted;
+    } else if (*is_list) {
+        auto metadata = screen_event(machine, *current, kEventScreenUpdated);
+        if (!metadata) return std::unexpected(metadata.error());
+        metadata->arguments = {kScreenKindList, 0, 0,
+                               kScreenKindMetadata};
+        machine.emit_ui_event(std::move(*metadata));
+
+        auto screen_id = int_field(machine, *current, kDisplayableIdField);
+        auto peer_id = int_field(machine, *current, kListPeerIdField);
+        auto choice_type = int_field(machine, *current,
+                                     kListChoiceTypeField);
+        if (!screen_id) return std::unexpected(screen_id.error());
+        if (!peer_id) return std::unexpected(peer_id.error());
+        if (!choice_type) return std::unexpected(choice_type.error());
+        if (*choice_type < 1 || *choice_type > 4) {
+            return fail(ErrorCode::invalid_state,
+                        "LCDUI List has an invalid choice type");
+        }
+        machine.emit_ui_event(UiBridgeEvent {
+            .kind = kEventItemShown,
+            .component_id = *peer_id,
+            .parent_id = *screen_id,
+            .component_type = *choice_type - 1,
+        });
+        auto choices = emit_choice_elements(machine, *current);
+        if (!choices) return choices;
+    } else if (*is_form) {
+        auto count = int_field(machine, *current, kFormItemCountField);
+        auto items = reference_field(machine, *current, kFormItemsField);
+        if (!count) return std::unexpected(count.error());
+        if (!items) return std::unexpected(items.error());
+        if (!items->is_null()) {
+            for (i32 index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(
+                    *items, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto item = value->as_reference();
+                if (!item) return std::unexpected(item.error());
+                if (item->is_null()) continue;
+                auto emitted = emit_item(machine, *item,
+                                         kEventItemShown, index);
+                if (!emitted) return emitted;
+                auto is_choice_group = machine.object_is_instance(
+                    *item, "javax/microedition/lcdui/ChoiceGroup");
+                if (!is_choice_group) {
+                    return std::unexpected(is_choice_group.error());
+                }
+                if (*is_choice_group) {
+                    auto choices = emit_choice_elements(machine, *item);
+                    if (!choices) return choices;
+                }
+            }
+        }
+    }
+
+    if (*is_alert) {
+        auto indicator = reference_field(machine, *current,
+                                         kAlertIndicatorField);
+        if (!indicator) return std::unexpected(indicator.error());
+        if (!indicator->is_null()) {
+            auto emitted = emit_item(machine, *indicator,
+                                     kEventItemShown);
+            if (!emitted) return emitted;
+        }
+    }
+
+    return emit_commands(machine, *current);
 }
 
 Status pump_lcdui_alert_timeouts(Machine& machine) {

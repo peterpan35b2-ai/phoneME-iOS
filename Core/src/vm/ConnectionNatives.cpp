@@ -1,6 +1,7 @@
 #include "ConnectionNatives.hpp"
 
 #include "FileNatives.hpp"
+#include "SensorNatives.hpp"
 
 #include <algorithm>
 #include <array>
@@ -70,6 +71,10 @@ constexpr std::string_view kWirelessTextMessageClass =
     "javax/wireless/messaging/NativeTextMessage";
 constexpr std::string_view kWirelessBinaryMessageClass =
     "javax/wireless/messaging/NativeBinaryMessage";
+constexpr std::string_view kWirelessMultipartMessageClass =
+    "javax/wireless/messaging/NativeMultipartMessage";
+constexpr std::string_view kWirelessMessagePartClass =
+    "javax/wireless/messaging/MessagePart";
 
 constexpr usize kWirelessConnectionAddressField = 0;
 constexpr usize kWirelessConnectionModeField = 1;
@@ -79,6 +84,15 @@ constexpr usize kWirelessConnectionProtocolField = 4;
 
 constexpr usize kWirelessMessageAddressField = 0;
 constexpr usize kWirelessMessageTimestampField = 1;
+constexpr usize kWirelessMultipartSubjectField = 2;
+constexpr usize kWirelessMultipartStartContentIdField = 3;
+constexpr usize kWirelessMultipartPartsField = 4;
+constexpr usize kWirelessMultipartPartCountField = 5;
+constexpr usize kWirelessPartContentField = 0;
+constexpr usize kWirelessPartContentTypeField = 1;
+constexpr usize kWirelessPartContentIdField = 2;
+constexpr usize kWirelessPartContentLocationField = 3;
+constexpr usize kWirelessPartEncodingField = 4;
 constexpr usize kWirelessMessagePayloadField = 2;
 
 constexpr usize kSecurityCertificateField = 0;
@@ -735,6 +749,9 @@ try_open_wireless_connection(Machine& machine,
 
     auto text = utf8_text(machine, url);
     if (!text) return std::unexpected(text.error());
+    if (text->starts_with("sensor:")) {
+        return open_sensor_connection(machine, url, *text, mode);
+    }
     auto wireless = try_open_wireless_connection(
         machine, url, *text, mode);
     if (!wireless) return std::unexpected(wireless.error());
@@ -3309,8 +3326,7 @@ void register_security_objects(NativeMethodRegistry& registry) {
     } else if (*type_text == "binary") {
         class_name = kWirelessBinaryMessageClass;
     } else if (*type_text == "multipart") {
-        return fail_java("java/lang/IllegalArgumentException",
-                         "multipart wireless messages are not supported");
+        class_name = kWirelessMultipartMessageClass;
     } else {
         return fail_java("java/lang/IllegalArgumentException",
                          "unknown wireless message type: " + *type_text);
@@ -3325,6 +3341,18 @@ void register_security_objects(NativeMethodRegistry& registry) {
         machine, *message, kWirelessMessageTimestampField, 0);
     if (!address_stored) return std::unexpected(address_stored.error());
     if (!timestamp_stored) return std::unexpected(timestamp_stored.error());
+    if (class_name == kWirelessMultipartMessageClass) {
+        auto parts = machine.heap().allocate_array(
+            "[Ljavax/wireless/messaging/MessagePart;", 0U,
+            Value::from_reference({}));
+        if (!parts) return std::unexpected(parts.error());
+        auto parts_stored = set_reference_field(
+            machine, *message, kWirelessMultipartPartsField, *parts);
+        auto count_stored = set_int_field(
+            machine, *message, kWirelessMultipartPartCountField, 0);
+        if (!parts_stored) return std::unexpected(parts_stored.error());
+        if (!count_stored) return std::unexpected(count_stored.error());
+    }
     return *message;
 }
 
@@ -3592,6 +3620,7 @@ void register_wireless_messaging(NativeMethodRegistry& registry) {
     };
     register_common_message(kWirelessTextMessageClass);
     register_common_message(kWirelessBinaryMessageClass);
+    register_common_message(kWirelessMultipartMessageClass);
 
     add(registry, std::string(kWirelessTextMessageClass),
         "getPayloadText", "()Ljava/lang/String;",
@@ -3646,6 +3675,298 @@ void register_wireless_messaging(NativeMethodRegistry& registry) {
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
+
+    add(registry, std::string(kWirelessMessagePartClass), "<init>",
+        "([BIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto part = receiver(arguments, "MessagePart.<init>");
+            auto source = reference_argument(arguments, 1, "content", false);
+            if (!part) return std::unexpected(part.error());
+            if (!source) return std::unexpected(source.error());
+            if (arguments.size() < 8U) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessagePart constructor arguments are missing");
+            }
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!offset) return std::unexpected(offset.error());
+            if (!length) return std::unexpected(length.error());
+            auto source_length = byte_array_length(machine, *source);
+            if (!source_length) return std::unexpected(source_length.error());
+            if (*offset < 0 || *length < 0 ||
+                static_cast<usize>(*offset) > *source_length ||
+                static_cast<usize>(*length) >
+                    *source_length - static_cast<usize>(*offset)) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "MessagePart content range is invalid");
+            }
+            auto bytes = machine.heap().read_byte_array(
+                *source, static_cast<usize>(*offset),
+                static_cast<usize>(*length));
+            if (!bytes) return std::unexpected(bytes.error());
+            auto content = machine.heap().allocate_array(
+                "[B", bytes->size(), Value::from_int(0));
+            if (!content) return std::unexpected(content.error());
+            auto written = machine.heap().write_byte_array(*content, 0U, *bytes);
+            if (!written) return std::unexpected(written.error());
+            auto content_root = machine.pin_native_root(*content);
+            if (!content_root) return std::unexpected(content_root.error());
+            const std::array<usize, 4> argument_indices {{4U, 5U, 6U, 7U}};
+            const std::array<usize, 4> field_indices {{
+                kWirelessPartContentTypeField, kWirelessPartContentIdField,
+                kWirelessPartContentLocationField, kWirelessPartEncodingField,
+            }};
+            auto content_stored = set_reference_field(
+                machine, *part, kWirelessPartContentField, *content);
+            if (!content_stored) return std::unexpected(content_stored.error());
+            for (usize index = 0; index < argument_indices.size(); ++index) {
+                auto value = arguments[argument_indices[index]].as_reference();
+                if (!value) return std::unexpected(value.error());
+                auto stored = set_reference_field(machine, *part,
+                                                  field_indices[index], *value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kWirelessMessagePartClass), "<init>",
+        "(Ljava/io/InputStream;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return fail_java("java/io/IOException",
+                             "stream-backed MessagePart is not available");
+        });
+    const std::array<std::pair<std::string_view, usize>, 5> part_getters {{
+        {"getContent", kWirelessPartContentField},
+        {"getContentType", kWirelessPartContentTypeField},
+        {"getContentID", kWirelessPartContentIdField},
+        {"getContentLocation", kWirelessPartContentLocationField},
+        {"getEncoding", kWirelessPartEncodingField},
+    }};
+    for (const auto& [name, field_index] : part_getters) {
+        const std::string descriptor = name == "getContent"
+            ? "()[B" : "()Ljava/lang/String;";
+        add(registry, std::string(kWirelessMessagePartClass),
+            std::string(name), descriptor,
+            [field_index](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto part = receiver(arguments, "MessagePart getter");
+                if (!part) return std::unexpected(part.error());
+                auto value = reference_field(machine, *part, field_index);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            });
+    }
+    add(registry, std::string(kWirelessMessagePartClass), "getLength", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto part = receiver(arguments, "MessagePart.getLength");
+            if (!part) return std::unexpected(part.error());
+            auto content = reference_field(machine, *part,
+                                           kWirelessPartContentField);
+            if (!content) return std::unexpected(content.error());
+            if (content->is_null()) return std::optional<Value>(Value::from_int(0));
+            auto length = byte_array_length(machine, *content);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                return fail_java("javax/wireless/messaging/SizeExceededException",
+                                 "MessagePart is too large");
+            }
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(*length)));
+        });
+    add(registry, std::string(kWirelessMessagePartClass),
+        "getContentAsStream", "()Ljava/io/InputStream;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto part = receiver(arguments, "MessagePart.getContentAsStream");
+            if (!part) return std::unexpected(part.error());
+            auto content = reference_field(machine, *part,
+                                           kWirelessPartContentField);
+            if (!content) return std::unexpected(content.error());
+            if (content->is_null()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto stream = machine.class_states().allocate_instance(
+                machine.heap(), "java/io/ByteArrayInputStream");
+            if (!stream) return std::unexpected(stream.error());
+            auto stream_root = machine.pin_native_root(*stream);
+            if (!stream_root) return std::unexpected(stream_root.error());
+            const Value content_argument = Value::from_reference(*content);
+            auto initialized = machine.invoke_instance(
+                *stream, "java/io/ByteArrayInputStream", "<init>", "([B)V",
+                std::span<const Value>(&content_argument, 1U));
+            if (!initialized) return std::unexpected(initialized.error());
+            if (initialized->throwable.has_value()) {
+                return fail_java("java/io/IOException",
+                                 "MessagePart stream initialization failed");
+            }
+            return std::optional<Value>(Value::from_reference(*stream));
+        });
+
+    for (const auto& [method, field_index] : {
+             std::pair<std::string_view, usize>{"getSubject",
+                                                kWirelessMultipartSubjectField},
+             {"getStartContentId", kWirelessMultipartStartContentIdField}}) {
+        add(registry, std::string(kWirelessMultipartMessageClass),
+            std::string(method), "()Ljava/lang/String;",
+            [field_index](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "MultipartMessage getter");
+                if (!message) return std::unexpected(message.error());
+                auto value = reference_field(machine, *message, field_index);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            });
+    }
+    for (const auto& [method, field_index] : {
+             std::pair<std::string_view, usize>{"setSubject",
+                                                kWirelessMultipartSubjectField},
+             {"setStartContentId", kWirelessMultipartStartContentIdField}}) {
+        add(registry, std::string(kWirelessMultipartMessageClass),
+            std::string(method), "(Ljava/lang/String;)V",
+            [field_index](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "MultipartMessage setter");
+                auto value = reference_argument(arguments, 1, "value", true);
+                if (!message) return std::unexpected(message.error());
+                if (!value) return std::unexpected(value.error());
+                auto stored = set_reference_field(machine, *message,
+                                                  field_index, *value);
+                if (!stored) return std::unexpected(stored.error());
+                return std::optional<Value> {};
+            });
+    }
+    add(registry, std::string(kWirelessMultipartMessageClass),
+        "addMessagePart", "(Ljavax/wireless/messaging/MessagePart;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "MultipartMessage.addMessagePart");
+            auto part = reference_argument(arguments, 1, "message part", false);
+            if (!message) return std::unexpected(message.error());
+            if (!part) return std::unexpected(part.error());
+            auto count = int_field(machine, *message,
+                                   kWirelessMultipartPartCountField);
+            auto old_parts = reference_field(machine, *message,
+                                             kWirelessMultipartPartsField);
+            if (!count) return std::unexpected(count.error());
+            if (!old_parts) return std::unexpected(old_parts.error());
+            if (*count < 0 || *count >= 64) {
+                return fail_java("javax/wireless/messaging/SizeExceededException",
+                                 "too many multipart message parts");
+            }
+            auto new_parts = machine.heap().allocate_array(
+                "[Ljavax/wireless/messaging/MessagePart;",
+                static_cast<usize>(*count + 1), Value::from_reference({}));
+            if (!new_parts) return std::unexpected(new_parts.error());
+            auto new_root = machine.pin_native_root(*new_parts);
+            if (!new_root) return std::unexpected(new_root.error());
+            for (i32 index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(
+                    *old_parts, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *new_parts, static_cast<usize>(index), *value);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            auto appended = machine.heap().set_element(
+                *new_parts, static_cast<usize>(*count),
+                Value::from_reference(*part));
+            if (!appended) return std::unexpected(appended.error());
+            auto parts_stored = set_reference_field(
+                machine, *message, kWirelessMultipartPartsField, *new_parts);
+            auto count_stored = set_int_field(
+                machine, *message, kWirelessMultipartPartCountField,
+                *count + 1);
+            if (!parts_stored) return std::unexpected(parts_stored.error());
+            if (!count_stored) return std::unexpected(count_stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kWirelessMultipartMessageClass),
+        "getMessageParts", "()[Ljavax/wireless/messaging/MessagePart;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "MultipartMessage.getMessageParts");
+            if (!message) return std::unexpected(message.error());
+            auto parts = reference_field(machine, *message,
+                                         kWirelessMultipartPartsField);
+            if (!parts) return std::unexpected(parts.error());
+            return std::optional<Value>(Value::from_reference(*parts));
+        });
+    add(registry, std::string(kWirelessMultipartMessageClass), "addAddress",
+        "(Ljava/lang/String;Ljava/lang/String;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "MultipartMessage.addAddress");
+            auto address = reference_argument(arguments, 2, "address", false);
+            if (!message) return std::unexpected(message.error());
+            if (!address) return std::unexpected(address.error());
+            auto stored = set_reference_field(
+                machine, *message, kWirelessMessageAddressField, *address);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+    add(registry, std::string(kWirelessMultipartMessageClass), "getAddresses",
+        "(Ljava/lang/String;)[Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto message = receiver(arguments, "MultipartMessage.getAddresses");
+            if (!message) return std::unexpected(message.error());
+            auto address = reference_field(machine, *message,
+                                           kWirelessMessageAddressField);
+            if (!address) return std::unexpected(address.error());
+            const usize length = address->is_null() ? 0U : 1U;
+            auto result = machine.heap().allocate_array(
+                "[Ljava/lang/String;", length, Value::from_reference({}));
+            if (!result) return std::unexpected(result.error());
+            if (length != 0U) {
+                auto stored = machine.heap().set_element(
+                    *result, 0U, Value::from_reference(*address));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    for (const auto& [method, descriptor] : {
+             std::pair<std::string_view, std::string_view>{
+                 "getHeader", "(Ljava/lang/String;)Ljava/lang/String;"},
+             {"getMessagePart", "(Ljava/lang/String;)Ljavax/wireless/messaging/MessagePart;"}}) {
+        add(registry, std::string(kWirelessMultipartMessageClass),
+            std::string(method), std::string(descriptor),
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "MultipartMessage lookup");
+                if (!message) return std::unexpected(message.error());
+                return std::optional<Value>(Value::from_reference({}));
+            });
+    }
+    for (const auto& [method, descriptor] : {
+             std::pair<std::string_view, std::string_view>{
+                 "removeAddress", "(Ljava/lang/String;Ljava/lang/String;)Z"},
+             {"removeMessagePart", "(Ljavax/wireless/messaging/MessagePart;)Z"},
+             {"removeMessagePartId", "(Ljava/lang/String;)Z"},
+             {"removeMessagePartLocation", "(Ljava/lang/String;)Z"}}) {
+        add(registry, std::string(kWirelessMultipartMessageClass),
+            std::string(method), std::string(descriptor),
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "MultipartMessage remove");
+                if (!message) return std::unexpected(message.error());
+                return std::optional<Value>(Value::from_int(0));
+            });
+    }
+    for (const auto& [method, descriptor] : {
+             std::pair<std::string_view, std::string_view>{
+                 "removeAddresses", "(Ljava/lang/String;)V"},
+             {"setHeader", "(Ljava/lang/String;Ljava/lang/String;)V"}}) {
+        add(registry, std::string(kWirelessMultipartMessageClass),
+            std::string(method), std::string(descriptor),
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto message = receiver(arguments, "MultipartMessage operation");
+                if (!message) return std::unexpected(message.error());
+                return std::optional<Value> {};
+            });
+    }
 }
 
 } // namespace

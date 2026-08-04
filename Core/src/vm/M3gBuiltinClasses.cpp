@@ -114,6 +114,7 @@ using namespace builtin;
             api_method("getChildCount", "()I"),
             api_method("pick", "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z"),
             api_method("pick", "(IFFFFLjavax/microedition/m3g/Camera;Ljavax/microedition/m3g/RayIntersection;)Z"),
+            api_method("pick", "(IFFLjavax/microedition/m3g/Camera;Ljavax/microedition/m3g/RayIntersection;)Z"),
         });
     }
     if (name == "javax/microedition/m3g/World") {

@@ -38,6 +38,11 @@ done < <(find "$STUB_ROOT" -type f -name '*.java' -print | LC_ALL=C sort)
 
 FIXTURE_SOURCES=()
 case "${PHONEME_TEST_FILTER:-}" in
+  xml)
+    FIXTURE_SOURCES=(
+      "$FIXTURE_ROOT/XmlOps.java"
+    )
+    ;;
   security)
     FIXTURE_SOURCES=(
       "$FIXTURE_ROOT/Arithmetic.java"

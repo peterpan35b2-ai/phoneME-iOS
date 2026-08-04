@@ -829,7 +829,9 @@ Status draw_image(Image& target,
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
     if (!context.rendering_enabled) return {};
-    const Rect visible = intersect(*placement, context.clip);
+    const Rect visible = intersect(
+        intersect(*placement, context.clip),
+        target_bounds(target));
     if (empty(visible)) {
         return {};
     }
@@ -868,22 +870,37 @@ Status draw_image(Image& target,
                             static_cast<std::ptrdiff_t>(destination_offset));
         }
     }
+    auto target_pixels = target.mutable_pixels();
+    const auto source_pixels = source.pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    const usize source_stride = static_cast<usize>(source.width());
+    const usize visible_width = static_cast<usize>(visible.width);
+    bool changed = false;
     for (i32 row = 0; row < visible.height; ++row) {
-        for (i32 column = 0; column < visible.width; ++column) {
+        const usize row_index = static_cast<usize>(row);
+        const usize destination_offset =
+            static_cast<usize>(visible.y + row) * target_stride +
+            static_cast<usize>(visible.x);
+        const usize source_offset = needs_snapshot
+            ? row_index * visible_width
+            : static_cast<usize>(first_source_y + row) * source_stride +
+                static_cast<usize>(first_source_x);
+        for (usize column = 0; column < visible_width; ++column) {
             const Pixel pixel_value = needs_snapshot
-                ? snapshot[static_cast<usize>(row) *
-                               static_cast<usize>(visible.width) +
-                           static_cast<usize>(column)]
-                : source.pixels()[
-                      static_cast<usize>(first_source_y + row) *
-                          static_cast<usize>(source.width()) +
-                      static_cast<usize>(first_source_x + column)];
-            auto stored = target.set_pixel(visible.x + column,
-                                           visible.y + row,
-                                           pixel_value,
-                                           true);
-            if (!stored) return stored;
+                ? snapshot[source_offset + column]
+                : source_pixels[source_offset + column];
+            Pixel& destination = target_pixels[destination_offset + column];
+            const Pixel composited = rgb565_roundtrip(
+                source_over(pixel_value, destination));
+            if (composited != destination) {
+                destination = composited;
+                changed = true;
+            }
         }
+    }
+    if (changed) {
+        target.mark_dirty_region(
+            visible.x, visible.y, visible.width, visible.height);
     }
     return {};
 }
@@ -918,7 +935,9 @@ Status draw_region(Image& target,
                                    anchor,
                                    false);
     if (!placement) return std::unexpected(placement.error());
-    const Rect visible = intersect(*placement, context.clip);
+    const Rect visible = intersect(
+        intersect(*placement, context.clip),
+        target_bounds(target));
     if (empty(visible)) {
         return {};
     }
@@ -951,11 +970,19 @@ Status draw_region(Image& target,
                             static_cast<std::ptrdiff_t>(destination_offset));
         }
     }
+    auto target_pixels = target.mutable_pixels();
+    const auto source_pixels = source.pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    const usize source_stride = static_cast<usize>(source.width());
+    const usize region_width = static_cast<usize>(width);
+    bool changed = false;
     for (i32 destination_y = visible.y;
          destination_y < visible.y + visible.height;
          ++destination_y) {
         const i32 transformed_y = static_cast<i32>(
             static_cast<i64>(destination_y) - placement->y);
+        const usize destination_row =
+            static_cast<usize>(destination_y) * target_stride;
         for (i32 destination_x = visible.x;
              destination_x < visible.x + visible.width;
              ++destination_x) {
@@ -967,20 +994,28 @@ Status draw_region(Image& target,
                                               width,
                                               height,
                                               transform_value);
+            const usize source_index = needs_snapshot
+                ? static_cast<usize>(local_source_y) * region_width +
+                    static_cast<usize>(local_source_x)
+                : static_cast<usize>(source_y + local_source_y) *
+                        source_stride +
+                    static_cast<usize>(source_x + local_source_x);
             const Pixel pixel_value = needs_snapshot
-                ? snapshot[static_cast<usize>(local_source_y) *
-                               static_cast<usize>(width) +
-                           static_cast<usize>(local_source_x)]
-                : source.pixels()[
-                      static_cast<usize>(source_y + local_source_y) *
-                          static_cast<usize>(source.width()) +
-                      static_cast<usize>(source_x + local_source_x)];
-            auto stored = target.set_pixel(destination_x,
-                                           destination_y,
-                                           pixel_value,
-                                           true);
-            if (!stored) return stored;
+                ? snapshot[source_index]
+                : source_pixels[source_index];
+            Pixel& destination = target_pixels[
+                destination_row + static_cast<usize>(destination_x)];
+            const Pixel composited = rgb565_roundtrip(
+                source_over(pixel_value, destination));
+            if (composited != destination) {
+                destination = composited;
+                changed = true;
+            }
         }
+    }
+    if (changed) {
+        target.mark_dirty_region(
+            visible.x, visible.y, visible.width, visible.height);
     }
     return {};
 }

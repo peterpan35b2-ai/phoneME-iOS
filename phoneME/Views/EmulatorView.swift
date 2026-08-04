@@ -53,7 +53,7 @@ struct EmulatorView: View {
 
     private var navigationTitle: String {
         guard session.isPresentingNativeLCDUI,
-              session.lcdUI.screenKind == .list,
+              session.lcdUI.screenKind != .alert,
               let title = session.lcdUI.screen?.title.trimmingCharacters(
                   in: .whitespacesAndNewlines
               ),
@@ -89,13 +89,14 @@ struct EmulatorView: View {
                     // Canvas subtree. Otherwise FPS/LCDUI updates can dismiss
                     // an open toolbar menu or its nested submenu on iOS.
                     EmulatorToolbarAnchor(
-                        title: navigationTitle,
                         keyboardDisabled: session.isPresentingNativeLCDUI,
                         keyboardAdjustmentMode: keyboardAdjustmentMode,
                         isRotationLocked: runtimeProfile.lockedOrientation != nil,
+                        translationEnabled: runtimeProfile.isAutoTranslationEnabled,
                         hideAction: hideApplication,
                         exitAction: { showExitConfirmation = true },
                         toggleRotationLockAction: toggleRotationLock,
+                        setTranslationEnabledAction: setAutoTranslationEnabled,
                         toggleKeyboardAction: toggleKeyboard,
                         screenshotAction: saveScreenshot,
                         beginKeyboardPositionAction: {
@@ -117,8 +118,7 @@ struct EmulatorView: View {
                         NativeLCDUIScreenView(
                             imageStore: session.lcdUIImageStore,
                             state: session.lcdUI,
-                            profile: runtimeProfile,
-                            showsListTitleInContent: !enableActionBar
+                            showsTitleInContent: !enableActionBar
                                 || runtimeProfile.forceFullscreen
                         )
                             .environmentObject(session)
@@ -182,54 +182,38 @@ struct EmulatorView: View {
 
                     if keyboardAdjustmentMode != .none,
                        !session.isPresentingNativeLCDUI {
-                        VStack {
-                            HStack(spacing: 10) {
-                                VStack(alignment: .leading, spacing: 1) {
+                        VStack(spacing: 0) {
+                            HStack {
+                                VStack(alignment: .leading) {
                                     Label(
                                         keyboardAdjustmentMode == .position
-                                            ? "Move virtual keys"
-                                            : "Resize virtual key groups",
+                                            ? "Move Virtual Keys"
+                                            : "Resize Key Groups",
                                         systemImage: keyboardAdjustmentMode == .position
                                             ? "arrow.up.and.down.and.arrow.left.and.right"
                                             : "arrow.up.left.and.arrow.down.right"
                                     )
-                                    .font(.callout.weight(.semibold))
+                                    .font(.headline)
 
                                     Text(
                                         keyboardAdjustmentMode == .position
-                                            ? "Snaps to a 4 pt grid"
-                                            : "Drag sideways or vertically in 5% steps"
+                                            ? "Keys snap to a 4-point grid."
+                                            : "Drag horizontally or vertically in 5% steps."
                                     )
-                                    .font(.caption2)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                                 }
 
                                 Spacer()
 
-                                Button("Done") {
-                                    finishKeyboardAdjustment()
-                                }
-                                .buttonStyle(.borderedProminent)
+                                Button("Done", action: finishKeyboardAdjustment)
+                                    .buttonStyle(.borderedProminent)
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(
-                                .regularMaterial,
-                                in: RoundedRectangle(
-                                    cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
-                                    style: .continuous
-                                )
-                            )
-                            .overlay {
-                                RoundedRectangle(
-                                    cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
-                                    style: .continuous
-                                )
-                                .stroke(Color.phoneMEHairline, lineWidth: 0.5)
+                            .padding()
+                            .background(.regularMaterial)
+                            .overlay(alignment: .bottom) {
+                                Divider()
                             }
-                            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-                            .padding(.horizontal, PhoneMEVisualMetrics.horizontalInset)
-                            .padding(.top, 8)
 
                             Spacer()
                         }
@@ -260,7 +244,7 @@ struct EmulatorView: View {
                 edges: presentsEdgeToEdgeSurface ? .all : []
             )
 #if os(iOS)
-            .navigationTitle("")
+            .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
             .phoneMENavigationBarBackgroundVisible()
             .phoneMENavigationBarVisible(enableActionBar)
@@ -392,6 +376,21 @@ struct EmulatorView: View {
         keyboardObscuresDisplay = obscuresDisplay
         if showKeypad, activeVirtualKeyCount == 0 {
             scheduleKeyboardAutoHide(obscuresDisplay: obscuresDisplay)
+        }
+    }
+
+    private func setAutoTranslationEnabled(_ enabled: Bool) {
+        let previous = runtimeProfile.isAutoTranslationEnabled
+        guard previous != enabled else { return }
+
+        runtimeProfile.setAutoTranslationEnabled(enabled)
+        persistRuntimeProfile()
+        session.setAutoTranslationEnabled(enabled, for: game) { result in
+            guard case let .failure(error) = result else { return }
+            runtimeProfile.setAutoTranslationEnabled(previous)
+            persistRuntimeProfile()
+            errorMessage = error.localizedDescription
+            showError = true
         }
     }
 
@@ -781,38 +780,14 @@ private struct EmulatorLoadingOverlay: View {
     let title: String
 
     var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
+        ZStack {
+            Rectangle()
+                .fill(.regularMaterial)
+                .ignoresSafeArea()
 
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text("Preparing the Java ME runtime…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            ProgressView(title)
+                .controlSize(.large)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
-        .frame(maxWidth: 320)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(
-                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
-                style: .continuous
-            )
-        )
-        .overlay {
-            RoundedRectangle(
-                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
-                style: .continuous
-            )
-            .stroke(Color.phoneMEHairline, lineWidth: 0.5)
-        }
-        .shadow(color: .black.opacity(0.14), radius: 12, y: 5)
-        .padding(PhoneMEVisualMetrics.horizontalInset)
         .accessibilityElement(children: .combine)
     }
 }
@@ -837,13 +812,14 @@ private struct EmulatorFPSOverlay: View {
 }
 
 private struct EmulatorToolbarAnchor: View, Equatable {
-    let title: String
     let keyboardDisabled: Bool
     let keyboardAdjustmentMode: KeyboardAdjustmentMode
     let isRotationLocked: Bool
+    let translationEnabled: Bool
     let hideAction: () -> Void
     let exitAction: () -> Void
     let toggleRotationLockAction: () -> Void
+    let setTranslationEnabledAction: (Bool) -> Void
     let toggleKeyboardAction: () -> Void
     let screenshotAction: () -> Void
     let beginKeyboardPositionAction: () -> Void
@@ -854,31 +830,25 @@ private struct EmulatorToolbarAnchor: View, Equatable {
     let resetKeyboardLayoutAction: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.title == rhs.title
-            && lhs.keyboardDisabled == rhs.keyboardDisabled
+        lhs.keyboardDisabled == rhs.keyboardDisabled
             && lhs.keyboardAdjustmentMode == rhs.keyboardAdjustmentMode
             && lhs.isRotationLocked == rhs.isRotationLocked
+            && lhs.translationEnabled == rhs.translationEnabled
     }
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .toolbar {
-#if os(iOS)
-                ToolbarItem(placement: .navigationBarLeading) {
-                    PhoneMEToolbarTitle(title)
-                }
-#endif
-
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: toggleKeyboardAction) {
-                        PhoneMEToolbarIconLabel(systemImage: "keyboard")
+                        Image(systemName: "keyboard")
                     }
                     .accessibilityLabel("Keyboard (IME)")
                     .disabled(keyboardDisabled)
 
                     Button(action: screenshotAction) {
-                        PhoneMEToolbarIconLabel(systemImage: "camera")
+                        Image(systemName: "camera")
                     }
                     .accessibilityLabel("Take screenshot")
 
@@ -897,6 +867,17 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                 systemImage: isRotationLocked
                                     ? "lock.rotation.open"
                                     : "lock.rotation"
+                            )
+                        }
+                        Toggle(
+                            isOn: Binding(
+                                get: { translationEnabled },
+                                set: setTranslationEnabledAction
+                            )
+                        ) {
+                            Label(
+                                "Auto translate",
+                                systemImage: "character.book.closed.fill"
                             )
                         }
                         Divider()
@@ -933,7 +914,7 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                             )
                         }
                     } label: {
-                        PhoneMEToolbarIconLabel(systemImage: "ellipsis")
+                        Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel("More")
                 }
@@ -956,22 +937,15 @@ private struct KeyboardVisibilityEditor: View {
                         control.accessibilityLabel.capitalized,
                         isOn: visibilityBinding(for: control.id)
                     )
-                    .frame(minHeight: PhoneMEVisualMetrics.minimumRowHeight)
-                    .listRowBackground(Color.phoneMECardBackground)
                 }
             } header: {
-                PhoneMESectionTitle(
-                    title: "Visible controls",
-                    subtitle: "Turn off controls you do not need for this game."
-                )
+                Text("Visible Controls")
+            } footer: {
+                Text("Turn off controls you do not need for this game.")
             }
         }
         .listStyle(.insetGrouped)
-        .phoneMEScrollContentBackgroundHidden()
-        .background(Color.phoneMEAppBackground)
-        .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
-        .frame(maxWidth: .infinity)
-        .navigationTitle("Virtual buttons")
+        .navigationTitle("Virtual Buttons")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
@@ -982,7 +956,7 @@ private struct KeyboardVisibilityEditor: View {
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("OK", action: applyAction)
+                Button("Done", action: applyAction)
             }
         }
     }
@@ -1470,33 +1444,6 @@ private final class PhoneMEFrameLayerHostView: UIView {
     }
 }
 #endif
-
-struct PhoneMEToolbarTitle: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        Text(text)
-            .font(.headline)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: 190, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
-    }
-}
-
-struct PhoneMEToolbarIconLabel: View {
-    let systemImage: String
-
-    var body: some View {
-        Image(systemName: systemImage)
-            .font(.body.weight(.medium))
-            .imageScale(.medium)
-    }
-}
 
 private extension Color {
     static var playSurfaceBackground: Color {

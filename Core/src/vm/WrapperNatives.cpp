@@ -1490,6 +1490,8 @@ void register_floating_wrapper(NativeMethodRegistry& registry,
 constexpr usize kThrowableMessageField = 0U;
 constexpr usize kThrowableCauseField = 1U;
 constexpr usize kThrowableCauseInitializedField = 2U;
+constexpr usize kThrowableSuppressedField = 3U;
+constexpr usize kThrowableSuppressedCountField = 4U;
 
 [[nodiscard]] Status initialize_throwable(Machine& machine,
                                           ObjectRef throwable,
@@ -1503,9 +1505,15 @@ constexpr usize kThrowableCauseInitializedField = 2U;
     auto initialized_stored = machine.heap().set_field(
         throwable, kThrowableCauseInitializedField,
         Value::from_int(cause_initialized ? 1 : 0));
+    auto suppressed_stored = machine.heap().set_field(
+        throwable, kThrowableSuppressedField, Value::from_reference({}));
+    auto suppressed_count_stored = machine.heap().set_field(
+        throwable, kThrowableSuppressedCountField, Value::from_int(0));
     if (!message_stored) return message_stored;
     if (!cause_stored) return cause_stored;
-    return initialized_stored;
+    if (!initialized_stored) return initialized_stored;
+    if (!suppressed_stored) return suppressed_stored;
+    return suppressed_count_stored;
 }
 
 [[nodiscard]] Result<ObjectRef> throwable_reference_field(
@@ -1773,6 +1781,107 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 return std::unexpected(initialized_stored.error());
             }
             return std::optional<Value>(Value::from_reference(*object));
+        });
+    add(registry, "java/lang/Throwable", "addSuppressed",
+        "(Ljava/lang/Throwable;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Throwable.addSuppressed argument is missing");
+            }
+            auto exception = arguments[1].as_reference();
+            if (!exception || exception->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "suppressed exception is null");
+            }
+            if (*exception == *object) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "self-suppression is not permitted");
+            }
+            auto count_value = machine.heap().field(
+                *object, kThrowableSuppressedCountField);
+            auto array_value = machine.heap().field(
+                *object, kThrowableSuppressedField);
+            if (!count_value) return std::unexpected(count_value.error());
+            if (!array_value) return std::unexpected(array_value.error());
+            auto count = count_value->as_int();
+            auto array = array_value->as_reference();
+            if (!count) return std::unexpected(count.error());
+            if (!array) return std::unexpected(array.error());
+            if (*count < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "Throwable suppressed count is negative");
+            }
+            usize capacity = 0U;
+            if (!array->is_null()) {
+                auto length = machine.heap().array_length(*array);
+                if (!length) return std::unexpected(length.error());
+                capacity = *length;
+            }
+            if (static_cast<usize>(*count) >= capacity) {
+                const usize new_capacity = capacity == 0U ? 4U : capacity * 2U;
+                auto replacement = machine.heap().allocate_array(
+                    "[Ljava/lang/Throwable;", new_capacity,
+                    Value::from_reference({}));
+                if (!replacement) return std::unexpected(replacement.error());
+                if (capacity != 0U) {
+                    auto copied = machine.heap().copy_array_range(
+                        *array, 0U, *replacement, 0U, capacity);
+                    if (!copied) return std::unexpected(copied.error());
+                }
+                auto stored = machine.heap().set_field(
+                    *object, kThrowableSuppressedField,
+                    Value::from_reference(*replacement));
+                if (!stored) return std::unexpected(stored.error());
+                *array = *replacement;
+            }
+            auto appended = machine.heap().set_element(
+                *array, static_cast<usize>(*count),
+                Value::from_reference(*exception));
+            if (!appended) return std::unexpected(appended.error());
+            auto updated = machine.heap().set_field(
+                *object, kThrowableSuppressedCountField,
+                Value::from_int(*count + 1));
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/Throwable", "getSuppressed",
+        "()[Ljava/lang/Throwable;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count_value = machine.heap().field(
+                *object, kThrowableSuppressedCountField);
+            auto array_value = machine.heap().field(
+                *object, kThrowableSuppressedField);
+            if (!count_value) return std::unexpected(count_value.error());
+            if (!array_value) return std::unexpected(array_value.error());
+            auto count = count_value->as_int();
+            auto array = array_value->as_reference();
+            if (!count) return std::unexpected(count.error());
+            if (!array) return std::unexpected(array.error());
+            if (*count < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "Throwable suppressed count is negative");
+            }
+            auto result = machine.heap().allocate_array(
+                "[Ljava/lang/Throwable;", static_cast<usize>(*count),
+                Value::from_reference({}));
+            if (!result) return std::unexpected(result.error());
+            if (*count > 0) {
+                if (array->is_null()) {
+                    return fail(ErrorCode::invalid_state,
+                                "Throwable suppressed storage is missing");
+                }
+                auto copied = machine.heap().copy_array_range(
+                    *array, 0U, *result, 0U, static_cast<usize>(*count));
+                if (!copied) return std::unexpected(copied.error());
+            }
+            return std::optional<Value>(Value::from_reference(*result));
         });
     add(registry, "java/lang/Throwable", "toString",
         "()Ljava/lang/String;",

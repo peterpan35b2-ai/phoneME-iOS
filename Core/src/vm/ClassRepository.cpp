@@ -447,9 +447,19 @@ namespace phoneme::vm
               {},
               {"java/lang/Cloneable", "java/io/Serializable"}));
     }
-    if (auto builtin = load_builtin_class(internal_name); builtin)
+    // A few vendor APIs are commonly bundled as application-specific
+    // compatibility wrappers. Prefer those JAR-local implementations and use
+    // Core's vendor classes only as a fallback when the application omitted
+    // them. Standard CLDC/MIDP classes remain protected from shadowing.
+    const bool prefer_archive =
+        internal_name.starts_with("com/sprintpcs/media/") ||
+        internal_name == "com/samsung/util/AudioClip";
+    if (!prefer_archive)
     {
-      return builtin;
+      if (auto builtin = load_builtin_class(internal_name); builtin)
+      {
+        return builtin;
+      }
     }
 
     const std::string entry_name = std::string(internal_name) + ".class";
@@ -484,6 +494,14 @@ namespace phoneme::vm
                         verified.error().message);
       }
       return std::make_shared<const classfile::ClassFile>(std::move(*parsed));
+    }
+
+    if (prefer_archive)
+    {
+      if (auto builtin = load_builtin_class(internal_name); builtin)
+      {
+        return builtin;
+      }
     }
 
     return fail(ErrorCode::class_not_found,

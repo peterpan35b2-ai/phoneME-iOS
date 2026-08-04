@@ -25,13 +25,18 @@ thread_local u32 Scheduler::tls_unpaced_execution_depth_ = 0U;
 namespace {
 
 constexpr auto kExplicitYieldBackoff = std::chrono::milliseconds(1);
-constexpr auto kInitialQuantumBackoff = std::chrono::microseconds(100);
-constexpr auto kWarmMinimumBackoff = std::chrono::microseconds(250);
-constexpr auto kWarmMaximumBackoff = std::chrono::milliseconds(2);
-constexpr auto kSustainedMinimumBackoff = std::chrono::microseconds(500);
-constexpr auto kSustainedMaximumBackoff = std::chrono::milliseconds(6);
-constexpr auto kBusyMinimumBackoff = std::chrono::milliseconds(1);
-constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(10);
+// Foreground VM quanta only need enough pause to hand the execution gate to
+// framebuffer/input workers. The previous 0.5-10 ms adaptive sleeps consumed
+// roughly one third of foreground wall time and could pull otherwise healthy
+// game loops below their intended frame rate. Keep a light duty-cycle guard for
+// pathological spin loops without turning scheduler fairness into frame pacing.
+constexpr auto kInitialQuantumBackoff = std::chrono::microseconds(50);
+constexpr auto kWarmMinimumBackoff = std::chrono::microseconds(100);
+constexpr auto kWarmMaximumBackoff = std::chrono::microseconds(500);
+constexpr auto kSustainedMinimumBackoff = std::chrono::microseconds(150);
+constexpr auto kSustainedMaximumBackoff = std::chrono::microseconds(1'500);
+constexpr auto kBusyMinimumBackoff = std::chrono::microseconds(350);
+constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(4);
 // Hidden MIDlets share one execution gate per VM. This caps aggregate CPU even
 // when a game has several Java threads that would otherwise take turns while
 // each individual thread is sleeping. A blocked socket/timer callback still
@@ -68,22 +73,19 @@ constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(500);
     }
     if (uninterrupted_quantums < 16U) {
         return clamp_backoff(
-            active_cpu_time / 4,
+            active_cpu_time / 8,
             kWarmMinimumBackoff,
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                kWarmMaximumBackoff));
+            kWarmMaximumBackoff);
     }
     if (uninterrupted_quantums < 64U) {
         return clamp_backoff(
-            active_cpu_time * 2 / 3,
+            active_cpu_time / 3,
             kSustainedMinimumBackoff,
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                kSustainedMaximumBackoff));
+            kSustainedMaximumBackoff);
     }
     return clamp_backoff(
-        active_cpu_time,
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            kBusyMinimumBackoff),
+        active_cpu_time * 2 / 3,
+        kBusyMinimumBackoff,
         std::chrono::duration_cast<std::chrono::microseconds>(
             kBusyMaximumBackoff));
 }

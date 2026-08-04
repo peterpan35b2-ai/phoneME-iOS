@@ -102,6 +102,7 @@ SOURCES=(
   "$CORE_ROOT/src/runtime/CanvasRuntime.cpp"
   "$CORE_ROOT/src/runtime/Framebuffer.cpp"
   "$CORE_ROOT/src/runtime/RecordStoreRegistry.cpp"
+  "$CORE_ROOT/src/translation/TranslationService.cpp"
   "$CORE_ROOT/src/security/PermissionCatalog.cpp"
   "$CORE_ROOT/src/security/PermissionPolicy.cpp"
 )

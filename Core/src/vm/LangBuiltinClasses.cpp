@@ -69,6 +69,7 @@ using namespace builtin;
             method(kPublic, "regionMatches",
                    "(ZILjava/lang/String;II)Z"),
             method(kPublic, "compareTo", "(Ljava/lang/String;)I"),
+            method(kPublic, "compareTo", "(Ljava/lang/Object;)I"),
             method(kPublic, "startsWith", "(Ljava/lang/String;)Z"),
             method(kPublic, "startsWith", "(Ljava/lang/String;I)Z"),
             method(kPublic, "endsWith", "(Ljava/lang/String;)Z"),
@@ -102,7 +103,7 @@ using namespace builtin;
             method(kPublic | kStatic, "valueOf", "(J)Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/String;"),
-        });
+        }, {"java/lang/Comparable", "java/io/Serializable"});
     }
     if (name == "java/lang/StringBuilder") {
         return make_class("java/lang/StringBuilder", "java/lang/Object",
@@ -248,9 +249,15 @@ using namespace builtin;
             fields.push_back(field(kPublic | kStatic | kFinal, "MAX_VALUE", "D"));
             fields.push_back(field(kPublic | kStatic | kFinal, "MIN_VALUE", "D"));
         }
+        std::vector<std::string> interfaces;
+        if (class_name == "java/lang/Integer" ||
+            class_name == "java/lang/Long") {
+            interfaces.push_back("java/lang/Comparable");
+        }
+        interfaces.push_back("java/io/Serializable");
         return make_class(std::move(class_name), std::move(super_name),
                           kOrdinary | kFinal, std::move(fields),
-                          std::move(methods));
+                          std::move(methods), std::move(interfaces));
     };
     if (name == "java/lang/Byte") {
         return number_wrapper("java/lang/Byte", "java/lang/Object", "B", {
@@ -301,6 +308,7 @@ using namespace builtin;
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "compareTo", "(Ljava/lang/Integer;)I"),
+            method(kPublic, "compareTo", "(Ljava/lang/Object;)I"),
             method(kPublic | kStatic, "valueOf", "(I)Ljava/lang/Integer;"),
             method(kPublic | kStatic, "valueOf",
                    "(Ljava/lang/String;)Ljava/lang/Integer;"),
@@ -328,6 +336,7 @@ using namespace builtin;
             method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "compareTo", "(Ljava/lang/Long;)I"),
+            method(kPublic, "compareTo", "(Ljava/lang/Object;)I"),
             method(kPublic | kStatic, "valueOf", "(J)Ljava/lang/Long;"),
             method(kPublic | kStatic, "parseLong", "(Ljava/lang/String;)J"),
             method(kPublic | kStatic, "parseLong", "(Ljava/lang/String;I)J"),
@@ -492,6 +501,8 @@ using namespace builtin;
             field(kPrivate, "detailMessage", "Ljava/lang/String;"),
             field(kPrivate, "cause", "Ljava/lang/Throwable;"),
             field(kPrivate, "causeInitialized", "Z"),
+            field(kPrivate, "suppressedExceptions", "[Ljava/lang/Throwable;"),
+            field(kPrivate, "suppressedCount", "I"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
@@ -503,6 +514,10 @@ using namespace builtin;
             method(kPublic, "getCause", "()Ljava/lang/Throwable;"),
             method(kPublic | kSynchronized, "initCause",
                    "(Ljava/lang/Throwable;)Ljava/lang/Throwable;"),
+            method(kPublic | kFinal | kSynchronized, "addSuppressed",
+                   "(Ljava/lang/Throwable;)V"),
+            method(kPublic | kFinal | kSynchronized, "getSuppressed",
+                   "()[Ljava/lang/Throwable;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "printStackTrace", "()V"),
         });

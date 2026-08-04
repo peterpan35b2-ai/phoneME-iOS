@@ -9,10 +9,13 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "phoneme/translation/TranslationService.hpp"
+#include "phoneme/vm/ClassRepository.hpp"
+#include "phoneme/vm/Machine.hpp"
 
 namespace {
 
@@ -136,11 +139,23 @@ public:
         std::string translated;
         if (is_batch && mode_ == Mode::malformed_batch) {
             translated = "Đăng nhập vào trò chơi";
+        } else if (is_batch && request.url.query.find(
+                       "%E5%95%86%E5%BA%97") != std::string::npos) {
+            translated = "Đăng nhập vào trò chơi; tự nhiên; cửa hàng";
         } else if (is_batch) {
             translated = "Đăng nhập vào trò chơi; tự nhiên";
+        } else if (request.url.query.find("%E5%95%86%E5%BA%97") !=
+                   std::string::npos) {
+            translated = "cửa hàng";
         } else if (request.url.query.find("%E8%87%AA%E7%84%B6") !=
                    std::string::npos) {
             translated = "tự nhiên";
+        } else if (request.url.query.find("q=hello") != std::string::npos) {
+            translated = "xin chào";
+        } else if (request.url.query.find(
+                       "%E3%82%B2%E3%83%BC%E3%83%A0%E9%96%8B%E5%A7%8B") !=
+                   std::string::npos) {
+            translated = "Bắt đầu trò chơi";
         } else {
             translated = "Đăng nhập vào trò chơi";
         }
@@ -151,12 +166,19 @@ public:
         auto final_url = phoneme::network::Url::parse(
             "https://translate.googleapis.com/");
         require(final_url.has_value(), "fake response URL parses");
-        completion(phoneme::network::HttpResponse {
+        phoneme::network::HttpResponse response {
             .final_url = std::move(*final_url),
             .status_code = 200,
             .reason = "OK",
             .body = std::vector<phoneme::u8>(payload.begin(), payload.end()),
+        };
+        std::thread worker([
+            completion = std::move(completion),
+            response = std::move(response)
+        ]() mutable {
+            completion(std::move(response));
         });
+        worker.join();
         return phoneme::network::OperationId {
             static_cast<phoneme::u64>(current_request),
         };
@@ -203,6 +225,7 @@ phoneme::translation::TranslationConfiguration test_configuration() {
         .maximum_batch_items = 8,
         .maximum_batch_source_bytes = 2'048,
         .batch_coalescing_delay_ms = 10,
+        .maximum_batch_wait_ms = 30,
     };
 }
 
@@ -246,15 +269,26 @@ int main() {
 
     const std::array<char32_t, 4> chinese {{U'登', U'录', U'游', U'戏'}};
     const std::array<char32_t, 5> latin {{U'h', U'e', U'l', U'l', U'o'}};
-    require(TranslationService::contains_han(chinese),
-            "detect Han text eligible for translation");
-    require(!TranslationService::contains_han(latin),
-            "skip non-Han Canvas text");
+    const std::array<char32_t, 4> japanese {{U'ゲ', U'ー', U'ム', U'開'}};
+    const std::array<char32_t, 4> numeric {{U'1', U'0', U'0', U'%'}};
+    require(TranslationService::contains_translatable_text(chinese),
+            "detect Chinese text eligible for auto translation");
+    require(TranslationService::contains_translatable_text(latin),
+            "detect Latin text eligible for auto translation");
+    require(TranslationService::contains_translatable_text(japanese),
+            "detect Japanese text eligible for auto translation");
+    require(!TranslationService::contains_translatable_text(numeric),
+            "skip numeric and symbol-only Canvas text");
 
     {
         auto adapter = std::make_shared<FakeTranslationAdapter>();
         TranslationService service(test_configuration(), adapter);
         CompletionCollector collector;
+
+        require(!service.lookup_or_request_utf8("https://example.com/login"),
+                "skip URL text during automatic translation");
+        require(adapter->request_count.load() == 0,
+                "URL filtering avoids a translation request");
 
         require(!service.lookup_or_request_utf8(
                     "登录游戏", collector.callback("login")),
@@ -279,6 +313,202 @@ int main() {
                 "bulk result caches the first source independently");
         require(cached_natural && *cached_natural == "tự nhiên",
                 "bulk result caches the second source independently");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        auto configuration = test_configuration();
+        configuration.batch_coalescing_delay_ms = 40;
+        configuration.maximum_batch_wait_ms = 120;
+        TranslationService service(configuration, adapter);
+        CompletionCollector collector;
+
+        (void)service.lookup_or_request_utf8(
+            "登录游戏", collector.callback("login"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        (void)service.lookup_or_request_utf8(
+            "自然", collector.callback("natural"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        (void)service.lookup_or_request_utf8(
+            "商店", collector.callback("store"));
+        require(collector.wait_for(3),
+                "screen debounce waits for the final text burst");
+        require(collector.value("store") == "cửa hàng",
+                "debounced screen batch maps the final source");
+        require(adapter->request_count.load() == 1,
+                "one stable screen uses one translation request");
+        require(adapter->batch_request_count.load() == 1,
+                "screen debounce keeps all same-script text in one batch");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        TranslationService service(test_configuration(), adapter);
+        CompletionCollector collector;
+
+        (void)service.lookup_or_request_utf8(
+            "登录游戏", collector.callback("login"));
+        (void)service.lookup_or_request_utf8(
+            "hello", collector.callback("english"));
+        (void)service.lookup_or_request_utf8(
+            "自然", collector.callback("natural"));
+        require(collector.wait_for(3),
+                "interleaved scripts complete without losing mappings");
+        require(adapter->request_count.load() == 2,
+                "interleaved same-script text is regrouped into two requests");
+        require(adapter->batch_request_count.load() == 1,
+                "Chinese text is bulked across an interleaved Latin source");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        TranslationService service(test_configuration(), adapter);
+        CompletionCollector collector;
+
+        (void)service.lookup_or_request_utf8(
+            "hello", collector.callback("english"));
+        (void)service.lookup_or_request_utf8(
+            "ゲーム開始", collector.callback("japanese"));
+        require(collector.wait_for(2),
+                "automatic translation handles multiple source scripts");
+        require(collector.value("english") == "xin chào",
+                "automatic translation handles Latin text");
+        require(collector.value("japanese") == "Bắt đầu trò chơi",
+                "automatic translation handles Japanese text");
+        require(adapter->request_count.load() == 2,
+                "different scripts use separate auto-detection requests");
+        require(adapter->batch_request_count.load() == 0,
+                "different scripts are never mixed into one bulk request");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        auto service = std::make_shared<TranslationService>(
+            test_configuration(), adapter);
+        phoneme::vm::ClassRepository classes;
+        phoneme::vm::Machine machine(classes);
+        machine.configure_translation_service(service);
+
+        machine.begin_character_translation_frame();
+        const auto first_original = machine.translate_draw_character(
+            7U, U'登', 10, 20, 0, 0, 0, 8);
+        const auto second_original = machine.translate_draw_character(
+            7U, U'录', 18, 20, 0, 0, 0, 8);
+        require(first_original.action ==
+                    phoneme::vm::Machine::CharacterTranslationDecision::Action::
+                        draw_original &&
+                second_original.action ==
+                    phoneme::vm::Machine::CharacterTranslationDecision::Action::
+                        draw_original,
+                "fragmented characters render original text on first frame");
+        machine.end_character_translation_frame();
+
+        const std::array<char32_t, 2> fragmented_source {{U'登', U'录'}};
+        std::shared_ptr<const std::vector<char32_t>> cached;
+        for (int attempt = 0; attempt < 100 && !cached; ++attempt) {
+            cached = service->lookup_or_request(fragmented_source);
+            if (!cached) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        require(cached != nullptr,
+                "fragmented character run is translated as one phrase");
+
+        machine.begin_character_translation_frame();
+        const auto first_translated = machine.translate_draw_character(
+            7U, U'登', 12, 22, 0, 0, 0, 8);
+        const auto second_suppressed = machine.translate_draw_character(
+            7U, U'录', 20, 22, 0, 0, 0, 8);
+        require(first_translated.action ==
+                    phoneme::vm::Machine::CharacterTranslationDecision::Action::
+                        draw_translation &&
+                first_translated.translated != nullptr,
+                "next frame draws the complete translated phrase once");
+        require(second_suppressed.action ==
+                    phoneme::vm::Machine::CharacterTranslationDecision::Action::
+                        suppress,
+                "remaining source characters are suppressed after phrase draw");
+        machine.end_character_translation_frame();
+
+        constexpr std::u32string_view first_line =
+            U"Đăng nhập vào trò chơi bằng tài khoản của bạn";
+        constexpr std::u32string_view second_line =
+            U"Tiếp tục cuộc hội thoại dài phía dưới";
+        const auto capture_layout = [&](std::u32string_view text,
+                                        phoneme::i32 y) {
+            return machine.plan_translated_text(
+                7U,
+                std::span<const char32_t>(text.data(), text.size()),
+                6,
+                y,
+                0,
+                0,
+                0,
+                8,
+                0,
+                0,
+                80,
+                60,
+                0,
+                0);
+        };
+
+        machine.begin_character_translation_frame();
+        require(!capture_layout(first_line, 20).planned &&
+                    !capture_layout(second_line, 34).planned,
+                "first translated paragraph frame captures its text blocks");
+        machine.end_character_translation_frame();
+
+        machine.begin_character_translation_frame();
+        const auto first_layout = capture_layout(first_line, 20);
+        const auto second_layout = capture_layout(second_line, 34);
+        require(first_layout.planned && second_layout.planned,
+                "next frame replays translated paragraph positions");
+        require(first_layout.y < 20 && second_layout.y < 34,
+                "long translated blocks grow upward from their original lines");
+        require(first_layout.y + first_layout.height < second_layout.y,
+                "translated paragraph blocks are stacked without overlap");
+        machine.end_character_translation_frame();
+
+        constexpr std::u32string_view lower_first_line =
+            U"Đăng nhập vào trò chơi ngay";
+        constexpr std::u32string_view lower_second_line = U"Tiếp tục";
+        const auto capture_lower_layout = [&](std::u32string_view text,
+                                              phoneme::i32 y) {
+            return machine.plan_translated_text(
+                7U,
+                std::span<const char32_t>(text.data(), text.size()),
+                6,
+                y,
+                0,
+                0,
+                0,
+                8,
+                0,
+                0,
+                120,
+                110,
+                0,
+                0);
+        };
+
+        machine.begin_character_translation_frame();
+        require(!capture_lower_layout(lower_first_line, 60).planned &&
+                    !capture_lower_layout(lower_second_line, 74).planned,
+                "first lower dialogue frame captures text with room below");
+        machine.end_character_translation_frame();
+
+        machine.begin_character_translation_frame();
+        const auto lower_first = capture_lower_layout(lower_first_line, 60);
+        const auto lower_second = capture_lower_layout(lower_second_line, 74);
+        require(lower_first.planned && lower_second.planned,
+                "lower dialogue layout replays on the next frame");
+        require(lower_first.height > 13 && lower_first.y == 60 &&
+                    lower_second.y > 74,
+                "lower dialogue grows into free space below before moving up");
+        require(lower_first.y + lower_first.height < lower_second.y,
+                "downward lower dialogue layout still prevents overlap");
+        machine.end_character_translation_frame();
     }
 
     {

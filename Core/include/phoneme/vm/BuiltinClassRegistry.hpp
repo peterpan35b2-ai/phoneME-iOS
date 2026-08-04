@@ -27,6 +27,7 @@ void register_file_classes(BuiltinClassRegistry& registry);
 void register_connection_classes(BuiltinClassRegistry& registry);
 void register_bluetooth_classes(BuiltinClassRegistry& registry);
 void register_util_classes(BuiltinClassRegistry& registry);
+void register_headless_compat_classes(BuiltinClassRegistry& registry);
 void register_lcdui_classes(BuiltinClassRegistry& registry);
 void register_game_classes(BuiltinClassRegistry& registry);
 void register_m3g_classes(BuiltinClassRegistry& registry);
@@ -37,5 +38,8 @@ void register_media_classes(BuiltinClassRegistry& registry);
 void register_push_classes(BuiltinClassRegistry& registry);
 void register_xml_classes(BuiltinClassRegistry& registry);
 void register_vendor_classes(BuiltinClassRegistry& registry);
+void register_sensor_classes(BuiltinClassRegistry& registry);
+void register_pim_classes(BuiltinClassRegistry& registry);
+void register_amms_classes(BuiltinClassRegistry& registry);
 
 } // namespace phoneme::vm

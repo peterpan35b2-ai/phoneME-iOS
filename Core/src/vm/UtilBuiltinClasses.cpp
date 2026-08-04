@@ -168,6 +168,15 @@ using namespace builtin;
                           kOrdinary | kFinal, {}, {
             method(kPublic | kStatic, "requireNonNull",
                    "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic | kStatic, "requireNonNull",
+                   "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"),
+            method(kPublic | kStatic, "equals",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic | kStatic, "hashCode", "(Ljava/lang/Object;)I"),
+            method(kPublic | kStatic, "toString",
+                   "(Ljava/lang/Object;)Ljava/lang/String;"),
+            method(kPublic | kStatic, "toString",
+                   "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;"),
         });
     }
     if (name == "java/util/Enumeration") {
@@ -209,6 +218,71 @@ using namespace builtin;
             method(kPublic, "nextElement", "()Ljava/lang/Object;"),
             method(kPublic, "countTokens", "()I"),
         }, {"java/util/Enumeration"});
+    }
+    if (name == "java/util/List") {
+        return make_class("java/util/List", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "size", "()I"),
+            method(kPublic | kAbstract, "isEmpty", "()Z"),
+            method(kPublic | kAbstract, "contains", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "get", "(I)Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "set",
+                   "(ILjava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "add", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "add", "(ILjava/lang/Object;)V"),
+            method(kPublic | kAbstract, "remove", "(I)Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "remove", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "clear", "()V"),
+            method(kPublic | kAbstract, "indexOf", "(Ljava/lang/Object;)I"),
+            method(kPublic | kAbstract, "lastIndexOf", "(Ljava/lang/Object;)I"),
+            method(kPublic | kAbstract, "iterator", "()Ljava/util/Iterator;"),
+            method(kPublic | kAbstract, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "addAll", "(Ljava/util/Collection;)Z"),
+        }, {"java/util/Collection"});
+    }
+    if (name == "java/util/ArrayList") {
+        return make_class("java/util/ArrayList", "java/lang/Object", kOrdinary, {
+            field(kPrivate, "elementData", "[Ljava/lang/Object;"),
+            field(kPrivate, "size", "I"),
+            field(kPrivate, "capacityIncrement", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic, "<init>", "(Ljava/util/Collection;)V"),
+            method(kPublic, "size", "()I"),
+            method(kPublic, "isEmpty", "()Z"),
+            method(kPublic, "contains", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "get", "(I)Ljava/lang/Object;"),
+            method(kPublic, "set", "(ILjava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "add", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "add", "(ILjava/lang/Object;)V"),
+            method(kPublic, "remove", "(I)Ljava/lang/Object;"),
+            method(kPublic, "remove", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "clear", "()V"),
+            method(kPublic, "indexOf", "(Ljava/lang/Object;)I"),
+            method(kPublic, "lastIndexOf", "(Ljava/lang/Object;)I"),
+            method(kPublic, "iterator", "()Ljava/util/Iterator;"),
+            method(kPublic, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/util/List"});
+    }
+    if (name == "java/time/LocalTime") {
+        return make_class("java/time/LocalTime", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "hour", "I"),
+            field(kPrivate | kFinal, "minute", "I"),
+            field(kPrivate | kFinal, "second", "I"),
+            field(kPrivate | kFinal, "nano", "I"),
+        }, {
+            method(kPublic | kStatic, "now", "()Ljava/time/LocalTime;"),
+            method(kPublic | kStatic, "of", "(II)Ljava/time/LocalTime;"),
+            method(kPublic, "withSecond", "(I)Ljava/time/LocalTime;"),
+            method(kPublic, "withNano", "(I)Ljava/time/LocalTime;"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
     }
     if (name == "java/util/Vector") {
         return make_class("java/util/Vector", "java/lang/Object", kOrdinary, {
@@ -303,9 +377,10 @@ using namespace builtin;
         const char* name;
         const char* super_name;
     };
-    static constexpr std::array<Hierarchy, 2> hierarchy {{
+    static constexpr std::array<Hierarchy, 3> hierarchy {{
         {"java/util/NoSuchElementException", "java/lang/RuntimeException"},
         {"java/util/EmptyStackException", "java/lang/RuntimeException"},
+        {"java/time/DateTimeException", "java/lang/RuntimeException"},
     }};
     for (const Hierarchy& entry : hierarchy) {
         if (name == entry.name) {

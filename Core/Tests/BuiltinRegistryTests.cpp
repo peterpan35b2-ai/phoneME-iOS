@@ -48,6 +48,7 @@ void test_lang_registry() {
     const auto runtime = registry.find("java/lang/Runtime");
     const auto thread = registry.find("java/lang/Thread");
     const auto integer = registry.find("java/lang/Integer");
+    const auto throwable = registry.find("java/lang/Throwable");
     const auto no_class = registry.find("java/lang/NoClassDefFoundError");
 
     require(object != nullptr && object->super_name().empty(),
@@ -80,6 +81,10 @@ void test_lang_registry() {
                    "Thread exposes CLDC text form");
     require(integer != nullptr && integer->super_name() == "java/lang/Object",
             "CLDC Integer extends Object directly");
+    require_method(throwable, "addSuppressed", "(Ljava/lang/Throwable;)V",
+                   "Throwable exposes Java 8 suppressed exception support");
+    require_method(throwable, "getSuppressed", "()[Ljava/lang/Throwable;",
+                   "Throwable exposes suppressed exception snapshots");
     require(no_class != nullptr && no_class->super_name() == "java/lang/Error",
             "CLDC NoClassDefFoundError extends Error directly");
     require(registry.find("java/util/Vector") == nullptr,
@@ -140,6 +145,9 @@ void test_util_registry() {
     phoneme::vm::BuiltinClassRegistry registry;
     phoneme::vm::register_util_classes(registry);
 
+    const auto list = registry.find("java/util/List");
+    const auto array_list = registry.find("java/util/ArrayList");
+    const auto local_time = registry.find("java/time/LocalTime");
     const auto vector = registry.find("java/util/Vector");
     const auto stack = registry.find("java/util/Stack");
     const auto table = registry.find("java/util/Hashtable");
@@ -150,6 +158,20 @@ void test_util_registry() {
         registry.find("com/sun/cldc/util/j2me/TimeZoneImpl");
     const auto timer_task = registry.find("java/util/TimerTask");
 
+    require(list != nullptr && (list->access_flags() & 0x0200U) != 0U,
+            "List is exposed as an interface");
+    require_method(list, "add", "(Ljava/lang/Object;)Z",
+                   "List exposes object insertion");
+    require(array_list != nullptr && array_list->fields().size() == 3U &&
+                array_list->interfaces().size() == 1U &&
+                array_list->interfaces().front() == "java/util/List",
+            "ArrayList preserves storage layout and implements List");
+    require_method(array_list, "contains", "(Ljava/lang/Object;)Z",
+                   "ArrayList exposes value lookup");
+    require_method(local_time, "of", "(II)Ljava/time/LocalTime;",
+                   "LocalTime exposes hour/minute factory");
+    require_method(local_time, "withNano", "(I)Ljava/time/LocalTime;",
+                   "LocalTime exposes immutable nano normalization");
     require(vector != nullptr && vector->fields().size() == 3U,
             "Vector preserves native field layout");
     require_method(vector, "elements", "()Ljava/util/Enumeration;",
@@ -180,6 +202,54 @@ void test_util_registry() {
             "TimerTask implements Runnable");
     require(registry.find("java/io/DataInputStream") == nullptr,
             "util registry does not claim io classes");
+}
+
+void test_headless_compat_registry() {
+    phoneme::vm::BuiltinClassRegistry registry;
+    phoneme::vm::register_headless_compat_classes(registry);
+
+    const auto iterable = registry.find("java/lang/Iterable");
+    const auto closeable = registry.find("java/io/Closeable");
+    const auto collection = registry.find("java/util/Collection");
+    const auto iterator = registry.find("java/util/Iterator");
+    const auto map = registry.find("java/util/Map");
+    const auto hash_map = registry.find("java/util/HashMap");
+    const auto hash_set = registry.find("java/util/HashSet");
+    const auto arrays = registry.find("java/util/Arrays");
+    const auto collections = registry.find("java/util/Collections");
+    const auto encoder = registry.find("java/util/Base64$Encoder");
+
+    require(iterable != nullptr && (iterable->access_flags() & 0x0200U) != 0U,
+            "headless profile exposes Iterable as an interface");
+    require_method(iterable, "iterator", "()Ljava/util/Iterator;",
+                   "Iterable exposes iterator");
+    require(closeable != nullptr && closeable->interfaces().size() == 1U &&
+                closeable->interfaces().front() == "java/lang/AutoCloseable",
+            "Closeable extends AutoCloseable");
+    require(collection != nullptr && collection->interfaces().size() == 1U &&
+                collection->interfaces().front() == "java/lang/Iterable",
+            "Collection extends Iterable");
+    require_method(iterator, "next", "()Ljava/lang/Object;",
+                   "Iterator exposes next");
+    require_method(map, "put",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                   "Map exposes put");
+    require(hash_map != nullptr && hash_map->fields().size() == 3U,
+            "HashMap preserves compact native storage layout");
+    require_method(hash_map, "keySet", "()Ljava/util/Set;",
+                   "HashMap exposes keySet");
+    require(hash_set != nullptr && hash_set->fields().size() == 1U,
+            "HashSet uses one compact backing-map field");
+    require_method(arrays, "copyOf", "([BI)[B",
+                   "Arrays exposes byte copyOf");
+    require_method(collections, "sort", "(Ljava/util/List;)V",
+                   "Collections exposes bounded list sorting");
+    require_method(encoder, "encodeToString", "([B)Ljava/lang/String;",
+                   "Base64 encoder exposes string output");
+    require(registry.find("java/awt/Graphics") == nullptr &&
+                registry.find("javax/swing/JFrame") == nullptr &&
+                registry.find("java/sql/Connection") == nullptr,
+            "headless profile does not claim desktop or server APIs");
 }
 
 void test_connection_registry() {
@@ -318,6 +388,9 @@ void test_composed_registry() {
     const auto data_input =
         phoneme::vm::load_builtin_class("java/io/DataInputStream");
     const auto vector = phoneme::vm::load_builtin_class("java/util/Vector");
+    const auto hash_map = phoneme::vm::load_builtin_class("java/util/HashMap");
+    const auto arrays = phoneme::vm::load_builtin_class("java/util/Arrays");
+    const auto base64 = phoneme::vm::load_builtin_class("java/util/Base64");
     const auto form =
         phoneme::vm::load_builtin_class("javax/microedition/lcdui/Form");
     const auto sprite =
@@ -326,6 +399,12 @@ void test_composed_registry() {
     require(string.has_value(), "composed registry resolves lang classes");
     require(data_input.has_value(), "composed registry resolves io classes");
     require(vector.has_value(), "composed registry resolves util classes");
+    require(hash_map.has_value(),
+            "composed registry resolves headless HashMap compatibility");
+    require(arrays.has_value(),
+            "composed registry resolves headless Arrays compatibility");
+    require(base64.has_value(),
+            "composed registry resolves Java 8 Base64 compatibility");
     require(form.has_value(), "composed registry resolves lcdui classes");
     require(sprite.has_value(), "composed registry resolves Game API classes");
     require(!phoneme::vm::load_builtin_class("java/lang/ProcessBuilder").has_value(),
@@ -373,6 +452,7 @@ int main() {
     test_lang_registry();
     test_io_registry();
     test_util_registry();
+    test_headless_compat_registry();
     test_lcdui_registry();
     test_connection_registry();
     test_game_registry();

@@ -237,11 +237,30 @@ constexpr CaseSpec kCases[] {
     return true;
 }
 
+[[nodiscard]] bool write_native_coverage(
+    const std::string& path,
+    const phoneme::vm::NativeMethodRegistry& registry) {
+    std::ofstream output(path);
+    if (!output) {
+        std::cerr << "Cannot write native coverage: " << path << '\n';
+        return false;
+    }
+    output << "owner\tname\tdescriptor\tinvocations\n";
+    for (const auto& entry : registry.invocation_counts()) {
+        output << entry.signature.owner << '\t'
+               << entry.signature.name << '\t'
+               << entry.signature.descriptor << '\t'
+               << entry.count << '\n';
+    }
+    return output.good();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "usage: VmDifferentialHarness FIXTURE.jar ORACLE.tsv\n";
+    if (argc != 3 && argc != 4) {
+        std::cerr << "usage: VmDifferentialHarness FIXTURE.jar ORACLE.tsv "
+                     "[NATIVE_COVERAGE.tsv]\n";
         return 2;
     }
 
@@ -290,6 +309,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    bool coverage_written = true;
+    if (argc == 4) {
+        coverage_written = write_native_coverage(argv[3], machine.natives());
+    }
     machine.shutdown();
     std::cout << "VM differential summary: " << passed << '/' << records.size()
               << " matched";
@@ -297,5 +320,5 @@ int main(int argc, char** argv) {
         std::cout << ", " << failed << " mismatched";
     }
     std::cout << '\n';
-    return failed == 0U ? 0 : 1;
+    return failed == 0U && coverage_written ? 0 : 1;
 }

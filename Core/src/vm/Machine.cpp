@@ -37,6 +37,164 @@ namespace phoneme::vm
     static_assert((kMaintenancePollInterval &
                    (kMaintenancePollInterval - 1U)) == 0U);
 
+    [[nodiscard]] bool translation_wrapping_space(
+        char32_t character) noexcept
+    {
+      return character == U' ' || character == U'\t' ||
+             character == U'\r' || character == U'\u3000';
+    }
+
+    [[nodiscard]] usize translated_wrapped_line_count(
+        const graphics::Font &font,
+        std::span<const char32_t> text,
+        i32 maximum_width)
+    {
+      usize line_count = 0U;
+      std::vector<char32_t> current;
+      auto flush = [&]()
+      {
+        while (!current.empty() &&
+               translation_wrapping_space(current.front()))
+          current.erase(current.begin());
+        while (!current.empty() &&
+               translation_wrapping_space(current.back()))
+          current.pop_back();
+        if (!current.empty())
+          ++line_count;
+        current.clear();
+      };
+
+      for (const char32_t character : text)
+      {
+        if (character == U'\n')
+        {
+          flush();
+          continue;
+        }
+        current.push_back(character);
+        if (font.chars_width(current) <= maximum_width)
+          continue;
+
+        usize break_index = current.size();
+        while (break_index > 1U &&
+               !translation_wrapping_space(current[break_index - 1U]))
+          --break_index;
+        if (break_index <= 1U)
+        {
+          const char32_t overflow = current.back();
+          current.pop_back();
+          flush();
+          current.push_back(overflow);
+          continue;
+        }
+
+        std::vector<char32_t> remainder(
+            current.begin() + static_cast<std::ptrdiff_t>(break_index),
+            current.end());
+        current.erase(
+            current.begin() + static_cast<std::ptrdiff_t>(break_index),
+            current.end());
+        flush();
+        current = std::move(remainder);
+        while (!current.empty() &&
+               translation_wrapping_space(current.front()))
+          current.erase(current.begin());
+      }
+      flush();
+      return std::max<usize>(line_count, 1U);
+    }
+
+    [[nodiscard]] i32 translated_available_width(
+        i32 x,
+        i32 anchor,
+        i32 clip_x,
+        i32 clip_width,
+        i32 translate_x) noexcept
+    {
+      const i32 resolved_anchor = anchor == 0
+          ? graphics::anchor_left | graphics::anchor_top
+          : anchor;
+      const i32 horizontal = resolved_anchor &
+          (graphics::anchor_left | graphics::anchor_right |
+           graphics::anchor_hcenter);
+      const i64 absolute_x = static_cast<i64>(x) + translate_x;
+      const i64 clip_left = clip_x;
+      const i64 clip_right = clip_left + clip_width;
+      i64 available = clip_width;
+      if (horizontal == graphics::anchor_left)
+        available = clip_right - std::max(absolute_x, clip_left);
+      else if (horizontal == graphics::anchor_right)
+        available = std::min(absolute_x, clip_right) - clip_left;
+      else if (horizontal == graphics::anchor_hcenter)
+        available = 2 * std::min(
+            std::max<i64>(0, absolute_x - clip_left),
+            std::max<i64>(0, clip_right - absolute_x));
+      return static_cast<i32>(std::clamp<i64>(
+          available, 1, std::numeric_limits<i32>::max()));
+    }
+
+    [[nodiscard]] i32 translated_text_height(
+        const graphics::Font &font,
+        std::span<const char32_t> text,
+        i32 maximum_width)
+    {
+      const usize line_count = translated_wrapped_line_count(
+          font, text, std::max(maximum_width, 1));
+      const i32 line_advance = std::max(font.height(), 1) + 1;
+      const i64 total_height =
+          static_cast<i64>(line_count) * line_advance - 1;
+      return static_cast<i32>(std::clamp<i64>(
+          total_height, 1, std::numeric_limits<i32>::max()));
+    }
+
+    [[nodiscard]] i32 translated_text_top(
+        i32 y,
+        i32 anchor,
+        const graphics::Font &font,
+        i32 translate_y) noexcept
+    {
+      const i32 resolved_anchor = anchor == 0
+          ? graphics::anchor_left | graphics::anchor_top
+          : anchor;
+      const i32 vertical = resolved_anchor &
+          (graphics::anchor_top | graphics::anchor_bottom |
+           graphics::anchor_baseline);
+      i64 top = static_cast<i64>(y) + translate_y;
+      if (vertical == graphics::anchor_bottom)
+        top -= font.height();
+      else if (vertical == graphics::anchor_baseline)
+        top -= font.baseline();
+      return static_cast<i32>(std::clamp<i64>(
+          top,
+          std::numeric_limits<i32>::min(),
+          std::numeric_limits<i32>::max()));
+    }
+
+    [[nodiscard]] i32 translated_y_for_top(
+        i32 top,
+        i32 block_height,
+        i32 anchor,
+        const graphics::Font &font,
+        i32 translate_y) noexcept
+    {
+      const i32 resolved_anchor = anchor == 0
+          ? graphics::anchor_left | graphics::anchor_top
+          : anchor;
+      const i32 vertical = resolved_anchor &
+          (graphics::anchor_top | graphics::anchor_bottom |
+           graphics::anchor_baseline);
+      i64 y = top;
+      if (vertical == graphics::anchor_bottom)
+        y += block_height;
+      else if (vertical == graphics::anchor_baseline)
+        y += font.baseline();
+      y -= translate_y;
+      return static_cast<i32>(std::clamp<i64>(
+          y,
+          std::numeric_limits<i32>::min(),
+          std::numeric_limits<i32>::max()));
+    }
+
     [[nodiscard]] constexpr usize heap_capacity_with_emergency_reserve(
         usize requested) noexcept
     {
@@ -1092,6 +1250,513 @@ namespace phoneme::vm
     media_events_.shutdown();
     timers_.shutdown();
     scheduler_.shutdown(&monitors_);
+  }
+
+  void Machine::begin_character_translation_frame() noexcept
+  {
+    character_translation_capture_.clear();
+    character_translation_replay_index_ = 0U;
+    character_translation_replay_valid_ = true;
+    translated_text_capture_.clear();
+    translated_text_replay_index_ = 0U;
+    translated_text_replay_valid_ = true;
+    character_translation_frame_active_ = true;
+    ++character_translation_run_generation_;
+  }
+
+  void Machine::break_character_translation_run() noexcept
+  {
+    if (character_translation_frame_active_)
+      ++character_translation_run_generation_;
+  }
+
+  Machine::CharacterTranslationDecision Machine::translate_draw_character(
+      u64 graphics_id,
+      char32_t character,
+      i32 x,
+      i32 y,
+      i32 anchor,
+      i32 font_face,
+      i32 font_style,
+      i32 font_size)
+  {
+    CharacterTranslationDecision decision {
+        .action = CharacterTranslationDecision::Action::draw_original,
+        .translated = nullptr,
+        .x = x,
+        .y = y,
+        .anchor = anchor,
+    };
+    const auto service = translation_service();
+    if (!character_translation_frame_active_ || !service ||
+        !service->enabled())
+      return decision;
+
+    const CharacterDrawSample sample {
+        .graphics_id = graphics_id,
+        .character = character,
+        .x = x,
+        .y = y,
+        .anchor = anchor,
+        .font_face = font_face,
+        .font_style = font_style,
+        .font_size = font_size,
+        .run_generation = character_translation_run_generation_,
+    };
+    character_translation_capture_.push_back(sample);
+
+    if (!character_translation_replay_valid_ ||
+        character_translation_replay_index_ >=
+            character_translation_plan_samples_.size())
+    {
+      character_translation_replay_valid_ = false;
+      return decision;
+    }
+
+    const PlannedCharacterSample &planned =
+        character_translation_plan_samples_[character_translation_replay_index_];
+    const CharacterDrawSample &expected = planned.sample;
+    constexpr i32 kCoordinateTolerance = 4;
+    const bool matches =
+        expected.graphics_id == sample.graphics_id &&
+        expected.character == sample.character &&
+        std::abs(expected.x - sample.x) <= kCoordinateTolerance &&
+        std::abs(expected.y - sample.y) <= kCoordinateTolerance &&
+        expected.anchor == sample.anchor &&
+        expected.font_face == sample.font_face &&
+        expected.font_style == sample.font_style &&
+        expected.font_size == sample.font_size;
+    ++character_translation_replay_index_;
+    if (!matches)
+    {
+      character_translation_replay_valid_ = false;
+      return decision;
+    }
+    if (planned.run_index == std::numeric_limits<usize>::max() ||
+        planned.run_index >= character_translation_runs_.size())
+      return decision;
+
+    const CharacterRunPlan &run =
+        character_translation_runs_[planned.run_index];
+    auto translated = service->lookup_or_request(run.source);
+    if (!translated)
+      return decision;
+
+    if (!planned.first_in_run)
+    {
+      decision.action = CharacterTranslationDecision::Action::suppress;
+      return decision;
+    }
+    decision.action = CharacterTranslationDecision::Action::draw_translation;
+    decision.translated = std::move(translated);
+    decision.x = sample.x + (run.x - expected.x);
+    decision.y = sample.y + (run.y - expected.y);
+    decision.anchor = run.anchor;
+    return decision;
+  }
+
+  Machine::TextTranslationLayoutDecision Machine::plan_translated_text(
+      u64 graphics_id,
+      std::span<const char32_t> text,
+      i32 x,
+      i32 y,
+      i32 anchor,
+      i32 font_face,
+      i32 font_style,
+      i32 font_size,
+      i32 clip_x,
+      i32 clip_y,
+      i32 clip_width,
+      i32 clip_height,
+      i32 translate_x,
+      i32 translate_y)
+  {
+    auto created_font = graphics::Font::create(
+        font_face, font_style, font_size);
+    const graphics::Font font = created_font
+        ? *created_font
+        : graphics::Font::default_font();
+    const i32 maximum_width = translated_available_width(
+        x, anchor, clip_x, clip_width, translate_x);
+    const i32 block_height = translated_text_height(
+        font, text, maximum_width);
+    const i32 original_top = translated_text_top(
+        y, anchor, font, translate_y);
+    const i32 clip_bottom = clip_y + clip_height;
+    const i32 original_bottom = original_top + font.height();
+    const bool lower_half =
+        static_cast<i64>(original_top) + original_bottom >=
+        static_cast<i64>(clip_y) * 2 + clip_height;
+    i32 planned_top = original_top;
+    if (!lower_half || original_top + block_height > clip_bottom)
+    {
+      planned_top =
+          std::min(original_bottom, clip_bottom) - block_height;
+      if (planned_top < clip_y && planned_top + block_height < clip_bottom)
+      {
+        planned_top += std::min(
+            clip_y - planned_top,
+            clip_bottom - (planned_top + block_height));
+      }
+    }
+    TextTranslationLayoutDecision decision {
+        .planned = false,
+        .y = translated_y_for_top(
+            planned_top, block_height, anchor, font, translate_y),
+        .height = block_height,
+    };
+    if (!character_translation_frame_active_ || text.empty())
+      return decision;
+
+    TranslatedTextDrawSample sample {
+        .graphics_id = graphics_id,
+        .text = std::vector<char32_t>(text.begin(), text.end()),
+        .x = x,
+        .y = y,
+        .anchor = anchor,
+        .font_face = font_face,
+        .font_style = font_style,
+        .font_size = font_size,
+        .clip_x = clip_x,
+        .clip_y = clip_y,
+        .clip_width = clip_width,
+        .clip_height = clip_height,
+        .translate_x = translate_x,
+        .translate_y = translate_y,
+    };
+    translated_text_capture_.push_back(sample);
+
+    if (!translated_text_replay_valid_ ||
+        translated_text_replay_index_ >= translated_text_plan_.size())
+    {
+      translated_text_replay_valid_ = false;
+      return decision;
+    }
+
+    const PlannedTranslatedTextSample &planned =
+        translated_text_plan_[translated_text_replay_index_];
+    const TranslatedTextDrawSample &expected = planned.sample;
+    constexpr i32 kCoordinateTolerance = 4;
+    const bool matches =
+        expected.graphics_id == sample.graphics_id &&
+        expected.text == sample.text &&
+        std::abs(expected.x - sample.x) <= kCoordinateTolerance &&
+        std::abs(expected.y - sample.y) <= kCoordinateTolerance &&
+        expected.anchor == sample.anchor &&
+        expected.font_face == sample.font_face &&
+        expected.font_style == sample.font_style &&
+        expected.font_size == sample.font_size &&
+        expected.clip_x == sample.clip_x &&
+        expected.clip_y == sample.clip_y &&
+        expected.clip_width == sample.clip_width &&
+        expected.clip_height == sample.clip_height &&
+        expected.translate_x == sample.translate_x &&
+        expected.translate_y == sample.translate_y;
+    ++translated_text_replay_index_;
+    if (!matches)
+    {
+      translated_text_replay_valid_ = false;
+      return decision;
+    }
+
+    decision.planned = planned.height > 0;
+    decision.y = planned.y + (sample.y - expected.y);
+    decision.height = planned.height;
+    return decision;
+  }
+
+  void Machine::end_character_translation_frame()
+  {
+    if (!character_translation_frame_active_)
+      return;
+    character_translation_frame_active_ = false;
+
+    const auto service = translation_service();
+    if (!service || !service->enabled())
+    {
+      character_translation_capture_.clear();
+      character_translation_plan_samples_.clear();
+      character_translation_runs_.clear();
+      translated_text_capture_.clear();
+      translated_text_plan_.clear();
+      return;
+    }
+
+    std::vector<PlannedCharacterSample> planned;
+    planned.reserve(character_translation_capture_.size());
+    for (const auto &sample : character_translation_capture_)
+    {
+      planned.push_back(PlannedCharacterSample {
+          .sample = sample,
+      });
+    }
+
+    std::vector<CharacterRunPlan> runs;
+    usize begin = 0U;
+    while (begin < character_translation_capture_.size())
+    {
+      usize end = begin + 1U;
+      const CharacterDrawSample &first =
+          character_translation_capture_[begin];
+      i32 previous_x = first.x;
+      i32 previous_y = first.y;
+      const i32 maximum_horizontal_step =
+          std::max<i32>(24, first.font_size * 4);
+      const i32 maximum_vertical_step =
+          std::max<i32>(20, maximum_horizontal_step);
+      const i32 maximum_line_indent =
+          std::max<i32>(48, maximum_horizontal_step * 2);
+      while (end < character_translation_capture_.size())
+      {
+        const CharacterDrawSample &candidate =
+            character_translation_capture_[end];
+        const bool same_style =
+            candidate.run_generation == first.run_generation &&
+            candidate.graphics_id == first.graphics_id &&
+            candidate.anchor == first.anchor &&
+            candidate.font_face == first.font_face &&
+            candidate.font_style == first.font_style &&
+            candidate.font_size == first.font_size;
+        const bool continues_line =
+            candidate.y == previous_y &&
+            std::abs(candidate.x - previous_x) <=
+                maximum_horizontal_step;
+        const bool starts_adjacent_line =
+            candidate.y > previous_y &&
+            candidate.y - previous_y <= maximum_vertical_step &&
+            std::abs(candidate.x - first.x) <= maximum_line_indent;
+        if (!same_style || (!continues_line && !starts_adjacent_line))
+          break;
+        previous_x = candidate.x;
+        previous_y = candidate.y;
+        ++end;
+      }
+
+      std::vector<char32_t> source;
+      source.reserve((end - begin) + 2U);
+      i32 source_line_y = first.y;
+      for (usize index = begin; index < end; ++index)
+      {
+        const CharacterDrawSample &sample =
+            character_translation_capture_[index];
+        if (sample.y != source_line_y)
+        {
+          if (!source.empty() && source.back() != U'\n')
+            source.push_back(U'\n');
+          source_line_y = sample.y;
+        }
+        source.push_back(sample.character);
+      }
+
+      if (translation::TranslationService::contains_translatable_text(source))
+      {
+        const usize run_index = runs.size();
+        runs.push_back(CharacterRunPlan {
+            .first_sample = begin,
+            .sample_count = end - begin,
+            .x = first.x,
+            .y = first.y,
+            .anchor = first.anchor,
+            .source = std::move(source),
+        });
+        for (usize index = begin; index < end; ++index)
+        {
+          planned[index].run_index = run_index;
+          planned[index].first_in_run = index == begin;
+        }
+        (void)service->lookup_or_request(runs.back().source);
+      }
+      begin = end;
+    }
+
+    std::vector<PlannedTranslatedTextSample> text_plan;
+    text_plan.reserve(translated_text_capture_.size());
+    for (const auto &sample : translated_text_capture_)
+    {
+      auto created_font = graphics::Font::create(
+          sample.font_face, sample.font_style, sample.font_size);
+      const graphics::Font font = created_font
+          ? *created_font
+          : graphics::Font::default_font();
+      text_plan.push_back(PlannedTranslatedTextSample {
+          .sample = sample,
+          .y = sample.y,
+          .height = font.height(),
+      });
+    }
+
+    usize text_begin = 0U;
+    while (text_begin < translated_text_capture_.size())
+    {
+      const TranslatedTextDrawSample &first =
+          translated_text_capture_[text_begin];
+      const i32 first_anchor = first.anchor == 0
+          ? graphics::anchor_left | graphics::anchor_top
+          : first.anchor;
+      const i32 first_horizontal = first_anchor &
+          (graphics::anchor_left | graphics::anchor_right |
+           graphics::anchor_hcenter);
+      const i32 first_vertical = first_anchor &
+          (graphics::anchor_top | graphics::anchor_bottom |
+           graphics::anchor_baseline);
+      usize text_end = text_begin + 1U;
+      i64 previous_y = static_cast<i64>(first.y) + first.translate_y;
+      const i32 maximum_gap = 48;
+      const i32 maximum_indent = std::max<i32>(
+          64, std::max(first.clip_width, 1) / 2);
+      while (text_end < translated_text_capture_.size())
+      {
+        const TranslatedTextDrawSample &candidate =
+            translated_text_capture_[text_end];
+        const i32 candidate_anchor = candidate.anchor == 0
+            ? graphics::anchor_left | graphics::anchor_top
+            : candidate.anchor;
+        const i32 candidate_horizontal = candidate_anchor &
+            (graphics::anchor_left | graphics::anchor_right |
+             graphics::anchor_hcenter);
+        const i32 candidate_vertical = candidate_anchor &
+            (graphics::anchor_top | graphics::anchor_bottom |
+             graphics::anchor_baseline);
+        const i64 candidate_y =
+            static_cast<i64>(candidate.y) + candidate.translate_y;
+        const bool same_clip =
+            candidate.graphics_id == first.graphics_id &&
+            candidate.clip_x == first.clip_x &&
+            candidate.clip_y == first.clip_y &&
+            candidate.clip_width == first.clip_width &&
+            candidate.clip_height == first.clip_height &&
+            candidate.translate_x == first.translate_x &&
+            candidate.translate_y == first.translate_y &&
+            candidate_horizontal == first_horizontal &&
+            candidate_vertical == first_vertical;
+        const bool adjacent =
+            candidate_y > previous_y &&
+            candidate_y - previous_y <= maximum_gap &&
+            std::abs(candidate.x - first.x) <= maximum_indent;
+        if (!same_clip || !adjacent)
+          break;
+        previous_y = candidate_y;
+        ++text_end;
+      }
+
+      const usize block_count = text_end - text_begin;
+      std::vector<graphics::Font> fonts;
+      std::vector<i32> heights(block_count, 1);
+      std::vector<i32> original_tops(block_count, 0);
+      std::vector<i32> planned_tops(block_count, 0);
+      std::vector<i32> gaps(block_count, 1);
+      fonts.reserve(block_count);
+
+      for (usize index = text_begin; index < text_end; ++index)
+      {
+        const TranslatedTextDrawSample &sample =
+            translated_text_capture_[index];
+        const usize local_index = index - text_begin;
+        auto created_font = graphics::Font::create(
+            sample.font_face, sample.font_style, sample.font_size);
+        const graphics::Font font = created_font
+            ? *created_font
+            : graphics::Font::default_font();
+        fonts.push_back(font);
+        const i32 maximum_width = translated_available_width(
+            sample.x,
+            sample.anchor,
+            sample.clip_x,
+            sample.clip_width,
+            sample.translate_x);
+        heights[local_index] = translated_text_height(
+            font, sample.text, maximum_width);
+        original_tops[local_index] = translated_text_top(
+            sample.y, sample.anchor, font, sample.translate_y);
+        if (local_index > 0U)
+        {
+          const i32 natural_gap =
+              original_tops[local_index] -
+              (original_tops[local_index - 1U] +
+               fonts[local_index - 1U].height());
+          const i32 maximum_natural_gap = std::max<i32>(
+              1,
+              std::min(font.height(),
+                       fonts[local_index - 1U].height()) / 2);
+          gaps[local_index] = std::clamp(
+              natural_gap, 1, maximum_natural_gap);
+        }
+      }
+
+      const i32 clip_top = first.clip_y;
+      const i32 clip_bottom = first.clip_y + first.clip_height;
+      const i32 original_group_top = original_tops.front();
+      const i32 original_group_bottom =
+          original_tops.back() + fonts.back().height();
+      i64 translated_group_height = 0;
+      for (usize index = 0U; index < block_count; ++index)
+      {
+        if (index > 0U)
+          translated_group_height += gaps[index];
+        translated_group_height += heights[index];
+      }
+      const bool lower_half =
+          static_cast<i64>(original_group_top) + original_group_bottom >=
+          static_cast<i64>(clip_top) * 2 + first.clip_height;
+      const bool fits_below =
+          static_cast<i64>(original_group_top) + translated_group_height <=
+          clip_bottom;
+
+      if (lower_half && fits_below)
+      {
+        i32 cursor_top = original_group_top;
+        for (usize index = 0U; index < block_count; ++index)
+        {
+          if (index > 0U)
+            cursor_top += gaps[index];
+          planned_tops[index] = cursor_top;
+          cursor_top += heights[index];
+        }
+      }
+      else
+      {
+        i32 cursor_bottom = std::min(original_group_bottom, clip_bottom);
+        for (usize reverse = block_count; reverse > 0U; --reverse)
+        {
+          const usize local_index = reverse - 1U;
+          planned_tops[local_index] = cursor_bottom - heights[local_index];
+          if (local_index > 0U)
+            cursor_bottom = planned_tops[local_index] - gaps[local_index];
+        }
+
+        const i32 planned_bottom =
+            planned_tops.back() + heights.back();
+        if (planned_tops.front() < clip_top && planned_bottom < clip_bottom)
+        {
+          const i32 shift_down = std::min(
+              clip_top - planned_tops.front(),
+              clip_bottom - planned_bottom);
+          for (i32 &top : planned_tops)
+            top += shift_down;
+        }
+      }
+
+      for (usize index = text_begin; index < text_end; ++index)
+      {
+        const usize local_index = index - text_begin;
+        const TranslatedTextDrawSample &sample =
+            translated_text_capture_[index];
+        text_plan[index].y = translated_y_for_top(
+            planned_tops[local_index],
+            heights[local_index],
+            sample.anchor,
+            fonts[local_index],
+            sample.translate_y);
+        text_plan[index].height = heights[local_index];
+      }
+      text_begin = text_end;
+    }
+
+    character_translation_plan_samples_ = std::move(planned);
+    character_translation_runs_ = std::move(runs);
+    character_translation_capture_.clear();
+    translated_text_plan_ = std::move(text_plan);
+    translated_text_capture_.clear();
   }
 
   Result<ObjectRef> Machine::current_java_thread()

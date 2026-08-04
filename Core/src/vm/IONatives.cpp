@@ -1479,6 +1479,29 @@ void register_filter_streams(NativeMethodRegistry& registry) {
     };
     input_constructor("java/io/FilterInputStream");
     input_constructor("java/io/DataInputStream");
+    input_constructor("java/io/BufferedInputStream");
+    add(registry, "java/io/BufferedInputStream", "<init>",
+        "(Ljava/io/InputStream;I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto input = arguments[1].as_reference();
+            auto size = arguments[2].as_int();
+            if (!object) return std::unexpected(object.error());
+            if (!input || input->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "buffered input is null");
+            }
+            if (!size) return std::unexpected(size.error());
+            if (*size <= 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "buffer size must be positive");
+            }
+            auto stored = set_reference_field(machine, *object,
+                                              kFilterStreamField, *input);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
 
     const auto output_constructor = [&registry](std::string owner,
                                                 bool data) {
@@ -1507,6 +1530,29 @@ void register_filter_streams(NativeMethodRegistry& registry) {
     };
     output_constructor("java/io/FilterOutputStream", false);
     output_constructor("java/io/DataOutputStream", true);
+    output_constructor("java/io/BufferedOutputStream", false);
+    add(registry, "java/io/BufferedOutputStream", "<init>",
+        "(Ljava/io/OutputStream;I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto output = arguments[1].as_reference();
+            auto size = arguments[2].as_int();
+            if (!object) return std::unexpected(object.error());
+            if (!output || output->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "buffered output is null");
+            }
+            if (!size) return std::unexpected(size.error());
+            if (*size <= 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "buffer size must be positive");
+            }
+            auto stored = set_reference_field(machine, *object,
+                                              kFilterStreamField, *output);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
 }
 
 void register_data_input(NativeMethodRegistry& registry) {

@@ -165,8 +165,7 @@ final class PhoneMECAPI: @unchecked Sendable {
     }
 
     static func load(gameID: UUID) throws -> PhoneMECAPI {
-        _ = gameID
-        return try load()
+        PhoneMECAPI(layout: try PhoneMERuntimeResources.prepare(for: gameID))
     }
 
     func createRuntime() -> RuntimeHandle? {
@@ -219,6 +218,24 @@ final class PhoneMECAPI: @unchecked Sendable {
             "vi".withCString { targetLanguage in
                 phoneme_configure_translation(
                     runtime?.rawValue,
+                    enabled ? 1 : 0,
+                    sourceLanguage,
+                    targetLanguage
+                )
+            }
+        }
+    }
+
+    func configureApplicationTranslation(
+        _ runtime: RuntimeHandle?,
+        appID: Int32,
+        enabled: Bool
+    ) -> Int32 {
+        "auto".withCString { sourceLanguage in
+            "vi".withCString { targetLanguage in
+                phoneme_configure_app_translation(
+                    runtime?.rawValue,
+                    appID,
                     enabled ? 1 : 0,
                     sourceLanguage,
                     targetLanguage
@@ -421,19 +438,6 @@ final class PhoneMECAPI: @unchecked Sendable {
     func foregroundAppID(_ runtime: RuntimeHandle?) -> Int32? {
         let appID = phoneme_foreground_app_id(runtime?.rawValue)
         return appID > 0 ? appID : nil
-    }
-
-    func midletUsedMemory(
-        _ runtime: RuntimeHandle?,
-        appID: Int32,
-        timeoutMilliseconds: Int32 = 200
-    ) -> UInt64? {
-        let bytes = phoneme_midlet_used_memory(
-            runtime?.rawValue,
-            appID,
-            timeoutMilliseconds
-        )
-        return bytes >= 0 ? UInt64(bytes) : nil
     }
 
     func startJar(

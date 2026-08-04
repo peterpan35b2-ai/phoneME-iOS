@@ -92,6 +92,8 @@ int main(int argc, char** argv) {
     invoke_int(machine, "resourceLookup", 1);
     invoke_int(machine, "resourceTraversalBlocked", 1);
     invoke_int(machine, "fileRoundTrip", 1);
+    invoke_int(machine, "javaIoFileCompatibility", 1);
+    invoke_int(machine, "suppressedExceptions", 1);
     invoke_int(machine, "traversalBlocked", 1);
     invoke_int(machine, "closedHandleRejected", 1);
     invoke_int(machine, "offsetAndOpenHandlePolicy", 1);

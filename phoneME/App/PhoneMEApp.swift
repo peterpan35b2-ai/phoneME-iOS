@@ -154,18 +154,15 @@ struct PhoneMEApp: App {
         switch phase {
         case .active:
             backgroundExecution.setApplicationInBackground(false)
-            session.setApplicationInBackground(false)
             session.resume()
         case .background:
             backgroundExecution.setApplicationInBackground(true)
-            session.setApplicationInBackground(true)
             session.suspend()
         case .inactive:
             // Inactive also covers transient system overlays while the app is
             // still visible. Keep Location fully stopped until the scene has
             // actually entered the background.
             backgroundExecution.setApplicationInBackground(false)
-            session.setApplicationInBackground(true)
         @unknown default:
             break
         }

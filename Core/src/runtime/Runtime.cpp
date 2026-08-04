@@ -847,6 +847,25 @@ Status Runtime::configure(std::string runtime_home,
         return fail(ErrorCode::already_running,
                     "runtime cannot be reconfigured while running");
     }
+
+    // The suite database owns the stable MIDlet-to-suite mapping used by RMS,
+    // filesystem and push storage paths. Leaving SuiteStore in its default
+    // in-memory mode makes every process launch reinstall the library from
+    // scratch and can redirect a game to a different suite data directory.
+    // Load the persistent store before publishing the runtime configuration so
+    // a failed recovery never exposes a half-configured Runtime.
+    configured_ = false;
+    runtime_home_.clear();
+    optional_class_archive_.clear();
+    permission_policies_.clear();
+    suite_store_.clear();
+    auto suite_store_status = suite_store_.configure(SuiteStoreConfig {
+        .root_path = runtime_home,
+    });
+    if (!suite_store_status) {
+        return suite_store_status;
+    }
+
     runtime_home_ = std::move(runtime_home);
     optional_class_archive_ = std::move(optional_class_archive);
     permission_policies_.clear();
@@ -907,13 +926,8 @@ Status Runtime::configure_translation(bool enabled,
             return fail(ErrorCode::not_configured,
                         "translation requires a configured runtime");
         }
-        if (!enabled) {
-            // This is the default for subsequently created MIDlets. Existing
-            // application VMs retain the service selected at launch so MVM
-            // profiles do not unexpectedly change each other.
-            translation_service_.reset();
-            return {};
-        }
+        translation_enabled_by_default_ = enabled;
+        if (!enabled || translation_service_) return {};
         runtime_home = runtime_home_;
     }
 
@@ -928,6 +942,13 @@ Status Runtime::configure_translation(bool enabled,
         .enabled = true,
         .source_language = std::move(source_language),
         .target_language = std::move(target_language),
+        .maximum_pending_requests = 512U,
+        .maximum_concurrent_requests = 2U,
+        .maximum_source_bytes = 2'048U,
+        .maximum_batch_items = 64U,
+        .maximum_batch_source_bytes = 8U * 1'024U,
+        .batch_coalescing_delay_ms = 12,
+        .maximum_batch_wait_ms = 32,
     };
     configuration.cache_path = runtime_home +
         "/translation-gtx-" + sanitize(configuration.source_language) +
@@ -940,7 +961,89 @@ Status Runtime::configure_translation(bool enabled,
     }
 
     std::scoped_lock lock(mutex_);
-    translation_service_ = std::move(service);
+    if (!translation_service_) translation_service_ = std::move(service);
+    return {};
+}
+
+Status Runtime::configure_app_translation(
+    AppId app_id,
+    bool enabled,
+    std::string source_language,
+    std::string target_language) {
+    if (!app_id.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "application translation requires a valid app ID");
+    }
+
+    std::shared_ptr<ApplicationVM> application_vm;
+    std::shared_ptr<translation::TranslationService> service;
+    std::string runtime_home;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "translation requires a configured runtime");
+        }
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr || app->vm == nullptr ||
+            app->state == AppState::destroyed) {
+            return fail(ErrorCode::invalid_state,
+                        "application translation target is unavailable");
+        }
+        application_vm = app->vm;
+        service = translation_service_;
+        runtime_home = runtime_home_;
+    }
+
+    if (!enabled) {
+        std::scoped_lock vm_operation(application_vm->operation_mutex);
+        application_vm->machine.configure_translation_service(nullptr);
+        application_vm->canvas.invalidate_translation_rendering();
+        return {};
+    }
+
+    if (!service) {
+        const auto sanitize = [](std::string value) {
+            for (char& character : value) {
+                const auto byte = static_cast<unsigned char>(character);
+                if (std::isalnum(byte) == 0 && character != '-') {
+                    character = '_';
+                }
+            }
+            return value;
+        };
+        translation::TranslationConfiguration configuration {
+            .enabled = true,
+            .source_language = std::move(source_language),
+            .target_language = std::move(target_language),
+            .maximum_pending_requests = 512U,
+            .maximum_concurrent_requests = 2U,
+            .maximum_source_bytes = 2'048U,
+            .maximum_batch_items = 64U,
+            .maximum_batch_source_bytes = 8U * 1'024U,
+            .batch_coalescing_delay_ms = 12,
+            .maximum_batch_wait_ms = 32,
+        };
+        configuration.cache_path = runtime_home +
+            "/translation-gtx-" + sanitize(configuration.source_language) +
+            "-" + sanitize(configuration.target_language) + "-v1.bin";
+        service = std::make_shared<translation::TranslationService>(
+            std::move(configuration));
+        if (!service->enabled()) {
+            return fail(ErrorCode::invalid_argument,
+                        "translation language configuration is invalid");
+        }
+
+        std::scoped_lock lock(mutex_);
+        if (!translation_service_) translation_service_ = service;
+        else service = translation_service_;
+    }
+
+    {
+        std::scoped_lock vm_operation(application_vm->operation_mutex);
+        application_vm->machine.configure_translation_service(std::move(service));
+        application_vm->canvas.invalidate_translation_rendering();
+    }
     return {};
 }
 
@@ -1109,7 +1212,9 @@ Status Runtime::start_midlet(SuiteId suite_id,
         pointer_motion_supported = pointer_motion_supported_;
         repeat_events_supported = repeat_events_supported_;
         permission_prompt = permission_prompt_;
-        translation_service = translation_service_;
+        translation_service = translation_enabled_by_default_
+            ? translation_service_
+            : nullptr;
         if (const auto existing = permission_policies_.find(suite_id.value);
             existing != permission_policies_.end()) {
             permission_policy = existing->second;
@@ -1191,10 +1296,9 @@ Status Runtime::start_midlet(SuiteId suite_id,
     application_vm->machine.set_permission_policy(permission_policy);
     ApplicationVM* const ui_observer = application_vm.get();
     const auto ui_replay = ui_translation_replay_;
-    const auto ui_translation = application_vm->machine.translation_service();
     application_vm->machine.configure_ui_bridge(
         app_id.value,
-        [ui_observer, ui_replay, ui_translation](vm::UiBridgeEvent event) {
+        [ui_observer, ui_replay](vm::UiBridgeEvent event) {
             ui_observer->ui_event_count.fetch_add(1U,
                                                   std::memory_order_release);
             auto pending = std::make_shared<PendingUiTranslation>(
@@ -1213,6 +1317,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
                 ui_replay,
                 ui_replay->current_epoch());
 
+            const auto ui_translation =
+                ui_observer->machine.translation_service();
             if (ui_translation && ui_translation->enabled()) {
                 const UiEvent original = pending->snapshot();
                 if (!original.text.empty()) {
@@ -1667,6 +1773,8 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     if (!foregrounded) return finish_failure(foregrounded.error(), false);
     auto pumped = target_vm->canvas.pump();
     if (!pumped) return finish_failure(pumped.error(), false);
+    auto replayed = vm::replay_current_lcdui(target_vm->machine);
+    if (!replayed) return finish_failure(replayed.error(), false);
 
     std::unique_lock lock(mutex_);
     App* target = find_app_unlocked(app_id);

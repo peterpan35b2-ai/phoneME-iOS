@@ -26,6 +26,7 @@ Modules:
   suite-installer
   coverage-inventory
   lcdui-extended
+  vendor-compat
 EOF
 }
 
@@ -60,6 +61,7 @@ case "$MODULE" in
   suite-installer) SCRIPT="$SCRIPT_DIR/test-suite-installer-host.sh" ;;
   coverage-inventory) SCRIPT="$SCRIPT_DIR/test-coverage-inventory.sh" ;;
   lcdui-extended) SCRIPT="$SCRIPT_DIR/test-lcdui-extended-host.sh" ;;
+  vendor-compat) SCRIPT="$SCRIPT_DIR/test-vendor-compat-host.sh" ;;
   tooling-fail)
     [[ "${PHONEME_TOOLING_SELF_TEST:-0}" == "1" ]] || {
       phoneme_tool_error "unknown module: $MODULE"

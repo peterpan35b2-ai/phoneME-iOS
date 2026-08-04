@@ -1,9 +1,5 @@
 import SwiftUI
 
-enum TranslationPreferences {
-    static let enabledKey = "translateChineseToVietnamese"
-}
-
 enum AppTheme: String, CaseIterable, Identifiable {
     case light
     case dark
@@ -15,7 +11,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .light: return "Light"
         case .dark: return "Dark"
-        case .system: return "Auto, by time of day"
+        case .system: return "System"
         }
     }
 
@@ -40,162 +36,63 @@ struct SettingsView: View {
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
     @AppStorage("keepScreenOn") private var keepScreenOn = false
-    @AppStorage(TranslationPreferences.enabledKey)
-    private var translateChineseToVietnamese = false
     @State private var storageErrorMessage: String?
 
     var body: some View {
         Form {
             Section {
-                Picker(selection: $appTheme) {
+                Picker("Appearance", selection: $appTheme) {
                     ForEach(AppTheme.allCases) { theme in
-                        Text(theme.title).tag(theme.rawValue)
+                        Text(theme.title)
+                            .tag(theme.rawValue)
                     }
-                } label: {
-                    SettingsLabel(
-                        title: "Appearance",
-                        subtitle: "Choose how phoneME looks",
-                        systemImage: "paintpalette.fill",
-                        tint: .pink
-                    )
                 }
             } header: {
-                PhoneMESectionTitle(
-                    title: "Appearance",
-                    subtitle: "Uses native system colors in every theme."
-                )
+                Text("Appearance")
+            } footer: {
+                Text("System follows the appearance selected in iOS Settings.")
             }
-            .listRowBackground(Color.phoneMECardBackground)
 
-            Section {
-                Toggle(isOn: $enableActionBar) {
-                    SettingsLabel(
-                        title: "Action bar",
-                        subtitle: "Show app controls above the emulator",
-                        systemImage: "rectangle.topthird.inset.filled",
-                        tint: .cyan
-                    )
-                }
-
-                Toggle(isOn: $enableStatusBar) {
-                    SettingsLabel(
-                        title: "Status bar",
-                        subtitle: "Keep the iOS status bar visible",
-                        systemImage: "iphone.gen3",
-                        tint: .purple
-                    )
-                }
-
-                Toggle(isOn: $keepScreenOn) {
-                    SettingsLabel(
-                        title: "Keep screen awake",
-                        subtitle: "Prevent display sleep while playing",
-                        systemImage: "sun.max.fill",
-                        tint: .orange
-                    )
-                }
-
-                Toggle(isOn: $translateChineseToVietnamese) {
-                    SettingsLabel(
-                        title: "Translate Chinese to Vietnamese",
-                        subtitle: "Translate native game text online and cache it locally",
-                        systemImage: "character.book.closed.fill",
-                        tint: .green
-                    )
-                }
-            } header: {
-                PhoneMESectionTitle(title: "Player")
+            Section("Player") {
+                Toggle("Action Bar", isOn: $enableActionBar)
+                Toggle("Status Bar", isOn: $enableStatusBar)
+                Toggle("Keep Screen Awake", isOn: $keepScreenOn)
             }
-            .listRowBackground(Color.phoneMECardBackground)
 
 #if os(iOS)
             Section {
-                Toggle(isOn: backgroundExecutionBinding) {
-                    SettingsLabel(
-                        title: "Run in background",
-                        subtitle: "Keep active MIDlets running after leaving the player",
-                        systemImage: "location.fill",
-                        tint: .blue
-                    )
-                }
+                Toggle("Run in Background", isOn: backgroundExecutionBinding)
             } header: {
-                PhoneMESectionTitle(title: "Background execution")
+                Text("Background Execution")
             } footer: {
-                Text("iOS requires low-accuracy Location Services while this option is active.")
+                Text("iOS requires low-accuracy Location Services while this option is enabled.")
             }
-            .listRowBackground(Color.phoneMECardBackground)
 #endif
 
             Section {
-                Picker(selection: storageLocationBinding) {
+                Picker("Data Storage", selection: storageLocationBinding) {
                     ForEach(PhoneMEStorageLocation.allCases) { location in
                         Text(location.title)
                             .tag(location)
                     }
-                } label: {
-                    SettingsLabel(
-                        title: "Data storage",
-                        subtitle: storage.activeLocation.subtitle,
-                        systemImage: storage.activeLocation == .iCloud
-                            ? "icloud.fill"
-                            : "internaldrive.fill",
-                        tint: .blue
-                    )
                 }
                 .disabled(storage.isSwitching)
 
                 if storage.isSwitching {
-                    HStack(spacing: 12) {
+                    HStack {
                         ProgressView()
                         Text("Moving library and game data…")
-                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                PhoneMELabeledContent {
-                    Text(storage.locationDescription)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                        .fixedSize(horizontal: false, vertical: true)
-                } label: {
-                    SettingsLabel(
-                        title: "Data folder",
-                        systemImage: "folder.fill",
-                        tint: .yellow
-                    )
-                }
             } header: {
-                PhoneMESectionTitle(
-                    title: "Storage",
-                    subtitle: "Includes JAR files, profiles, RMS saves, memory-card files and runtime data."
-                )
+                Text("Storage")
             } footer: {
-                Text("Stop every running J2ME app before changing storage. Existing data is copied safely to the selected location.")
+                Text("Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location.")
             }
-            .listRowBackground(Color.phoneMECardBackground)
 
-            Section {
-                NavigationLink {
-                    ProfilesView()
-                } label: {
-                    SettingsLabel(
-                        title: "Profiles",
-                        subtitle: "Reusable display and input presets",
-                        systemImage: "slider.horizontal.3",
-                        tint: .green
-                    )
-                }
-            } header: {
-                PhoneMESectionTitle(title: "Library")
-            }
-            .listRowBackground(Color.phoneMECardBackground)
         }
-        .phoneMEScrollContentBackgroundHidden()
-        .background(Color.phoneMEAppBackground)
-        .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
-        .frame(maxWidth: .infinity)
         .navigationTitle("Settings")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -254,38 +151,6 @@ struct SettingsView: View {
 #endif
 }
 
-private struct SettingsLabel: View {
-    let title: String
-    var subtitle: String? = nil
-    let systemImage: String
-    let tint: Color
-
-    var body: some View {
-        Label {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .foregroundStyle(.primary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        } icon: {
-            Image(systemName: systemImage)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint)
-                .frame(width: 30, height: 30)
-                .background(tint.opacity(0.14))
-                .clipShape(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
-        }
-        .frame(minHeight: 42)
-    }
-}
-
 struct ProfilesView: View {
     @EnvironmentObject private var templates: ProfileTemplateStore
 
@@ -294,17 +159,15 @@ struct ProfilesView: View {
     @State private var showAddDialog = false
     @State private var enteredName = ""
 
+    @ViewBuilder
     var body: some View {
-        ZStack {
-            Color.phoneMEAppBackground
-                .ignoresSafeArea()
-
+        Group {
             if templates.templates.isEmpty {
                 PhoneMEEmptyStateView(
-                    title: "No profiles",
-                    message: "Create a reusable profile for screen, font and input settings.",
+                    title: "No Profiles",
+                    message: "Create a reusable profile for display, font and input settings.",
                     systemImage: "slider.horizontal.3",
-                    actionTitle: "Create profile",
+                    actionTitle: "Create Profile",
                     action: beginAddingProfile
                 )
             } else {
@@ -312,49 +175,37 @@ struct ProfilesView: View {
                     Button {
                         editingTemplate = template
                     } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 34, height: 34)
-                                .background(Color.accentColor.opacity(0.12))
-                                .clipShape(
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                )
+                        HStack {
+                            Label {
+                                VStack(alignment: .leading) {
+                                    Text(template.name)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
 
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(template.name)
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-
-                                if template.id == templates.defaultTemplateID {
-                                    Text("Default profile")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                    if template.id == templates.defaultTemplateID {
+                                        Text("Default")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
+                            } icon: {
+                                Image(systemName: "slider.horizontal.3")
+                                    .foregroundStyle(.secondary)
                             }
 
-                            Spacer(minLength: 12)
+                            Spacer()
 
                             if template.id == templates.defaultTemplateID {
-                                Image(systemName: "checkmark.circle.fill")
+                                Image(systemName: "checkmark")
                                     .foregroundStyle(Color.accentColor)
-                                    .accessibilityLabel("Default")
+                                    .accessibilityLabel("Default profile")
                             }
-
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.tertiary)
-                                .accessibilityHidden(true)
                         }
-                        .frame(minHeight: PhoneMEVisualMetrics.minimumRowHeight)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .listRowBackground(Color.phoneMECardBackground)
                     .contextMenu {
-                        Button("Set as default") {
+                        Button("Set as Default") {
                             templates.setDefault(template)
                         }
                         Button("Edit") {
@@ -370,10 +221,6 @@ struct ProfilesView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .phoneMEScrollContentBackgroundHidden()
-                .background(Color.phoneMEAppBackground)
-                .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
-                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("Profiles")
@@ -388,23 +235,19 @@ struct ProfilesView: View {
                 .accessibilityLabel("Add profile")
             }
         }
-        .alert("Enter name", isPresented: $showAddDialog) {
-            TextField("Profile name", text: $enteredName)
-                .foregroundStyle(.primary)
-                .tint(.accentColor)
+        .alert("New Profile", isPresented: $showAddDialog) {
+            TextField("Profile Name", text: $enteredName)
             Button("Cancel", role: .cancel) {}
-            Button("OK") {
+            Button("Add") {
                 if let template = templates.add(name: enteredName) {
                     editingTemplate = template
                 }
             }
         }
-        .alert("Enter new name", isPresented: renameDialogBinding) {
-            TextField("New profile name", text: $enteredName)
-                .foregroundStyle(.primary)
-                .tint(.accentColor)
+        .alert("Rename Profile", isPresented: renameDialogBinding) {
+            TextField("Profile Name", text: $enteredName)
             Button("Cancel", role: .cancel) {}
-            Button("OK") {
+            Button("Save") {
                 if let renamingTemplate {
                     templates.rename(renamingTemplate, to: enteredName)
                 }

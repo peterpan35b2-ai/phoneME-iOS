@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "phoneme/vm/Value.hpp"
 
@@ -17,6 +18,17 @@ class Machine;
 using NativeMethod = std::function<Result<std::optional<Value>>(
     Machine& machine,
     std::span<const Value> arguments)>;
+
+struct NativeMethodSignature final {
+    std::string owner;
+    std::string name;
+    std::string descriptor;
+};
+
+struct NativeMethodInvocationCount final {
+    NativeMethodSignature signature;
+    std::size_t count {0};
+};
 
 class NativeMethodRegistry final {
 public:
@@ -33,6 +45,11 @@ public:
         std::string_view name,
         std::string_view descriptor,
         std::span<const Value> arguments) const;
+    [[nodiscard]] std::vector<NativeMethodSignature>
+    registered_methods() const;
+    [[nodiscard]] std::vector<NativeMethodInvocationCount>
+    invocation_counts() const;
+    void reset_invocation_counts() noexcept;
     void clear() noexcept;
 
 private:
@@ -42,6 +59,8 @@ private:
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, NativeMethod> methods_;
+    std::unordered_map<std::string, NativeMethodSignature> signatures_;
+    mutable std::unordered_map<std::string, std::size_t> invocation_counts_;
 };
 
 void register_core_natives(NativeMethodRegistry& registry);

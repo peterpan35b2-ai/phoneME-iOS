@@ -24,7 +24,8 @@ struct TranslationConfiguration final {
     usize maximum_source_bytes {2'048U};
     usize maximum_batch_items {16U};
     usize maximum_batch_source_bytes {2'048U};
-    i32 batch_coalescing_delay_ms {4};
+    i32 batch_coalescing_delay_ms {12};
+    i32 maximum_batch_wait_ms {32};
 };
 
 class TranslationService final {
@@ -54,7 +55,7 @@ public:
         std::string_view text,
         Utf8Completion completion = {});
 
-    [[nodiscard]] static bool contains_han(
+    [[nodiscard]] static bool contains_translatable_text(
         std::span<const char32_t> text) noexcept;
     [[nodiscard]] static Result<std::string> parse_google_response(
         std::span<const u8> body);

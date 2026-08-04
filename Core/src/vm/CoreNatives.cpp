@@ -25,6 +25,7 @@
 #include "GameCanvasNatives.hpp"
 #include "GameApiNatives.hpp"
 #include "GraphicsNatives.hpp"
+#include "HeadlessCompatNatives.hpp"
 #include "ImageNatives.hpp"
 #include "IONatives.hpp"
 #include "LcduiNatives.hpp"
@@ -41,6 +42,9 @@
 #include "WrapperNatives.hpp"
 #include "XmlNatives.hpp"
 #include "VendorNatives.hpp"
+#include "SensorNatives.hpp"
+#include "PimNatives.hpp"
+#include "AmmsNatives.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -217,19 +221,15 @@ std::atomic<u64> thread_name_sequence {0};
                 "array contains an invalid component descriptor");
 }
 
-[[nodiscard]] Result<std::u16string> object_text(Machine& machine,
-                                                 ObjectRef reference) {
+[[nodiscard]] Result<std::u16string> identity_object_text(
+    Machine& machine,
+    ObjectRef reference) {
     if (reference.is_null()) {
         return std::u16string(u"null");
     }
     auto class_name = machine.heap().class_name(reference);
     if (!class_name) {
         return std::unexpected(class_name.error());
-    }
-    if (*class_name == "java/lang/String" ||
-        *class_name == "java/lang/StringBuilder" ||
-        *class_name == "java/lang/StringBuffer") {
-        return machine.heap().string_value(reference);
     }
 
     std::string printable = *class_name;
@@ -247,6 +247,75 @@ std::atomic<u64> thread_name_sequence {0};
     }
     printable.append(hash_buffer.data(), converted.ptr);
     return ascii_text(printable);
+}
+
+[[nodiscard]] Result<std::u16string> object_text(Machine& machine,
+                                                 ObjectRef reference) {
+    if (reference.is_null()) {
+        return std::u16string(u"null");
+    }
+    auto class_name = machine.heap().class_name(reference);
+    if (!class_name) {
+        return std::unexpected(class_name.error());
+    }
+    if (*class_name == "java/lang/String" ||
+        *class_name == "java/lang/StringBuilder" ||
+        *class_name == "java/lang/StringBuffer") {
+        return machine.heap().string_value(reference);
+    }
+    // Arrays inherit Object.toString and have no loadable class body of their
+    // own in CLDC. Their Java representation is therefore the identity form.
+    if (class_name->starts_with('[')) {
+        return identity_object_text(machine, reference);
+    }
+
+    auto resolved = machine.classes().resolve_method(
+        *class_name, "toString", "()Ljava/lang/String;");
+    if (!resolved) {
+        return std::unexpected(resolved.error());
+    }
+    if (resolved->owner == nullptr ||
+        resolved->owner->name() == "java/lang/Object") {
+        return identity_object_text(machine, reference);
+    }
+
+    auto invoked = machine.invoke_instance(
+        reference,
+        *class_name,
+        "toString",
+        "()Ljava/lang/String;",
+        {});
+    if (!invoked) {
+        return std::unexpected(invoked.error());
+    }
+    if (invoked->throwable.has_value()) {
+        auto throwable_class = machine.heap().class_name(*invoked->throwable);
+        if (!throwable_class) {
+            return std::unexpected(throwable_class.error());
+        }
+        return fail_java(*throwable_class,
+                         "Object.toString() threw an exception");
+    }
+    if (!invoked->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Object.toString() returned without a value");
+    }
+    auto text_reference = invoked->return_value->as_reference();
+    if (!text_reference) {
+        return std::unexpected(text_reference.error());
+    }
+    if (text_reference->is_null()) {
+        return std::u16string(u"null");
+    }
+    auto text_class = machine.heap().class_name(*text_reference);
+    if (!text_class) {
+        return std::unexpected(text_class.error());
+    }
+    if (*text_class != "java/lang/String") {
+        return fail(ErrorCode::invalid_state,
+                    "Object.toString() returned a non-String object");
+    }
+    return machine.heap().string_value(*text_reference);
 }
 
 void add(NativeMethodRegistry& registry,
@@ -2151,6 +2220,7 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_game_canvas_natives(registry);
     register_game_api_natives(registry);
     register_graphics_natives(registry);
+    register_headless_compat_natives(registry);
     register_image_natives(registry);
     register_io_natives(registry);
     register_lcdui_natives(registry);
@@ -2167,6 +2237,9 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_wrapper_natives(registry);
     register_xml_natives(registry);
     register_vendor_natives(registry);
+    register_sensor_natives(registry);
+    register_pim_natives(registry);
+    register_amms_natives(registry);
 
     add(registry,
         "java/lang/Object",
@@ -2227,7 +2300,7 @@ void register_core_natives(NativeMethodRegistry& registry) {
             if (!receiver) {
                 return std::unexpected(receiver.error());
             }
-            auto text = object_text(machine, *receiver);
+            auto text = identity_object_text(machine, *receiver);
             if (!text) {
                 return std::unexpected(text.error());
             }

@@ -14,6 +14,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "phoneme/media/MediaService.hpp"
 #include "phoneme/filesystem/FileSystem.hpp"
@@ -75,6 +76,29 @@ namespace phoneme::vm
   class Machine final
   {
   public:
+    struct CharacterTranslationDecision final
+    {
+      enum class Action : u8
+      {
+        draw_original,
+        draw_translation,
+        suppress,
+      };
+
+      Action action{Action::draw_original};
+      std::shared_ptr<const std::vector<char32_t>> translated;
+      i32 x{0};
+      i32 y{0};
+      i32 anchor{0};
+    };
+
+    struct TextTranslationLayoutDecision final
+    {
+      bool planned{false};
+      i32 y{0};
+      i32 height{0};
+    };
+
     // Scheduler-owned Thread.run invocations are long-lived. They still yield
     // every VM quantum and observe cancellation, but must not inherit the
     // finite callback/lifecycle budget used to isolate buggy application code.
@@ -143,12 +167,41 @@ namespace phoneme::vm
     }
     void configure_translation_service(
         std::shared_ptr<translation::TranslationService> service) noexcept {
+      std::scoped_lock lock(translation_service_mutex_);
       translation_service_ = std::move(service);
     }
-    [[nodiscard]] const std::shared_ptr<translation::TranslationService>&
+    [[nodiscard]] std::shared_ptr<translation::TranslationService>
     translation_service() const noexcept {
+      std::scoped_lock lock(translation_service_mutex_);
       return translation_service_;
     }
+    void begin_character_translation_frame() noexcept;
+    void end_character_translation_frame();
+    void break_character_translation_run() noexcept;
+    [[nodiscard]] CharacterTranslationDecision translate_draw_character(
+        u64 graphics_id,
+        char32_t character,
+        i32 x,
+        i32 y,
+        i32 anchor,
+        i32 font_face,
+        i32 font_style,
+        i32 font_size);
+    [[nodiscard]] TextTranslationLayoutDecision plan_translated_text(
+        u64 graphics_id,
+        std::span<const char32_t> text,
+        i32 x,
+        i32 y,
+        i32 anchor,
+        i32 font_face,
+        i32 font_style,
+        i32 font_size,
+        i32 clip_x,
+        i32 clip_y,
+        i32 clip_width,
+        i32 clip_height,
+        i32 translate_x,
+        i32 translate_y);
     [[nodiscard]] double next_random_double() noexcept;
     void configure_ui_bridge(i32 app_namespace, UiEventSink sink);
     [[nodiscard]] i32 allocate_ui_component_id() noexcept;
@@ -262,6 +315,61 @@ namespace phoneme::vm
       std::optional<Value> return_override;
     };
 
+    struct CharacterDrawSample final
+    {
+      u64 graphics_id{0};
+      char32_t character{0};
+      i32 x{0};
+      i32 y{0};
+      i32 anchor{0};
+      i32 font_face{0};
+      i32 font_style{0};
+      i32 font_size{0};
+      u64 run_generation{0};
+    };
+
+    struct CharacterRunPlan final
+    {
+      usize first_sample{0};
+      usize sample_count{0};
+      i32 x{0};
+      i32 y{0};
+      i32 anchor{0};
+      std::vector<char32_t> source;
+    };
+
+    struct PlannedCharacterSample final
+    {
+      CharacterDrawSample sample;
+      usize run_index{std::numeric_limits<usize>::max()};
+      bool first_in_run{false};
+    };
+
+    struct TranslatedTextDrawSample final
+    {
+      u64 graphics_id{0};
+      std::vector<char32_t> text;
+      i32 x{0};
+      i32 y{0};
+      i32 anchor{0};
+      i32 font_face{0};
+      i32 font_style{0};
+      i32 font_size{0};
+      i32 clip_x{0};
+      i32 clip_y{0};
+      i32 clip_width{0};
+      i32 clip_height{0};
+      i32 translate_x{0};
+      i32 translate_y{0};
+    };
+
+    struct PlannedTranslatedTextSample final
+    {
+      TranslatedTextDrawSample sample;
+      i32 y{0};
+      i32 height{0};
+    };
+
     struct LambdaBinding final
     {
       std::string interface_name;
@@ -334,7 +442,19 @@ namespace phoneme::vm
     MonitorTable monitors_;
     mutable std::recursive_mutex execution_mutex_;
     graphics::GraphicsStore graphics_;
+    mutable std::mutex translation_service_mutex_;
     std::shared_ptr<translation::TranslationService> translation_service_;
+    std::vector<CharacterDrawSample> character_translation_capture_;
+    std::vector<PlannedCharacterSample> character_translation_plan_samples_;
+    std::vector<CharacterRunPlan> character_translation_runs_;
+    usize character_translation_replay_index_{0};
+    u64 character_translation_run_generation_{0};
+    bool character_translation_frame_active_{false};
+    bool character_translation_replay_valid_{true};
+    std::vector<TranslatedTextDrawSample> translated_text_capture_;
+    std::vector<PlannedTranslatedTextSample> translated_text_plan_;
+    usize translated_text_replay_index_{0};
+    bool translated_text_replay_valid_{true};
     runtime::RecordStoreRegistry record_stores_;
     security::SharedPermissionPolicy permission_policy_;
     push::PushRegistry push_registry_;

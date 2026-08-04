@@ -574,6 +574,68 @@ using namespace builtin;
                           },
                           {"javax/wireless/messaging/Message"});
     }
+    if (name == "javax/wireless/messaging/MessagePart") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPrivate, "content", "[B"),
+                              field(kPrivate, "contentType", "Ljava/lang/String;"),
+                              field(kPrivate, "contentId", "Ljava/lang/String;"),
+                              field(kPrivate, "contentLocation", "Ljava/lang/String;"),
+                              field(kPrivate, "encoding", "Ljava/lang/String;"),
+                          },
+                          {
+                              method(kPublic, "<init>",
+                                     "([BIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                              method(kPublic, "<init>",
+                                     "(Ljava/io/InputStream;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                              method(kPublic, "getContent", "()[B"),
+                              method(kPublic, "getContentAsStream", "()Ljava/io/InputStream;"),
+                              method(kPublic, "getContentID", "()Ljava/lang/String;"),
+                              method(kPublic, "getContentLocation", "()Ljava/lang/String;"),
+                              method(kPublic, "getContentType", "()Ljava/lang/String;"),
+                              method(kPublic, "getEncoding", "()Ljava/lang/String;"),
+                              method(kPublic, "getLength", "()I"),
+                          });
+    }
+    if (name == "javax/wireless/messaging/MultipartMessage") {
+        return make_class(name.data(), "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {},
+                          {
+                              method(kPublic | kAbstract, "addAddress",
+                                     "(Ljava/lang/String;Ljava/lang/String;)Z"),
+                              method(kPublic | kAbstract, "addMessagePart",
+                                     "(Ljavax/wireless/messaging/MessagePart;)V"),
+                              method(kPublic | kAbstract, "getAddresses",
+                                     "(Ljava/lang/String;)[Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "getHeader",
+                                     "(Ljava/lang/String;)Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "getMessagePart",
+                                     "(Ljava/lang/String;)Ljavax/wireless/messaging/MessagePart;"),
+                              method(kPublic | kAbstract, "getMessageParts",
+                                     "()[Ljavax/wireless/messaging/MessagePart;"),
+                              method(kPublic | kAbstract, "getStartContentId",
+                                     "()Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "getSubject",
+                                     "()Ljava/lang/String;"),
+                              method(kPublic | kAbstract, "removeAddress",
+                                     "(Ljava/lang/String;Ljava/lang/String;)Z"),
+                              method(kPublic | kAbstract, "removeAddresses",
+                                     "(Ljava/lang/String;)V"),
+                              method(kPublic | kAbstract, "removeMessagePart",
+                                     "(Ljavax/wireless/messaging/MessagePart;)Z"),
+                              method(kPublic | kAbstract, "removeMessagePartId",
+                                     "(Ljava/lang/String;)Z"),
+                              method(kPublic | kAbstract, "removeMessagePartLocation",
+                                     "(Ljava/lang/String;)Z"),
+                              method(kPublic | kAbstract, "setHeader",
+                                     "(Ljava/lang/String;Ljava/lang/String;)V"),
+                              method(kPublic | kAbstract, "setStartContentId",
+                                     "(Ljava/lang/String;)V"),
+                              method(kPublic | kAbstract, "setSubject",
+                                     "(Ljava/lang/String;)V"),
+                          },
+                          {"javax/wireless/messaging/Message"});
+    }
     if (name == "javax/wireless/messaging/MessageListener") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract, {},
@@ -661,6 +723,39 @@ using namespace builtin;
                               method(kPublic, "setPayloadText", "(Ljava/lang/String;)V"),
                           },
                           {"javax/wireless/messaging/TextMessage"});
+    }
+    if (name == "javax/wireless/messaging/NativeMultipartMessage") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPrivate, "address", "Ljava/lang/String;"),
+                              field(kPrivate, "timestamp", "J"),
+                              field(kPrivate, "subject", "Ljava/lang/String;"),
+                              field(kPrivate, "startContentId", "Ljava/lang/String;"),
+                              field(kPrivate, "parts", "[Ljavax/wireless/messaging/MessagePart;"),
+                              field(kPrivate, "partCount", "I"),
+                          },
+                          {
+                              method(kPublic, "getAddress", "()Ljava/lang/String;"),
+                              method(kPublic, "setAddress", "(Ljava/lang/String;)V"),
+                              method(kPublic, "getTimestamp", "()Ljava/util/Date;"),
+                              method(kPublic, "addAddress", "(Ljava/lang/String;Ljava/lang/String;)Z"),
+                              method(kPublic, "addMessagePart", "(Ljavax/wireless/messaging/MessagePart;)V"),
+                              method(kPublic, "getAddresses", "(Ljava/lang/String;)[Ljava/lang/String;"),
+                              method(kPublic, "getHeader", "(Ljava/lang/String;)Ljava/lang/String;"),
+                              method(kPublic, "getMessagePart", "(Ljava/lang/String;)Ljavax/wireless/messaging/MessagePart;"),
+                              method(kPublic, "getMessageParts", "()[Ljavax/wireless/messaging/MessagePart;"),
+                              method(kPublic, "getStartContentId", "()Ljava/lang/String;"),
+                              method(kPublic, "getSubject", "()Ljava/lang/String;"),
+                              method(kPublic, "removeAddress", "(Ljava/lang/String;Ljava/lang/String;)Z"),
+                              method(kPublic, "removeAddresses", "(Ljava/lang/String;)V"),
+                              method(kPublic, "removeMessagePart", "(Ljavax/wireless/messaging/MessagePart;)Z"),
+                              method(kPublic, "removeMessagePartId", "(Ljava/lang/String;)Z"),
+                              method(kPublic, "removeMessagePartLocation", "(Ljava/lang/String;)Z"),
+                              method(kPublic, "setHeader", "(Ljava/lang/String;Ljava/lang/String;)V"),
+                              method(kPublic, "setStartContentId", "(Ljava/lang/String;)V"),
+                              method(kPublic, "setSubject", "(Ljava/lang/String;)V"),
+                          },
+                          {"javax/wireless/messaging/MultipartMessage"});
     }
     if (name == "javax/wireless/messaging/NativeBinaryMessage") {
         return make_class(name.data(), "java/lang/Object", kOrdinary | kFinal,

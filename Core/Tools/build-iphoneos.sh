@@ -43,7 +43,7 @@ if ! version_is_supported "$IOS_DEPLOYMENT_TARGET"; then
   exit 2
 fi
 
-for command in find sort shasum xcrun awk rg; do
+for command in cmp find sort shasum xcrun awk rg; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required build command not found: $command" >&2
     exit 1
@@ -76,6 +76,8 @@ mkdir -p "$OBJECT_ROOT" "$(dirname "$OUTPUT_ARCHIVE")"
 
 SOURCE_LIST="$BUILD_ROOT/source-files.txt"
 SOURCE_HASHES="$BUILD_ROOT/source-sha256.txt"
+FINAL_SOURCE_LIST="$BUILD_ROOT/source-files-final.txt"
+FINAL_SOURCE_HASHES="$BUILD_ROOT/source-sha256-final.txt"
 BUILD_LOG="$BUILD_ROOT/build.log"
 PROVENANCE="$BUILD_ROOT/build-provenance.txt"
 OBJECT_LIST="$BUILD_ROOT/archive-members.txt"
@@ -133,6 +135,23 @@ while IFS= read -r source; do
     2>&1 | tee -a "$BUILD_LOG"
   OBJECTS+=("$object")
 done < <(cd "$CORE_ROOT" && find src -type f -name '*.cpp' -print | LC_ALL=C sort)
+
+(
+  cd "$CORE_ROOT"
+  find include src -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' \) \
+    -print | LC_ALL=C sort
+) > "$FINAL_SOURCE_LIST"
+(
+  cd "$CORE_ROOT"
+  while IFS= read -r path; do
+    shasum -a 256 "$path"
+  done < "$FINAL_SOURCE_LIST"
+) > "$FINAL_SOURCE_HASHES"
+if ! cmp -s "$SOURCE_LIST" "$FINAL_SOURCE_LIST" ||
+   ! cmp -s "$SOURCE_HASHES" "$FINAL_SOURCE_HASHES"; then
+  echo "phoneME Core sources changed during compilation; retry the build." >&2
+  exit 1
+fi
 
 rm -f "$OUTPUT_ARCHIVE"
 ZERO_AR_DATE=1 xcrun libtool -static -D -o "$OUTPUT_ARCHIVE" "${OBJECTS[@]}"

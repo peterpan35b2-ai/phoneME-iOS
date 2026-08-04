@@ -20,6 +20,7 @@
 namespace phoneme::vm {
 namespace {
 
+constexpr usize kJavaFilePathField = 0;
 constexpr usize kFileStreamHandleField = 0;
 constexpr usize kFileStreamClosedField = 1;
 constexpr usize kConnectionPathField = 0;
@@ -681,75 +682,349 @@ struct ConnectionState final {
     return static_cast<i64>(std::min(value, maximum));
 }
 
-void register_file_stream_natives(NativeMethodRegistry& registry) {
-    add(registry, "java/io/FileInputStream", "<init>",
+[[nodiscard]] Result<ObjectRef> java_file_path_object(
+    Machine& machine,
+    ObjectRef file) {
+    auto path = reference_field(machine, file, kJavaFilePathField);
+    if (!path) return std::unexpected(path.error());
+    if (path->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "java.io.File path is not initialized");
+    }
+    return *path;
+}
+
+[[nodiscard]] Result<std::string> normalized_java_file_path(
+    Machine& machine,
+    ObjectRef file) {
+    auto path = java_file_path_object(machine, file);
+    if (!path) return std::unexpected(path.error());
+    return normalize_path_argument(machine, *path);
+}
+
+[[nodiscard]] Status initialize_file_input_stream(
+    Machine& machine,
+    ObjectRef stream,
+    ObjectRef path_object) {
+    auto path = normalize_path_argument(machine, path_object);
+    if (!path) return file_error(path.error());
+    auto permitted = require_file_permissions(
+        machine, true, false, file_resource_uri(*path));
+    if (!permitted) return permitted;
+    auto handle = machine.filesystem().open(
+        *path, filesystem::OpenMode::read, false, false);
+    if (!handle) return file_error(handle.error(), true);
+    auto initialized = initialize_stream(machine, stream, *handle);
+    if (!initialized) {
+        static_cast<void>(machine.filesystem().close(*handle));
+        return initialized;
+    }
+    return {};
+}
+
+[[nodiscard]] Status initialize_file_output_stream(
+    Machine& machine,
+    ObjectRef stream,
+    ObjectRef path_object,
+    bool append) {
+    auto path = normalize_path_argument(machine, path_object);
+    if (!path) return file_error(path.error());
+    auto permitted = require_file_permissions(
+        machine, false, true, file_resource_uri(*path));
+    if (!permitted) return permitted;
+    auto handle = machine.filesystem().open(
+        *path,
+        append ? filesystem::OpenMode::append
+               : filesystem::OpenMode::write,
+        true,
+        !append);
+    if (!handle) return file_error(handle.error(), true);
+    auto initialized = initialize_stream(machine, stream, *handle);
+    if (!initialized) {
+        static_cast<void>(machine.filesystem().close(*handle));
+        return initialized;
+    }
+    return {};
+}
+
+void register_java_file_natives(NativeMethodRegistry& registry) {
+    add(registry, "java/io/File", "<init>",
         "(Ljava/lang/String;)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments);
-            auto path_object = arguments[1].as_reference();
             if (!object) return std::unexpected(object.error());
-            if (!path_object || path_object->is_null()) {
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "File constructor path is missing");
+            }
+            auto path = arguments[1].as_reference();
+            if (!path || path->is_null()) {
                 return fail_java("java/lang/NullPointerException",
-                                 "file path is null");
+                                 "File path is null");
             }
-            auto path = normalize_path_argument(machine, *path_object);
-            if (!path) return file_error(path.error());
-            auto permitted = require_file_permissions(
-                machine, true, false, file_resource_uri(*path));
-            if (!permitted) return std::unexpected(permitted.error());
-            auto handle = machine.filesystem().open(
-                *path, filesystem::OpenMode::read, false, false);
-            if (!handle) return file_error(handle.error(), true);
-            auto initialized = initialize_stream(machine, *object, *handle);
-            if (!initialized) {
-                static_cast<void>(machine.filesystem().close(*handle));
-                return std::unexpected(initialized.error());
-            }
+            auto stored = set_reference_field(
+                machine, *object, kJavaFilePathField, *path);
+            if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
 
-    const auto output_constructor = [&registry](bool with_append) {
-        add(registry, "java/io/FileOutputStream", "<init>",
-            with_append ? "(Ljava/lang/String;Z)V"
-                        : "(Ljava/lang/String;)V",
-            [with_append](Machine& machine,
-                          std::span<const Value> arguments)
+    const auto path_value = [](Machine& machine,
+                               std::span<const Value> arguments)
+        -> Result<std::optional<Value>> {
+        auto object = receiver(arguments);
+        if (!object) return std::unexpected(object.error());
+        auto path = java_file_path_object(machine, *object);
+        if (!path) return std::unexpected(path.error());
+        return std::optional<Value>(Value::from_reference(*path));
+    };
+    add(registry, "java/io/File", "getPath", "()Ljava/lang/String;",
+        path_value);
+    add(registry, "java/io/File", "toString", "()Ljava/lang/String;",
+        path_value);
+
+    const auto path_component = [&registry](const char* name, bool parent) {
+        add(registry, "java/io/File", name, "()Ljava/lang/String;",
+            [parent](Machine& machine, std::span<const Value> arguments)
                 -> Result<std::optional<Value>> {
                 auto object = receiver(arguments);
-                auto path_object = arguments[1].as_reference();
                 if (!object) return std::unexpected(object.error());
-                if (!path_object || path_object->is_null()) {
+                auto path = normalized_java_file_path(machine, *object);
+                if (!path) return std::unexpected(path.error());
+                const std::string value = parent
+                    ? parent_path(*path)
+                    : leaf_name(*path);
+                if (parent && value.empty()) {
+                    return std::optional<Value>(Value::from_reference({}));
+                }
+                auto string = create_string(machine, value);
+                if (!string) return std::unexpected(string.error());
+                return std::optional<Value>(Value::from_reference(*string));
+            });
+    };
+    path_component("getName", false);
+    path_component("getParent", true);
+
+    add(registry, "java/io/File", "isAbsolute", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path_object = java_file_path_object(machine, *object);
+            if (!path_object) return std::unexpected(path_object.error());
+            auto path = utf8_text(machine, *path_object);
+            if (!path) return std::unexpected(path.error());
+            const bool absolute = path->starts_with('/') ||
+                                  path->starts_with("file:/");
+            return std::optional<Value>(
+                Value::from_int(absolute ? 1 : 0));
+        });
+
+    const auto stat_boolean = [&registry](const char* name, int property) {
+        add(registry, "java/io/File", name, "()Z",
+            [property](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto path = normalized_java_file_path(machine, *object);
+                if (!path) return std::unexpected(path.error());
+                auto permitted = require_file_permissions(
+                    machine, true, false, file_resource_uri(*path));
+                if (!permitted) return std::unexpected(permitted.error());
+                auto info = machine.filesystem().stat(*path);
+                if (!info) return file_error(info.error());
+                const bool value = property == 0
+                    ? info->exists
+                    : (property == 1
+                        ? info->exists && info->directory
+                        : info->exists && !info->directory);
+                return std::optional<Value>(
+                    Value::from_int(value ? 1 : 0));
+            });
+    };
+    stat_boolean("exists", 0);
+    stat_boolean("isDirectory", 1);
+    stat_boolean("isFile", 2);
+
+    add(registry, "java/io/File", "length", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path = normalized_java_file_path(machine, *object);
+            if (!path) return std::unexpected(path.error());
+            auto permitted = require_file_permissions(
+                machine, true, false, file_resource_uri(*path));
+            if (!permitted) return std::unexpected(permitted.error());
+            auto info = machine.filesystem().stat(*path);
+            if (!info) return file_error(info.error());
+            const i64 size = info->exists && !info->directory
+                ? clamp_java_long_size(info->size)
+                : 0;
+            return std::optional<Value>(Value::from_long(size));
+        });
+    add(registry, "java/io/File", "lastModified", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path = normalized_java_file_path(machine, *object);
+            if (!path) return std::unexpected(path.error());
+            auto permitted = require_file_permissions(
+                machine, true, false, file_resource_uri(*path));
+            if (!permitted) return std::unexpected(permitted.error());
+            auto info = machine.filesystem().stat(*path);
+            if (!info) return file_error(info.error());
+            if (!info->exists) {
+                return std::optional<Value>(Value::from_long(0));
+            }
+            const i64 seconds = info->modified_seconds;
+            const i64 millis = seconds > std::numeric_limits<i64>::max() / 1000
+                ? std::numeric_limits<i64>::max()
+                : (seconds < std::numeric_limits<i64>::min() / 1000
+                    ? std::numeric_limits<i64>::min()
+                    : seconds * 1000);
+            return std::optional<Value>(Value::from_long(millis));
+        });
+
+    const auto mutate = [&registry](const char* name, bool directory) {
+        add(registry, "java/io/File", name, "()Z",
+            [directory](Machine& machine,
+                        std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto path = normalized_java_file_path(machine, *object);
+                if (!path) return std::unexpected(path.error());
+                auto permitted = require_file_permissions(
+                    machine, false, true, file_resource_uri(*path));
+                if (!permitted) return std::unexpected(permitted.error());
+                Status changed = directory
+                    ? machine.filesystem().create_directory(*path)
+                    : machine.filesystem().remove(*path, false);
+                return std::optional<Value>(
+                    Value::from_int(changed ? 1 : 0));
+            });
+    };
+    mutate("mkdir", true);
+    mutate("delete", false);
+
+    add(registry, "java/io/File", "renameTo", "(Ljava/io/File;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = receiver(arguments);
+            if (!source) return std::unexpected(source.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "File.renameTo target is missing");
+            }
+            auto target = arguments[1].as_reference();
+            if (!target || target->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "File.renameTo target is null");
+            }
+            auto from = normalized_java_file_path(machine, *source);
+            auto to = normalized_java_file_path(machine, *target);
+            if (!from) return std::unexpected(from.error());
+            if (!to) return std::unexpected(to.error());
+            auto permitted_from = require_file_permissions(
+                machine, false, true, file_resource_uri(*from));
+            auto permitted_to = require_file_permissions(
+                machine, false, true, file_resource_uri(*to));
+            if (!permitted_from) return std::unexpected(permitted_from.error());
+            if (!permitted_to) return std::unexpected(permitted_to.error());
+            auto renamed = machine.filesystem().rename(*from, *to);
+            return std::optional<Value>(
+                Value::from_int(renamed ? 1 : 0));
+        });
+}
+
+void register_file_stream_natives(NativeMethodRegistry& registry) {
+    const auto input_constructor = [&registry](bool file_argument) {
+        add(registry, "java/io/FileInputStream", "<init>",
+            file_argument ? "(Ljava/io/File;)V"
+                          : "(Ljava/lang/String;)V",
+            [file_argument](Machine& machine,
+                            std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                if (arguments.size() < 2U) {
+                    return fail(ErrorCode::invalid_argument,
+                                "file input path is missing");
+                }
+                auto argument = arguments[1].as_reference();
+                if (!argument || argument->is_null()) {
                     return fail_java("java/lang/NullPointerException",
-                                     "file path is null");
+                                     "file input path is null");
+                }
+                Result<ObjectRef> path_object = file_argument
+                    ? java_file_path_object(machine, *argument)
+                    : Result<ObjectRef>(*argument);
+                if (!path_object) {
+                    return std::unexpected(path_object.error());
+                }
+                auto initialized = initialize_file_input_stream(
+                    machine, *object, *path_object);
+                if (!initialized) return std::unexpected(initialized.error());
+                return std::optional<Value> {};
+            });
+    };
+    input_constructor(false);
+    input_constructor(true);
+
+    const auto output_constructor = [&registry](bool file_argument,
+                                                bool with_append) {
+        const char* descriptor = nullptr;
+        if (file_argument) {
+            descriptor = with_append ? "(Ljava/io/File;Z)V"
+                                     : "(Ljava/io/File;)V";
+        } else {
+            descriptor = with_append ? "(Ljava/lang/String;Z)V"
+                                     : "(Ljava/lang/String;)V";
+        }
+        add(registry, "java/io/FileOutputStream", "<init>", descriptor,
+            [file_argument, with_append](
+                Machine& machine,
+                std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                if (arguments.size() < 2U) {
+                    return fail(ErrorCode::invalid_argument,
+                                "file output path is missing");
+                }
+                auto argument = arguments[1].as_reference();
+                if (!argument || argument->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "file output path is null");
                 }
                 bool append = false;
                 if (with_append) {
+                    if (arguments.size() < 3U) {
+                        return fail(ErrorCode::invalid_argument,
+                                    "file output append flag is missing");
+                    }
                     auto value = arguments[2].as_int();
                     if (!value) return std::unexpected(value.error());
                     append = *value != 0;
                 }
-                auto path = normalize_path_argument(machine, *path_object);
-                if (!path) return file_error(path.error());
-                auto permitted = require_file_permissions(
-                    machine, false, true, file_resource_uri(*path));
-                if (!permitted) return std::unexpected(permitted.error());
-                auto handle = machine.filesystem().open(
-                    *path,
-                    append ? filesystem::OpenMode::append
-                           : filesystem::OpenMode::write,
-                    true, !append);
-                if (!handle) return file_error(handle.error(), true);
-                auto initialized = initialize_stream(machine, *object, *handle);
-                if (!initialized) {
-                    static_cast<void>(machine.filesystem().close(*handle));
-                    return std::unexpected(initialized.error());
+                Result<ObjectRef> path_object = file_argument
+                    ? java_file_path_object(machine, *argument)
+                    : Result<ObjectRef>(*argument);
+                if (!path_object) {
+                    return std::unexpected(path_object.error());
                 }
+                auto initialized = initialize_file_output_stream(
+                    machine, *object, *path_object, append);
+                if (!initialized) return std::unexpected(initialized.error());
                 return std::optional<Value> {};
             });
     };
-    output_constructor(false);
-    output_constructor(true);
+    output_constructor(false, false);
+    output_constructor(false, true);
+    output_constructor(true, false);
+    output_constructor(true, true);
 
     add(registry, "java/io/FileInputStream", "read", "()I",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1258,6 +1533,62 @@ void register_file_connection_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    add(registry, owner, "setFileConnection", "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto state = connection_state(machine, arguments, true);
+            if (!state) return std::unexpected(state.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "setFileConnection target is missing");
+            }
+            auto target_object = arguments[1].as_reference();
+            if (!target_object || target_object->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "setFileConnection target is null");
+            }
+            auto target = utf8_text(machine, *target_object);
+            if (!target) return std::unexpected(target.error());
+            if (target->empty() || *target == "." ||
+                (target->find('/') != std::string::npos) ||
+                (target->find('\\') != std::string::npos)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "setFileConnection requires one path component");
+            }
+
+            std::string destination;
+            if (*target == "..") {
+                destination = parent_path(state->path);
+            } else {
+                auto current = machine.filesystem().stat(state->path);
+                if (!current) return file_error(current.error());
+                if (!current->exists || !current->directory) {
+                    return fail_java("java/io/IOException",
+                                     "setFileConnection requires a directory");
+                }
+                destination = state->path;
+                if (!destination.empty()) destination.push_back('/');
+                destination.append(*target);
+            }
+            auto normalized = filesystem::normalize_virtual_path(
+                destination, true);
+            if (!normalized) return file_error(normalized.error());
+            auto info = machine.filesystem().stat(*normalized);
+            if (!info) return file_error(info.error());
+            if (!info->exists) {
+                return fail_java("java/io/IOException",
+                                 "setFileConnection target does not exist");
+            }
+            auto closed = close_connection_streams(machine, state->object);
+            if (!closed) return std::unexpected(closed.error());
+            auto string = create_string(machine, *normalized);
+            if (!string) return std::unexpected(string.error());
+            auto stored = set_reference_field(machine, state->object,
+                                              kConnectionPathField, *string);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
     const auto register_list = [&registry](bool filtered) {
         add(registry, owner, "list",
             filtered ? "(Ljava/lang/String;Z)Ljava/util/Enumeration;"
@@ -1518,6 +1849,7 @@ Status file_output_close(Machine& machine, ObjectRef stream) {
 }
 
 void register_file_natives(NativeMethodRegistry& registry) {
+    register_java_file_natives(registry);
     register_file_stream_natives(registry);
     register_file_connection_natives(registry);
 

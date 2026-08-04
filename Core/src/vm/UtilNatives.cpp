@@ -846,6 +846,285 @@ void register_enumeration(NativeMethodRegistry& registry) {
         });
 }
 
+void register_array_list(NativeMethodRegistry& registry) {
+    add(registry, "java/util/ArrayList", "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto initialized = initialize_vector(machine, *object, 10, 0);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "<init>", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto capacity = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!capacity) return std::unexpected(capacity.error());
+            auto initialized = initialize_vector(machine, *object, *capacity, 0);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "size", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            if (!count) return std::unexpected(count.error());
+            return std::optional<Value>(Value::from_int(*count));
+        });
+    add(registry, "java/util/ArrayList", "isEmpty", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            if (!count) return std::unexpected(count.error());
+            return std::optional<Value>(Value::from_int(*count == 0 ? 1 : 0));
+        });
+
+    const auto add_search = [&registry](const char* name, bool reverse) {
+        add(registry, "java/util/ArrayList", name,
+            "(Ljava/lang/Object;)I",
+            [reverse](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto target = reference_argument(arguments, 1U, true);
+                if (!object) return std::unexpected(object.error());
+                if (!target) return std::unexpected(target.error());
+                const i32 start = reverse
+                    ? std::numeric_limits<i32>::max() : 0;
+                auto index = vector_index_of(machine, *object, *target,
+                                             start, reverse);
+                if (!index) return std::unexpected(index.error());
+                return std::optional<Value>(Value::from_int(*index));
+            });
+    };
+    add_search("indexOf", false);
+    add_search("lastIndexOf", true);
+    add(registry, "java/util/ArrayList", "contains",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto target = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!target) return std::unexpected(target.error());
+            auto index = vector_index_of(machine, *object, *target, 0, false);
+            if (!index) return std::unexpected(index.error());
+            return std::optional<Value>(Value::from_int(*index >= 0 ? 1 : 0));
+        });
+    add(registry, "java/util/ArrayList", "get",
+        "(I)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            if (*index < 0 || *index >= *count) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "ArrayList index is out of range");
+            }
+            auto value = machine.heap().element(
+                *data, static_cast<usize>(*index));
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(*value);
+        });
+    add(registry, "java/util/ArrayList", "set",
+        "(ILjava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            auto replacement = reference_argument(arguments, 2U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            if (!replacement) return std::unexpected(replacement.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            if (*index < 0 || *index >= *count) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "ArrayList index is out of range");
+            }
+            auto previous = machine.heap().element(
+                *data, static_cast<usize>(*index));
+            if (!previous) return std::unexpected(previous.error());
+            auto stored = machine.heap().set_element(
+                *data, static_cast<usize>(*index),
+                Value::from_reference(*replacement));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(*previous);
+        });
+    add(registry, "java/util/ArrayList", "add",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto value = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!value) return std::unexpected(value.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            if (!count) return std::unexpected(count.error());
+            auto capacity = ensure_vector_capacity(machine, *object, *count + 1);
+            if (!capacity) return std::unexpected(capacity.error());
+            auto data = vector_data(machine, *object);
+            if (!data) return std::unexpected(data.error());
+            auto stored = machine.heap().set_element(
+                *data, static_cast<usize>(*count),
+                Value::from_reference(*value));
+            if (!stored) return std::unexpected(stored.error());
+            auto updated = set_int_field(machine, *object,
+                                         kVectorCountField, *count + 1);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+    add(registry, "java/util/ArrayList", "add",
+        "(ILjava/lang/Object;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            auto value = reference_argument(arguments, 2U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            if (!value) return std::unexpected(value.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            if (!count) return std::unexpected(count.error());
+            if (*index < 0 || *index > *count) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "ArrayList insertion index is out of range");
+            }
+            auto capacity = ensure_vector_capacity(machine, *object, *count + 1);
+            if (!capacity) return std::unexpected(capacity.error());
+            auto data = vector_data(machine, *object);
+            if (!data) return std::unexpected(data.error());
+            for (i32 current = *count; current > *index; --current) {
+                auto previous = machine.heap().element(
+                    *data, static_cast<usize>(current - 1));
+                if (!previous) return std::unexpected(previous.error());
+                auto shifted = machine.heap().set_element(
+                    *data, static_cast<usize>(current), *previous);
+                if (!shifted) return std::unexpected(shifted.error());
+            }
+            auto stored = machine.heap().set_element(
+                *data, static_cast<usize>(*index),
+                Value::from_reference(*value));
+            if (!stored) return std::unexpected(stored.error());
+            auto updated = set_int_field(machine, *object,
+                                         kVectorCountField, *count + 1);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "remove",
+        "(I)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto index = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!index) return std::unexpected(index.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            if (*index < 0 || *index >= *count) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "ArrayList index is out of range");
+            }
+            auto previous = machine.heap().element(
+                *data, static_cast<usize>(*index));
+            if (!previous) return std::unexpected(previous.error());
+            auto removed = remove_vector_index(machine, *object, *index);
+            if (!removed) return std::unexpected(removed.error());
+            return std::optional<Value>(*previous);
+        });
+    add(registry, "java/util/ArrayList", "remove",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto target = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!target) return std::unexpected(target.error());
+            auto index = vector_index_of(machine, *object, *target, 0, false);
+            if (!index) return std::unexpected(index.error());
+            if (*index < 0) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto removed = remove_vector_index(machine, *object, *index);
+            if (!removed) return std::unexpected(removed.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+    add(registry, "java/util/ArrayList", "clear", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            for (i32 index = 0; index < *count; ++index) {
+                auto cleared = machine.heap().set_element(
+                    *data, static_cast<usize>(index),
+                    Value::from_reference({}));
+                if (!cleared) return std::unexpected(cleared.error());
+            }
+            auto updated = set_int_field(machine, *object,
+                                         kVectorCountField, 0);
+            if (!updated) return std::unexpected(updated.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            std::u16string text(u"[");
+            for (i32 index = 0; index < *count; ++index) {
+                if (index != 0) text.append(u", ");
+                auto value = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto reference = value->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                auto value_text = collection_value_text(
+                    machine, *reference, *object, u"(this Collection)");
+                if (!value_text) return std::unexpected(value_text.error());
+                text.append(*value_text);
+            }
+            text.push_back(u']');
+            auto string = create_string(machine, std::move(text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
+}
+
 void register_vector(NativeMethodRegistry& registry) {
     add(registry, "java/util/Vector", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2330,6 +2609,7 @@ void register_random(NativeMethodRegistry& registry) {
 void register_util_natives(NativeMethodRegistry& registry) {
     register_string_tokenizer(registry);
     register_enumeration(registry);
+    register_array_list(registry);
     register_vector(registry);
     register_hashtable(registry);
     register_timer(registry);

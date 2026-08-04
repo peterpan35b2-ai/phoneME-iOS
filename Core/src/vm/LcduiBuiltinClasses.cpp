@@ -484,6 +484,8 @@ using namespace builtin;
                           kOrdinary | kFinal, {
             field(kPrivate | kStatic, "singleton",
                   "Ljavax/microedition/lcdui/Display;"),
+            field(kPrivate | kStatic, "ownerMidlet",
+                  "Ljavax/microedition/midlet/MIDlet;"),
             field(kPrivate, "current",
                   "Ljavax/microedition/lcdui/Displayable;"),
             field(kPublic | kStatic | kFinal, "LIST_ELEMENT", "I"),

@@ -184,6 +184,12 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                       int32_t enabled,
                                       const char* source_language,
                                       const char* target_language);
+/* Changes translation only for one already-running MIDlet. */
+int32_t phoneme_configure_app_translation(PhoneMERuntimeRef runtime,
+                                          int32_t app_id,
+                                          int32_t enabled,
+                                          const char* source_language,
+                                          const char* target_language);
 /* Configure before phoneme_start_system. Passing NULL clears the callback. */
 int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,

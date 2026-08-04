@@ -11,6 +11,27 @@ using namespace builtin;
 
 [[nodiscard]] BuiltinClassRegistry::ClassPtr build_file_class(
     std::string_view name) {
+    if (name == "java/io/File") {
+        return make_class("java/io/File", "java/lang/Object",
+                          kOrdinary, {
+                              field(kPrivate | kFinal, "path", "Ljava/lang/String;"),
+                          }, {
+                              method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                              method(kPublic, "getName", "()Ljava/lang/String;"),
+                              method(kPublic, "getParent", "()Ljava/lang/String;"),
+                              method(kPublic, "getPath", "()Ljava/lang/String;"),
+                              method(kPublic, "isAbsolute", "()Z"),
+                              method(kPublic, "exists", "()Z"),
+                              method(kPublic, "isDirectory", "()Z"),
+                              method(kPublic, "isFile", "()Z"),
+                              method(kPublic, "length", "()J"),
+                              method(kPublic, "lastModified", "()J"),
+                              method(kPublic, "mkdir", "()Z"),
+                              method(kPublic, "delete", "()Z"),
+                              method(kPublic, "renameTo", "(Ljava/io/File;)Z"),
+                              method(kPublic, "toString", "()Ljava/lang/String;"),
+                          }, {"java/io/Serializable"});
+    }
     if (name == "java/io/FileInputStream") {
         return make_class("java/io/FileInputStream", "java/io/InputStream",
                           kOrdinary | kFinal,
@@ -20,6 +41,7 @@ using namespace builtin;
                           },
                           {
                               method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                              method(kPublic, "<init>", "(Ljava/io/File;)V"),
                               method(kPublic, "read", "()I"),
                               method(kPublic, "read", "([B)I"),
                               method(kPublic, "read", "([BII)I"),
@@ -38,6 +60,8 @@ using namespace builtin;
                           {
                               method(kPublic, "<init>", "(Ljava/lang/String;)V"),
                               method(kPublic, "<init>", "(Ljava/lang/String;Z)V"),
+                              method(kPublic, "<init>", "(Ljava/io/File;)V"),
+                              method(kPublic, "<init>", "(Ljava/io/File;Z)V"),
                               method(kPublic, "write", "(I)V"),
                               method(kPublic, "write", "([B)V"),
                               method(kPublic, "write", "([BII)V"),
@@ -175,6 +199,7 @@ using namespace builtin;
                               method(kPublic | kAbstract, "mkdir", "()V"),
                               method(kPublic | kAbstract, "delete", "()V"),
                               method(kPublic | kAbstract, "rename", "(Ljava/lang/String;)V"),
+                              method(kPublic | kAbstract, "setFileConnection", "(Ljava/lang/String;)V"),
                               method(kPublic | kAbstract, "truncate", "(J)V"),
                               method(kPublic | kAbstract, "list", "()Ljava/util/Enumeration;"),
                               method(kPublic | kAbstract, "list", "(Ljava/lang/String;Z)Ljava/util/Enumeration;"),
@@ -220,6 +245,7 @@ using namespace builtin;
                               method(kPublic, "mkdir", "()V"),
                               method(kPublic, "delete", "()V"),
                               method(kPublic, "rename", "(Ljava/lang/String;)V"),
+                              method(kPublic, "setFileConnection", "(Ljava/lang/String;)V"),
                               method(kPublic, "truncate", "(J)V"),
                               method(kPublic, "list", "()Ljava/util/Enumeration;"),
                               method(kPublic, "list", "(Ljava/lang/String;Z)Ljava/util/Enumeration;"),

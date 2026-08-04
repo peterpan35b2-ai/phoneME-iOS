@@ -31,6 +31,26 @@ constexpr usize kMaximumRepeatsPerPump = 8U;
 constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
 constexpr u64 kCanvasPaintWatchdogInstructionBudget = 5'000'000U;
 
+class ScopedCharacterTranslationFrame final {
+public:
+    explicit ScopedCharacterTranslationFrame(vm::Machine& machine) noexcept
+        : machine_(machine) {
+        machine_.begin_character_translation_frame();
+    }
+
+    ~ScopedCharacterTranslationFrame() {
+        machine_.end_character_translation_frame();
+    }
+
+    ScopedCharacterTranslationFrame(
+        const ScopedCharacterTranslationFrame&) = delete;
+    ScopedCharacterTranslationFrame& operator=(
+        const ScopedCharacterTranslationFrame&) = delete;
+
+private:
+    vm::Machine& machine_;
+};
+
 class ScopedUnpacedCallback final {
 public:
     explicit ScopedUnpacedCallback(vm::Scheduler& scheduler,
@@ -96,6 +116,13 @@ void CanvasRuntime::set_input_capabilities(bool pointer_events,
             (void)key;
             state.next_key_repeat.clear();
         }
+    }
+}
+
+void CanvasRuntime::invalidate_translation_rendering() noexcept {
+    observed_translation_generation_ = 0U;
+    if (CanvasState* state = active_visible_state(); state != nullptr) {
+        merge_region(state->repaint_region, full_region());
     }
 }
 
@@ -556,6 +583,7 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
     set_game_rendering_enabled(**state,
                                host_foreground_ &&
                                    (*state)->display_visible);
+    machine_.begin_character_translation_frame();
     return *graphics;
 }
 
@@ -882,6 +910,7 @@ Status CanvasRuntime::process_flushes() {
         const vm::ObjectRef canvas = found->second.object;
         const vm::CanvasRect region = *found->second.flush_region;
         found->second.flush_region.reset();
+        machine_.end_character_translation_frame();
         auto graphics = game_graphics(canvas);
         if (!graphics) return std::unexpected(graphics.error());
         if (render_hooks_.flush_game_graphics) {
@@ -894,6 +923,7 @@ Status CanvasRuntime::process_flushes() {
                 merge_region(current->repaint_region, region);
             }
         }
+        machine_.begin_character_translation_frame();
     }
     return {};
 }
@@ -1000,6 +1030,7 @@ Result<bool> CanvasRuntime::invoke_paint(
     const std::array<vm::Value, 1> arguments {
         vm::Value::from_reference(graphics),
     };
+    ScopedCharacterTranslationFrame translation_frame(machine_);
     ScopedUnpacedCallback unpaced(machine_.scheduler(), initial_paint);
     auto result = machine_.invoke_instance(
         receiver,

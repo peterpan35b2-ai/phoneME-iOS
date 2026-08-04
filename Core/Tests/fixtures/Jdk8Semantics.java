@@ -35,6 +35,12 @@ public final class Jdk8Semantics {
     public static final class DefaultImpl implements ChildDefault {
     }
 
+    public static final class PrintableValue {
+        public String toString() {
+            return "custom";
+        }
+    }
+
     public static final class ReflectTarget {
         public int value;
 
@@ -307,6 +313,22 @@ public final class Jdk8Semantics {
                 && Character.digit('9', 8) == -1) {
             result |= 1024;
         }
+        Object integerObject = integer;
+        Object booleanObject = booleanValue;
+        Object printableObject = new PrintableValue();
+        String appended = new StringBuilder()
+                .append(integerObject)
+                .append(',')
+                .append(booleanObject)
+                .append(',')
+                .append(printableObject)
+                .toString();
+        if (String.valueOf(integerObject).equals("123")
+                && String.valueOf(booleanObject).equals("true")
+                && String.valueOf(printableObject).equals("custom")
+                && appended.equals("123,true,custom")) {
+            result |= 2048;
+        }
         return result;
     }
 
@@ -331,6 +353,32 @@ public final class Jdk8Semantics {
             Double.parseDouble("broken");
         } catch (NumberFormatException expected) {
             result += 8;
+        }
+        return result;
+    }
+
+    public static int throwableSuppressedApi() {
+        int result = 0;
+        Throwable primary = new Exception("primary");
+        Throwable first = new java.io.IOException("first");
+        Throwable second = new IllegalStateException("second");
+        primary.addSuppressed(first);
+        primary.addSuppressed(second);
+        Throwable[] suppressed = primary.getSuppressed();
+        if (suppressed.length == 2
+                && suppressed[0] == first
+                && suppressed[1] == second) result |= 1;
+        suppressed[0] = second;
+        if (primary.getSuppressed()[0] == first) result |= 2;
+        try {
+            primary.addSuppressed(null);
+        } catch (NullPointerException expected) {
+            result |= 4;
+        }
+        try {
+            primary.addSuppressed(primary);
+        } catch (IllegalArgumentException expected) {
+            result |= 8;
         }
         return result;
     }
@@ -420,9 +468,161 @@ public final class Jdk8Semantics {
         resized.setSize(1);
         resized.ensureCapacity(8);
         resized.trimToSize();
+
+        java.util.List modernList = new java.util.ArrayList(1);
+        java.time.LocalTime noon = java.time.LocalTime.of(12, 30);
+        modernList.add(noon);
+        modernList.add(null);
+        Object replaced = modernList.set(1, "tail");
+        modernList.add(1, "middle");
+        boolean removedMiddle = modernList.remove("middle");
+        Object removedTail = modernList.remove(1);
+        java.time.LocalTime normalized = java.time.LocalTime.of(12, 30)
+            .withSecond(0).withNano(0);
         if (copied[0].equals("one") && copied[1] == null
                 && copied[2] == null && resized.size() == 1
-                && resized.capacity() == 1) result |= 128;
+                && resized.capacity() == 1
+                && replaced == null && removedMiddle
+                && removedTail.equals("tail")
+                && modernList.size() == 1
+                && modernList.contains(normalized)
+                && modernList.get(0).equals(normalized)) result |= 128;
+        return result;
+    }
+
+    public static int headlessCollectionsApi() throws Exception {
+        int result = 0;
+
+        java.util.List list = new java.util.ArrayList(
+            java.util.Arrays.asList(new String[] {"c", "a", "b"}));
+        java.util.Collections.sort(list);
+        java.util.Iterator iterator = list.iterator();
+        String joined = "";
+        while (iterator.hasNext()) joined += iterator.next();
+        if (joined.equals("abc") && list.toArray().length == 3) result |= 1;
+
+        java.util.Map map = new java.util.HashMap();
+        map.put(null, "zero");
+        map.put("one", Integer.valueOf(1));
+        map.put("nullable", null);
+        Object previous = map.put("one", Integer.valueOf(2));
+        if (map.size() == 3 && map.containsKey(null)
+                && map.containsKey("nullable") && map.containsValue(null)
+                && previous.equals(Integer.valueOf(1))
+                && map.get("one").equals(Integer.valueOf(2))) result |= 2;
+
+        java.util.Set set = new java.util.HashSet(list);
+        boolean addedNull = set.add(null);
+        boolean duplicate = set.add("a");
+        if (addedNull && !duplicate && set.contains(null)
+                && set.size() == 4 && set.toArray().length == 4) result |= 4;
+
+        int[] numbers = new int[] {7, -2, 4, 4};
+        java.util.Arrays.sort(numbers);
+        int[] middle = java.util.Arrays.copyOfRange(numbers, 1, 3);
+        byte[] bytes = new byte[] {3, -1, 2};
+        java.util.Arrays.sort(bytes);
+        byte[] padded = java.util.Arrays.copyOf(bytes, 5);
+        if (numbers[0] == -2 && numbers[3] == 7
+                && java.util.Arrays.binarySearch(numbers, 4) >= 1
+                && java.util.Arrays.equals(middle, new int[] {4, 4})
+                && padded[0] == -1 && padded[2] == 3 && padded[4] == 0) {
+            result |= 8;
+        }
+
+        java.util.Collections.reverse(list);
+        java.util.Collections.swap(list, 0, 2);
+        java.util.Collections.fill(list, "x");
+        if (list.get(0).equals("x") && list.get(2).equals("x")
+                && java.util.Collections.emptyList().isEmpty()
+                && java.util.Collections.singletonList("s").size() == 1) {
+            result |= 16;
+        }
+
+        String encoded = java.util.Base64.getEncoder().encodeToString(
+            "mod-game".getBytes("UTF-8"));
+        byte[] decoded = java.util.Base64.getDecoder().decode(encoded);
+        byte[] encodedBytes = java.util.Base64.getEncoder().encode(decoded);
+        if (encoded.equals("bW9kLWdhbWU=")
+                && new String(decoded, "UTF-8").equals("mod-game")
+                && new String(encodedBytes, "US-ASCII").equals(encoded)) {
+            result |= 32;
+        }
+
+        Comparable comparable = "b";
+        if (comparable.compareTo("a") > 0
+                && java.util.Objects.equals("v", new String("v"))
+                && java.util.Objects.hashCode(null) == 0
+                && java.util.Objects.toString(null).equals("null")
+                && java.util.Objects.toString(null, "fallback").equals("fallback")
+                && java.util.Objects.requireNonNull("ok", "missing").equals("ok")) {
+            result |= 64;
+        }
+
+        java.util.Map copiedMap = new java.util.HashMap(map);
+        java.util.Map mergedMap = new java.util.HashMap();
+        mergedMap.putAll(copiedMap);
+        java.util.Collection values = mergedMap.values();
+        java.util.Set keys = mergedMap.keySet();
+        if (copiedMap.size() == 3 && mergedMap.size() == 3
+                && values.size() == 3 && keys.contains("one")
+                && mergedMap.remove("one").equals(Integer.valueOf(2))
+                && mergedMap.size() == 2) result |= 128;
+        return result;
+    }
+
+    public static int headlessIoApi() throws Exception {
+        int result = 0;
+        java.io.ByteArrayOutputStream sink = new java.io.ByteArrayOutputStream();
+        java.io.BufferedOutputStream output =
+            new java.io.BufferedOutputStream(sink, 4);
+        output.write(new byte[] {65, 66, 67});
+        output.flush();
+        if (java.util.Arrays.equals(sink.toByteArray(),
+                new byte[] {65, 66, 67})) result |= 1;
+
+        java.io.BufferedInputStream input = new java.io.BufferedInputStream(
+            new java.io.ByteArrayInputStream(sink.toByteArray()), 4);
+        if (input.read() == 65 && input.available() == 2) result |= 2;
+        java.lang.AutoCloseable automatic = input;
+        automatic.close();
+        java.io.Closeable closeable = output;
+        closeable.close();
+        result |= 4;
+
+        try {
+            new java.io.BufferedInputStream(
+                new java.io.ByteArrayInputStream(new byte[0]), 0);
+        } catch (IllegalArgumentException expected) {
+            result |= 8;
+        }
+        return result;
+    }
+
+    public static int headlessCompatibilityExceptions() {
+        int result = 0;
+        try {
+            new java.util.HashMap(-1);
+        } catch (IllegalArgumentException expected) {
+            result |= 1;
+        }
+        try {
+            java.util.Base64.getDecoder().decode("broken");
+        } catch (IllegalArgumentException expected) {
+            result |= 2;
+        }
+        java.util.Iterator iterator =
+            java.util.Collections.emptyList().iterator();
+        try {
+            iterator.next();
+        } catch (java.util.NoSuchElementException expected) {
+            result |= 4;
+        }
+        try {
+            iterator.remove();
+        } catch (UnsupportedOperationException expected) {
+            result |= 8;
+        }
         return result;
     }
 

@@ -947,14 +947,22 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute String byte constructors and charset encoders");
     require_jdk8_string_result("stringEncodingExceptions", 7,
                                "String encoding failures preserve Java exceptions");
-    require_jdk8_string_result("wrapperApi", 2047,
+    require_jdk8_string_result("wrapperApi", 4095,
                                "execute JDK 8 boxing and java.lang wrapper APIs");
     require_jdk8_string_result("wrapperExceptions", 15,
                                "wrapper parse failures unwind as NumberFormatException");
+    require_jdk8_string_result("throwableSuppressedApi", 15,
+                               "Throwable preserves Java 8 suppressed exceptions");
     require_jdk8_string_result("mathApi", 255,
                                "execute java.lang.Math numeric semantics");
     require_jdk8_string_result("utilApi", 255,
                                "execute CLDC Vector Stack Hashtable and Random APIs");
+    require_jdk8_string_result("headlessCollectionsApi", 255,
+                               "execute the bounded Java 8 modding collection profile");
+    require_jdk8_string_result("headlessIoApi", 15,
+                               "execute buffered streams and AutoCloseable compatibility");
+    require_jdk8_string_result("headlessCompatibilityExceptions", 15,
+                               "headless profile failures preserve Java exceptions");
     require_jdk8_string_result("utilExceptions", 15,
                                "java.util failures unwind through Java exceptions");
     require_jdk8_string_result("timeApi", 1023,
@@ -1233,6 +1241,10 @@ void test_machine_filesystem(const std::string& fixture_jar) {
            "Class.getResourceAsStream rejects archive-root traversal");
     invoke("fileRoundTrip", 1,
            "JSR-75 FileConnection round trip and enumeration succeed");
+    invoke("javaIoFileCompatibility", 1,
+           "Java 8 File streams and FileConnection navigation succeed");
+    invoke("suppressedExceptions", 1,
+           "Throwable suppressed exception semantics succeed");
     invoke("traversalBlocked", 1,
            "JSR-75 rejects paths outside the application sandbox");
     invoke("closedHandleRejected", 1,
@@ -1516,6 +1528,34 @@ void test_machine_media(const std::string& fixture_jar) {
     }
     require(events.has_value() && *events == 15,
             "MMAPI fixture receives start stop close and volume events");
+}
+
+void test_machine_xml(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add XML fixture JAR to VM classpath");
+    phoneme::vm::Machine machine(classes);
+
+    auto result = machine.invoke_static("corefixture/XmlOps",
+                                        "run",
+                                        "()I",
+                                        {},
+                                        40'000'000);
+    if (!result) {
+        std::cerr << "XML fixture VM error: "
+                  << result.error().message << '\n';
+    } else if (result->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*result->throwable);
+        std::cerr << "XML fixture throwable: "
+                  << (throwable ? *throwable : std::string("unknown"))
+                  << '\n';
+    }
+    require(result.has_value() && result->completed_normally() &&
+                result->return_value.has_value(),
+            "execute JAXP SAX fixture");
+    auto status = result->return_value->as_int();
+    require(status.has_value() && *status == 0,
+            "SAX parser preserves attributes entities CDATA and callbacks");
 }
 
 void test_machine_graphics(const std::string& fixture_jar) {
@@ -3284,6 +3324,12 @@ int main(int argc, char** argv) {
         std::cout << "Standalone Media Core tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "xml") {
+        test_builtin_boot_classes();
+        test_machine_xml(fixture_jar);
+        std::cout << "Standalone XML Core tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "graphics") {
         test_archive_and_classfile(fixture_jar);
         test_builtin_boot_classes();
@@ -3332,6 +3378,7 @@ int main(int argc, char** argv) {
     test_runtime_push_queue(fixture_jar);
     test_machine_network(fixture_jar);
     test_machine_media(fixture_jar);
+    test_machine_xml(fixture_jar);
     test_machine_graphics(fixture_jar);
     test_machine_game_api(fixture_jar);
     test_machine_m3g();

@@ -133,20 +133,166 @@ void append_utf8(std::string& output, u32 code_point) {
     return output;
 }
 
-[[nodiscard]] bool is_han(u32 code_point) noexcept {
-    return (code_point >= 0x3400U && code_point <= 0x4DBFU) ||
+[[nodiscard]] bool is_translatable_letter(u32 code_point) noexcept {
+    if ((code_point >= 'A' && code_point <= 'Z') ||
+        (code_point >= 'a' && code_point <= 'z')) {
+        return true;
+    }
+
+    // Common alphabetic scripts used by J2ME games. Keep symbols, emoji,
+    // counters and punctuation out of the request queue while allowing
+    // Google's sl=auto detector to handle the actual source language.
+    return (code_point >= 0x00C0U && code_point <= 0x02AFU) ||
+           (code_point >= 0x0370U && code_point <= 0x052FU) ||
+           (code_point >= 0x0531U && code_point <= 0x08FFU) ||
+           (code_point >= 0x0900U && code_point <= 0x1FFFU) ||
+           (code_point >= 0x2C00U && code_point <= 0x2DFFU) ||
+           (code_point >= 0x3040U && code_point <= 0x318FU) ||
+           (code_point >= 0x3400U && code_point <= 0x4DBFU) ||
            (code_point >= 0x4E00U && code_point <= 0x9FFFU) ||
+           (code_point >= 0xA000U && code_point <= 0xA4CFU) ||
+           (code_point >= 0xAC00U && code_point <= 0xD7AFU) ||
            (code_point >= 0xF900U && code_point <= 0xFAFFU) ||
+           (code_point >= 0xFB50U && code_point <= 0xFDFFU) ||
+           (code_point >= 0xFE70U && code_point <= 0xFEFFU) ||
+           (code_point >= 0xFF21U && code_point <= 0xFF5AU) ||
+           (code_point >= 0x1'0000U && code_point <= 0x1'EFFFU) ||
            (code_point >= 0x2'0000U && code_point <= 0x2'FA1FU) ||
            (code_point >= 0x3'0000U && code_point <= 0x3'134FU);
+}
+
+enum ScriptMask : u32 {
+    script_latin = 1U << 0U,
+    script_greek = 1U << 1U,
+    script_cyrillic = 1U << 2U,
+    script_hebrew = 1U << 3U,
+    script_arabic = 1U << 4U,
+    script_indic = 1U << 5U,
+    script_southeast_asian = 1U << 6U,
+    script_japanese_kana = 1U << 7U,
+    script_han = 1U << 8U,
+    script_hangul = 1U << 9U,
+    script_other = 1U << 10U,
+};
+
+[[nodiscard]] u32 script_mask_for(u32 code_point) noexcept {
+    if ((code_point >= 'A' && code_point <= 'Z') ||
+        (code_point >= 'a' && code_point <= 'z') ||
+        (code_point >= 0x00C0U && code_point <= 0x02AFU) ||
+        (code_point >= 0x1E00U && code_point <= 0x1EFFU)) {
+        return script_latin;
+    }
+    if ((code_point >= 0x0370U && code_point <= 0x03FFU) ||
+        (code_point >= 0x1F00U && code_point <= 0x1FFFU)) {
+        return script_greek;
+    }
+    if ((code_point >= 0x0400U && code_point <= 0x052FU) ||
+        (code_point >= 0x2DE0U && code_point <= 0x2DFFU) ||
+        (code_point >= 0xA640U && code_point <= 0xA69FU)) {
+        return script_cyrillic;
+    }
+    if ((code_point >= 0x0590U && code_point <= 0x05FFU) ||
+        (code_point >= 0xFB1DU && code_point <= 0xFB4FU)) {
+        return script_hebrew;
+    }
+    if ((code_point >= 0x0600U && code_point <= 0x08FFU) ||
+        (code_point >= 0xFB50U && code_point <= 0xFDFFU) ||
+        (code_point >= 0xFE70U && code_point <= 0xFEFFU)) {
+        return script_arabic;
+    }
+    if (code_point >= 0x0900U && code_point <= 0x0DFFU) {
+        return script_indic;
+    }
+    if ((code_point >= 0x0E00U && code_point <= 0x0EFFU) ||
+        (code_point >= 0x1780U && code_point <= 0x17FFU)) {
+        return script_southeast_asian;
+    }
+    if ((code_point >= 0x3040U && code_point <= 0x30FFU) ||
+        (code_point >= 0x31F0U && code_point <= 0x31FFU)) {
+        return script_japanese_kana;
+    }
+    if ((code_point >= 0x3400U && code_point <= 0x4DBFU) ||
+        (code_point >= 0x4E00U && code_point <= 0x9FFFU) ||
+        (code_point >= 0xF900U && code_point <= 0xFAFFU) ||
+        (code_point >= 0x2'0000U && code_point <= 0x2'FA1FU) ||
+        (code_point >= 0x3'0000U && code_point <= 0x3'134FU)) {
+        return script_han;
+    }
+    if ((code_point >= 0x1100U && code_point <= 0x11FFU) ||
+        (code_point >= 0x3130U && code_point <= 0x318FU) ||
+        (code_point >= 0xAC00U && code_point <= 0xD7AFU)) {
+        return script_hangul;
+    }
+    return is_translatable_letter(code_point) ? script_other : 0U;
+}
+
+[[nodiscard]] u32 batch_script_mask(std::string_view text) {
+    auto decoded = decode_utf8(text);
+    if (!decoded) return 0U;
+    u32 mask = 0U;
+    for (const char32_t character : *decoded) {
+        mask |= script_mask_for(static_cast<u32>(character));
+    }
+    return mask;
+}
+
+[[nodiscard]] bool ascii_equal_ignore_case(char32_t character,
+                                           char expected) noexcept {
+    u32 value = static_cast<u32>(character);
+    if (value >= 'A' && value <= 'Z') value += 'a' - 'A';
+    return value == static_cast<u32>(expected);
+}
+
+[[nodiscard]] bool starts_with_ascii_ignore_case(
+    std::span<const char32_t> text,
+    usize begin,
+    usize end,
+    std::string_view prefix) noexcept {
+    if (end - begin < prefix.size()) return false;
+    for (usize index = 0U; index < prefix.size(); ++index) {
+        if (!ascii_equal_ignore_case(text[begin + index], prefix[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool is_likely_machine_identifier(
+    std::span<const char32_t> text) noexcept {
+    usize begin = 0U;
+    usize end = text.size();
+    while (begin < end && text[begin] <= U' ') ++begin;
+    while (end > begin && text[end - 1U] <= U' ') --end;
+    if (begin == end) return false;
+
+    constexpr std::array<std::string_view, 8> prefixes {{
+        "http://", "https://", "ftp://", "www.",
+        "mailto:", "file:", "socket://", "ssl://",
+    }};
+    for (const auto prefix : prefixes) {
+        if (starts_with_ascii_ignore_case(text, begin, end, prefix)) {
+            return true;
+        }
+    }
+
+    bool contains_space = false;
+    bool contains_at = false;
+    for (usize index = begin; index < end; ++index) {
+        contains_space = contains_space || text[index] <= U' ';
+        contains_at = contains_at || text[index] == U'@';
+    }
+    return !contains_space && contains_at;
 }
 
 [[nodiscard]] bool should_translate(
     std::span<const char32_t> text,
     usize maximum_source_bytes) noexcept {
-    if (text.empty() || text.size() > 1'024U) return false;
+    if (text.empty() || text.size() > 1'024U ||
+        is_likely_machine_identifier(text)) {
+        return false;
+    }
     usize estimated_bytes = 0U;
-    bool has_han = false;
+    bool has_letter = false;
     for (const char32_t character : text) {
         const u32 code_point = static_cast<u32>(character);
         if (code_point == 0U) return false;
@@ -160,9 +306,9 @@ void append_utf8(std::string& output, u32 code_point) {
             estimated_bytes += 4U;
         }
         if (estimated_bytes > maximum_source_bytes) return false;
-        has_han = has_han || is_han(code_point);
+        has_letter = has_letter || is_translatable_letter(code_point);
     }
-    return has_han;
+    return has_letter;
 }
 
 [[nodiscard]] bool should_translate_utf8(
@@ -500,6 +646,8 @@ struct TranslationService::State final {
         retry_after;
     std::unordered_map<std::string, std::vector<Utf8Completion>> waiters;
     std::deque<PendingSource> pending;
+    std::chrono::steady_clock::time_point first_enqueue_at {};
+    std::chrono::steady_clock::time_point last_enqueue_at {};
     usize in_flight {0U};
     bool pump_scheduled {false};
     bool stopped {false};
@@ -631,7 +779,11 @@ TranslationService::TranslationService(
         state_->configuration.maximum_source_bytes,
         16U * 1'024U);
     state_->configuration.batch_coalescing_delay_ms = std::clamp<i32>(
-        state_->configuration.batch_coalescing_delay_ms, 0, 50);
+        state_->configuration.batch_coalescing_delay_ms, 0, 250);
+    state_->configuration.maximum_batch_wait_ms = std::clamp<i32>(
+        state_->configuration.maximum_batch_wait_ms,
+        state_->configuration.batch_coalescing_delay_ms,
+        500);
     if (!state_->adapter ||
         !valid_language_code(state_->configuration.source_language) ||
         !valid_language_code(state_->configuration.target_language)) {
@@ -680,9 +832,12 @@ TranslationService::lookup_or_request(std::span<const char32_t> text) {
             return nullptr;
         }
         state_->scheduled.insert(source);
+        const auto now = std::chrono::steady_clock::now();
+        if (state_->pending.empty()) state_->first_enqueue_at = now;
         state_->pending.push_back(PendingSource {
             .source = source,
         });
+        state_->last_enqueue_at = now;
         should_pump = true;
     }
     if (should_pump) schedule_pump(state_);
@@ -720,19 +875,22 @@ std::optional<std::string> TranslationService::lookup_or_request_utf8(
             return std::nullopt;
         }
         state_->scheduled.insert(source);
+        const auto now = std::chrono::steady_clock::now();
+        if (state_->pending.empty()) state_->first_enqueue_at = now;
         state_->pending.push_back(PendingSource {
             .source = source,
         });
+        state_->last_enqueue_at = now;
         should_pump = true;
     }
     if (should_pump) schedule_pump(state_);
     return std::nullopt;
 }
 
-bool TranslationService::contains_han(
+bool TranslationService::contains_translatable_text(
     std::span<const char32_t> text) noexcept {
     return std::any_of(text.begin(), text.end(), [](char32_t character) {
-        return is_han(static_cast<u32>(character));
+        return is_translatable_letter(static_cast<u32>(character));
     });
 }
 
@@ -791,19 +949,54 @@ Result<std::string> TranslationService::parse_google_response(
 
 void TranslationService::schedule_pump(
     const std::shared_ptr<State>& state) {
-    i32 delay_ms = 0;
     {
         std::scoped_lock lock(state->mutex);
         if (state->stopped || state->pump_scheduled) return;
         state->pump_scheduled = true;
-        delay_ms = state->configuration.batch_coalescing_delay_ms;
     }
 
-    std::thread([state, delay_ms] {
-        if (delay_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    std::thread([state] {
+        for (;;) {
+            std::chrono::steady_clock::time_point deadline;
+            {
+                std::scoped_lock lock(state->mutex);
+                if (state->stopped) {
+                    state->pump_scheduled = false;
+                    return;
+                }
+                const auto quiet_deadline = state->last_enqueue_at +
+                    std::chrono::milliseconds(
+                        state->configuration.batch_coalescing_delay_ms);
+                const auto maximum_deadline = state->first_enqueue_at +
+                    std::chrono::milliseconds(
+                        state->configuration.maximum_batch_wait_ms);
+                deadline = std::min(quiet_deadline, maximum_deadline);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now < deadline) std::this_thread::sleep_until(deadline);
+
+            {
+                std::scoped_lock lock(state->mutex);
+                if (state->stopped) {
+                    state->pump_scheduled = false;
+                    return;
+                }
+                const auto quiet_deadline = state->last_enqueue_at +
+                    std::chrono::milliseconds(
+                        state->configuration.batch_coalescing_delay_ms);
+                const auto maximum_deadline = state->first_enqueue_at +
+                    std::chrono::milliseconds(
+                        state->configuration.maximum_batch_wait_ms);
+                const auto refreshed_deadline = std::min(
+                    quiet_deadline, maximum_deadline);
+                if (std::chrono::steady_clock::now() < refreshed_deadline) {
+                    continue;
+                }
+            }
+            pump_requests(state);
+            return;
         }
-        pump_requests(state);
     }).detach();
 }
 
@@ -825,26 +1018,38 @@ void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
             usize joined_size = first.source.size();
             const bool may_batch = !first.force_single &&
                 first.source.find(';') == std::string::npos;
+            const u32 first_script_mask = batch_script_mask(first.source);
             sources.push_back(std::move(first.source));
 
-            while (may_batch &&
-                   sources.size() <
-                       state->configuration.maximum_batch_items &&
-                   !state->pending.empty()) {
-                const PendingSource& candidate = state->pending.front();
-                if (candidate.force_single ||
-                    candidate.source.find(';') != std::string::npos) {
-                    break;
+            if (may_batch) {
+                for (auto iterator = state->pending.begin();
+                     iterator != state->pending.end() &&
+                     sources.size() <
+                         state->configuration.maximum_batch_items;) {
+                    const bool compatible_script =
+                        state->configuration.source_language != "auto" ||
+                        batch_script_mask(iterator->source) == first_script_mask;
+                    if (iterator->force_single ||
+                        iterator->source.find(';') != std::string::npos ||
+                        !compatible_script) {
+                        ++iterator;
+                        continue;
+                    }
+                    const usize next_size = joined_size + 1U +
+                        iterator->source.size();
+                    if (next_size >
+                        state->configuration.maximum_batch_source_bytes) {
+                        ++iterator;
+                        continue;
+                    }
+                    joined_size = next_size;
+                    sources.push_back(std::move(iterator->source));
+                    iterator = state->pending.erase(iterator);
                 }
-                const usize next_size = joined_size + 1U +
-                    candidate.source.size();
-                if (next_size >
-                    state->configuration.maximum_batch_source_bytes) {
-                    break;
-                }
-                joined_size = next_size;
-                sources.push_back(std::move(state->pending.front().source));
-                state->pending.pop_front();
+            }
+            if (state->pending.empty()) {
+                state->first_enqueue_at = {};
+                state->last_enqueue_at = {};
             }
             ++state->in_flight;
         }
@@ -961,14 +1166,23 @@ void TranslationService::complete_request(
     }
 
     if (stored) {
+        // Publish the in-memory result immediately. Disk persistence must not
+        // add latency to LCDUI updates or Canvas repaint scheduling.
         for (auto& item : completed) {
-            append_cache_record(*state, item.source, item.translated);
             for (auto& completion : item.completions) {
                 if (completion) completion(item.translated);
             }
         }
     }
-    pump_requests(state);
+
+    // Let the next ready batch start before doing synchronous cache I/O.
+    schedule_pump(state);
+
+    if (stored) {
+        for (const auto& item : completed) {
+            append_cache_record(*state, item.source, item.translated);
+        }
+    }
 }
 
 } // namespace phoneme::translation

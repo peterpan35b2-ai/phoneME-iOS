@@ -31,6 +31,7 @@ public interface FileConnection extends StreamConnection {
     void mkdir() throws IOException;
     void delete() throws IOException;
     void rename(String newName) throws IOException;
+    void setFileConnection(String fileName) throws IOException;
     void truncate(long byteOffset) throws IOException;
     Enumeration list() throws IOException;
     Enumeration list(String filter, boolean includeHidden) throws IOException;

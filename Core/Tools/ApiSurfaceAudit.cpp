@@ -87,7 +87,11 @@ int main(int argc, char** argv) {
         return 64;
     }
 
-    auto reference = phoneme::archive::ZipArchive::open(argv[1]);
+    phoneme::archive::ZipLimits audit_limits;
+    audit_limits.maximum_entries = 50'000U;
+    audit_limits.maximum_total_uncompressed_bytes =
+        1024ULL * 1024ULL * 1024ULL;
+    auto reference = phoneme::archive::ZipArchive::open(argv[1], audit_limits);
     if (!reference) {
         std::cerr << "Unable to load reference archive: "
                   << reference.error().message << '\n';

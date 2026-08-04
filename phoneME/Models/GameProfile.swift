@@ -159,6 +159,8 @@ struct GameProfile: Codable, Equatable {
     var forceFullscreen = false
     var showFPS = false
     var frameRateLimit = Self.maximumFrameRate
+    // Optional keeps older profile JSON decodable. Missing/nil means off.
+    var autoTranslateToVietnamese: Bool?
 
     var fontSmall = 18
     var fontMedium = 22
@@ -188,6 +190,14 @@ struct GameProfile: Codable, Equatable {
     static let previousMaximumFrameRate = 30
     static let maximumFrameRate = 60
     static let `default` = GameProfile()
+
+    var isAutoTranslationEnabled: Bool {
+        autoTranslateToVietnamese ?? false
+    }
+
+    mutating func setAutoTranslationEnabled(_ enabled: Bool) {
+        autoTranslateToVietnamese = enabled ? true : nil
+    }
 
     mutating func normalize() {
         screenWidth = min(max(screenWidth, 1), 2048)

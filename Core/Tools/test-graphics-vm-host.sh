@@ -49,6 +49,8 @@ SOURCES=(
   "$CORE_ROOT/src/runtime/RecordStoreRegistry.cpp"
   "$CORE_ROOT/src/security/PermissionCatalog.cpp"
   "$CORE_ROOT/src/security/PermissionPolicy.cpp"
+  "$CORE_ROOT/src/translation/TranslationService.cpp"
+  "$CORE_ROOT/src/vm/AmmsBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/BluetoothBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/BuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/BuiltinClassRegistry.cpp"
@@ -78,14 +80,18 @@ SOURCES=(
   "$CORE_ROOT/src/vm/MonitorTable.cpp"
   "$CORE_ROOT/src/vm/NativeMethodRegistry.cpp"
   "$CORE_ROOT/src/vm/NativeRootScope.cpp"
+  "$CORE_ROOT/src/vm/PimBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/PushBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/RootSet.cpp"
   "$CORE_ROOT/src/vm/RmsBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/Scheduler.cpp"
   "$CORE_ROOT/src/vm/SecurityBuiltinClasses.cpp"
+  "$CORE_ROOT/src/vm/SensorBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/TimerService.cpp"
   "$CORE_ROOT/src/vm/UtilBuiltinClasses.cpp"
+  "$CORE_ROOT/src/vm/VendorBuiltinClasses.cpp"
   "$CORE_ROOT/src/vm/Verifier.cpp"
+  "$CORE_ROOT/src/vm/XmlBuiltinClasses.cpp"
 )
 while IFS= read -r source; do
   SOURCES+=("$source")

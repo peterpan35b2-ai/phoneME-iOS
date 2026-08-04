@@ -35,8 +35,8 @@ using namespace builtin;
     if (name == "javax/xml/parsers/SAXParserFactory") {
         return make_class(std::string(name), "java/lang/Object",
                           kPublic | kAbstract | kSuper, {
-            field(kPrivate, "namespaceAware", "Z"),
-            field(kPrivate, "validating", "Z"),
+            field(kPrivate, "namespaceAware", "I"),
+            field(kPrivate, "validating", "I"),
         }, {
             method(kProtected, "<init>", "()V"),
             method(kPublic | kStatic, "newInstance",
@@ -83,8 +83,8 @@ using namespace builtin;
     if (name == "phoneme/xml/SAXParserImpl") {
         return make_class(std::string(name), "javax/xml/parsers/SAXParser",
                           kOrdinary | kFinal, {
-            field(kPrivate, "namespaceAware", "Z"),
-            field(kPrivate, "validating", "Z"),
+            field(kPrivate, "namespaceAware", "I"),
+            field(kPrivate, "validating", "I"),
             field(kPrivate, "entityResolver", "Lorg/xml/sax/EntityResolver;"),
             field(kPrivate, "dtdHandler", "Lorg/xml/sax/DTDHandler;"),
             field(kPrivate, "contentHandler", "Lorg/xml/sax/ContentHandler;"),

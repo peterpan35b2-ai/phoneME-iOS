@@ -3,6 +3,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <ctime>
 #include <exception>
 #include <limits>
 #include <string>
@@ -21,6 +22,10 @@ constexpr usize kCalendarTimeField = 0U;
 constexpr usize kCalendarZoneField = 1U;
 constexpr usize kCalendarFieldsField = 2U;
 constexpr usize kCalendarIsSetField = 3U;
+constexpr usize kLocalTimeHourField = 0U;
+constexpr usize kLocalTimeMinuteField = 1U;
+constexpr usize kLocalTimeSecondField = 2U;
+constexpr usize kLocalTimeNanoField = 3U;
 
 constexpr i64 kMillisPerSecond = 1'000LL;
 constexpr i64 kMillisPerMinute = 60LL * kMillisPerSecond;
@@ -213,6 +218,91 @@ void add(NativeMethodRegistry& registry,
     auto attached = machine.heap().attach_string(*object, std::move(text));
     if (!attached) return std::unexpected(attached.error());
     return *object;
+}
+
+[[nodiscard]] Result<i32> int_field(Machine& machine,
+                                    ObjectRef object,
+                                    usize index);
+[[nodiscard]] Status set_int_field(Machine& machine,
+                                   ObjectRef object,
+                                   usize index,
+                                   i32 value);
+
+struct LocalTimeFields final {
+    i32 hour {0};
+    i32 minute {0};
+    i32 second {0};
+    i32 nano {0};
+};
+
+[[nodiscard]] Status validate_local_time(LocalTimeFields fields) {
+    if (fields.hour < 0 || fields.hour > 23 ||
+        fields.minute < 0 || fields.minute > 59 ||
+        fields.second < 0 || fields.second > 59 ||
+        fields.nano < 0 || fields.nano > 999'999'999) {
+        return fail_java("java/time/DateTimeException",
+                         "LocalTime field is out of range");
+    }
+    return {};
+}
+
+[[nodiscard]] Result<ObjectRef> create_local_time(Machine& machine,
+                                                  LocalTimeFields fields) {
+    auto valid = validate_local_time(fields);
+    if (!valid) return std::unexpected(valid.error());
+    auto object = machine.class_states().allocate_instance(
+        machine.heap(), "java/time/LocalTime");
+    if (!object) return std::unexpected(object.error());
+    auto hour = set_int_field(machine, *object, kLocalTimeHourField,
+                              fields.hour);
+    auto minute = set_int_field(machine, *object, kLocalTimeMinuteField,
+                                fields.minute);
+    auto second = set_int_field(machine, *object, kLocalTimeSecondField,
+                                fields.second);
+    auto nano = set_int_field(machine, *object, kLocalTimeNanoField,
+                              fields.nano);
+    if (!hour) return std::unexpected(hour.error());
+    if (!minute) return std::unexpected(minute.error());
+    if (!second) return std::unexpected(second.error());
+    if (!nano) return std::unexpected(nano.error());
+    return *object;
+}
+
+[[nodiscard]] Result<LocalTimeFields> local_time_fields(
+    Machine& machine,
+    ObjectRef object) {
+    auto hour = int_field(machine, object, kLocalTimeHourField);
+    auto minute = int_field(machine, object, kLocalTimeMinuteField);
+    auto second = int_field(machine, object, kLocalTimeSecondField);
+    auto nano = int_field(machine, object, kLocalTimeNanoField);
+    if (!hour || !minute || !second || !nano) {
+        return fail(ErrorCode::invalid_state,
+                    "LocalTime state is invalid");
+    }
+    LocalTimeFields fields {*hour, *minute, *second, *nano};
+    auto valid = validate_local_time(fields);
+    if (!valid) return std::unexpected(valid.error());
+    return fields;
+}
+
+[[nodiscard]] Result<LocalTimeFields> current_local_time() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t raw = std::chrono::system_clock::to_time_t(now);
+    std::tm local {};
+    if (localtime_r(&raw, &local) == nullptr) {
+        return fail(ErrorCode::internal_error,
+                    "cannot resolve the current local time");
+    }
+    const auto whole_seconds =
+        std::chrono::floor<std::chrono::seconds>(now);
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now - whole_seconds).count();
+    return LocalTimeFields {
+        static_cast<i32>(local.tm_hour),
+        static_cast<i32>(local.tm_min),
+        static_cast<i32>(local.tm_sec),
+        static_cast<i32>(nanos),
+    };
 }
 
 [[nodiscard]] std::u16string ascii_text(std::string_view text) {
@@ -463,6 +553,156 @@ void append_integer(std::string& output, i32 value) {
 } // namespace
 
 void register_time_natives(NativeMethodRegistry& registry) {
+    add(registry, "java/time/LocalTime", "now",
+        "()Ljava/time/LocalTime;",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto fields = current_local_time();
+            if (!fields) return std::unexpected(fields.error());
+            auto object = create_local_time(machine, *fields);
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+    add(registry, "java/time/LocalTime", "of",
+        "(II)Ljava/time/LocalTime;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "LocalTime.of arguments are missing");
+            }
+            auto hour = arguments[0].as_int();
+            auto minute = arguments[1].as_int();
+            if (!hour) return std::unexpected(hour.error());
+            if (!minute) return std::unexpected(minute.error());
+            auto object = create_local_time(
+                machine, LocalTimeFields {*hour, *minute, 0, 0});
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+    add(registry, "java/time/LocalTime", "withSecond",
+        "(I)Ljava/time/LocalTime;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "LocalTime.withSecond argument is missing");
+            }
+            auto second = arguments[1].as_int();
+            if (!second) return std::unexpected(second.error());
+            auto fields = local_time_fields(machine, *object);
+            if (!fields) return std::unexpected(fields.error());
+            fields->second = *second;
+            auto result = create_local_time(machine, *fields);
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    add(registry, "java/time/LocalTime", "withNano",
+        "(I)Ljava/time/LocalTime;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "LocalTime.withNano argument is missing");
+            }
+            auto nano = arguments[1].as_int();
+            if (!nano) return std::unexpected(nano.error());
+            auto fields = local_time_fields(machine, *object);
+            if (!fields) return std::unexpected(fields.error());
+            fields->nano = *nano;
+            auto result = create_local_time(machine, *fields);
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    add(registry, "java/time/LocalTime", "equals",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto left = receiver(arguments);
+            if (!left) return std::unexpected(left.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "LocalTime.equals argument is missing");
+            }
+            auto right = arguments[1].as_reference();
+            if (!right) return std::unexpected(right.error());
+            if (right->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto compatible = is_instance_of(
+                machine, *right, "java/time/LocalTime");
+            if (!compatible) return std::unexpected(compatible.error());
+            if (!*compatible) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto left_fields = local_time_fields(machine, *left);
+            auto right_fields = local_time_fields(machine, *right);
+            if (!left_fields) return std::unexpected(left_fields.error());
+            if (!right_fields) return std::unexpected(right_fields.error());
+            const bool equal =
+                left_fields->hour == right_fields->hour &&
+                left_fields->minute == right_fields->minute &&
+                left_fields->second == right_fields->second &&
+                left_fields->nano == right_fields->nano;
+            return std::optional<Value>(Value::from_int(equal ? 1 : 0));
+        });
+    add(registry, "java/time/LocalTime", "hashCode", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto fields = local_time_fields(machine, *object);
+            if (!fields) return std::unexpected(fields.error());
+            const i64 seconds =
+                static_cast<i64>(fields->hour) * 3'600LL +
+                static_cast<i64>(fields->minute) * 60LL +
+                static_cast<i64>(fields->second);
+            const i64 nanos = seconds * 1'000'000'000LL + fields->nano;
+            const u64 bits = static_cast<u64>(nanos);
+            const i32 hash = static_cast<i32>(
+                static_cast<u32>(bits ^ (bits >> 32U)));
+            return std::optional<Value>(Value::from_int(hash));
+        });
+    add(registry, "java/time/LocalTime", "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto fields = local_time_fields(machine, *object);
+            if (!fields) return std::unexpected(fields.error());
+            std::string text;
+            text.reserve(18U);
+            append_two_digits(text, fields->hour);
+            text.push_back(':');
+            append_two_digits(text, fields->minute);
+            if (fields->second != 0 || fields->nano != 0) {
+                text.push_back(':');
+                append_two_digits(text, fields->second);
+            }
+            if (fields->nano != 0) {
+                text.push_back('.');
+                std::array<char, 9> digits {};
+                i32 divisor = 100'000'000;
+                i32 value = fields->nano;
+                for (char& digit : digits) {
+                    digit = static_cast<char>('0' + value / divisor);
+                    value %= divisor;
+                    divisor /= 10;
+                }
+                usize used = digits.size();
+                while (used > 1U && digits[used - 1U] == '0') --used;
+                text.append(digits.data(), used);
+            }
+            auto string = create_string(machine, ascii_text(text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
+
     add(registry, "java/util/Date", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

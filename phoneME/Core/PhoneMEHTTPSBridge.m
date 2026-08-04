@@ -112,6 +112,7 @@ static NSMutableSet<NSNumber *> *PhoneMEHTTPSRevokedCookieSessions(void);
 static NSMutableDictionary<NSNumber *, NSOperationQueue *> *
 PhoneMEHTTPSDelegateQueues(void);
 static NSOperationQueue *PhoneMEHTTPSDelegateQueue(int64_t sessionID);
+static NSURLSession *PhoneMETranslationSession(void);
 static void PhoneMEStoreResponseCookies(int64_t sessionID,
                                         NSHTTPURLResponse *response);
 static void PhoneMEApplyStoredCookies(int64_t sessionID,
@@ -732,6 +733,24 @@ static NSOperationQueue *PhoneMEHTTPSDelegateQueue(int64_t sessionID) {
     }
 }
 
+static NSURLSession *PhoneMETranslationSession(void) {
+    static NSURLSession *session;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *configuration =
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        configuration.requestCachePolicy =
+            NSURLRequestReloadIgnoringLocalCacheData;
+        configuration.URLCache = nil;
+        configuration.HTTPCookieStorage = nil;
+        configuration.HTTPShouldSetCookies = NO;
+        configuration.waitsForConnectivity = NO;
+        configuration.HTTPMaximumConnectionsPerHost = 2;
+        session = [NSURLSession sessionWithConfiguration:configuration];
+    });
+    return session;
+}
+
 static BOOL PhoneMECookieMatchesURL(NSHTTPCookie *cookie, NSURL *url) {
     if (cookie == nil || url == nil || url.host.length == 0) return NO;
     NSDate *expires = cookie.expiresDate;
@@ -1050,6 +1069,78 @@ int32_t phoneme_ios_https_execute_async(
     if (body_length > 0) {
         request.HTTPBody = [NSData dataWithBytes:body_bytes
                                           length:(NSUInteger)body_length];
+    }
+
+    const BOOL fastTranslationRequest = secureRequest &&
+        [url.host.lowercaseString isEqualToString:@"translate.googleapis.com"] &&
+        [[request valueForHTTPHeaderField:@"User-Agent"]
+            isEqualToString:@"phoneME-iOS/translation"];
+    if (fastTranslationRequest) {
+        NSURLSession *session = PhoneMETranslationSession();
+        PhoneMEHTTPSPending *pending = [[PhoneMEHTTPSPending alloc] init];
+        pending.session = session;
+        pending.completion = completion;
+        pending.context = context;
+        pending.cookieSessionID = cookie_session_id;
+
+        NSURLSessionDataTask *task = [session
+            dataTaskWithRequest:request
+              completionHandler:^(NSData *data,
+                                  NSURLResponse *response,
+                                  NSError *error) {
+            if (error != nil) {
+                result.errorMessage = error.localizedDescription != nil
+                    ? error.localizedDescription : @"HTTP request failed";
+                result.errorCode =
+                    [error.domain isEqualToString:NSURLErrorDomain]
+                        ? error.code : 0;
+            } else if (![response isKindOfClass:[NSHTTPURLResponse class]]) {
+                result.errorMessage =
+                    @"HTTP server returned an invalid response";
+            } else {
+                NSHTTPURLResponse *httpResponse =
+                    (NSHTTPURLResponse *)response;
+                result.statusCode = httpResponse.statusCode;
+                result.responseMessage =
+                    PhoneMEHTTPReasonPhrase(httpResponse.statusCode);
+                result.responseHeaders =
+                    PhoneMESerializeHeaders(httpResponse.allHeaderFields);
+                NSString *finalURL = httpResponse.URL.absoluteString;
+                if (finalURL != nil) result.finalURL = finalURL;
+
+                const NSUInteger responseLimit =
+                    PhoneMEHTTPSMaximumResponseSize();
+                if (data.length > responseLimit) {
+                    result.errorMessage =
+                        PhoneMEHTTPSResponseLimitError(responseLimit);
+                    result.body = [NSData data];
+                } else {
+                    result.body = data != nil ? data : [NSData data];
+                    result.TLSProtocol = @"TLS";
+                }
+            }
+
+            PhoneMEHTTPSCompletion callback = NULL;
+            void *callbackContext = NULL;
+            @synchronized (PhoneMEHTTPSResults()) {
+                PhoneMEHTTPSPending *active =
+                    PhoneMEHTTPSPendingRequests()[@(handle)];
+                if (active != nil) {
+                    callback = active.completion;
+                    callbackContext = active.context;
+                    [PhoneMEHTTPSPendingRequests()
+                        removeObjectForKey:@(handle)];
+                }
+                PhoneMEHTTPSResults()[@(handle)] = result;
+            }
+            if (callback != NULL) callback(handle, callbackContext);
+        }];
+        pending.task = task;
+        @synchronized (PhoneMEHTTPSResults()) {
+            PhoneMEHTTPSPendingRequests()[@(handle)] = pending;
+        }
+        [task resume];
+        return handle;
     }
 
     NSURLSessionConfiguration *configuration =

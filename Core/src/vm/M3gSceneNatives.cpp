@@ -768,6 +768,7 @@ void register_group(NativeMethodRegistry& registry) {
     };
     pick("(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z");
     pick("(IFFFFLjavax/microedition/m3g/Camera;Ljavax/microedition/m3g/RayIntersection;)Z");
+    pick("(IFFLjavax/microedition/m3g/Camera;Ljavax/microedition/m3g/RayIntersection;)Z");
 }
 
 void register_world(NativeMethodRegistry& registry) {

@@ -17,6 +17,7 @@ namespace phoneme::vm {
 // test independent from unrelated native modules that may be changing in
 // parallel; CoreNatives still calls these registrars, so provide empty module
 // boundaries here rather than compiling their implementations.
+void register_amms_natives(NativeMethodRegistry&) {}
 void register_bluetooth_natives(NativeMethodRegistry&) {}
 void register_canvas_natives(NativeMethodRegistry&) {}
 void register_class_natives(NativeMethodRegistry&) {}
@@ -33,14 +34,18 @@ void register_lcdui_natives(NativeMethodRegistry&) {}
 void register_m3g_natives(NativeMethodRegistry&) {}
 void register_math_natives(NativeMethodRegistry&) {}
 void register_media_natives(NativeMethodRegistry&) {}
+void register_pim_natives(NativeMethodRegistry&) {}
 void register_push_natives(NativeMethodRegistry&) {}
 void register_reference_natives(NativeMethodRegistry&) {}
 void register_rms_natives(NativeMethodRegistry&) {}
 void register_security_natives(NativeMethodRegistry&) {}
+void register_sensor_natives(NativeMethodRegistry&) {}
 void register_string_encoding_natives(NativeMethodRegistry&) {}
 void register_time_natives(NativeMethodRegistry&) {}
 void register_util_natives(NativeMethodRegistry&) {}
+void register_vendor_natives(NativeMethodRegistry&) {}
 void register_wrapper_natives(NativeMethodRegistry&) {}
+void register_xml_natives(NativeMethodRegistry&) {}
 
 Status dispatch_media_event(Machine&,
                             ObjectRef,
@@ -381,6 +386,8 @@ int main(int argc, char** argv) {
         if (performance_gate_enabled) {
             require(busy_cpu_seconds < busy_wall_seconds * 0.85,
                     "main Java thread busy loop yields host CPU");
+            require(busy_cpu_seconds > busy_wall_seconds * 0.70,
+                    "foreground main Java thread is not over-throttled");
         }
     }
 

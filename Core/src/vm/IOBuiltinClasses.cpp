@@ -23,7 +23,7 @@ using namespace builtin;
             method(kPublic | kSynchronized, "mark", "(I)V"),
             method(kPublic | kSynchronized, "reset", "()V"),
             method(kPublic, "markSupported", "()Z"),
-        });
+        }, {"java/io/Closeable"});
     }
     if (name == "java/io/OutputStream") {
         return make_class("java/io/OutputStream", "java/lang/Object",
@@ -34,7 +34,7 @@ using namespace builtin;
             method(kPublic, "write", "([BII)V"),
             method(kPublic, "flush", "()V"),
             method(kPublic, "close", "()V"),
-        });
+        }, {"java/io/Closeable"});
     }
     if (name == "java/io/Reader") {
         return make_class("java/io/Reader", "java/lang/Object",
@@ -52,7 +52,7 @@ using namespace builtin;
             method(kPublic, "mark", "(I)V"),
             method(kPublic, "reset", "()V"),
             method(kPublic | kAbstract, "close", "()V"),
-        });
+        }, {"java/io/Closeable"});
     }
     if (name == "java/io/Writer") {
         return make_class("java/io/Writer", "java/lang/Object",
@@ -68,7 +68,7 @@ using namespace builtin;
             method(kPublic, "write", "(Ljava/lang/String;II)V"),
             method(kPublic | kAbstract, "flush", "()V"),
             method(kPublic | kAbstract, "close", "()V"),
-        });
+        }, {"java/io/Closeable"});
     }
     if (name == "java/io/InputStreamReader") {
         return make_class("java/io/InputStreamReader", "java/io/Reader",
@@ -175,6 +175,20 @@ using namespace builtin;
             method(kPublic, "write", "([BII)V"),
             method(kPublic, "flush", "()V"),
             method(kPublic, "close", "()V"),
+        });
+    }
+    if (name == "java/io/BufferedInputStream") {
+        return make_class("java/io/BufferedInputStream",
+                          "java/io/FilterInputStream", kOrdinary, {}, {
+            method(kPublic, "<init>", "(Ljava/io/InputStream;)V"),
+            method(kPublic, "<init>", "(Ljava/io/InputStream;I)V"),
+        });
+    }
+    if (name == "java/io/BufferedOutputStream") {
+        return make_class("java/io/BufferedOutputStream",
+                          "java/io/FilterOutputStream", kOrdinary, {}, {
+            method(kPublic, "<init>", "(Ljava/io/OutputStream;)V"),
+            method(kPublic, "<init>", "(Ljava/io/OutputStream;I)V"),
         });
     }
     if (name == "java/io/PrintStream") {

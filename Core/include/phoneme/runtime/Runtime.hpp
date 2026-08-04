@@ -89,6 +89,11 @@ public:
         bool enabled,
         std::string source_language = "auto",
         std::string target_language = "vi");
+    [[nodiscard]] Status configure_app_translation(
+        AppId app_id,
+        bool enabled,
+        std::string source_language = "auto",
+        std::string target_language = "vi");
     [[nodiscard]] Status configure_permission_prompt(
         security::PermissionPromptCallback prompt);
     [[nodiscard]] Status set_suite_trust(
@@ -186,6 +191,7 @@ private:
     std::string optional_class_archive_;
     std::array<i32, 7> keymap_ {-1, -2, -3, -4, -5, -6, -7};
     std::shared_ptr<translation::TranslationService> translation_service_;
+    bool translation_enabled_by_default_ {false};
     bool pointer_events_supported_ {true};
     bool pointer_motion_supported_ {true};
     bool repeat_events_supported_ {true};

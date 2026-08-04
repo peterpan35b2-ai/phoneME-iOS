@@ -57,6 +57,7 @@ public:
     void set_input_capabilities(bool pointer_events,
                                 bool pointer_motion,
                                 bool repeat_events) noexcept;
+    void invalidate_translation_rendering() noexcept;
     void set_repeat_clock_for_testing(
         std::function<std::chrono::steady_clock::time_point()> clock);
     [[nodiscard]] Status set_dimensions(Dimensions dimensions);

@@ -52,6 +52,7 @@ constexpr i32 kNokiaTypeInt888Rgb = 888;
 constexpr i32 kNokiaTypeInt8888Argb = 8888;
 
 struct BoundGraphics final {
+    u64 graphics_id {0U};
     graphics::GraphicsContext* context {nullptr};
     graphics::Image* target {nullptr};
 };
@@ -60,11 +61,253 @@ struct BoundGraphics final {
     Machine& machine,
     std::span<const char32_t> original,
     std::shared_ptr<const std::vector<char32_t>>& translated) {
-    const auto& service = machine.translation_service();
+    const auto service = machine.translation_service();
     if (!service || !service->enabled()) return original;
     translated = service->lookup_or_request(original);
     if (!translated) return original;
     return *translated;
+}
+
+[[nodiscard]] i32 clamped_coordinate(i64 value) noexcept {
+    return static_cast<i32>(std::clamp<i64>(
+        value,
+        std::numeric_limits<i32>::min(),
+        std::numeric_limits<i32>::max()));
+}
+
+[[nodiscard]] bool wrapping_space(char32_t character) noexcept {
+    return character == U' ' || character == U'\t' ||
+           character == U'\r' || character == U'\u3000';
+}
+
+void trim_wrapping_spaces(std::vector<char32_t>& line) {
+    while (!line.empty() && wrapping_space(line.front())) {
+        line.erase(line.begin());
+    }
+    while (!line.empty() && wrapping_space(line.back())) {
+        line.pop_back();
+    }
+}
+
+[[nodiscard]] std::vector<std::vector<char32_t>> wrap_translated_lines(
+    const graphics::Font& font,
+    std::span<const char32_t> text,
+    i32 maximum_width) {
+    std::vector<std::vector<char32_t>> lines;
+    std::vector<char32_t> current;
+    auto flush = [&]() {
+        trim_wrapping_spaces(current);
+        if (!current.empty()) lines.push_back(std::move(current));
+        current.clear();
+    };
+
+    for (const char32_t character : text) {
+        if (character == U'\n') {
+            flush();
+            continue;
+        }
+        current.push_back(character);
+        if (font.chars_width(current) <= maximum_width) continue;
+
+        usize break_index = current.size();
+        while (break_index > 1U &&
+               !wrapping_space(current[break_index - 1U])) {
+            --break_index;
+        }
+        if (break_index <= 1U) {
+            const char32_t overflow = current.back();
+            current.pop_back();
+            flush();
+            current.push_back(overflow);
+        } else {
+            std::vector<char32_t> remainder(
+                current.begin() + static_cast<std::ptrdiff_t>(break_index),
+                current.end());
+            current.erase(
+                current.begin() + static_cast<std::ptrdiff_t>(break_index),
+                current.end());
+            flush();
+            current = std::move(remainder);
+            trim_wrapping_spaces(current);
+        }
+    }
+    flush();
+    if (lines.empty()) lines.emplace_back();
+    return lines;
+}
+
+struct TranslatedTextLayout final {
+    std::vector<std::vector<char32_t>> lines;
+    i32 line_advance {1};
+    i64 total_height {1};
+};
+
+[[nodiscard]] TranslatedTextLayout layout_translated_text(
+    const graphics::Font& font,
+    std::span<const char32_t> text,
+    i32 maximum_width) {
+    auto lines = wrap_translated_lines(
+        font, text, std::max(maximum_width, 1));
+    const i32 line_advance = std::max(font.height(), 1) + 1;
+    const i64 total_height = lines.empty()
+        ? font.height()
+        : static_cast<i64>(lines.size()) * line_advance - 1;
+    return TranslatedTextLayout {
+        .lines = std::move(lines),
+        .line_advance = line_advance,
+        .total_height = std::max<i64>(1, total_height),
+    };
+}
+
+[[nodiscard]] constexpr graphics::Pixel translated_outline_color(
+    graphics::Pixel text_color) noexcept {
+    const u32 luminance =
+        299U * graphics::red(text_color) +
+        587U * graphics::green(text_color) +
+        114U * graphics::blue(text_color);
+    const u8 component = luminance < 128'000U ? 0xFFU : 0x00U;
+    return graphics::argb(
+        graphics::alpha(text_color), component, component, component);
+}
+
+static_assert(translated_outline_color(0xFF000000U) == 0xFFFFFFFFU);
+static_assert(translated_outline_color(0xFFFFFFFFU) == 0xFF000000U);
+
+[[nodiscard]] Status draw_outlined_translated_line(
+    graphics::Image& target,
+    const graphics::GraphicsContext& context,
+    std::span<const char32_t> text,
+    i32 x,
+    i32 y,
+    i32 anchor) {
+    graphics::GraphicsContext outline_context = context;
+    outline_context.color = translated_outline_color(context.color);
+    constexpr std::array<std::pair<i32, i32>, 8> offsets {{
+        {-1, -1}, {0, -1}, {1, -1}, {-1, 0},
+        {1, 0}, {-1, 1}, {0, 1}, {1, 1},
+    }};
+    for (const auto [offset_x, offset_y] : offsets) {
+        auto outlined = graphics::draw_text(
+            target,
+            outline_context,
+            text,
+            x + offset_x,
+            y + offset_y,
+            anchor);
+        if (!outlined) return outlined;
+    }
+    return graphics::draw_text(target, context, text, x, y, anchor);
+}
+
+[[nodiscard]] Status draw_translated_text(
+    graphics::Image& target,
+    const graphics::GraphicsContext& context,
+    std::span<const char32_t> text,
+    bool translated,
+    i32 x,
+    i32 y,
+    i32 anchor) {
+    if (!translated) {
+        return graphics::draw_text(target, context, text, x, y, anchor);
+    }
+    if (context.clip.width <= 0 || context.clip.height <= 0) {
+        return {};
+    }
+
+    const i32 resolved_anchor = anchor == 0
+        ? graphics::anchor_left | graphics::anchor_top
+        : anchor;
+    const i32 horizontal = resolved_anchor &
+        (graphics::anchor_left | graphics::anchor_right |
+         graphics::anchor_hcenter);
+    const i32 vertical = resolved_anchor &
+        (graphics::anchor_top | graphics::anchor_bottom |
+         graphics::anchor_baseline);
+    const i64 absolute_x = static_cast<i64>(x) + context.translate_x;
+    const i64 absolute_y = static_cast<i64>(y) + context.translate_y;
+    const i64 clip_left = context.clip.x;
+    const i64 clip_right = clip_left + context.clip.width;
+
+    i64 available_width = context.clip.width;
+    if (horizontal == graphics::anchor_left) {
+        available_width = clip_right - std::max(absolute_x, clip_left);
+    } else if (horizontal == graphics::anchor_right) {
+        available_width = std::min(absolute_x, clip_right) - clip_left;
+    } else if (horizontal == graphics::anchor_hcenter) {
+        available_width = 2 * std::min(
+            std::max<i64>(0, absolute_x - clip_left),
+            std::max<i64>(0, clip_right - absolute_x));
+    }
+    const i32 maximum_width = std::max<i32>(
+        1, clamped_coordinate(available_width));
+    const TranslatedTextLayout layout = layout_translated_text(
+        context.font, text, maximum_width);
+
+    i64 top = absolute_y;
+    if (vertical == graphics::anchor_bottom) {
+        top -= layout.total_height;
+    } else if (vertical == graphics::anchor_baseline) {
+        top -= context.font.baseline();
+    }
+    const i64 clip_top = context.clip.y;
+    const i64 clip_bottom = clip_top + context.clip.height;
+    if (layout.total_height <= context.clip.height) {
+        top = std::clamp(
+            top,
+            clip_top,
+            std::max(clip_top, clip_bottom - layout.total_height));
+    } else {
+        top = std::max(top, clip_top);
+    }
+    const i32 local_top = clamped_coordinate(top - context.translate_y);
+    const i32 line_anchor = horizontal | graphics::anchor_top;
+
+    for (usize index = 0U; index < layout.lines.size(); ++index) {
+        const i32 line_y = clamped_coordinate(
+            static_cast<i64>(local_top) +
+            static_cast<i64>(index) * layout.line_advance);
+        auto drawn = draw_outlined_translated_line(
+            target, context, layout.lines[index], x, line_y, line_anchor);
+        if (!drawn) return drawn;
+    }
+    return {};
+}
+
+[[nodiscard]] Status draw_runtime_translated_text(
+    Machine& machine,
+    const BoundGraphics& bound,
+    std::span<const char32_t> text,
+    bool translated,
+    i32 x,
+    i32 y,
+    i32 anchor) {
+    if (!translated) {
+        return draw_translated_text(
+            *bound.target, *bound.context, text, false, x, y, anchor);
+    }
+    const auto planned = machine.plan_translated_text(
+        bound.graphics_id,
+        text,
+        x,
+        y,
+        anchor,
+        bound.context->font.face(),
+        bound.context->font.style(),
+        bound.context->font.size(),
+        bound.context->clip.x,
+        bound.context->clip.y,
+        bound.context->clip.width,
+        bound.context->clip.height,
+        bound.context->translate_x,
+        bound.context->translate_y);
+    return draw_translated_text(
+        *bound.target,
+        *bound.context,
+        text,
+        true,
+        x,
+        planned.y,
+        anchor);
 }
 
 void add(NativeMethodRegistry& registry,
@@ -91,14 +334,20 @@ void add(NativeMethodRegistry& registry,
 [[nodiscard]] Result<BoundGraphics> bound_graphics(
     Machine& machine,
     std::span<const Value> arguments,
-    std::string_view operation) {
+    std::string_view operation,
+    bool preserve_character_run = false) {
     auto graphics_object = receiver(arguments, operation);
     if (!graphics_object) return std::unexpected(graphics_object.error());
+    if (!preserve_character_run) machine.break_character_translation_run();
     auto context = machine.graphics().context(graphics_object->bits);
     if (!context) return graphics_error(context.error());
     auto target = machine.graphics().image((*context)->target_key);
     if (!target) return graphics_error(target.error());
-    return BoundGraphics {.context = *context, .target = *target};
+    return BoundGraphics {
+        .graphics_id = graphics_object->bits,
+        .context = *context,
+        .target = *target,
+    };
 }
 
 [[nodiscard]] Result<ObjectRef> direct_graphics_target(
@@ -1556,9 +1805,9 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             std::shared_ptr<const std::vector<char32_t>> translated;
             const auto rendered = translated_characters(
                 machine, *text, translated);
-            return status_result(graphics::draw_text(
-                *bound->target, *bound->context, rendered,
-                *x, *y, *anchor));
+            return status_result(draw_runtime_translated_text(
+                machine, *bound, rendered,
+                translated != nullptr, *x, *y, *anchor));
         });
 
     add(registry, graphics_owner, "drawSubstring",
@@ -1588,8 +1837,9 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             std::shared_ptr<const std::vector<char32_t>> translated;
             const auto rendered = translated_characters(
                 machine, *text, translated);
-            return status_result(graphics::draw_text(
-                *bound->target, *bound->context, rendered,
+            return status_result(draw_runtime_translated_text(
+                machine, *bound, rendered,
+                translated != nullptr,
                 *values[2], *values[3], *values[4]));
         });
 
@@ -1597,7 +1847,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto bound = bound_graphics(machine, arguments,
-                                        "Graphics.drawChar");
+                                        "Graphics.drawChar", true);
             auto character = int_argument(arguments, 1U,
                                           "Graphics.drawChar");
             auto x = int_argument(arguments, 2U, "Graphics.drawChar");
@@ -1612,6 +1862,31 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             const char32_t text[] {
                 static_cast<char32_t>(static_cast<u16>(*character)),
             };
+            const auto decision = machine.translate_draw_character(
+                bound->graphics_id,
+                text[0],
+                *x,
+                *y,
+                *anchor,
+                bound->context->font.face(),
+                bound->context->font.style(),
+                bound->context->font.size());
+            if (decision.action ==
+                Machine::CharacterTranslationDecision::Action::suppress) {
+                return std::optional<Value> {};
+            }
+            if (decision.action ==
+                    Machine::CharacterTranslationDecision::Action::draw_translation &&
+                decision.translated) {
+                return status_result(draw_runtime_translated_text(
+                    machine,
+                    *bound,
+                    *decision.translated,
+                    true,
+                    decision.x,
+                    decision.y,
+                    decision.anchor));
+            }
             return status_result(graphics::draw_text(
                 *bound->target, *bound->context, text,
                 *x, *y, *anchor));
@@ -1643,8 +1918,9 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             std::shared_ptr<const std::vector<char32_t>> translated;
             const auto rendered = translated_characters(
                 machine, *text, translated);
-            return status_result(graphics::draw_text(
-                *bound->target, *bound->context, rendered,
+            return status_result(draw_runtime_translated_text(
+                machine, *bound, rendered,
+                translated != nullptr,
                 *values[2], *values[3], *values[4]));
         });
 
