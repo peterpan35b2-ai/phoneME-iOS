@@ -5,7 +5,7 @@
 
 _Static_assert(PHONEME_C_API_VERSION_MAJOR == 1u,
                "unexpected C API major version");
-_Static_assert(PHONEME_C_API_VERSION == 0x00010000u,
+_Static_assert(PHONEME_C_API_VERSION == 0x00010100u,
                "C API version encoding changed");
 _Static_assert(sizeof(PhoneMERuntimeRef) == sizeof(void*),
                "runtime reference must remain an opaque pointer");
@@ -20,6 +20,8 @@ _Static_assert(sizeof(((PhoneMEPushLaunchRequest*)0)->request_id) ==
 _Static_assert(sizeof(&phoneme_push_notify_connection_available_from_source) ==
                    sizeof(void*),
                "source-aware push notification must remain exported");
+_Static_assert(sizeof(&phoneme_uninstall_suite) == sizeof(void*),
+               "suite uninstall must remain exported");
 
 int main(void) {
     PhoneMEPermissionResponse response = {

@@ -39,6 +39,8 @@
 #include "TimeNatives.hpp"
 #include "UtilNatives.hpp"
 #include "WrapperNatives.hpp"
+#include "XmlNatives.hpp"
+#include "VendorNatives.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -2163,6 +2165,8 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_time_natives(registry);
     register_util_natives(registry);
     register_wrapper_natives(registry);
+    register_xml_natives(registry);
+    register_vendor_natives(registry);
 
     add(registry,
         "java/lang/Object",
@@ -2659,6 +2663,12 @@ void register_core_natives(NativeMethodRegistry& registry) {
                     return fail_java("java/lang/ArrayStoreException",
                                      "primitive array types do not match");
                 }
+                auto copied = machine.heap().copy_array_range(
+                    *source, source_start,
+                    *destination, destination_start,
+                    count);
+                if (!copied) return std::unexpected(copied.error());
+                return std::optional<Value> {};
             }
 
             std::vector<Value> copied;

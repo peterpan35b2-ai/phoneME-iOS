@@ -74,6 +74,7 @@ typedef void (*PhoneMEHTTPSCompletion)(int32_t handle, void *context);
 @property(nonatomic, strong) NSURLSessionDataTask *task;
 @property(nonatomic, assign) PhoneMEHTTPSCompletion completion;
 @property(nonatomic, assign) void *context;
+@property(nonatomic, assign) int64_t cookieSessionID;
 @end
 
 @implementation PhoneMEHTTPSPending
@@ -97,12 +98,24 @@ typedef void (*PhoneMEHTTPSCompletion)(int32_t handle, void *context);
 @property(nonatomic, assign) BOOL secureRequest;
 @property(nonatomic, assign) BOOL responseTooLarge;
 @property(nonatomic, copy) NSString *fallbackCertificateHost;
+@property(nonatomic, assign) int64_t cookieSessionID;
+@property(nonatomic, copy) NSString *explicitCookieHeader;
 @end
 
 static NSMutableDictionary<NSNumber *, PhoneMEHTTPSResult *> *
 PhoneMEHTTPSResults(void);
 static NSMutableDictionary<NSNumber *, PhoneMEHTTPSPending *> *
 PhoneMEHTTPSPendingRequests(void);
+static NSMutableDictionary<NSNumber *, NSMutableArray<NSHTTPCookie *> *> *
+PhoneMEHTTPSCookieJars(void);
+static NSMutableSet<NSNumber *> *PhoneMEHTTPSRevokedCookieSessions(void);
+static NSMutableDictionary<NSNumber *, NSOperationQueue *> *
+PhoneMEHTTPSDelegateQueues(void);
+static NSOperationQueue *PhoneMEHTTPSDelegateQueue(int64_t sessionID);
+static void PhoneMEStoreResponseCookies(int64_t sessionID,
+                                        NSHTTPURLResponse *response);
+static void PhoneMEApplyStoredCookies(int64_t sessionID,
+                                      NSMutableURLRequest *request);
 static NSString *PhoneMEHTTPReasonPhrase(NSInteger statusCode);
 static NSString *PhoneMESerializeHeaders(NSDictionary *headers);
 
@@ -490,6 +503,7 @@ static int64_t PhoneMEDeclaredContentLength(
 willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         newRequest:(NSURLRequest *)request
  completionHandler:(void (^)(NSURLRequest *request))completionHandler {
+    PhoneMEStoreResponseCookies(self.cookieSessionID, response);
     NSString *redirectScheme = request.URL.scheme.lowercaseString;
     if (redirectScheme.length == 0 ||
             ![redirectScheme isEqualToString:self.allowedRedirectScheme]) {
@@ -501,15 +515,20 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         return;
     }
     self.redirectsFollowed += 1;
-    if (PhoneMEURLAuthorityChanged(response.URL, request.URL)) {
-        NSMutableURLRequest *sanitized = [request mutableCopy];
-        [sanitized setValue:nil forHTTPHeaderField:@"Authorization"];
-        [sanitized setValue:nil forHTTPHeaderField:@"Proxy-Authorization"];
-        [sanitized setValue:nil forHTTPHeaderField:@"Cookie"];
-        completionHandler(sanitized);
-        return;
+    NSMutableURLRequest *redirected = [request mutableCopy];
+    const BOOL authorityChanged =
+        PhoneMEURLAuthorityChanged(response.URL, request.URL);
+    if (authorityChanged) {
+        [redirected setValue:nil forHTTPHeaderField:@"Authorization"];
+        [redirected setValue:nil forHTTPHeaderField:@"Proxy-Authorization"];
     }
-    completionHandler(request);
+    [redirected setValue:nil forHTTPHeaderField:@"Cookie"];
+    PhoneMEApplyStoredCookies(self.cookieSessionID, redirected);
+    if (!authorityChanged && self.explicitCookieHeader.length != 0) {
+        [redirected setValue:self.explicitCookieHeader
+          forHTTPHeaderField:@"Cookie"];
+    }
+    completionHandler(redirected);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -538,6 +557,7 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
     }
 
     NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+    PhoneMEStoreResponseCookies(self.cookieSessionID, httpResponse);
     self.result.statusCode = httpResponse.statusCode;
     self.result.responseMessage = PhoneMEHTTPReasonPhrase(httpResponse.statusCode);
     self.result.responseHeaders =
@@ -667,6 +687,155 @@ PhoneMEHTTPSPendingRequests(void) {
     return pending;
 }
 
+static NSMutableDictionary<NSNumber *, NSMutableArray<NSHTTPCookie *> *> *
+PhoneMEHTTPSCookieJars(void) {
+    static NSMutableDictionary<NSNumber *, NSMutableArray<NSHTTPCookie *> *> *jars;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        jars = [[NSMutableDictionary alloc] init];
+    });
+    return jars;
+}
+
+static NSMutableSet<NSNumber *> *PhoneMEHTTPSRevokedCookieSessions(void) {
+    static NSMutableSet<NSNumber *> *sessions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sessions = [[NSMutableSet alloc] init];
+    });
+    return sessions;
+}
+
+static NSMutableDictionary<NSNumber *, NSOperationQueue *> *
+PhoneMEHTTPSDelegateQueues(void) {
+    static NSMutableDictionary<NSNumber *, NSOperationQueue *> *queues;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queues = [[NSMutableDictionary alloc] init];
+    });
+    return queues;
+}
+
+static NSOperationQueue *PhoneMEHTTPSDelegateQueue(int64_t sessionID) {
+    NSNumber *key = @(sessionID);
+    @synchronized (PhoneMEHTTPSResults()) {
+        NSOperationQueue *queue = PhoneMEHTTPSDelegateQueues()[key];
+        if (queue == nil) {
+            queue = [[NSOperationQueue alloc] init];
+            queue.maxConcurrentOperationCount = 1;
+            queue.qualityOfService = NSQualityOfServiceUtility;
+            queue.name = [NSString stringWithFormat:
+                @"phoneME.http.delegate.%lld", (long long)sessionID];
+            PhoneMEHTTPSDelegateQueues()[key] = queue;
+        }
+        return queue;
+    }
+}
+
+static BOOL PhoneMECookieMatchesURL(NSHTTPCookie *cookie, NSURL *url) {
+    if (cookie == nil || url == nil || url.host.length == 0) return NO;
+    NSDate *expires = cookie.expiresDate;
+    if (expires != nil && [expires timeIntervalSinceNow] <= 0.0) return NO;
+    if (cookie.isSecure &&
+            ![url.scheme.lowercaseString isEqualToString:@"https"]) {
+        return NO;
+    }
+
+    NSString *host = url.host.lowercaseString;
+    NSString *domain = cookie.domain.lowercaseString;
+    if (domain.length == 0) return NO;
+    const BOOL acceptsSubdomains = [domain hasPrefix:@"."];
+    if (acceptsSubdomains) domain = [domain substringFromIndex:1U];
+    BOOL domainMatches = [host isEqualToString:domain];
+    if (!domainMatches && acceptsSubdomains && host.length > domain.length &&
+            [host hasSuffix:domain]) {
+        const NSUInteger separator = host.length - domain.length - 1U;
+        domainMatches = [host characterAtIndex:separator] == '.';
+    }
+    if (!domainMatches) return NO;
+
+    NSString *requestPath = url.path.length == 0 ? @"/" : url.path;
+    NSString *cookiePath = cookie.path.length == 0 ? @"/" : cookie.path;
+    if ([requestPath isEqualToString:cookiePath]) return YES;
+    if (![requestPath hasPrefix:cookiePath]) return NO;
+    if ([cookiePath hasSuffix:@"/"]) return YES;
+    return requestPath.length > cookiePath.length &&
+           [requestPath characterAtIndex:cookiePath.length] == '/';
+}
+
+static void PhoneMEStoreResponseCookies(int64_t sessionID,
+                                        NSHTTPURLResponse *response) {
+    if (sessionID <= 0 || response == nil || response.URL == nil) return;
+    NSArray<NSHTTPCookie *> *cookies = [NSHTTPCookie
+        cookiesWithResponseHeaderFields:
+            (NSDictionary<NSString *, NSString *> *)response.allHeaderFields
+        forURL:response.URL];
+    if (cookies.count == 0) return;
+
+    NSNumber *key = @(sessionID);
+    @synchronized (PhoneMEHTTPSResults()) {
+        if ([PhoneMEHTTPSRevokedCookieSessions() containsObject:key]) return;
+        NSMutableArray<NSHTTPCookie *> *jar = PhoneMEHTTPSCookieJars()[key];
+        if (jar == nil) {
+            jar = [[NSMutableArray alloc] init];
+            PhoneMEHTTPSCookieJars()[key] = jar;
+        }
+        for (NSHTTPCookie *cookie in cookies) {
+            NSIndexSet *duplicates = [jar indexesOfObjectsPassingTest:
+                ^BOOL(NSHTTPCookie *stored, NSUInteger index, BOOL *stop) {
+                    (void)index;
+                    (void)stop;
+                    return [stored.name isEqualToString:cookie.name] &&
+                           [stored.domain caseInsensitiveCompare:cookie.domain] ==
+                               NSOrderedSame &&
+                           [stored.path isEqualToString:cookie.path];
+                }];
+            if (duplicates.count != 0) [jar removeObjectsAtIndexes:duplicates];
+            NSDate *expires = cookie.expiresDate;
+            if (expires == nil || [expires timeIntervalSinceNow] > 0.0) {
+                [jar addObject:cookie];
+            }
+        }
+        static const NSUInteger kMaximumCookiesPerSession = 256U;
+        if (jar.count > kMaximumCookiesPerSession) {
+            [jar removeObjectsInRange:NSMakeRange(
+                0U, jar.count - kMaximumCookiesPerSession)];
+        }
+    }
+}
+
+static void PhoneMEApplyStoredCookies(int64_t sessionID,
+                                      NSMutableURLRequest *request) {
+    if (sessionID <= 0 || request == nil || request.URL == nil) return;
+    if ([request valueForHTTPHeaderField:@"Cookie"].length != 0) return;
+    NSNumber *key = @(sessionID);
+    NSMutableArray<NSHTTPCookie *> *matching = [[NSMutableArray alloc] init];
+    @synchronized (PhoneMEHTTPSResults()) {
+        if ([PhoneMEHTTPSRevokedCookieSessions() containsObject:key]) return;
+        NSMutableArray<NSHTTPCookie *> *jar = PhoneMEHTTPSCookieJars()[key];
+        if (jar == nil) return;
+        NSMutableArray<NSHTTPCookie *> *retained = [[NSMutableArray alloc] init];
+        for (NSHTTPCookie *cookie in jar) {
+            NSDate *expires = cookie.expiresDate;
+            if (expires != nil && [expires timeIntervalSinceNow] <= 0.0) {
+                continue;
+            }
+            [retained addObject:cookie];
+            if (PhoneMECookieMatchesURL(cookie, request.URL)) {
+                [matching addObject:cookie];
+            }
+        }
+        PhoneMEHTTPSCookieJars()[key] = retained;
+    }
+    if (matching.count == 0) return;
+    NSDictionary<NSString *, NSString *> *fields =
+        [NSHTTPCookie requestHeaderFieldsWithCookies:matching];
+    NSString *cookieHeader = fields[@"Cookie"];
+    if (cookieHeader.length != 0) {
+        [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+    }
+}
+
 static int32_t PhoneMENextHTTPSHandle(void) {
     static int32_t nextHandle = 1;
     @synchronized (PhoneMEHTTPSResults()) {
@@ -764,8 +933,9 @@ static NSString *PhoneMESerializeHeaders(NSDictionary *headers) {
     return serialized;
 }
 
-static void PhoneMEApplyHeaders(NSString *serialized,
+static BOOL PhoneMEApplyHeaders(NSString *serialized,
                                 NSMutableURLRequest *request) {
+    BOOL explicitCookie = NO;
     NSString *previousKey = nil;
     for (NSString *rawLine in [serialized componentsSeparatedByString:@"\n"]) {
         NSString *line = [rawLine hasSuffix:@"\r"]
@@ -811,8 +981,12 @@ static void PhoneMEApplyHeaders(NSString *serialized,
             continue;
         }
         [request setValue:value forHTTPHeaderField:key];
+        if ([key caseInsensitiveCompare:@"Cookie"] == NSOrderedSame) {
+            explicitCookie = YES;
+        }
         previousKey = key;
     }
+    return explicitCookie;
 }
 
 int32_t phoneme_ios_https_execute_async(
@@ -823,6 +997,7 @@ int32_t phoneme_ios_https_execute_async(
     int32_t body_length,
     int32_t timeout_ms,
     int32_t redirect_limit,
+    int64_t cookie_session_id,
     PhoneMEHTTPSCompletion completion,
     void *context) {
     const int32_t handle = PhoneMENextHTTPSHandle();
@@ -870,7 +1045,8 @@ int32_t phoneme_ios_https_execute_async(
                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                            timeoutInterval:timeout];
     request.HTTPMethod = method;
-    PhoneMEApplyHeaders(headers, request);
+    PhoneMEApplyStoredCookies(cookie_session_id, request);
+    const BOOL explicitCookie = PhoneMEApplyHeaders(headers, request);
     if (body_length > 0) {
         request.HTTPBody = [NSData dataWithBytes:body_bytes
                                           length:(NSUInteger)body_length];
@@ -882,8 +1058,8 @@ int32_t phoneme_ios_https_execute_async(
         NSURLRequestReloadIgnoringLocalCacheData;
     configuration.timeoutIntervalForRequest = timeout;
     configuration.timeoutIntervalForResource = timeout;
-    configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
-    configuration.HTTPShouldSetCookies = YES;
+    configuration.HTTPCookieStorage = nil;
+    configuration.HTTPShouldSetCookies = NO;
     configuration.waitsForConnectivity = timeout_ms <= 0;
 #if defined(PHONEME_HTTPS_TESTING)
     gPhoneMEHTTPSLastTimeoutInterval = timeout;
@@ -900,17 +1076,18 @@ int32_t phoneme_ios_https_execute_async(
     capture.responseBody = [[NSMutableData alloc] init];
     capture.secureRequest = secureRequest;
     capture.fallbackCertificateHost = url.host;
+    capture.cookieSessionID = cookie_session_id;
+    capture.explicitCookieHeader = explicitCookie
+        ? [request valueForHTTPHeaderField:@"Cookie"] : nil;
 
-    NSOperationQueue *delegateQueue = [[NSOperationQueue alloc] init];
-    delegateQueue.maxConcurrentOperationCount = 1;
-    delegateQueue.qualityOfService = NSQualityOfServiceUtility;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
                                                           delegate:capture
-                                                     delegateQueue:delegateQueue];
+                                                     delegateQueue:PhoneMEHTTPSDelegateQueue(cookie_session_id)];
     PhoneMEHTTPSPending *pending = [[PhoneMEHTTPSPending alloc] init];
     pending.session = session;
     pending.completion = completion;
     pending.context = context;
+    pending.cookieSessionID = cookie_session_id;
 
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request];
     pending.task = task;
@@ -927,6 +1104,27 @@ void phoneme_ios_https_cancel(int32_t handle) {
         pending = PhoneMEHTTPSPendingRequests()[@(handle)];
     }
     [pending.task cancel];
+}
+
+void phoneme_ios_https_clear_session(int64_t cookie_session_id) {
+    if (cookie_session_id <= 0) return;
+    NSNumber *key = @(cookie_session_id);
+    NSMutableArray<PhoneMEHTTPSPending *> *pending =
+        [[NSMutableArray alloc] init];
+    @synchronized (PhoneMEHTTPSResults()) {
+        [PhoneMEHTTPSCookieJars() removeObjectForKey:key];
+        [PhoneMEHTTPSDelegateQueues() removeObjectForKey:key];
+        [PhoneMEHTTPSRevokedCookieSessions() addObject:key];
+        for (PhoneMEHTTPSPending *request in
+                PhoneMEHTTPSPendingRequests().allValues) {
+            if (request.cookieSessionID == cookie_session_id) {
+                [pending addObject:request];
+            }
+        }
+    }
+    for (PhoneMEHTTPSPending *request in pending) {
+        [request.task cancel];
+    }
 }
 
 int32_t phoneme_ios_https_get_status_code(int32_t handle) {
@@ -1048,7 +1246,16 @@ void phoneme_ios_https_reset(void) {
     NSArray<PhoneMEHTTPSPending *> *pending = nil;
     @synchronized (PhoneMEHTTPSResults()) {
         [PhoneMEHTTPSResults() removeAllObjects];
+        [PhoneMEHTTPSCookieJars() removeAllObjects];
+        [PhoneMEHTTPSDelegateQueues() removeAllObjects];
+        [PhoneMEHTTPSRevokedCookieSessions() removeAllObjects];
         pending = PhoneMEHTTPSPendingRequests().allValues;
+        for (PhoneMEHTTPSPending *request in pending) {
+            if (request.cookieSessionID > 0) {
+                [PhoneMEHTTPSRevokedCookieSessions()
+                    addObject:@(request.cookieSessionID)];
+            }
+        }
     }
     for (PhoneMEHTTPSPending *request in pending) {
         [request.task cancel];

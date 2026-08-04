@@ -22,7 +22,14 @@ final class ProfileTemplateStore: ObservableObject {
         var defaultTemplateID: UUID?
     }
 
-    private let metadataURL: URL
+    private let fileManager: FileManager
+    private let storage: PhoneMEStorageController
+    private var metadataURL: URL {
+        storage.rootURL.appendingPathComponent(
+            "templates.json",
+            isDirectory: false
+        )
+    }
     private let keyboardLayoutMigrationKey = "phoneME.profileTemplates.keyboardLayoutV2"
     private let keyboardPaletteMigrationKey = "phoneME.profileTemplates.keyboardPaletteV3"
     private let displayGravityMigrationKey = "phoneME.profileTemplates.displayGravityV5"
@@ -30,14 +37,20 @@ final class ProfileTemplateStore: ObservableObject {
     private let nativeInputDefaultsMigrationKey = "phoneME.profileTemplates.nativeInputDefaultsV7"
     private let frameRate60MigrationKey = "phoneME.profileTemplates.frameRate60V8"
 
-    init(fileManager: FileManager = .default) {
-        let applicationSupport = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? fileManager.temporaryDirectory
-        let rootURL = applicationSupport.appendingPathComponent("phoneME", isDirectory: true)
-        metadataURL = rootURL.appendingPathComponent("templates.json", isDirectory: false)
-        try? fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+    init(
+        storage: PhoneMEStorageController,
+        fileManager: FileManager = .default
+    ) {
+        self.storage = storage
+        self.fileManager = fileManager
+        reloadFromStorage()
+    }
+
+    func reloadFromStorage() {
+        try? fileManager.createDirectory(
+            at: storage.rootURL,
+            withIntermediateDirectories: true
+        )
         load()
     }
 

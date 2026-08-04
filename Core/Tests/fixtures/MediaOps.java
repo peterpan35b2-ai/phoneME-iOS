@@ -1,6 +1,7 @@
 package corefixture;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import javax.microedition.media.Control;
 import javax.microedition.media.Manager;
 import javax.microedition.media.MediaException;
@@ -9,9 +10,111 @@ import javax.microedition.media.PlayerListener;
 import javax.microedition.media.TimeBase;
 import javax.microedition.media.control.ToneControl;
 import javax.microedition.media.control.VolumeControl;
+import javax.microedition.media.protocol.ContentDescriptor;
+import javax.microedition.media.protocol.DataSource;
+import javax.microedition.media.protocol.SourceStream;
 
 public final class MediaOps implements PlayerListener {
     private static int events;
+
+    private static final class MemorySource extends DataSource {
+        private final MemoryStream stream;
+        private boolean connected;
+        private boolean started;
+
+        MemorySource(byte[] data) {
+            super("memory://fixture.wav");
+            stream = new MemoryStream(data);
+        }
+
+        public String getContentType() { return "audio/x-wav"; }
+        public void connect() { connected = true; }
+        public void disconnect() { connected = false; }
+        public void start() throws IOException {
+            if (!connected) throw new IOException("not connected");
+            started = true;
+        }
+        public void stop() { started = false; }
+        public SourceStream[] getStreams() {
+            return new SourceStream[] {stream};
+        }
+        public Control[] getControls() { return new Control[0]; }
+        public Control getControl(String type) { return null; }
+    }
+
+    private static final class MemoryStream implements SourceStream {
+        private final byte[] data;
+        private int position;
+
+        MemoryStream(byte[] data) { this.data = data; }
+        public ContentDescriptor getContentDescriptor() {
+            return new ContentDescriptor("audio/x-wav");
+        }
+        public long getContentLength() { return data.length; }
+        public int read(byte[] buffer, int offset, int length) {
+            if (position >= data.length) return -1;
+            int count = Math.min(length, data.length - position);
+            System.arraycopy(data, position, buffer, offset, count);
+            position += count;
+            return count;
+        }
+        public int getTransferSize() { return 512; }
+        public long seek(long where) {
+            if (where < 0) where = 0;
+            if (where > data.length) where = data.length;
+            position = (int)where;
+            return position;
+        }
+        public long tell() { return position; }
+        public int getSeekType() { return RANDOM_ACCESSIBLE; }
+        public Control[] getControls() { return new Control[0]; }
+        public Control getControl(String type) { return null; }
+    }
+
+    private static byte[] oneSampleWave() {
+        byte[] wave = new byte[45];
+        wave[0] = 'R'; wave[1] = 'I'; wave[2] = 'F'; wave[3] = 'F';
+        wave[4] = 37;
+        wave[8] = 'W'; wave[9] = 'A'; wave[10] = 'V'; wave[11] = 'E';
+        wave[12] = 'f'; wave[13] = 'm'; wave[14] = 't'; wave[15] = ' ';
+        wave[16] = 16;
+        wave[20] = 1; wave[22] = 1;
+        wave[24] = 64; wave[25] = 31;
+        wave[28] = 64; wave[29] = 31;
+        wave[32] = 1; wave[34] = 8;
+        wave[36] = 'd'; wave[37] = 'a'; wave[38] = 't'; wave[39] = 'a';
+        wave[40] = 1;
+        wave[44] = (byte)128;
+        return wave;
+    }
+
+    private static int dataSourceCompatibility() throws Exception {
+        int stage = 0;
+        try {
+            stage = 1;
+            ContentDescriptor descriptor = new ContentDescriptor("audio/x-wav");
+            if (!"audio/x-wav".equals(descriptor.getContentType())) return -16;
+            try {
+                new ContentDescriptor(null);
+                return -17;
+            } catch (IllegalArgumentException expected) {
+            }
+            stage = 2;
+            MemorySource source = new MemorySource(oneSampleWave());
+            if (!"memory://fixture.wav".equals(source.getLocator())) return -18;
+            stage = 3;
+            Player streamed = Manager.createPlayer(source);
+            if (streamed == null || source.connected || source.started) return -19;
+            stage = 4;
+            streamed.realize();
+            if (!"audio/x-wav".equals(streamed.getContentType())) return -20;
+            stage = 5;
+            streamed.close();
+            return 0;
+        } catch (IllegalStateException failure) {
+            return -100 - stage;
+        }
+    }
 
     public void playerUpdate(Player player, String event, Object eventData) {
         if (PlayerListener.STARTED.equals(event)) {
@@ -115,6 +218,8 @@ public final class MediaOps implements PlayerListener {
         } catch (MediaException expected) {
             // phoneME reports malformed/empty stream payloads as MediaException.
         }
+        int dataSourceResult = dataSourceCompatibility();
+        if (dataSourceResult != 0) return dataSourceResult;
         return events;
     }
 }

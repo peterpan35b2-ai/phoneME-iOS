@@ -94,6 +94,7 @@ API_PREFIXES = (
     "com/sprintpcs/",
     "com/sun/midp/",
     "org/microemu/",
+    "org/xml/sax/",
 )
 
 _PROGRESS_LOCK = threading.Lock()
@@ -482,6 +483,25 @@ def compiler_command() -> tuple[list[str], list[str]]:
     return [compiler], []
 
 
+def objective_c_compiler_command() -> tuple[list[str], list[str]]:
+    configured = os.environ.get("CC", "").strip()
+    if configured:
+        return shlex.split(configured), []
+    xcrun = shutil.which("xcrun")
+    if xcrun:
+        compiler = subprocess.check_output(
+            [xcrun, "--sdk", "macosx", "--find", "clang"], text=True
+        ).strip()
+        sdk = subprocess.check_output(
+            [xcrun, "--sdk", "macosx", "--show-sdk-path"], text=True
+        ).strip()
+        return [compiler], ["-isysroot", sdk]
+    compiler = shutil.which("clang") or shutil.which("cc")
+    if not compiler:
+        raise RuntimeError("an Objective-C compiler is required on macOS")
+    return [compiler], []
+
+
 def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Path | None, str]:
     build_root = output_root / "harness-build"
     build_root.mkdir(parents=True, exist_ok=True)
@@ -491,8 +511,59 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
 
     try:
         compiler, sdk_flags = compiler_command()
+        objective_c_compiler: list[str] = []
+        objective_c_sdk_flags: list[str] = []
+        if sys.platform == "darwin":
+            objective_c_compiler, objective_c_sdk_flags = (
+                objective_c_compiler_command()
+            )
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         return None, str(exc)
+
+    bridge_object: pathlib.Path | None = None
+    if sys.platform == "darwin":
+        bridge_source = PROJECT_ROOT / "phoneME" / "Core" / "PhoneMEHTTPSBridge.m"
+        bridge_object = build_root / "PhoneMEHTTPSBridge.o"
+        bridge_command = [
+            *objective_c_compiler,
+            *objective_c_sdk_flags,
+            "-fobjc-arc",
+            "-fmodules",
+            "-Wall",
+            "-Wextra",
+            "-Wpedantic",
+            "-Wconversion",
+            "-Wsign-conversion",
+            "-Wshadow",
+            "-Werror=return-type",
+            "-Werror=unguarded-availability-new",
+        ]
+        if sanitize:
+            bridge_command.extend(
+                ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+            )
+        bridge_command.extend(
+            ["-c", str(bridge_source), "-o", str(bridge_object)]
+        )
+        try:
+            with stdout_path.open("wb") as stdout_stream, stderr_path.open(
+                "wb"
+            ) as stderr_stream:
+                completed = subprocess.run(
+                    bridge_command,
+                    stdout=stdout_stream,
+                    stderr=stderr_stream,
+                    check=False,
+                    timeout=120,
+                )
+        except subprocess.TimeoutExpired:
+            return None, "PhoneME HTTP bridge build timed out after 120 seconds"
+        if completed.returncode != 0 or not bridge_object.is_file():
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+            return None, (
+                "PhoneME HTTP bridge build failed: "
+                + compact_text(stderr, 2_000)
+            )
 
     sources = sorted(
         path
@@ -520,6 +591,7 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
         [
             str(CORE_ROOT / "Tests" / "Compatibility" / "CompatibilityHarness.cpp"),
             *(str(path) for path in sources),
+            *([str(bridge_object)] if bridge_object is not None else []),
             "-lz",
         ]
     )
@@ -534,12 +606,20 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
                 "CoreFoundation",
                 "-framework",
                 "ImageIO",
+                "-framework",
+                "Foundation",
+                "-framework",
+                "Security",
             ]
         )
     command.extend(["-o", str(binary)])
 
     command_path = build_root / "build-command.txt"
-    command_path.write_text(shlex.join(command) + "\n", encoding="utf-8")
+    command_lines = []
+    if sys.platform == "darwin":
+        command_lines.append(shlex.join(bridge_command))
+    command_lines.append(shlex.join(command))
+    command_path.write_text("\n".join(command_lines) + "\n", encoding="utf-8")
     started = time.monotonic()
     try:
         with stdout_path.open("wb") as stdout_stream, stderr_path.open("wb") as stderr_stream:

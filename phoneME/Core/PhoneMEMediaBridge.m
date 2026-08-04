@@ -61,6 +61,7 @@ static NSMutableSet *PMTonePlayers(void) {
 static int32_t gNextMediaHandle = 1;
 static uint64_t gPMPlaybackSequence = 0;
 static void *PMStreamStatusContext = &PMStreamStatusContext;
+static void *PMStreamDurationContext = &PMStreamDurationContext;
 
 #if TARGET_OS_IOS
 static NSString *gPMMediaApplicationTitle;
@@ -168,7 +169,9 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 @property(nonatomic) int64_t pendingSeekMicroseconds;
 @property(nonatomic) BOOL resumeAfterPendingSeek;
 @property(nonatomic) BOOL resumeAfterSystemSuspend;
+@property(nonatomic) BOOL seekInProgress;
 @property(nonatomic) NSUInteger seekGeneration;
+@property(nonatomic) NSUInteger pendingSeekRetryCount;
 @property(nonatomic) int32_t handle;
 @property(nonatomic) NSInteger loopCount;
 @property(nonatomic) NSInteger midiLoopsRemaining;
@@ -198,6 +201,9 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         [_streamPlayer.currentItem removeObserver:self
                                        forKeyPath:@"status"
                                           context:PMStreamStatusContext];
+        [_streamPlayer.currentItem removeObserver:self
+                                       forKeyPath:@"duration"
+                                          context:PMStreamDurationContext];
     }
     if (_streamEndObserver != nil) {
         [NSNotificationCenter.defaultCenter removeObserver:_streamEndObserver];
@@ -423,7 +429,8 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
                 seconds = MIN(seconds, duration);
             }
         }
-        BOOL resume = self.streamPlayer.rate != 0.0f;
+        BOOL resume = self.resumeAfterPendingSeek ||
+                      self.streamPlayer.rate != 0.0f;
         if (@available(iOS 10.0, macOS 10.12, tvOS 10.0, *)) {
             resume = resume || self.streamPlayer.timeControlStatus ==
                     AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
@@ -433,6 +440,10 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         self.hasPendingSeek = YES;
         self.resumeAfterPendingSeek = resume;
         self.ended = NO;
+        self.pendingSeekRetryCount = 0;
+        self.seekGeneration += 1;
+        [item cancelPendingSeeks];
+        self.seekInProgress = NO;
         [self applyPendingSeekIfPossible];
         return self.pendingSeekMicroseconds;
     }
@@ -441,36 +452,104 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 
 - (void)applyPendingSeekIfPossible {
     AVPlayerItem *item = self.streamPlayer.currentItem;
-    if (!self.hasPendingSeek || item == nil ||
+    if (!self.hasPendingSeek || self.seekInProgress || item == nil ||
         item.status != AVPlayerItemStatusReadyToPlay) {
         return;
     }
 
-    int64_t targetMicroseconds = self.pendingSeekMicroseconds;
-    BOOL resume = self.resumeAfterPendingSeek;
-    self.seekGeneration += 1;
+    NSTimeInterval seconds = MAX(
+        0, (double)self.pendingSeekMicroseconds / 1000000.0);
+    if (CMTIME_IS_NUMERIC(item.duration)) {
+        NSTimeInterval duration = CMTimeGetSeconds(item.duration);
+        if (isfinite(duration) && duration > 0) {
+            seconds = MIN(seconds, duration);
+        }
+    }
+
+    CMTime target = CMTimeMakeWithSeconds(seconds, 1000000);
+    CMTime tolerance = CMTimeMakeWithSeconds(0.1, 1000);
+
+    NSTimeInterval resolvedSeconds = CMTimeGetSeconds(target);
+    if (isfinite(resolvedSeconds) && resolvedSeconds >= 0) {
+        seconds = resolvedSeconds;
+    }
+    self.pendingSeekMicroseconds =
+        (int64_t)llround(seconds * 1000000.0);
     NSUInteger generation = self.seekGeneration;
-    CMTime target = CMTimeMakeWithSeconds(
-            MAX(0, (double)targetMicroseconds / 1000000.0), 1000000);
+    self.seekInProgress = YES;
     [self.streamPlayer pause];
 
     __weak PMMediaEntry *weakSelf = self;
     [self.streamPlayer seekToTime:target
-                 toleranceBefore:kCMTimeZero
-                  toleranceAfter:kCMTimeZero
+                 toleranceBefore:tolerance
+                  toleranceAfter:tolerance
                completionHandler:^(BOOL finished) {
         dispatch_async(PMMediaQueue(), ^{
             PMMediaEntry *strongSelf = weakSelf;
             if (strongSelf == nil || generation != strongSelf.seekGeneration) {
                 return;
             }
-            strongSelf.hasPendingSeek = NO;
+            strongSelf.seekInProgress = NO;
             strongSelf.ended = NO;
-            if (finished && resume && !strongSelf.streamFailed) {
-                [strongSelf.streamPlayer play];
+            if (finished) {
+                BOOL shouldResume = strongSelf.resumeAfterPendingSeek;
+                strongSelf.hasPendingSeek = NO;
+                strongSelf.resumeAfterPendingSeek = NO;
+                strongSelf.pendingSeekRetryCount = 0;
+                if (shouldResume && !strongSelf.streamFailed) {
+                    [strongSelf.streamPlayer play];
+                }
+                PMReevaluateNowPlaying(nil);
+                return;
             }
+
+            strongSelf.pendingSeekRetryCount += 1;
+            if (strongSelf.pendingSeekRetryCount > 5) {
+                BOOL shouldResume = strongSelf.resumeAfterPendingSeek;
+                strongSelf.hasPendingSeek = NO;
+                strongSelf.resumeAfterPendingSeek = NO;
+                strongSelf.pendingSeekRetryCount = 0;
+                if (shouldResume && !strongSelf.streamFailed) {
+                    [strongSelf.streamPlayer play];
+                }
+                PMReevaluateNowPlaying(nil);
+                return;
+            }
+            NSUInteger retryGeneration = strongSelf.seekGeneration;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.15 * NSEC_PER_SEC)),
+                           PMMediaQueue(), ^{
+                PMMediaEntry *retrySelf = weakSelf;
+                if (retrySelf == nil ||
+                    retryGeneration != retrySelf.seekGeneration ||
+                    !retrySelf.hasPendingSeek) {
+                    return;
+                }
+                [retrySelf applyPendingSeekIfPossible];
+            });
         });
     }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(8.0 * NSEC_PER_SEC)),
+                   PMMediaQueue(), ^{
+        PMMediaEntry *strongSelf = weakSelf;
+        if (strongSelf == nil || generation != strongSelf.seekGeneration ||
+            !strongSelf.seekInProgress || !strongSelf.hasPendingSeek) {
+            return;
+        }
+        BOOL shouldResume = strongSelf.resumeAfterPendingSeek;
+        strongSelf.seekGeneration += 1;
+        [strongSelf.streamPlayer.currentItem cancelPendingSeeks];
+        strongSelf.seekInProgress = NO;
+        strongSelf.hasPendingSeek = NO;
+        strongSelf.resumeAfterPendingSeek = NO;
+        strongSelf.pendingSeekRetryCount = 0;
+        if (shouldResume && !strongSelf.streamFailed) {
+            [strongSelf.streamPlayer play];
+        }
+        PMReevaluateNowPlaying(nil);
+    });
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath
@@ -479,7 +558,9 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
                        context:(void *)context {
     (void)keyPath;
     (void)change;
-    if (context != PMStreamStatusContext) {
+    BOOL isStreamObservation = context == PMStreamStatusContext ||
+        context == PMStreamDurationContext;
+    if (!isStreamObservation) {
         [super observeValueForKeyPath:keyPath
                              ofObject:object
                                change:change
@@ -497,6 +578,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         if (item.status == AVPlayerItemStatusFailed) {
             strongSelf.streamFailed = YES;
             strongSelf.hasPendingSeek = NO;
+            strongSelf.seekInProgress = NO;
             NSLog(@"phoneME media: player item failed: %@",
                   item.error.localizedDescription ?: @"unknown error");
             PMReevaluateNowPlaying(nil);
@@ -898,12 +980,17 @@ static PMMediaEntry *PMEntryWithURL(NSURL *url, NSString *contentType) {
     };
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:assetOptions];
     AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    item.canUseNetworkResourcesForLiveStreamingWhilePaused = YES;
     entry.streamPlayer = [AVPlayer playerWithPlayerItem:item];
     entry.streamPlayer.automaticallyWaitsToMinimizeStalling = YES;
     [item addObserver:entry
            forKeyPath:@"status"
               options:NSKeyValueObservingOptionInitial | NSKeyValueObservingOptionNew
               context:PMStreamStatusContext];
+    [item addObserver:entry
+           forKeyPath:@"duration"
+              options:NSKeyValueObservingOptionInitial | NSKeyValueObservingOptionNew
+              context:PMStreamDurationContext];
     entry.observingStreamStatus = YES;
     __weak PMMediaEntry *weakEntry = entry;
     entry.streamFailedObserver = [NSNotificationCenter.defaultCenter
@@ -1208,7 +1295,8 @@ static BOOL gPMKeepScreenAwake = NO;
 void phoneme_ios_media_suspend(void) {
     dispatch_sync(PMMediaQueue(), ^{
         for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
-            entry.resumeAfterSystemSuspend = [entry isPlaying];
+            entry.resumeAfterSystemSuspend = [entry isPlaying] ||
+                entry.resumeAfterPendingSeek;
             if (entry.resumeAfterSystemSuspend) {
                 [entry stop];
             }

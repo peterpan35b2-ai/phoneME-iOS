@@ -7,12 +7,12 @@ source "$SCRIPT_DIR/lib/common-test-root.sh"
 APPLE_SDK="${PHONEME_APPLE_SDK:-iphoneos}"
 case "$APPLE_SDK" in
   iphoneos)
-    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-16.0}"
-    MIN_VERSION_FLAG="-miphoneos-version-min=${IOS_DEPLOYMENT_TARGET:-16.0}"
+    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-15.0}"
+    MIN_VERSION_FLAG="-miphoneos-version-min=${IOS_DEPLOYMENT_TARGET:-15.0}"
     ;;
   iphonesimulator)
-    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-16.0}-simulator"
-    MIN_VERSION_FLAG="-mios-simulator-version-min=${IOS_DEPLOYMENT_TARGET:-16.0}"
+    TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET:-15.0}-simulator"
+    MIN_VERSION_FLAG="-mios-simulator-version-min=${IOS_DEPLOYMENT_TARGET:-15.0}"
     ;;
   *)
     echo "Unsupported Apple SDK: $APPLE_SDK" >&2
@@ -27,19 +27,19 @@ else
 fi
 OBJECT_ROOT="$BUILD_ROOT/objects"
 OUTPUT_ARCHIVE="${PHONEME_CORE_OUTPUT:-$BUILD_ROOT/libphoneMECore.a}"
-IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}"
+IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}"
 
 version_is_supported() {
   /usr/bin/awk -v version="$1" 'BEGIN {
     count = split(version, part, ".");
     major = part[1] + 0;
     minor = count > 1 ? part[2] + 0 : 0;
-    exit !((major > 16) || (major == 16 && minor >= 0));
+    exit !((major > 15) || (major == 15 && minor >= 0));
   }'
 }
 
 if ! version_is_supported "$IOS_DEPLOYMENT_TARGET"; then
-  echo "phoneME Core requires iOS 16.0 or newer." >&2
+  echo "phoneME Core requires iOS 15.0 or newer." >&2
   exit 2
 fi
 

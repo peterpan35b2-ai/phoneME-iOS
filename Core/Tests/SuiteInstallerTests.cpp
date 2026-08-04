@@ -317,10 +317,21 @@ void test_install_flow(const std::filesystem::path& root,
         root / "files" / std::to_string(id.value) / "marker.bin";
     const std::filesystem::path permission_marker =
         root / "security" / (std::to_string(id.value) + ".permissions");
+    const std::filesystem::path push_marker =
+        root / "push" / (std::to_string(id.value) + ".push");
+    const std::filesystem::path push_recovery_marker =
+        std::filesystem::path(push_marker.string() + ".tmp");
+    const std::filesystem::path temporary_marker =
+        root / "tmp" / std::to_string(id.value) / "partial.bin";
     std::filesystem::create_directories(files_marker.parent_path(), error);
     std::filesystem::create_directories(permission_marker.parent_path(), error);
+    std::filesystem::create_directories(push_marker.parent_path(), error);
+    std::filesystem::create_directories(temporary_marker.parent_path(), error);
     check(!error && write_text(files_marker, "remove") &&
-              write_text(permission_marker, "remove"),
+              write_text(permission_marker, "remove") &&
+              write_text(push_marker, "remove") &&
+              write_text(push_recovery_marker, "remove") &&
+              write_text(temporary_marker, "remove"),
           "create suite data removal markers");
 
     auto removed_data = store.uninstall(
@@ -329,6 +340,8 @@ void test_install_flow(const std::filesystem::path& root,
             .remove_rms = true,
             .remove_files = true,
             .remove_permissions = true,
+            .remove_push = true,
+            .remove_temporary = true,
         });
     check(removed_data.has_value(), "uninstall with data removal policy");
     check(!std::filesystem::exists(rms_marker.parent_path(), error) && !error,
@@ -337,6 +350,12 @@ void test_install_flow(const std::filesystem::path& root,
           "remove files under explicit uninstall policy");
     check(!std::filesystem::exists(permission_marker, error) && !error,
           "remove persisted permissions under explicit uninstall policy");
+    check(!std::filesystem::exists(push_marker, error) && !error &&
+              !std::filesystem::exists(push_recovery_marker, error) && !error,
+          "remove push state under explicit uninstall policy");
+    check(!std::filesystem::exists(temporary_marker.parent_path(), error) &&
+              !error,
+          "remove temporary suite state under explicit uninstall policy");
 }
 
 void test_transaction_faults(const std::filesystem::path& root,
@@ -724,6 +743,32 @@ void test_validation(const std::filesystem::path& root,
         std::optional<std::string>(mixed_profile_jad.string()));
     check(mixed_profile.has_value(),
           "accept capability list containing an exact supported profile");
+
+    const std::filesystem::path newest_capabilities_jad =
+        root / "newest-capabilities.jad";
+    check(write_text(
+              newest_capabilities_jad,
+              make_jad(jar_v1, "1.0.0", fixture_file_size(jar_v1),
+                       false, "MIDP-2.1", "CLDC-1.1.1")),
+          "write MIDP 2.1 and CLDC 1.1.1 JAD");
+    auto newest_capabilities = SuiteInstaller::inspect(
+        jar_v1.string(),
+        std::optional<std::string>(newest_capabilities_jad.string()));
+    check(newest_capabilities.has_value(),
+          "accept phoneME MIDP 2.1 and CLDC 1.1.1 versions");
+
+    const std::filesystem::path legacy_capabilities_jad =
+        root / "legacy-capabilities.jad";
+    check(write_text(
+              legacy_capabilities_jad,
+              make_jad(jar_v1, "1.0.0", fixture_file_size(jar_v1),
+                       false, "MIDP-1.0", "CLDC-1.0")),
+          "write MIDP 1.0 and CLDC 1.0 JAD");
+    auto legacy_capabilities = SuiteInstaller::inspect(
+        jar_v1.string(),
+        std::optional<std::string>(legacy_capabilities_jad.string()));
+    check(legacy_capabilities.has_value(),
+          "retain legacy MIDP 1.0 and CLDC 1.0 support");
 
     auto missing = SuiteInstaller::inspect(missing_class_jar.string());
     check_error(missing, ErrorCode::class_not_found,

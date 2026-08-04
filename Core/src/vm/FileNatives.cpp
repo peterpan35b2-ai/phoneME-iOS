@@ -1520,6 +1520,36 @@ Status file_output_close(Machine& machine, ObjectRef stream) {
 void register_file_natives(NativeMethodRegistry& registry) {
     register_file_stream_natives(registry);
     register_file_connection_natives(registry);
+
+    const auto file_system_listeners = [&registry](Machine& machine)
+        -> Result<ObjectRef> {
+        constexpr std::string_view owner =
+            "javax/microedition/io/file/FileSystemRegistry";
+        auto field = machine.class_states().resolve_field(
+            owner, "listeners", "Ljava/util/Vector;", true);
+        if (!field) return std::unexpected(field.error());
+        auto current = machine.class_states().static_field(*field);
+        if (!current) return std::unexpected(current.error());
+        auto listeners = current->as_reference();
+        if (!listeners) return std::unexpected(listeners.error());
+        if (!listeners->is_null()) return *listeners;
+
+        auto vector = machine.class_states().allocate_instance(
+            machine.heap(), "java/util/Vector");
+        if (!vector) return std::unexpected(vector.error());
+        const std::array<Value, 1> constructor_arguments {
+            Value::from_reference(*vector),
+        };
+        auto initialized = registry.invoke(
+            machine, "java/util/Vector", "<init>", "()V",
+            constructor_arguments);
+        if (!initialized) return std::unexpected(initialized.error());
+        auto stored = machine.class_states().set_static_field(
+            *field, Value::from_reference(*vector));
+        if (!stored) return std::unexpected(stored.error());
+        return *vector;
+    };
+
     add(registry,
         "javax/microedition/io/file/FileSystemRegistry",
         "listRoots",
@@ -1534,6 +1564,90 @@ void register_file_natives(NativeMethodRegistry& registry) {
             auto enumeration = create_enumeration(machine, roots);
             if (!enumeration) return std::unexpected(enumeration.error());
             return std::optional<Value>(Value::from_reference(*enumeration));
+        });
+
+    add(registry,
+        "javax/microedition/io/file/FileSystemRegistry",
+        "addFileSystemListener",
+        "(Ljavax/microedition/io/file/FileSystemListener;)Z",
+        [&registry, file_system_listeners](
+            Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "addFileSystemListener expects one listener");
+            }
+            auto listener = arguments[0].as_reference();
+            if (!listener) return std::unexpected(listener.error());
+            if (listener->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "filesystem listener is null");
+            }
+            auto valid = machine.object_is_instance(
+                *listener,
+                "javax/microedition/io/file/FileSystemListener");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "object is not a FileSystemListener");
+            }
+            auto listeners = file_system_listeners(machine);
+            if (!listeners) return std::unexpected(listeners.error());
+            const std::array<Value, 2> vector_arguments {
+                Value::from_reference(*listeners),
+                Value::from_reference(*listener),
+            };
+            auto contained = registry.invoke(
+                machine, "java/util/Vector", "contains",
+                "(Ljava/lang/Object;)Z", vector_arguments);
+            if (!contained) return std::unexpected(contained.error());
+            if (!contained->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Vector.contains returned no value");
+            }
+            auto exists = contained->value().as_int();
+            if (!exists) return std::unexpected(exists.error());
+            if (*exists == 0) {
+                auto added = registry.invoke(
+                    machine, "java/util/Vector", "addElement",
+                    "(Ljava/lang/Object;)V", vector_arguments);
+                if (!added) return std::unexpected(added.error());
+            }
+            return std::optional<Value>(Value::from_int(1));
+        });
+
+    add(registry,
+        "javax/microedition/io/file/FileSystemRegistry",
+        "removeFileSystemListener",
+        "(Ljavax/microedition/io/file/FileSystemListener;)Z",
+        [&registry, file_system_listeners](
+            Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "removeFileSystemListener expects one listener");
+            }
+            auto listener = arguments[0].as_reference();
+            if (!listener) return std::unexpected(listener.error());
+            if (listener->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "filesystem listener is null");
+            }
+            auto listeners = file_system_listeners(machine);
+            if (!listeners) return std::unexpected(listeners.error());
+            const std::array<Value, 2> vector_arguments {
+                Value::from_reference(*listeners),
+                Value::from_reference(*listener),
+            };
+            auto removed = registry.invoke(
+                machine, "java/util/Vector", "removeElement",
+                "(Ljava/lang/Object;)Z", vector_arguments);
+            if (!removed) return std::unexpected(removed.error());
+            if (!removed->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Vector.removeElement returned no value");
+            }
+            return removed;
         });
 }
 

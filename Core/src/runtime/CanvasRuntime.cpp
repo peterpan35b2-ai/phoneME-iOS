@@ -6,6 +6,7 @@
 #include <memory>
 #include <utility>
 
+#include "phoneme/vm/LcduiBridge.hpp"
 #include "phoneme/vm/Machine.hpp"
 
 namespace phoneme::runtime {
@@ -27,6 +28,28 @@ constexpr usize kDisplayableIdField = 0;
 constexpr auto kKeyRepeatInitialDelay = std::chrono::milliseconds(400);
 constexpr auto kKeyRepeatInterval = std::chrono::milliseconds(80);
 constexpr usize kMaximumRepeatsPerPump = 8U;
+constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
+constexpr u64 kCanvasPaintWatchdogInstructionBudget = 5'000'000U;
+
+class ScopedUnpacedCallback final {
+public:
+    explicit ScopedUnpacedCallback(vm::Scheduler& scheduler,
+                                    bool enabled) noexcept
+        : scheduler_(scheduler), enabled_(enabled) {
+        if (enabled_) scheduler_.begin_unpaced_execution();
+    }
+
+    ~ScopedUnpacedCallback() {
+        if (enabled_) scheduler_.end_unpaced_execution();
+    }
+
+    ScopedUnpacedCallback(const ScopedUnpacedCallback&) = delete;
+    ScopedUnpacedCallback& operator=(const ScopedUnpacedCallback&) = delete;
+
+private:
+    vm::Scheduler& scheduler_;
+    bool enabled_ {false};
+};
 
 [[nodiscard]] i32 saturating_i32(i64 value) noexcept {
     return static_cast<i32>(std::clamp<i64>(
@@ -260,12 +283,25 @@ Status CanvasRuntime::pump_under_execution() {
     if (!repeats) return repeats;
     auto serial_callbacks = machine_.pump_serial_callbacks();
     if (!serial_callbacks) return serial_callbacks;
+    auto alert_timeouts = vm::pump_lcdui_alert_timeouts(machine_);
+    if (!alert_timeouts) return alert_timeouts;
     const bool dispatched_visibility_after_input =
         !visibility_changes_.empty();
     auto visibility_after_input = process_visibility_changes();
     if (!visibility_after_input) return visibility_after_input;
     auto flushes = process_flushes();
     if (!flushes) return flushes;
+
+    if (const auto& translation = machine_.translation_service(); translation) {
+        const u64 generation = translation->generation();
+        if (generation != observed_translation_generation_) {
+            observed_translation_generation_ = generation;
+            if (CanvasState* state = active_visible_state(); state != nullptr) {
+                merge_region(state->repaint_region, full_region());
+            }
+        }
+    }
+
     if (dispatched_visibility || dispatched_visibility_after_input) {
         // phoneME posts visibility and expose/paint as separate LCDUI events.
         // Deferring paint by one pump prevents a Canvas from observing worker-
@@ -891,6 +927,7 @@ Status CanvasRuntime::process_repaints() {
         }
         const vm::ObjectRef canvas = found->second.object;
         const vm::CanvasRect region = *found->second.repaint_region;
+        const bool initial_paint = !found->second.initial_paint_completed;
         found->second.repaint_region.reset();
         found->second.service_requested = false;
 
@@ -907,19 +944,16 @@ Status CanvasRuntime::process_repaints() {
             }
             graphics = *pinned_graphics;
         }
-        const std::array<vm::Value, 1> arguments {
-            vm::Value::from_reference(graphics),
-        };
-        auto painted = invoke_void(canvas,
-                                   "javax/microedition/lcdui/Canvas",
-                                   "paint",
-                                   "(Ljavax/microedition/lcdui/Graphics;)V",
-                                   arguments);
-        if (!painted) return painted;
+        auto painted = invoke_paint(canvas, graphics, initial_paint);
+        if (!painted) return std::unexpected(painted.error());
         if (render_hooks_.commit_paint) {
             auto committed = render_hooks_.commit_paint(
                 machine_, canvas, graphics, region);
             if (!committed) return committed;
+        }
+        if (*painted) {
+            auto current = find_state(canvas);
+            if (current != nullptr) current->initial_paint_completed = true;
         }
     }
     return {};
@@ -959,6 +993,50 @@ CanvasRuntime::active_visible_state() const noexcept {
     return nullptr;
 }
 
+Result<bool> CanvasRuntime::invoke_paint(
+    vm::ObjectRef receiver,
+    vm::ObjectRef graphics,
+    bool initial_paint) {
+    const std::array<vm::Value, 1> arguments {
+        vm::Value::from_reference(graphics),
+    };
+    ScopedUnpacedCallback unpaced(machine_.scheduler(), initial_paint);
+    auto result = machine_.invoke_instance(
+        receiver,
+        "javax/microedition/lcdui/Canvas",
+        "paint",
+        "(Ljavax/microedition/lcdui/Graphics;)V",
+        arguments,
+        kCanvasPaintWatchdogInstructionBudget,
+        vm::InstructionBudgetMode::progress_watchdog);
+    if (!result) {
+        if (result.error().code == ErrorCode::invalid_state &&
+            result.error().message.starts_with(
+                "VM progress watchdog was exhausted")) {
+            std::string diagnostic =
+                "callback paint(Ljavax/microedition/lcdui/Graphics;)V "
+                "made no progress before watchdog expiry: ";
+            diagnostic += result.error().message;
+            append_canvas_diagnostic(machine_, diagnostic);
+            return false;
+        }
+        return std::unexpected(result.error());
+    }
+    if (result->completed_normally()) return true;
+    if (!result->throwable.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Canvas paint failed without a Java throwable");
+    }
+    auto throwable = machine_.heap().class_name(*result->throwable);
+    if (!throwable) return std::unexpected(throwable.error());
+    std::string message = "Canvas callback threw " + *throwable;
+    if (!result->exception_context.empty()) {
+        message += " from " + result->exception_context;
+    }
+    append_canvas_diagnostic(machine_, message);
+    return fail_java(*throwable, std::move(message));
+}
+
 Status CanvasRuntime::invoke_void(
     vm::ObjectRef receiver,
     std::string_view declared_class,
@@ -966,7 +1044,6 @@ Status CanvasRuntime::invoke_void(
     std::string_view descriptor,
     std::span<const vm::Value> arguments,
     CallbackExceptionPolicy exception_policy) {
-    constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
     auto result = machine_.invoke_instance(receiver,
                                            declared_class,
                                            method_name,

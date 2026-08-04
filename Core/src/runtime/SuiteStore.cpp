@@ -1040,6 +1040,28 @@ Status SuiteStore::remove_policy_data(
             return filesystem_error("unable to remove suite permission state", error);
         }
     }
+    if (policy.remove_push) {
+        std::error_code error;
+        const std::filesystem::path push_path =
+            std::filesystem::path(root_path_) / "push" /
+            (std::to_string(id.value) + ".push");
+        std::filesystem::remove(push_path, error);
+        if (error) {
+            return filesystem_error("unable to remove suite push state", error);
+        }
+        std::filesystem::remove(push_path.string() + ".tmp", error);
+        if (error) {
+            return filesystem_error(
+                "unable to remove suite push recovery state",
+                error);
+        }
+    }
+    if (policy.remove_temporary) {
+        auto removed = remove_tree(
+            std::filesystem::path(root_path_) / "tmp" /
+            std::to_string(id.value));
+        if (!removed) return removed;
+    }
     return {};
 }
 

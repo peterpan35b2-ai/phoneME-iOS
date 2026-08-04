@@ -98,6 +98,7 @@ int main(int argc, char** argv) {
     invoke_int(machine, "modeAndClosedExceptions", 1);
     invoke_int(machine, "surfaceSemantics", 1);
     invoke_int(machine, "rootEnumeration", 1);
+    invoke_int(machine, "rootListenerRegistry", 1);
     invoke_int(machine, "hiddenListingPolicy", 1);
 
     phoneme::vm::Machine denied_machine(classes);

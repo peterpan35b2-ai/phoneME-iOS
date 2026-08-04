@@ -22,15 +22,32 @@ struct PhoneMEApp: App {
 #endif
     @Environment(\.scenePhase) private var scenePhase
 
-    @StateObject private var library = GameLibrary()
-    @StateObject private var profiles = GameProfileStore()
-    @StateObject private var profileTemplates = ProfileTemplateStore()
-    @StateObject private var session = EmulatorSession()
-    @StateObject private var backgroundExecution = BackgroundExecutionController()
+    @StateObject private var storage: PhoneMEStorageController
+    @StateObject private var library: GameLibrary
+    @StateObject private var profiles: GameProfileStore
+    @StateObject private var profileTemplates: ProfileTemplateStore
+    @StateObject private var session: EmulatorSession
+    @StateObject private var backgroundExecution: BackgroundExecutionController
+
+    init() {
+        let storage = PhoneMEStorageController()
+        PhoneMERuntimeResources.configure(storageRootURL: storage.rootURL)
+        _storage = StateObject(wrappedValue: storage)
+        _library = StateObject(wrappedValue: GameLibrary(storage: storage))
+        _profiles = StateObject(wrappedValue: GameProfileStore(storage: storage))
+        _profileTemplates = StateObject(
+            wrappedValue: ProfileTemplateStore(storage: storage)
+        )
+        _session = StateObject(wrappedValue: EmulatorSession())
+        _backgroundExecution = StateObject(
+            wrappedValue: BackgroundExecutionController()
+        )
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(storage)
                 .environmentObject(library)
                 .environmentObject(profiles)
                 .environmentObject(profileTemplates)
@@ -56,7 +73,12 @@ struct PhoneMEApp: App {
 #if os(macOS)
         Settings {
             SettingsView()
+                .environmentObject(storage)
+                .environmentObject(library)
+                .environmentObject(profiles)
                 .environmentObject(profileTemplates)
+                .environmentObject(session)
+                .environmentObject(backgroundExecution)
                 .frame(width: 420)
         }
 #endif
@@ -70,6 +92,9 @@ struct PhoneMEApp: App {
         }
 
         let sourceURL = URL(fileURLWithPath: path)
+        let environment = ProcessInfo.processInfo.environment
+        let reopenCount = Int(environment["PHONEME_DEBUG_REOPEN_COUNT"] ?? "")
+            ?? (environment["PHONEME_DEBUG_REOPEN"] == "1" ? 1 : 0)
         Task { @MainActor in
             let reportURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("phoneme-debug-report.txt")
@@ -82,12 +107,31 @@ struct PhoneMEApp: App {
                     artworkURL: library.iconURL(for: game),
                     profile: .default
                 )
+
+                for _ in 0..<max(reopenCount, 0) {
+                    for _ in 0..<400 where session.state != .running {
+                        if case .failed = session.state { break }
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                    }
+                    guard session.state == .running else { break }
+
+                    session.hideCurrent()
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    session.launch(
+                        game: game,
+                        jarURL: jarURL,
+                        artworkURL: library.iconURL(for: game),
+                        profile: .default
+                    )
+                }
+
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 let appState = session.runningApplications[game.id]
                     .map { String(describing: $0.state) } ?? "missing"
                 let report = [
                     "source=\(sourceURL.lastPathComponent)",
                     "mainClass=\(game.mainClass)",
+                    "reopenCount=\(reopenCount)",
                     "state=\(String(describing: session.state))",
                     "application=\(appState)",
                     "frame=\(session.frame != nil)",

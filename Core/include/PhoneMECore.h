@@ -10,7 +10,7 @@ extern "C" {
 typedef void* PhoneMERuntimeRef;
 
 #define PHONEME_C_API_VERSION_MAJOR 1u
-#define PHONEME_C_API_VERSION_MINOR 0u
+#define PHONEME_C_API_VERSION_MINOR 1u
 #define PHONEME_C_API_VERSION_PATCH 0u
 #define PHONEME_C_API_VERSION \
     ((PHONEME_C_API_VERSION_MAJOR << 16u) | \
@@ -177,6 +177,13 @@ int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
                                  int32_t fire,
                                  int32_t soft1,
                                  int32_t soft2);
+/* Selects the translation service for subsequently created MIDlets. Existing
+ * MIDlets keep the setting they had at launch. Language pointers may be NULL
+ * to use auto detection and Vietnamese output. */
+int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
+                                      int32_t enabled,
+                                      const char* source_language,
+                                      const char* target_language);
 /* Configure before phoneme_start_system. Passing NULL clears the callback. */
 int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,
@@ -190,6 +197,11 @@ int32_t phoneme_set_suite_trust(PhoneMERuntimeRef runtime,
 int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
                             const char* jar_path,
                             int32_t* suite_id_out);
+/* Removes the installed suite. When remove_data is nonzero, RMS, FileConnection,
+ * permissions, PushRegistry and temporary suite state are removed as well. */
+int32_t phoneme_uninstall_suite(PhoneMERuntimeRef runtime,
+                                int32_t suite_id,
+                                int32_t remove_data);
 int32_t phoneme_last_install_stage(void);
 int32_t phoneme_last_suite_store_stage(void);
 int32_t phoneme_start_system(PhoneMERuntimeRef runtime);
@@ -265,6 +277,10 @@ void phoneme_send_pointer(PhoneMERuntimeRef runtime,
                           int32_t x,
                           int32_t y,
                           int32_t action);
+/* Pump foreground VM events without copying a Canvas frame. Native LCDUI
+ * hosts use this once per poll tick so timers and serial callbacks continue
+ * while Form/List/Alert screens are visible. */
+void phoneme_pump_events(PhoneMERuntimeRef runtime);
 /* Query with destination == NULL to pump the foreground Canvas and obtain
  * dimensions/generation without copying pixels. Call again with storage to
  * copy that latest complete framebuffer without a second VM pump. */

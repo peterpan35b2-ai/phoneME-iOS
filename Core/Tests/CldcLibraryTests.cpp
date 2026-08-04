@@ -126,6 +126,10 @@ int main(int argc, char** argv) {
     phoneme::vm::Machine machine(classes);
     test_legacy_chain_linker(machine);
     require_java_zero(machine, "corefixture/CldcLibraryOps", "runAll");
+    machine.set_system_property(u"microedition.profiles", u"MIDP-2.1");
+    machine.set_system_property(u"microedition.configuration", u"CLDC-1.1.1");
+    require_java_zero(machine, "corefixture/CldcLibraryOps",
+                      "versionProperties");
     require_java_zero(machine, "corefixture/TimerOps", "run");
 
     require_java_zero(machine, "corefixture/WeakReferenceOps", "explicitClear");

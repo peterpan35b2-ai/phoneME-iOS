@@ -4,7 +4,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "phoneme/filesystem/ResourceLoader.hpp"
+#include "phoneme/filesystem/FileSystem.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/Descriptor.hpp"
 #include "phoneme/vm/Verifier.hpp"
@@ -55,10 +55,18 @@ namespace phoneme::vm
     }
 
     std::scoped_lock lock(mutex_);
-    if (std::find(archive_paths_.begin(), archive_paths_.end(), archive_path) ==
-        archive_paths_.end())
+    const auto existing = std::find_if(
+        archives_.begin(), archives_.end(),
+        [&archive_path](const ClasspathArchive &candidate)
+        {
+          return candidate.path == archive_path;
+        });
+    if (existing == archives_.end())
     {
-      archive_paths_.push_back(std::move(archive_path));
+      archives_.push_back(ClasspathArchive{
+          .path = std::move(archive_path),
+          .archive = std::move(*archive),
+      });
       cache_.clear();
       method_cache_.clear();
       declared_method_cache_.clear();
@@ -385,14 +393,32 @@ namespace phoneme::vm
   Result<std::vector<u8>> ClassRepository::read_resource(
       std::string_view resource_name) const
   {
+    auto normalized = filesystem::normalize_resource_path(resource_name);
+    if (!normalized)
+    {
+      return std::unexpected(normalized.error());
+    }
+
     std::scoped_lock lock(mutex_);
-    return filesystem::ResourceLoader::read(archive_paths_, resource_name);
+    for (const ClasspathArchive &classpath_archive : archives_)
+    {
+      const archive::ZipEntry *entry =
+          classpath_archive.archive.find(*normalized);
+      if (entry == nullptr || entry->name.ends_with('/'))
+      {
+        continue;
+      }
+      return classpath_archive.archive.read(*entry);
+    }
+    return fail(ErrorCode::class_not_found,
+                "resource is not present on the application classpath: " +
+                    *normalized);
   }
 
   void ClassRepository::clear() noexcept
   {
     std::scoped_lock lock(mutex_);
-    archive_paths_.clear();
+    archives_.clear();
     cache_.clear();
     method_cache_.clear();
     declared_method_cache_.clear();
@@ -427,19 +453,15 @@ namespace phoneme::vm
     }
 
     const std::string entry_name = std::string(internal_name) + ".class";
-    for (const std::string &archive_path : archive_paths_)
+    for (const ClasspathArchive &classpath_archive : archives_)
     {
-      auto archive = archive::ZipArchive::open(archive_path);
-      if (!archive)
-      {
-        return std::unexpected(archive.error());
-      }
-      const archive::ZipEntry *entry = archive->find(entry_name);
+      const archive::ZipEntry *entry =
+          classpath_archive.archive.find(entry_name);
       if (entry == nullptr)
       {
         continue;
       }
-      auto bytes = archive->read(*entry);
+      auto bytes = classpath_archive.archive.read(*entry);
       if (!bytes)
       {
         return std::unexpected(bytes.error());

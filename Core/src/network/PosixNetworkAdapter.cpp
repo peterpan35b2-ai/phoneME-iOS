@@ -42,7 +42,7 @@ extern "C" {
 using PhoneMEHTTPSCompletion = void (*)(int32_t, void*);
 __attribute__((weak)) int32_t phoneme_ios_https_execute_async(
     const char*, const char*, const char*, const uint8_t*, int32_t, int32_t,
-    int32_t, PhoneMEHTTPSCompletion, void*) {
+    int32_t, int64_t, PhoneMEHTTPSCompletion, void*) {
     return -1;
 }
 __attribute__((weak)) int32_t phoneme_ios_https_get_status_code(int32_t) {
@@ -61,6 +61,7 @@ __attribute__((weak)) int64_t phoneme_ios_https_get_long(int32_t, int32_t) {
 }
 __attribute__((weak)) void phoneme_ios_https_cancel(int32_t) {}
 __attribute__((weak)) void phoneme_ios_https_close(int32_t) {}
+__attribute__((weak)) void phoneme_ios_https_clear_session(int64_t) {}
 }
 #endif
 
@@ -77,8 +78,26 @@ constexpr i32 kCancellationPollMilliseconds = 50;
 // so listener threads cannot starve writes, reconnects, DNS, or other MIDlets.
 constexpr usize kInitialNetworkWorkerCount = 8U;
 constexpr usize kMaximumNetworkWorkerCount = 32U;
+constexpr usize kMaximumReservedNetworkWorkers = 4U;
+
+enum class NetworkTaskClass : u8 {
+    blocking_input,
+    latency_sensitive,
+};
 
 std::atomic<i32> g_address_resolution_delay_for_tests {0};
+#if defined(__APPLE__)
+std::atomic<u64> g_next_apple_http_session_id {1U};
+
+[[nodiscard]] i64 allocate_apple_http_session_id() noexcept {
+    const u64 value = g_next_apple_http_session_id.fetch_add(
+        1U, std::memory_order_relaxed);
+    constexpr u64 kMaximumSessionId =
+        static_cast<u64>(std::numeric_limits<i64>::max());
+    if (value == 0U || value > kMaximumSessionId) return 1;
+    return static_cast<i64>(value);
+}
+#endif
 
 using CancellationCheck = std::function<bool()>;
 
@@ -1404,21 +1423,26 @@ extern "C" void phoneme_apple_http_completed(i32 handle, void* opaque) {
         return;
     }
 
-    if (auto registry = context->registry.lock()) {
-        std::scoped_lock lock(registry->mutex);
-        const auto found = registry->operations.find(context->operation.value);
-        if (found != registry->operations.end() &&
-            found->second == context->state) {
-            registry->operations.erase(found);
-        }
-    }
-
     if (context->state->cancelled.load(std::memory_order_acquire)) {
         phoneme_ios_https_close(handle);
         return;
     }
     auto response = collect_apple_http_response(handle, context->request);
-    if (context->completion) context->completion(std::move(response));
+
+    bool deliver = false;
+    if (auto registry = context->registry.lock()) {
+        std::scoped_lock lock(registry->mutex);
+        const auto found = registry->operations.find(context->operation.value);
+        if (found != registry->operations.end() &&
+            found->second == context->state &&
+            !context->state->cancelled.load(std::memory_order_acquire)) {
+            registry->operations.erase(found);
+            deliver = true;
+        }
+    }
+    if (deliver && context->completion) {
+        context->completion(std::move(response));
+    }
 }
 #endif
 
@@ -1556,6 +1580,7 @@ public:
             apple_http_operations_->operations.clear();
         }
         for (i32 handle : apple_handles) phoneme_ios_https_cancel(handle);
+        phoneme_ios_https_clear_session(apple_http_session_id_);
 #endif
         shutdown_workers();
         std::unordered_map<u64, std::shared_ptr<HandleState>> handles;
@@ -1577,6 +1602,7 @@ public:
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
         return start_async_with_cleanup<NativeConnection>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, url, timeout_ms](const CancellationCheck& cancelled)
                 -> Result<NativeConnection> {
@@ -1600,6 +1626,7 @@ public:
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
         return start_async_with_cleanup<NativeConnection>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, url, timeout_ms](const CancellationCheck& cancelled)
                 -> Result<NativeConnection> {
@@ -1626,6 +1653,7 @@ public:
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
         return start_async_with_cleanup<NativeConnection>(
+            NetworkTaskClass::blocking_input,
             std::move(completion),
             [this, server, timeout_ms](const CancellationCheck& cancelled)
                 -> Result<NativeConnection> {
@@ -1678,6 +1706,7 @@ public:
         i32 timeout_ms,
         Completion<NativeConnection> completion) override {
         return start_async_with_cleanup<NativeConnection>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, url, timeout_ms](const CancellationCheck& cancelled)
                 -> Result<NativeConnection> {
@@ -1706,6 +1735,7 @@ public:
         i32 timeout_ms,
         Completion<std::vector<u8>> completion) override {
         return start_async<std::vector<u8>>(
+            NetworkTaskClass::blocking_input,
             std::move(completion),
             [this, handle, maximum_bytes, timeout_ms](
                 const CancellationCheck& cancelled)
@@ -1745,6 +1775,7 @@ public:
         i32 timeout_ms,
         Completion<usize> completion) override {
         return start_async<usize>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, handle, bytes = std::move(bytes), timeout_ms](
                 const CancellationCheck& cancelled) -> Result<usize> {
@@ -1765,6 +1796,7 @@ public:
         NativeHandle handle,
         Completion<usize> completion) override {
         return start_async<usize>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, handle](const CancellationCheck& cancelled)
                 -> Result<usize> {
@@ -1787,6 +1819,7 @@ public:
         i32 timeout_ms,
         Completion<usize> completion) override {
         return start_async<usize>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, handle, packet = std::move(packet), timeout_ms](
                 const CancellationCheck& cancelled) mutable -> Result<usize> {
@@ -1850,6 +1883,7 @@ public:
         i32 timeout_ms,
         Completion<DatagramPacket> completion) override {
         return start_async<DatagramPacket>(
+            NetworkTaskClass::blocking_input,
             std::move(completion),
             [this, handle, maximum_bytes, timeout_ms](
                 const CancellationCheck& cancelled) -> Result<DatagramPacket> {
@@ -1922,7 +1956,8 @@ public:
                 request.body.empty() ? nullptr : request.body.data(),
                 static_cast<i32>(request.body.size()), request.timeout_ms,
                 static_cast<i32>(request.redirect_limit),
-                &phoneme_apple_http_completed, context);
+                apple_http_session_id_, &phoneme_apple_http_completed,
+                context);
             if (handle <= 0) {
                 {
                     std::scoped_lock lock(apple_http_operations_->mutex);
@@ -1940,6 +1975,7 @@ public:
         }
 #endif
         return start_async<HttpResponse>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [request = std::move(request)](
                 const CancellationCheck& cancelled) mutable
@@ -1959,6 +1995,7 @@ public:
                         "socket buffer size must be positive");
         }
         return start_async<bool>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, handle, option, value](
                 const CancellationCheck& cancelled) -> Result<bool> {
@@ -2010,6 +2047,7 @@ public:
         SocketOption option,
         Completion<i32> completion) override {
         return start_async<i32>(
+            NetworkTaskClass::latency_sensitive,
             std::move(completion),
             [this, handle, option](const CancellationCheck& cancelled)
                 -> Result<i32> {
@@ -2131,6 +2169,7 @@ private:
 
     template <typename T, typename Work, typename Cleanup>
     [[nodiscard]] Result<OperationId> start_async_with_cleanup(
+        NetworkTaskClass task_class,
         Completion<T> completion,
         Work work,
         Cleanup cleanup) {
@@ -2174,19 +2213,22 @@ private:
                             "network adapter is shutting down");
             }
             operations_.insert_or_assign(operation.value, state);
-            operation_queue_.push_back(std::move(task));
+            auto& queue = task_class == NetworkTaskClass::blocking_input
+                ? blocking_input_queue_ : latency_sensitive_queue_;
+            queue.push_back(std::move(task));
             ensure_worker_capacity_unlocked();
         }
-        operation_condition_.notify_one();
+        operation_condition_.notify_all();
         return operation;
     }
 
     template <typename T, typename Work>
     [[nodiscard]] Result<OperationId> start_async(
+        NetworkTaskClass task_class,
         Completion<T> completion,
         Work work) {
         return start_async_with_cleanup<T>(
-            std::move(completion), std::move(work),
+            task_class, std::move(completion), std::move(work),
             [](Result<T>&) {});
     }
 
@@ -2197,12 +2239,47 @@ private:
             });
     }
 
+    [[nodiscard]] usize reserved_worker_count_unlocked() const noexcept {
+        if (workers_.size() <= 1U) return 0U;
+        return std::min(
+            kMaximumReservedNetworkWorkers,
+            std::max<usize>(1U, workers_.size() / 4U));
+    }
+
+    [[nodiscard]] bool can_run_blocking_input_unlocked() const noexcept {
+        if (blocking_input_queue_.empty() || workers_.empty()) return false;
+        const usize reserved = reserved_worker_count_unlocked();
+        const usize capacity = workers_.size() > reserved
+            ? workers_.size() - reserved : 1U;
+        return active_blocking_workers_ < capacity;
+    }
+
+    [[nodiscard]] bool has_runnable_task_unlocked() const noexcept {
+        return !latency_sensitive_queue_.empty() ||
+               can_run_blocking_input_unlocked();
+    }
+
     void ensure_worker_capacity_unlocked() {
         if (stopping_ || workers_.size() >= kMaximumNetworkWorkerCount) return;
         const usize idle_workers = workers_.size() > active_workers_
             ? workers_.size() - active_workers_ : 0U;
-        if (operation_queue_.size() <= idle_workers) return;
-        const usize missing_workers = operation_queue_.size() - idle_workers;
+        const usize latency_runnable = std::min(
+            latency_sensitive_queue_.size(), idle_workers);
+        const usize idle_after_latency = idle_workers - latency_runnable;
+        const usize reserved = reserved_worker_count_unlocked();
+        const usize blocking_capacity = workers_.size() > reserved
+            ? workers_.size() - reserved : 1U;
+        const usize blocking_slots =
+            blocking_capacity > active_blocking_workers_
+                ? blocking_capacity - active_blocking_workers_ : 0U;
+        const usize blocking_runnable = std::min(
+            blocking_input_queue_.size(),
+            std::min(idle_after_latency, blocking_slots));
+        const usize queued_tasks = latency_sensitive_queue_.size() +
+                                   blocking_input_queue_.size();
+        const usize runnable_tasks = latency_runnable + blocking_runnable;
+        if (queued_tasks <= runnable_tasks) return;
+        const usize missing_workers = queued_tasks - runnable_tasks;
         const usize capacity = kMaximumNetworkWorkerCount - workers_.size();
         const usize workers_to_add = std::min(missing_workers, capacity);
         for (usize index = 0; index < workers_to_add; ++index) {
@@ -2213,25 +2290,41 @@ private:
     void worker_loop(std::stop_token stop_token) noexcept {
         while (true) {
             AsyncTask task;
+            bool blocking_input = false;
             {
                 std::unique_lock lock(operation_mutex_);
                 operation_condition_.wait(lock, [this, &stop_token] {
                     return stopping_ || stop_token.stop_requested() ||
-                           !operation_queue_.empty();
+                           has_runnable_task_unlocked();
                 });
+                const bool queues_empty = latency_sensitive_queue_.empty() &&
+                                          blocking_input_queue_.empty();
                 if ((stopping_ || stop_token.stop_requested()) &&
-                    operation_queue_.empty()) {
+                    queues_empty) {
                     return;
                 }
-                task = std::move(operation_queue_.front());
-                operation_queue_.pop_front();
+                if (!latency_sensitive_queue_.empty()) {
+                    task = std::move(latency_sensitive_queue_.front());
+                    latency_sensitive_queue_.pop_front();
+                } else if (can_run_blocking_input_unlocked()) {
+                    task = std::move(blocking_input_queue_.front());
+                    blocking_input_queue_.pop_front();
+                    blocking_input = true;
+                    ++active_blocking_workers_;
+                } else {
+                    continue;
+                }
                 ++active_workers_;
             }
             if (task) task();
             {
                 std::scoped_lock lock(operation_mutex_);
                 if (active_workers_ != 0U) --active_workers_;
+                if (blocking_input && active_blocking_workers_ != 0U) {
+                    --active_blocking_workers_;
+                }
             }
+            operation_condition_.notify_all();
         }
     }
 
@@ -2244,7 +2337,8 @@ private:
                 (void)unused;
                 state->cancelled.store(true, std::memory_order_release);
             }
-            operation_queue_.clear();
+            latency_sensitive_queue_.clear();
+            blocking_input_queue_.clear();
         }
         for (auto& worker : workers_) worker.request_stop();
         operation_condition_.notify_all();
@@ -2316,15 +2410,18 @@ private:
     }
 
 #if defined(__APPLE__)
+    const i64 apple_http_session_id_ {allocate_apple_http_session_id()};
     std::shared_ptr<AppleHttpOperationRegistry> apple_http_operations_ {
         std::make_shared<AppleHttpOperationRegistry>()};
 #endif
     mutable std::mutex operation_mutex_;
     std::condition_variable operation_condition_;
-    std::deque<AsyncTask> operation_queue_;
+    std::deque<AsyncTask> latency_sensitive_queue_;
+    std::deque<AsyncTask> blocking_input_queue_;
     std::unordered_map<u64, std::shared_ptr<OperationState>> operations_;
     std::vector<std::jthread> workers_;
     usize active_workers_ {0U};
+    usize active_blocking_workers_ {0U};
     bool stopping_ {false};
 
     mutable std::mutex mutex_;

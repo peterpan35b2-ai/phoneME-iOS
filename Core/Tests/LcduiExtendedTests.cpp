@@ -1,7 +1,9 @@
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "LcduiNatives.hpp"
@@ -164,6 +166,18 @@ i32 item_id(const std::vector<UiBridgeEvent>& events,
     return 0;
 }
 
+i32 latest_item_index(const std::vector<UiBridgeEvent>& events,
+                      i32 component_id) {
+    for (auto iterator = events.rbegin(); iterator != events.rend(); ++iterator) {
+        if ((iterator->kind == 7 || iterator->kind == 8 ||
+             iterator->kind == 9) &&
+            iterator->component_id == component_id && iterator->index >= 0) {
+            return iterator->index;
+        }
+    }
+    return -1;
+}
+
 i32 command_id(const std::vector<UiBridgeEvent>& events,
                const char* label) {
     for (auto iterator = events.rbegin(); iterator != events.rend(); ++iterator) {
@@ -281,6 +295,7 @@ int main(int argc, char** argv) {
     require(invoke_int(machine, "setup") == 0, "setup LCDUI fixture");
     const i32 text = item_id(events, 15, "Text");
     const i32 numeric = item_id(events, 15, "Numeric");
+    const i32 styled = item_id(events, 12, "Styled");
     const i32 gauge = item_id(events, 7, "Gauge");
     const i32 choice = item_id(events, 1, "Choice");
     const i32 date_time = item_id(events, 5, "DateTime");
@@ -291,10 +306,17 @@ int main(int argc, char** argv) {
     const i32 ephemeral = item_id(events, 12, "Ephemeral");
     const i32 stale_command = command_id(events, "Stale");
     const i32 dismiss = dismiss_command_id(events);
-    require(text != 0 && numeric != 0 && gauge != 0 && choice != 0 &&
-                date_time != 0 && date_only != 0 && time_only != 0 &&
-                image != 0 && custom != 0 && ephemeral != 0,
+    require(text != 0 && numeric != 0 && styled != 0 && gauge != 0 &&
+                choice != 0 && date_time != 0 && date_only != 0 &&
+                time_only != 0 && image != 0 && custom != 0 &&
+                ephemeral != 0,
             "discover all extended item component IDs");
+    require(latest_item_index(events, text) == 0 &&
+                latest_item_index(events, numeric) == 1 &&
+                latest_item_index(events, styled) == 2 &&
+                latest_item_index(events, gauge) == 3,
+            "Form item events preserve Java insertion order");
+
     require(has_date_metadata(events, date_time, 3, "GMT+07:00"),
             "DATE_TIME bridge preserves explicit timezone");
     require(has_date_metadata(events, date_only, 2),
@@ -338,6 +360,19 @@ int main(int argc, char** argv) {
     require(dismiss != 0, "discover Alert.DISMISS_COMMAND ID");
     require(has_alert_metadata(events, -2, 17, 2, 3),
             "FOREVER Alert publishes timeout and image metadata");
+
+    events.clear();
+    invoke_void(machine, "insertOrderProbe");
+    const i32 order_probe = item_id(events, 12, "OrderProbe");
+    require(order_probe != 0 && latest_item_index(events, order_probe) == 1,
+            "Form.insert publishes the inserted item index");
+    require(latest_item_index(events, numeric) == 2,
+            "Form.insert reindexes following items");
+
+    events.clear();
+    invoke_void(machine, "deleteOrderProbe");
+    require(latest_item_index(events, numeric) == 1,
+            "Form.delete restores following item indices");
 
     perform(machine, 100, dismiss);
     invoke_void(machine, "removeStaleCommand");
@@ -402,7 +437,48 @@ int main(int argc, char** argv) {
             "finite Alert publishes timeout metadata for host auto-dismiss");
     require(dismiss_command_id(events) == dismiss,
             "Alert.DISMISS_COMMAND remains stable across alerts");
-    perform(machine, 100, dismiss);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    auto timed = phoneme::vm::pump_lcdui_alert_timeouts(machine);
+    require(timed.has_value(), "finite Alert timeout is pumped successfully");
+    bool timed_hidden = false;
+    bool form_restored = false;
+    for (const auto& event : events) {
+        timed_hidden = timed_hidden ||
+            (event.kind == 5 && event.text == "Timed");
+        form_restored = form_restored ||
+            (event.kind == 4 && event.text == "Extended");
+    }
+    require(timed_hidden && form_restored,
+            "finite Alert timeout invokes its sole command and restores Form");
+
+    events.clear();
+    invoke_void(machine, "showLoadingThenData");
+    bool loading_shown = false;
+    bool indicator_shown = false;
+    for (const auto& event : events) {
+        loading_shown = loading_shown ||
+            (event.kind == 4 && event.text == "Loading");
+        indicator_shown = indicator_shown ||
+            (event.kind == 9 && event.component_type == 6);
+    }
+    require(loading_shown && indicator_shown,
+            "FOREVER loading Alert shows its Gauge indicator");
+    auto data_callback = machine.pump_serial_callbacks();
+    require(data_callback.has_value(),
+            "loading data callback runs through Display.callSerially");
+    bool loading_hidden = false;
+    bool indicator_hidden = false;
+    bool data_form_restored = false;
+    for (const auto& event : events) {
+        loading_hidden = loading_hidden ||
+            (event.kind == 5 && event.text == "Loading");
+        indicator_hidden = indicator_hidden ||
+            (event.kind == 10 && event.component_type == 6);
+        data_form_restored = data_form_restored ||
+            (event.kind == 4 && event.text == "Extended");
+    }
+    require(loading_hidden && indicator_hidden && data_form_restored,
+            "data-ready setCurrent hides loading Alert and indicator");
 
     const int verification = invoke_int(machine, "verify");
     if (verification != 0) {

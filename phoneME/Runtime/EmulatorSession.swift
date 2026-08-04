@@ -225,7 +225,6 @@ final class EmulatorSession: ObservableObject {
     private var resourceMonitorTimer: DispatchSourceTimer?
     private var resourceMeasurementInFlight = false
     private var resourceMonitorTick: UInt = 0
-    private var resourceMemorySampleCursor = 0
     private var isApplicationInBackground = false
 
     init(engine: EmbeddedPhoneMEEngine? = nil) {
@@ -419,6 +418,44 @@ final class EmulatorSession: ObservableObject {
         engine.prepareApplications(applications)
     }
 
+    func exportRMS(
+        for game: Game,
+        jarURL: URL,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        engine.exportRMS(
+            gameID: game.id,
+            jarURL: jarURL,
+            completion: completion
+        )
+    }
+
+    func importRMS(
+        from sourceURL: URL,
+        for game: Game,
+        jarURL: URL,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        engine.importRMS(
+            from: sourceURL,
+            gameID: game.id,
+            jarURL: jarURL,
+            completion: completion
+        )
+    }
+
+    func deleteStoredData(
+        for game: Game,
+        jarURL: URL,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        engine.deleteStoredData(
+            gameID: game.id,
+            jarURL: jarURL,
+            completion: completion
+        )
+    }
+
     func launch(
         game: Game,
         jarURL: URL,
@@ -464,6 +501,9 @@ final class EmulatorSession: ObservableObject {
             frameRateLimit: profile.frameRateLimit,
             immediateProcessing: profile.immediateProcessing,
             parallelScreenRedrawing: profile.parallelScreenRedrawing,
+            translateChineseToVietnamese: UserDefaults.standard.bool(
+                forKey: TranslationPreferences.enabledKey
+            ),
             keyUp: profile.keyCode(for: .up),
             keyDown: profile.keyCode(for: .down),
             keyLeft: profile.keyCode(for: .left),
@@ -522,6 +562,13 @@ final class EmulatorSession: ObservableObject {
         terminateCurrent()
     }
 
+    func resetRuntimeForStorageChange() {
+        guard runningApplications.isEmpty else { return }
+        engine.resetForStorageChange()
+        resetSessionResources(clearCurrentGame: true)
+        state = .idle
+    }
+
     func isRunning(_ gameID: UUID) -> Bool {
         runningApplications[gameID] != nil
     }
@@ -575,7 +622,11 @@ final class EmulatorSession: ObservableObject {
 
     private func refreshResourceMonitoringState() {
         if hasHiddenApplications && !isApplicationInBackground {
-            startResourceMonitoring()
+            if resourceMonitorTimer == nil {
+                startResourceMonitoring()
+            } else {
+                measureHiddenApplicationMemory()
+            }
         } else {
             stopResourceMonitoring()
         }
@@ -585,12 +636,10 @@ final class EmulatorSession: ObservableObject {
         guard resourceMonitorTimer == nil else { return }
 
         resourceSampler.reset()
-        // Process CPU/RSS is cheap to sample. Per-isolate heap usage enters the
-        // AMS isolate and walks VM accounting state, so sample one hidden app
-        // at a time roughly every 18 seconds instead of bursting requests for
-        // every running MIDlet.
-        resourceMonitorTick = 11
-        resourceMemorySampleCursor = 0
+        // Process CPU/RSS remains sampled frequently. Per-application heap
+        // totals are O(1) in the core, so collect every hidden MIDlet together
+        // to avoid rows waiting through a round-robin cycle.
+        resourceMonitorTick = 0
         let sampler = resourceSampler
         let timer = DispatchSource.makeTimerSource(queue: resourceMonitorQueue)
         timer.schedule(
@@ -612,26 +661,23 @@ final class EmulatorSession: ObservableObject {
                     self.backgroundRuntimeUsage = sample
                 }
                 self.resourceMonitorTick &+= 1
-                if self.resourceMonitorTick.isMultiple(of: 12) {
-                    self.measureNextHiddenApplicationMemory()
+                if self.resourceMonitorTick.isMultiple(of: 3) {
+                    self.measureHiddenApplicationMemory()
                 }
             }
         }
         resourceMonitorTimer = timer
         timer.resume()
+        measureHiddenApplicationMemory()
     }
 
-    private func measureNextHiddenApplicationMemory() {
+    private func measureHiddenApplicationMemory() {
         guard !resourceMeasurementInFlight else { return }
-        let gameIDs = hiddenApplicationIDs.sorted {
-            $0.uuidString < $1.uuidString
-        }
+        let gameIDs = hiddenApplicationIDs
         guard !gameIDs.isEmpty else { return }
 
-        let gameID = gameIDs[resourceMemorySampleCursor % gameIDs.count]
-        resourceMemorySampleCursor = (resourceMemorySampleCursor + 1) % gameIDs.count
         resourceMeasurementInFlight = true
-        engine.measureApplicationMemoryUsage(gameIDs: [gameID]) { [weak self] usage in
+        engine.measureApplicationMemoryUsage(gameIDs: gameIDs) { [weak self] usage in
             guard let self else { return }
             self.resourceMeasurementInFlight = false
             guard !self.isApplicationInBackground else { return }
@@ -640,8 +686,8 @@ final class EmulatorSession: ObservableObject {
             var nextUsage = self.backgroundApplicationMemoryUsage.filter {
                 currentHiddenIDs.contains($0.key)
             }
-            if currentHiddenIDs.contains(gameID), let value = usage[gameID] {
-                nextUsage[gameID] = value
+            for (gameID, bytes) in usage where currentHiddenIDs.contains(gameID) {
+                nextUsage[gameID] = bytes
             }
             if self.backgroundApplicationMemoryUsage != nextUsage {
                 self.backgroundApplicationMemoryUsage = nextUsage
@@ -657,7 +703,6 @@ final class EmulatorSession: ObservableObject {
         resourceMonitorTimer?.cancel()
         resourceMonitorTimer = nil
         resourceMonitorTick = 0
-        resourceMemorySampleCursor = 0
         resourceMeasurementInFlight = false
         resourceSampler.reset()
         if backgroundRuntimeUsage != nil {

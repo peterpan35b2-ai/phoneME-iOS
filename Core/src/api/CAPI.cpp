@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -64,7 +65,21 @@ std::atomic<i32> g_last_suite_store_stage {0};
 }
 
 [[nodiscard]] i32 status_code(const phoneme::Status& status) noexcept {
-    return status ? PHONEME_OK : map_error(status.error());
+    if (status) return PHONEME_OK;
+
+    const phoneme::Error& error = status.error();
+    const i32 code = map_error(error);
+    std::fprintf(
+        stderr,
+        "phoneME C API error %d (core=%d): %s%s%s\n",
+        code,
+        static_cast<int>(error.code),
+        error.java_exception_class.empty()
+            ? ""
+            : error.java_exception_class.c_str(),
+        error.java_exception_class.empty() ? "" : ": ",
+        error.message.c_str());
+    return code;
 }
 
 void copy_utf8(char* destination,
@@ -212,6 +227,22 @@ int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
         std::array<i32, 7> {up, down, left, right, fire, soft1, soft2}));
 }
 
+int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
+                                      int32_t enabled,
+                                      const char* source_language,
+                                      const char* target_language) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(instance->configure_translation(
+        enabled != 0,
+        source_language == nullptr ? std::string("auto")
+                                   : std::string(source_language),
+        target_language == nullptr ? std::string("vi")
+                                   : std::string(target_language)));
+}
+
 int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,
     PhoneMEPermissionPromptCallback callback,
@@ -277,6 +308,18 @@ int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
     g_last_suite_store_stage.store(1, std::memory_order_relaxed);
     g_last_install_stage.store(2, std::memory_order_relaxed);
     return PHONEME_OK;
+}
+
+int32_t phoneme_uninstall_suite(PhoneMERuntimeRef runtime,
+                                int32_t suite_id,
+                                int32_t remove_data) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || suite_id <= 0) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(instance->uninstall_suite(
+        phoneme::SuiteId {suite_id},
+        remove_data != 0));
 }
 
 int32_t phoneme_last_install_stage(void) {
@@ -536,6 +579,12 @@ void phoneme_send_pointer(PhoneMERuntimeRef runtime,
                           int32_t action) {
     if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
         instance->send_pointer(x, y, action);
+    }
+}
+
+void phoneme_pump_events(PhoneMERuntimeRef runtime) {
+    if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
+        instance->pump_events();
     }
 }
 

@@ -169,13 +169,18 @@ void test_heap_generation_and_collection() {
 
     const phoneme::vm::ObjectRef roots[] {*root};
     require(heap.collect(roots).has_value(), "collect with a live root");
-    require(heap.stats().live_objects == 2,
+    const auto live_stats = heap.stats();
+    require(live_stats.live_objects == 2,
             "GC preserves transitive references");
+    require(heap.estimated_bytes() == live_stats.estimated_bytes,
+            "fast heap byte total matches detailed statistics");
 
     require(heap.collect(std::span<const phoneme::vm::ObjectRef> {}).has_value(),
             "collect without roots");
     require(heap.stats().live_objects == 0,
             "GC releases unreachable objects");
+    require(heap.estimated_bytes() == 0,
+            "fast heap byte total clears after collection");
     require(!heap.class_name(*child).has_value(),
             "stale object reference is rejected");
 
@@ -445,9 +450,43 @@ void test_type_state_verifier() {
         0x0021U,
         {},
         {modern_void_return});
-    require(!phoneme::vm::verify_method(modern_return_owner,
-                                        modern_void_return).has_value(),
-            "modern verifier rejects operand stack values at void return");
+    require(phoneme::vm::verify_method(modern_return_owner,
+                                       modern_void_return).has_value(),
+            "modern StackMapTable permits operands discarded by void return");
+
+    phoneme::classfile::Method modern_boolean_return {
+        .access_flags = 0x0009U,
+        .name = "modernBooleanReturn",
+        .descriptor = "()Z",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 2,
+            .max_locals = 0,
+            .bytecode = {0x03, 0x04, 0xAC},
+            .stack_map_frames = {
+                phoneme::classfile::StackMapFrame {
+                    .kind = phoneme::classfile::StackMapFrameKind::full,
+                    .bytecode_offset = 2,
+                    .stack = {
+                        phoneme::classfile::VerificationType {
+                            .kind = phoneme::classfile::VerificationTypeKind::integer,
+                        },
+                        phoneme::classfile::VerificationType {
+                            .kind = phoneme::classfile::VerificationTypeKind::integer,
+                        },
+                    },
+                },
+            },
+        },
+    };
+    const auto modern_boolean_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/ModernBooleanReturnVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {modern_boolean_return});
+    require(phoneme::vm::verify_method(modern_boolean_owner,
+                                       modern_boolean_return).has_value(),
+            "typed return consumes its value and discards lower operands");
 }
 
 void test_monitor_table() {
@@ -1457,10 +1496,24 @@ void test_machine_media(const std::string& fixture_jar) {
                                         "()I",
                                         {},
                                         20'000'000);
+    if (!result) {
+        std::cerr << "MMAPI fixture VM error: "
+                  << result.error().message << '\n';
+    } else if (result->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*result->throwable);
+        std::cerr << "MMAPI fixture throwable: "
+                  << (throwable ? *throwable : std::string("unknown"))
+                  << '\n';
+    }
     require(result.has_value() && result->completed_normally() &&
                 result->return_value.has_value(),
             "execute MMAPI lifecycle and control fixture");
     auto events = result->return_value->as_int();
+    if (!events || *events != 15) {
+        std::cerr << "MMAPI fixture result: "
+                  << (events ? std::to_string(*events) : std::string("invalid"))
+                  << '\n';
+    }
     require(events.has_value() && *events == 15,
             "MMAPI fixture receives start stop close and volume events");
 }
@@ -1476,10 +1529,24 @@ void test_machine_graphics(const std::string& fixture_jar) {
                                         "()I",
                                         {},
                                         40'000'000);
+    if (!result) {
+        std::cerr << "Graphics fixture VM error: "
+                  << result.error().message << '\n';
+    } else if (result->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*result->throwable);
+        std::cerr << "Graphics fixture throwable: "
+                  << (throwable ? *throwable : std::string("unknown"))
+                  << '\n';
+    }
     require(result.has_value() && result->completed_normally() &&
                 result->return_value.has_value(),
             "execute MIDP Image Graphics Font and PNG fixture");
     auto status = result->return_value->as_int();
+    if (!status || *status != 0) {
+        std::cerr << "Graphics fixture result: "
+                  << (status ? std::to_string(*status) : std::string("invalid"))
+                  << '\n';
+    }
     require(status.has_value() && *status == 0,
             "graphics fixture preserves pixels transforms alpha and metrics");
 }
@@ -2348,6 +2415,136 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
 
     require(runtime.destroy_midlet(app_id).has_value(),
             "destroy LCDUI fixture MIDlet");
+
+    constexpr phoneme::AppId timed_alert_app {23};
+    require(runtime.start_midlet(
+                *suite_id,
+                "corefixture.TimedAlertApp",
+                timed_alert_app,
+                phoneme::Dimensions {320, 240}).has_value(),
+            "start timed Alert fixture with a loading Gauge");
+
+    bool loading_alert_shown = false;
+    bool loading_gauge_shown = false;
+    phoneme::i32 loading_alert_id = 0;
+    phoneme::i32 loading_gauge_id = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 4 && event->component_type == 17 &&
+            event->text == "Loading" && event->detail == "Complete" &&
+            event->arguments[0] == 50) {
+            loading_alert_shown = true;
+            loading_alert_id = event->component_id;
+        }
+        if (event->kind == 9 && event->component_type == 6 &&
+            event->text == "Progress" && event->arguments[0] == 100 &&
+            event->arguments[1] == 100 && event->arguments[2] == 0) {
+            loading_gauge_shown = true;
+            loading_gauge_id = event->component_id;
+        }
+    }
+    require(loading_alert_shown && loading_gauge_shown &&
+                loading_alert_id != 0 && loading_gauge_id != 0,
+            "timed loading Alert and its Gauge are shown before expiry");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    runtime.pump_events();
+
+    bool loading_alert_hidden = false;
+    bool loading_gauge_hidden = false;
+    bool loaded_form_shown = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 5 &&
+            event->component_id == loading_alert_id &&
+            event->component_type == 17) {
+            loading_alert_hidden = true;
+        }
+        if (event->kind == 10 &&
+            event->component_id == loading_gauge_id &&
+            event->parent_id == loading_alert_id) {
+            loading_gauge_hidden = true;
+        }
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Loaded") {
+            loaded_form_shown = true;
+        }
+    }
+    require(loading_alert_hidden && loading_gauge_hidden &&
+                loaded_form_shown,
+            "native LCDUI pump expires loading Alert and restores next screen");
+    require(runtime.destroy_midlet(timed_alert_app).has_value(),
+            "destroy timed Alert fixture MIDlet");
+
+    constexpr phoneme::AppId list_image_app {24};
+    require(runtime.start_midlet(
+                *suite_id,
+                "corefixture.ListImageBackApp",
+                list_image_app,
+                phoneme::Dimensions {320, 240}).has_value(),
+            "start List fixture with a real per-item image");
+
+    bool icon_list_shown = false;
+    phoneme::i32 icon_choice_id = 0;
+    phoneme::i32 icon_image_key = 0;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Icons") {
+            icon_list_shown = true;
+        }
+        if (event->kind == 12 && event->text == "Image item" &&
+            event->arguments[3] < 0) {
+            icon_choice_id = event->component_id;
+            icon_image_key = event->arguments[3];
+        }
+    }
+    require(icon_list_shown && icon_choice_id != 0 && icon_image_key < 0,
+            "List initially publishes its real item image key");
+
+    const auto initial_icon = runtime.copy_lcdui_image_rgba(
+        icon_image_key, {});
+    require(initial_icon.dimensions.width == 2 &&
+                initial_icon.dimensions.height == 2 &&
+                initial_icon.byte_count == 16U,
+            "List item image key resolves to its source pixels");
+
+    runtime.ui_set_choice(icon_choice_id, 0, true);
+    bool opening_alert_shown = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 4 && event->component_type == 17 &&
+            event->text == "Opening") {
+            opening_alert_shown = true;
+        }
+    }
+    require(opening_alert_shown,
+            "selecting the image List item opens the intermediate Alert");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    runtime.pump_events();
+
+    bool icon_list_restored = false;
+    bool icon_choice_replayed = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 4 && event->component_type == 23 &&
+            event->text == "Icons") {
+            icon_list_restored = true;
+        }
+        if (event->kind == 12 &&
+            event->component_id == icon_choice_id &&
+            event->text == "Image item" &&
+            event->arguments[3] == icon_image_key) {
+            icon_choice_replayed = true;
+        }
+    }
+    require(icon_list_restored && icon_choice_replayed,
+            "Back to the same List replays each real item image");
+
+    const auto restored_icon = runtime.copy_lcdui_image_rgba(
+        icon_image_key, {});
+    require(restored_icon.dimensions.width == 2 &&
+                restored_icon.dimensions.height == 2 &&
+                restored_icon.byte_count == 16U,
+            "restored List item image remains resolvable after Back");
+    require(runtime.destroy_midlet(list_image_app).has_value(),
+            "destroy List image Back fixture MIDlet");
 }
 
 void test_runtime_canvas(const std::string& fixture_jar) {
@@ -2513,6 +2710,31 @@ void test_runtime_canvas(const std::string& fixture_jar) {
     require(runtime.destroy_midlet(plain_app).has_value(),
             "destroy secondary lifecycle MIDlet");
 
+    constexpr phoneme::AppId full_canvas_app {34};
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.FullCanvasOps",
+                                 full_canvas_app,
+                                 phoneme::Dimensions {320, 240}).has_value(),
+            "start Nokia FullCanvas compatibility fixture");
+    bool full_canvas_fullscreen = false;
+    bool full_canvas_semantics = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind == 3 && event->component_type == 22) {
+            full_canvas_semantics = full_canvas_semantics ||
+                event->text == "fullcanvas:ok";
+            if (event->arguments[3] == -1007) {
+                full_canvas_fullscreen = full_canvas_fullscreen ||
+                    event->arguments[0] == 1;
+            }
+        }
+    }
+    require(full_canvas_fullscreen,
+            "Nokia FullCanvas enters fullscreen during construction");
+    require(full_canvas_semantics,
+            "Nokia FullCanvas constants and command restrictions match phoneME");
+    require(runtime.destroy_midlet(full_canvas_app).has_value(),
+            "destroy Nokia FullCanvas compatibility fixture");
+
     constexpr phoneme::AppId budget_app {33};
     const auto budget_started_at = std::chrono::steady_clock::now();
     require(runtime.start_midlet(*suite_id,
@@ -2607,6 +2829,10 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
 
     auto suite_id = runtime.install_jar(fixture_jar);
     require(suite_id.has_value(), "install standalone fixture suite");
+    require(runtime.set_suite_trust(
+                *suite_id,
+                phoneme::security::SuiteTrust::trusted).has_value(),
+            "mark standalone fixture suite trusted");
     require(runtime.start_system().has_value(), "start standalone runtime");
     require(runtime.start_midlet(*suite_id,
                                  "corefixture.LifecycleApp",
@@ -2618,6 +2844,15 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
             "MIDlet enters active state");
     require(runtime.app_used_memory(phoneme::AppId {1}) > 0,
             "MIDlet reports heap memory");
+    require(runtime.set_suite_trust(
+                *suite_id,
+                phoneme::security::SuiteTrust::trusted).has_value(),
+            "reasserting unchanged suite trust is safe while MIDlet is alive");
+    const auto trust_change = runtime.set_suite_trust(
+        *suite_id, phoneme::security::SuiteTrust::untrusted);
+    require(!trust_change.has_value() &&
+                trust_change.error().code == phoneme::ErrorCode::invalid_state,
+            "changing suite trust remains blocked while MIDlet is alive");
 
     require(runtime.pause_midlet(phoneme::AppId {1}).has_value(),
             "execute pauseApp");
@@ -2653,6 +2888,28 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
             "resumed self-paused MIDlet becomes active");
     require(runtime.destroy_midlet(phoneme::AppId {3}).has_value(),
             "destroy self-paused MIDlet");
+
+    constexpr phoneme::AppId asynchronous_exit_app {4};
+    require(runtime.start_midlet(*suite_id,
+                                 "corefixture.AsyncSelfDestroyApp",
+                                 asynchronous_exit_app,
+                                 phoneme::Dimensions {320, 240}).has_value(),
+            "start MIDlet that exits from an application worker");
+    phoneme::runtime::AppState asynchronous_exit_state =
+        phoneme::runtime::AppState::active;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        asynchronous_exit_state = runtime.app_state(asynchronous_exit_app);
+        if (asynchronous_exit_state ==
+            phoneme::runtime::AppState::destroyed) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    require(asynchronous_exit_state ==
+                phoneme::runtime::AppState::destroyed,
+            "notifyDestroyed after startApp is observed and finalized");
+    require(runtime.destroy_midlet(asynchronous_exit_app).has_value(),
+            "host teardown remains idempotent after application exit");
 }
 
 void test_runtime_lock_reentry(const std::string& fixture_jar) {

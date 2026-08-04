@@ -38,12 +38,17 @@ public:
     void clear() noexcept;
 
 private:
+    struct ClasspathArchive final {
+        std::string path;
+        archive::ZipArchive archive;
+    };
+
     [[nodiscard]] Result<std::shared_ptr<const classfile::ClassFile>> load_uncached(
         std::string_view internal_name) const;
     [[nodiscard]] static std::string normalize_name(std::string_view binary_name);
 
     mutable std::mutex mutex_;
-    std::vector<std::string> archive_paths_;
+    std::vector<ClasspathArchive> archives_;
     std::unordered_map<std::string,
                        std::shared_ptr<const classfile::ClassFile>> cache_;
     std::unordered_map<std::string, ResolvedMethod> method_cache_;

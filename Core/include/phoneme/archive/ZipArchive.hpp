@@ -1,8 +1,10 @@
 #pragma once
 
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "phoneme/base/Error.hpp"
@@ -62,6 +64,18 @@ public:
     }
 
 private:
+    struct TransparentStringHash final {
+        using is_transparent = void;
+
+        [[nodiscard]] usize operator()(std::string_view value) const noexcept {
+            return std::hash<std::string_view> {}(value);
+        }
+
+        [[nodiscard]] usize operator()(const std::string& value) const noexcept {
+            return (*this)(std::string_view(value));
+        }
+    };
+
     explicit ZipArchive(platform::MappedFile file, ZipLimits limits)
         : file_(std::move(file)), limits_(limits) {}
 
@@ -71,6 +85,8 @@ private:
     ZipLimits limits_;
     usize central_directory_offset_ {0};
     std::vector<ZipEntry> entries_;
+    std::unordered_map<std::string, usize,
+                       TransparentStringHash, std::equal_to<>> entry_index_;
 };
 
 [[nodiscard]] Result<std::vector<u8>> inflate_raw(std::span<const u8> source,

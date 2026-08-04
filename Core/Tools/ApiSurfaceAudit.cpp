@@ -237,6 +237,21 @@ int main(int argc, char** argv) {
     sort_gaps(field_access_gaps);
     sort_gaps(load_errors);
 
+    const auto missing_category_count =
+        [&missing_classes](std::string_view expected) {
+            return static_cast<std::size_t>(std::count_if(
+                missing_classes.begin(), missing_classes.end(),
+                [expected](const Gap& gap) {
+                    return gap.detail == expected;
+                }));
+        };
+    const std::size_t missing_standard_api =
+        missing_category_count("public API");
+    const std::size_t missing_internal_public =
+        missing_category_count("phoneME internal public class");
+    const std::size_t missing_non_public =
+        missing_category_count("non-public implementation class");
+
     std::ofstream report(argv[3]);
     if (!report) {
         std::cerr << "Unable to create report: " << argv[3] << '\n';
@@ -248,7 +263,14 @@ int main(int argc, char** argv) {
     report << "| Metric | Count |\n| --- | ---: |\n";
     report << "| Reference classes | " << class_names.size() << " |\n";
     report << "| Compared builtin classes | " << compared_classes << " |\n";
-    report << "| Missing classes | " << missing_classes.size() << " |\n";
+    report << "| Missing classes (all phoneME internals included) | "
+           << missing_classes.size() << " |\n";
+    report << "| Missing application-visible `java`/`javax` API classes | "
+           << missing_standard_api << " |\n";
+    report << "| Missing phoneME internal public classes | "
+           << missing_internal_public << " |\n";
+    report << "| Missing non-public implementation classes | "
+           << missing_non_public << " |\n";
     report << "| Missing exported methods | " << method_gaps.size() << " |\n";
     report << "| Method access/shape mismatches | "
            << method_access_gaps.size() << " |\n";

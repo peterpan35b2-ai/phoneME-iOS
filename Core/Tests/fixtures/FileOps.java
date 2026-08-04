@@ -10,6 +10,7 @@ import java.util.Enumeration;
 import javax.microedition.io.Connector;
 import javax.microedition.io.file.ConnectionClosedException;
 import javax.microedition.io.file.FileConnection;
+import javax.microedition.io.file.FileSystemListener;
 import javax.microedition.io.file.FileSystemRegistry;
 import javax.microedition.io.file.IllegalModeException;
 
@@ -341,6 +342,25 @@ public final class FileOps {
         return roots != null && roots.hasMoreElements() &&
             "root/".equals((String) roots.nextElement()) &&
             !roots.hasMoreElements() ? 1 : 0;
+    }
+
+    public static int rootListenerRegistry() {
+        FileSystemListener listener = new FileSystemListener() {
+            public void rootChanged(int state, String rootName) {
+            }
+        };
+        if (FileSystemListener.ROOT_ADDED != 0 ||
+                FileSystemListener.ROOT_REMOVED != 1) return 0;
+        if (!FileSystemRegistry.addFileSystemListener(listener)) return 0;
+        if (!FileSystemRegistry.addFileSystemListener(listener)) return 0;
+        if (!FileSystemRegistry.removeFileSystemListener(listener)) return 0;
+        if (FileSystemRegistry.removeFileSystemListener(listener)) return 0;
+        try {
+            FileSystemRegistry.addFileSystemListener(null);
+            return 0;
+        } catch (NullPointerException expected) {
+        }
+        return 1;
     }
 
     public static int hiddenListingPolicy() throws Exception {

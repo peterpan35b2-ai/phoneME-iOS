@@ -13,9 +13,9 @@ namespace phoneme::runtime {
 
 struct SuiteInstallerCapabilities final {
     std::vector<std::string> profiles {
-        "MIDP-1.0", "MIDP-2.0"};
+        "MIDP-1.0", "MIDP-2.0", "MIDP-2.1"};
     std::vector<std::string> configurations {
-        "CLDC-1.0", "CLDC-1.1"};
+        "CLDC-1.0", "CLDC-1.1", "CLDC-1.1.1"};
 };
 
 struct SuiteInstallerLimits final {

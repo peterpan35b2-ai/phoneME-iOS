@@ -25,6 +25,7 @@ int32_t phoneme_ios_https_execute_async(
     int32_t body_length,
     int32_t timeout_ms,
     int32_t redirect_limit,
+    int64_t cookie_session_id,
     PhoneMEHTTPSCompletion completion,
     void* context);
 int32_t phoneme_ios_https_get_status_code(int32_t handle);
@@ -33,6 +34,7 @@ int32_t phoneme_ios_https_copy_string(
 int32_t phoneme_ios_https_copy_body(
     int32_t handle, uint8_t* destination, int32_t capacity);
 void phoneme_ios_https_close(int32_t handle);
+void phoneme_ios_https_clear_session(int64_t cookie_session_id);
 void phoneme_ios_https_reset(void);
 void phoneme_ios_https_set_test_response_limit(int32_t bytes);
 double phoneme_ios_https_get_test_timeout_interval(void);
@@ -122,7 +124,7 @@ void send_all(int descriptor, std::string_view bytes) {
     }
 }
 
-void read_request_headers(int descriptor) {
+std::string read_request_headers(int descriptor) {
     std::string request;
     char buffer[1024];
     while (request.find("\r\n\r\n") == std::string::npos) {
@@ -132,6 +134,7 @@ void read_request_headers(int descriptor) {
         require(request.size() <= 64U * 1024U,
                 "HTTP fixture request header remains bounded");
     }
+    return request;
 }
 
 std::string copy_string(int32_t handle, int32_t field) {
@@ -168,7 +171,7 @@ void test_streaming_small_response() {
         "http://127.0.0.1:" + std::to_string(server.port) + "/small";
     const auto started = std::chrono::steady_clock::now();
     const int32_t handle = phoneme_ios_https_execute_async(
-        url.c_str(), "GET", "", nullptr, 0, 0, 0,
+        url.c_str(), "GET", "", nullptr, 0, 0, 0, 1,
         &Completion::callback, &completion);
     require(handle > 0, "start streaming HTTP bridge request");
     require(phoneme_ios_https_get_test_timeout_interval() > 86'400.0,
@@ -197,6 +200,119 @@ void test_streaming_small_response() {
     phoneme_ios_https_close(handle);
 }
 
+void test_cookie_sessions_persist_and_remain_isolated() {
+    constexpr int64_t kFirstSession = 101;
+    constexpr int64_t kSecondSession = 202;
+    Server server;
+    std::atomic_bool same_session_cookie {false};
+    std::atomic_bool cross_session_cookie {false};
+    std::jthread worker([&] {
+        for (int request_index = 0; request_index < 3; ++request_index) {
+            sockaddr_in peer {};
+            socklen_t length = static_cast<socklen_t>(sizeof(peer));
+            const int client = ::accept(
+                server.descriptor, reinterpret_cast<sockaddr*>(&peer), &length);
+            require(client >= 0, "accept cookie HTTP fixture client");
+            const std::string request = read_request_headers(client);
+            const bool contains_cookie = request.find(
+                "Cookie: phoneme_session=stable") != std::string::npos;
+            if (request_index == 1) {
+                same_session_cookie.store(contains_cookie,
+                                          std::memory_order_release);
+            } else if (request_index == 2) {
+                cross_session_cookie.store(contains_cookie,
+                                           std::memory_order_release);
+            }
+            const char *set_cookie = request_index == 0
+                ? "Set-Cookie: phoneme_session=stable; Path=/; HttpOnly\r\n"
+                : "";
+            const std::string response =
+                std::string("HTTP/1.1 200 OK\r\n") + set_cookie +
+                "Content-Length: 2\r\nConnection: close\r\n\r\nOK";
+            send_all(client, response);
+            ::close(client);
+        }
+    });
+
+    const std::string base_url =
+        "http://127.0.0.1:" + std::to_string(server.port);
+    const auto request = [&](std::string_view path, int64_t session_id) {
+        Completion completion;
+        const std::string url = base_url + std::string(path);
+        const int32_t handle = phoneme_ios_https_execute_async(
+            url.c_str(), "GET", "", nullptr, 0, 5'000, 0, session_id,
+            &Completion::callback, &completion);
+        require(handle > 0, "start cookie-session HTTP request");
+        require(completion.wait_for(2s),
+                "cookie-session HTTP request completes");
+        require(phoneme_ios_https_get_status_code(handle) == 200,
+                "cookie-session HTTP request succeeds");
+        phoneme_ios_https_close(handle);
+    };
+
+    request("/cookie-set", kFirstSession);
+    request("/cookie-check", kFirstSession);
+    request("/cookie-isolation", kSecondSession);
+    require(same_session_cookie.load(std::memory_order_acquire),
+            "HTTP cookie persists within one emulator network session");
+    require(!cross_session_cookie.load(std::memory_order_acquire),
+            "HTTP cookie is isolated between emulator network sessions");
+    phoneme_ios_https_clear_session(kFirstSession);
+    phoneme_ios_https_clear_session(kSecondSession);
+}
+
+void test_redirect_response_cookie_reaches_followup_request() {
+    constexpr int64_t kSession = 303;
+    Server server;
+    std::atomic_bool redirect_cookie_seen {false};
+    std::jthread worker([&] {
+        sockaddr_in peer {};
+        socklen_t length = static_cast<socklen_t>(sizeof(peer));
+        int client = ::accept(
+            server.descriptor, reinterpret_cast<sockaddr*>(&peer), &length);
+        require(client >= 0, "accept redirect source HTTP client");
+        (void)read_request_headers(client);
+        const std::string location =
+            "http://127.0.0.1:" + std::to_string(server.port) + "/landing";
+        const std::string redirect =
+            "HTTP/1.1 302 Found\r\nLocation: " + location +
+            "\r\nSet-Cookie: redirect_token=ready; Path=/\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(client, redirect);
+        ::close(client);
+
+        peer = {};
+        length = static_cast<socklen_t>(sizeof(peer));
+        client = ::accept(
+            server.descriptor, reinterpret_cast<sockaddr*>(&peer), &length);
+        require(client >= 0, "accept redirected HTTP client");
+        const std::string request = read_request_headers(client);
+        redirect_cookie_seen.store(
+            request.find("Cookie: redirect_token=ready") != std::string::npos,
+            std::memory_order_release);
+        send_all(client,
+                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                 "Connection: close\r\n\r\nOK");
+        ::close(client);
+    });
+
+    Completion completion;
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port) + "/redirect";
+    const int32_t handle = phoneme_ios_https_execute_async(
+        url.c_str(), "GET", "", nullptr, 0, 5'000, 1, kSession,
+        &Completion::callback, &completion);
+    require(handle > 0, "start redirect-cookie HTTP request");
+    require(completion.wait_for(2s),
+            "redirect-cookie HTTP request completes");
+    require(phoneme_ios_https_get_status_code(handle) == 200,
+            "redirect-cookie HTTP request reaches final response");
+    require(redirect_cookie_seen.load(std::memory_order_acquire),
+            "redirect response cookie is sent to the follow-up request");
+    phoneme_ios_https_close(handle);
+    phoneme_ios_https_clear_session(kSession);
+}
+
 void test_declared_oversized_response_is_rejected() {
     Server server;
     std::jthread worker([&] {
@@ -221,7 +337,7 @@ void test_declared_oversized_response_is_rejected() {
     const std::string url =
         "http://127.0.0.1:" + std::to_string(server.port) + "/large";
     const int32_t handle = phoneme_ios_https_execute_async(
-        url.c_str(), "GET", "", nullptr, 0, 5'000, 0,
+        url.c_str(), "GET", "", nullptr, 0, 5'000, 0, 1,
         &Completion::callback, &completion);
     require(handle > 0, "start oversized HTTP bridge request");
     require(completion.wait_for(2s),
@@ -241,6 +357,8 @@ int main() {
     @autoreleasepool {
         phoneme_ios_https_reset();
         test_streaming_small_response();
+        test_cookie_sessions_persist_and_remain_isolated();
+        test_redirect_response_cookie_reaches_followup_request();
         test_declared_oversized_response_is_rejected();
         phoneme_ios_https_reset();
     }

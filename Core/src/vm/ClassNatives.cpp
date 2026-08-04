@@ -130,13 +130,8 @@ void add(NativeMethodRegistry& registry,
     auto array_root = machine.pin_native_root(*array);
     if (!array_root) return std::unexpected(array_root.error());
 
-    for (usize index = 0; index < bytes.size(); ++index) {
-        auto stored = machine.heap().set_element(
-            *array, index,
-            Value::from_int(static_cast<i32>(
-                static_cast<std::int8_t>(bytes[index]))));
-        if (!stored) return std::unexpected(stored.error());
-    }
+    auto bytes_stored = machine.heap().write_byte_array(*array, 0U, bytes);
+    if (!bytes_stored) return std::unexpected(bytes_stored.error());
 
     auto stream_root = machine.allocate_pinned_instance(
         "java/io/ByteArrayInputStream");

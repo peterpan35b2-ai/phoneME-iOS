@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -11,6 +13,20 @@
 
 #include "GraphicsNativeSupport.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
+
+#if defined(__APPLE__)
+extern "C" __attribute__((weak)) int phoneme_ios_device_start_vibrate(
+    int, std::int64_t) {
+    return 0;
+}
+extern "C" __attribute__((weak)) int phoneme_ios_device_stop_vibrate(void) {
+    return 0;
+}
+extern "C" __attribute__((weak)) int phoneme_ios_device_flash_lights(
+    std::int64_t) {
+    return 0;
+}
+#endif
 
 namespace phoneme::vm {
 namespace {
@@ -21,6 +37,12 @@ constexpr usize kFontFaceField = 0;
 constexpr usize kFontStyleField = 1;
 constexpr usize kFontSizeField = 2;
 constexpr usize kDirectGraphicsTargetField = 0;
+constexpr i32 kNokiaTypeByte1Gray = 1;
+constexpr i32 kNokiaTypeByte1GrayVertical = -1;
+constexpr i32 kNokiaTypeByte2Gray = 2;
+constexpr i32 kNokiaTypeByte4Gray = 4;
+constexpr i32 kNokiaTypeByte8Gray = 8;
+constexpr i32 kNokiaTypeByte332Rgb = 332;
 constexpr i32 kNokiaTypeUShort4444Argb = 4444;
 constexpr i32 kNokiaTypeUShort444Rgb = 444;
 constexpr i32 kNokiaTypeUShort555Rgb = 555;
@@ -33,6 +55,17 @@ struct BoundGraphics final {
     graphics::GraphicsContext* context {nullptr};
     graphics::Image* target {nullptr};
 };
+
+[[nodiscard]] std::span<const char32_t> translated_characters(
+    Machine& machine,
+    std::span<const char32_t> original,
+    std::shared_ptr<const std::vector<char32_t>>& translated) {
+    const auto& service = machine.translation_service();
+    if (!service || !service->enabled()) return original;
+    translated = service->lookup_or_request(original);
+    if (!translated) return original;
+    return *translated;
+}
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -276,6 +309,205 @@ void add(NativeMethodRegistry& registry,
     return static_cast<usize>(index);
 }
 
+[[nodiscard]] bool nokia_byte_format(i32 format) noexcept {
+    return format == kNokiaTypeByte1Gray ||
+           format == kNokiaTypeByte1GrayVertical ||
+           format == kNokiaTypeByte2Gray ||
+           format == kNokiaTypeByte4Gray ||
+           format == kNokiaTypeByte8Gray ||
+           format == kNokiaTypeByte332Rgb;
+}
+
+[[nodiscard]] Result<u8> byte_array_value(
+    Machine& machine,
+    ObjectRef array,
+    i64 index,
+    std::string_view operation) {
+    auto length = machine.heap().array_length(array);
+    if (!length || index < 0 || static_cast<u64>(index) >= *length) {
+        return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                         std::string(operation) +
+                             " packed pixel index is outside the array");
+    }
+    auto value = machine.heap().element(array, static_cast<usize>(index));
+    if (!value) return std::unexpected(value.error());
+    auto integer = value->as_int();
+    if (!integer) return std::unexpected(integer.error());
+    return static_cast<u8>(static_cast<u32>(*integer) & 0xFFU);
+}
+
+[[nodiscard]] Status set_byte_array_value(
+    Machine& machine,
+    ObjectRef array,
+    i64 index,
+    u8 value,
+    std::string_view operation) {
+    auto length = machine.heap().array_length(array);
+    if (!length || index < 0 || static_cast<u64>(index) >= *length) {
+        return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                         std::string(operation) +
+                             " packed pixel index is outside the array");
+    }
+    return machine.heap().set_element(
+        array, static_cast<usize>(index),
+        Value::from_int(static_cast<i32>(static_cast<i8>(value))));
+}
+
+[[nodiscard]] Result<graphics::Pixel> nokia_byte_to_argb(
+    Machine& machine,
+    ObjectRef pixels,
+    i32 position,
+    i32 scan_length,
+    i32 format,
+    std::string_view operation) {
+    if (format == kNokiaTypeByte8Gray ||
+        format == kNokiaTypeByte332Rgb) {
+        auto source = byte_array_value(machine, pixels, position, operation);
+        if (!source) return std::unexpected(source.error());
+        if (format == kNokiaTypeByte8Gray) {
+            const u32 gray = *source;
+            return 0xFF000000U | (gray << 16U) | (gray << 8U) | gray;
+        }
+        const u32 red = ((static_cast<u32>(*source) >> 5U) & 7U) * 255U / 7U;
+        const u32 green = ((static_cast<u32>(*source) >> 2U) & 7U) * 255U / 7U;
+        const u32 blue = (static_cast<u32>(*source) & 3U) * 255U / 3U;
+        return 0xFF000000U | (red << 16U) | (green << 8U) | blue;
+    }
+
+    i64 byte_index = 0;
+    i32 shift = 0;
+    i32 mask = 0;
+    if (format == kNokiaTypeByte1GrayVertical) {
+        if (scan_length <= 0) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             std::string(operation) +
+                                 " requires a positive vertical scan length");
+        }
+        const i32 row = position / scan_length;
+        const i32 column = position % scan_length;
+        byte_index = static_cast<i64>(row / 8) * scan_length + column;
+        shift = row & 7;
+        mask = 1;
+    } else {
+        const i32 bits = format;
+        const i64 bit_position = static_cast<i64>(position) * bits;
+        byte_index = bit_position >> 3;
+        shift = 8 - bits - static_cast<i32>(bit_position & 7);
+        mask = (1 << bits) - 1;
+        if (shift < 0) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             std::string(operation) +
+                                 " packed scan alignment is invalid");
+        }
+    }
+    auto source = byte_array_value(machine, pixels, byte_index, operation);
+    if (!source) return std::unexpected(source.error());
+    const u32 level =
+        ((static_cast<u32>(*source) >> static_cast<u32>(shift)) &
+         static_cast<u32>(mask)) * 255U / static_cast<u32>(mask);
+    return 0xFF000000U | (level << 16U) | (level << 8U) | level;
+}
+
+[[nodiscard]] Result<bool> packed_alpha_bit(
+    Machine& machine,
+    ObjectRef mask,
+    i32 position,
+    std::string_view operation) {
+    const i64 index = static_cast<i64>(position) >> 3;
+    auto value = byte_array_value(machine, mask, index, operation);
+    if (!value) return std::unexpected(value.error());
+    const u32 shift = static_cast<u32>(7 - (position & 7));
+    return ((static_cast<u32>(*value) >> shift) & 1U) != 0U;
+}
+
+[[nodiscard]] Status set_packed_alpha_bit(
+    Machine& machine,
+    ObjectRef mask,
+    i32 position,
+    bool enabled,
+    std::string_view operation) {
+    const i64 index = static_cast<i64>(position) >> 3;
+    auto current = byte_array_value(machine, mask, index, operation);
+    if (!current) return std::unexpected(current.error());
+    const u8 bit = static_cast<u8>(1U <<
+        static_cast<u32>(7 - (position & 7)));
+    const u8 updated = enabled
+        ? static_cast<u8>(*current | bit)
+        : static_cast<u8>(*current & static_cast<u8>(~bit));
+    return set_byte_array_value(machine, mask, index, updated, operation);
+}
+
+[[nodiscard]] u8 nokia_gray(graphics::Pixel pixel) noexcept {
+    const u32 red = (pixel >> 16U) & 0xFFU;
+    const u32 green = (pixel >> 8U) & 0xFFU;
+    const u32 blue = pixel & 0xFFU;
+    return static_cast<u8>((red * 30U + green * 59U + blue * 11U) / 100U);
+}
+
+[[nodiscard]] Status set_nokia_byte_pixel(
+    Machine& machine,
+    ObjectRef pixels,
+    i32 position,
+    i32 scan_length,
+    i32 format,
+    graphics::Pixel pixel,
+    std::string_view operation) {
+    const u32 red = (pixel >> 16U) & 0xFFU;
+    const u32 green = (pixel >> 8U) & 0xFFU;
+    const u32 blue = pixel & 0xFFU;
+    if (format == kNokiaTypeByte8Gray) {
+        return set_byte_array_value(machine, pixels, position,
+                                    nokia_gray(pixel), operation);
+    }
+    if (format == kNokiaTypeByte332Rgb) {
+        const u8 packed = static_cast<u8>(
+            ((((red * 7U) + 127U) / 255U) << 5U) |
+            ((((green * 7U) + 127U) / 255U) << 2U) |
+            (((blue * 3U) + 127U) / 255U));
+        return set_byte_array_value(machine, pixels, position,
+                                    packed, operation);
+    }
+
+    i64 byte_index = 0;
+    i32 shift = 0;
+    i32 mask = 0;
+    if (format == kNokiaTypeByte1GrayVertical) {
+        if (scan_length <= 0) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             std::string(operation) +
+                                 " requires a positive vertical scan length");
+        }
+        const i32 row = position / scan_length;
+        const i32 column = position % scan_length;
+        byte_index = static_cast<i64>(row / 8) * scan_length + column;
+        shift = row & 7;
+        mask = 1;
+    } else {
+        const i32 bits = format;
+        const i64 bit_position = static_cast<i64>(position) * bits;
+        byte_index = bit_position >> 3;
+        shift = 8 - bits - static_cast<i32>(bit_position & 7);
+        mask = (1 << bits) - 1;
+        if (shift < 0) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             std::string(operation) +
+                                 " packed scan alignment is invalid");
+        }
+    }
+    auto current = byte_array_value(machine, pixels, byte_index, operation);
+    if (!current) return std::unexpected(current.error());
+    const u8 gray = nokia_gray(pixel);
+    const i32 packed =
+        (static_cast<i32>(gray) * mask + 127) / 255;
+    const u32 shifted_mask = static_cast<u32>(mask) <<
+                             static_cast<u32>(shift);
+    const u8 updated = static_cast<u8>(
+        (static_cast<u32>(*current) & ~shifted_mask) |
+        (static_cast<u32>(packed) << static_cast<u32>(shift)));
+    return set_byte_array_value(machine, pixels, byte_index,
+                                updated, operation);
+}
+
 [[nodiscard]] Result<std::vector<graphics::Pixel>> nokia_source_pixels(
     Machine& machine,
     ObjectRef array,
@@ -384,6 +616,174 @@ void add(NativeMethodRegistry& registry,
         *bound->target, *bound->context, *source,
         0, 0, *width, *height, *transform, *x, *y,
         graphics::anchor_top | graphics::anchor_left);
+}
+
+[[nodiscard]] Status validate_byte_array(
+    Machine& machine,
+    ObjectRef array,
+    std::string_view operation) {
+    auto class_name = machine.heap().class_name(array);
+    if (!class_name || *class_name != "[B") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) + " expects byte[]");
+    }
+    return {};
+}
+
+[[nodiscard]] Status draw_nokia_byte_pixels(
+    Machine& machine,
+    std::span<const Value> arguments,
+    std::string_view operation) {
+    auto bound = bound_direct_graphics(machine, arguments, operation);
+    auto pixels = reference_argument(arguments, 1U, operation);
+    auto alpha_mask = reference_argument(arguments, 2U, operation, true);
+    auto offset = int_argument(arguments, 3U, operation);
+    auto scan_length = int_argument(arguments, 4U, operation);
+    auto x = int_argument(arguments, 5U, operation);
+    auto y = int_argument(arguments, 6U, operation);
+    auto width = int_argument(arguments, 7U, operation);
+    auto height = int_argument(arguments, 8U, operation);
+    auto manipulation = int_argument(arguments, 9U, operation);
+    auto format = int_argument(arguments, 10U, operation);
+    if (!bound) return std::unexpected(bound.error());
+    if (!pixels) return std::unexpected(pixels.error());
+    if (!alpha_mask) return std::unexpected(alpha_mask.error());
+    if (!offset) return std::unexpected(offset.error());
+    if (!scan_length) return std::unexpected(scan_length.error());
+    if (!x) return std::unexpected(x.error());
+    if (!y) return std::unexpected(y.error());
+    if (!width) return std::unexpected(width.error());
+    if (!height) return std::unexpected(height.error());
+    if (!manipulation) return std::unexpected(manipulation.error());
+    if (!format) return std::unexpected(format.error());
+    if (*width < 0 || *height < 0 || !nokia_byte_format(*format)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " dimensions or byte format are invalid");
+    }
+    auto valid_pixels = validate_byte_array(machine, *pixels, operation);
+    if (!valid_pixels) return valid_pixels;
+    if (!alpha_mask->is_null()) {
+        auto valid_mask = validate_byte_array(machine, *alpha_mask, operation);
+        if (!valid_mask) return valid_mask;
+    }
+    if (*width == 0 || *height == 0) return {};
+    auto count = graphics::validated_pixel_count(*width, *height);
+    if (!count) return graphics_error(count.error());
+    std::vector<graphics::Pixel> converted(*count);
+    for (i32 row = 0; row < *height; ++row) {
+        for (i32 column = 0; column < *width; ++column) {
+            const i64 raw_position = static_cast<i64>(*offset) +
+                                     static_cast<i64>(row) * *scan_length +
+                                     column;
+            if (raw_position < 0 ||
+                raw_position > std::numeric_limits<i32>::max()) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 std::string(operation) +
+                                     " pixel position is outside bounds");
+            }
+            const i32 position = static_cast<i32>(raw_position);
+            auto pixel = nokia_byte_to_argb(
+                machine, *pixels, position, *scan_length, *format, operation);
+            if (!pixel) return std::unexpected(pixel.error());
+            if (!alpha_mask->is_null()) {
+                auto opaque = packed_alpha_bit(
+                    machine, *alpha_mask, position, operation);
+                if (!opaque) return std::unexpected(opaque.error());
+                if (!*opaque) *pixel &= 0x00FFFFFFU;
+            }
+            converted[static_cast<usize>(row) *
+                      static_cast<usize>(*width) +
+                      static_cast<usize>(column)] = *pixel;
+        }
+    }
+    auto source = graphics::Image::create_immutable(
+        *width, *height, converted);
+    if (!source) return graphics_error(source.error());
+    auto transform = nokia_transform(*manipulation);
+    if (!transform) return std::unexpected(transform.error());
+    return graphics::draw_region(
+        *bound->target, *bound->context, *source,
+        0, 0, *width, *height, *transform, *x, *y,
+        graphics::anchor_top | graphics::anchor_left);
+}
+
+[[nodiscard]] Status get_nokia_byte_pixels(
+    Machine& machine,
+    std::span<const Value> arguments,
+    std::string_view operation) {
+    auto bound = bound_direct_graphics(machine, arguments, operation);
+    auto pixels = reference_argument(arguments, 1U, operation);
+    auto alpha_mask = reference_argument(arguments, 2U, operation, true);
+    auto offset = int_argument(arguments, 3U, operation);
+    auto scan_length = int_argument(arguments, 4U, operation);
+    auto x = int_argument(arguments, 5U, operation);
+    auto y = int_argument(arguments, 6U, operation);
+    auto width = int_argument(arguments, 7U, operation);
+    auto height = int_argument(arguments, 8U, operation);
+    auto format = int_argument(arguments, 9U, operation);
+    if (!bound) return std::unexpected(bound.error());
+    if (!pixels) return std::unexpected(pixels.error());
+    if (!alpha_mask) return std::unexpected(alpha_mask.error());
+    if (!offset) return std::unexpected(offset.error());
+    if (!scan_length) return std::unexpected(scan_length.error());
+    if (!x) return std::unexpected(x.error());
+    if (!y) return std::unexpected(y.error());
+    if (!width) return std::unexpected(width.error());
+    if (!height) return std::unexpected(height.error());
+    if (!format) return std::unexpected(format.error());
+    if (*width < 0 || *height < 0 || !nokia_byte_format(*format)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " dimensions or byte format are invalid");
+    }
+    auto valid_pixels = validate_byte_array(machine, *pixels, operation);
+    if (!valid_pixels) return valid_pixels;
+    if (!alpha_mask->is_null()) {
+        auto valid_mask = validate_byte_array(machine, *alpha_mask, operation);
+        if (!valid_mask) return valid_mask;
+    }
+    if (*width == 0 || *height == 0) return {};
+    const i64 source_x = static_cast<i64>(*x) +
+                         bound->context->translate_x;
+    const i64 source_y = static_cast<i64>(*y) +
+                         bound->context->translate_y;
+    if (source_x < 0 || source_y < 0 ||
+        source_x + *width > bound->target->width() ||
+        source_y + *height > bound->target->height()) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) +
+                             " source rectangle is outside the surface");
+    }
+    for (i32 row = 0; row < *height; ++row) {
+        for (i32 column = 0; column < *width; ++column) {
+            const i64 raw_position = static_cast<i64>(*offset) +
+                                     static_cast<i64>(row) * *scan_length +
+                                     column;
+            if (raw_position < 0 ||
+                raw_position > std::numeric_limits<i32>::max()) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 std::string(operation) +
+                                     " pixel position is outside bounds");
+            }
+            const i32 position = static_cast<i32>(raw_position);
+            auto pixel = bound->target->pixel(
+                static_cast<i32>(source_x) + column,
+                static_cast<i32>(source_y) + row);
+            if (!pixel) return graphics_error(pixel.error());
+            auto stored = set_nokia_byte_pixel(
+                machine, *pixels, position, *scan_length,
+                *format, *pixel, operation);
+            if (!stored) return stored;
+            if (!alpha_mask->is_null()) {
+                auto alpha = set_packed_alpha_bit(
+                    machine, *alpha_mask, position,
+                    ((*pixel >> 24U) & 0xFFU) != 0U, operation);
+                if (!alpha) return alpha;
+            }
+        }
+    }
+    return {};
 }
 
 [[nodiscard]] Result<std::vector<i32>> nokia_polygon_points(
@@ -1153,8 +1553,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = string_characters(machine, *string,
                                           "Graphics.drawString");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto rendered = translated_characters(
+                machine, *text, translated);
             return status_result(graphics::draw_text(
-                *bound->target, *bound->context, *text,
+                *bound->target, *bound->context, rendered,
                 *x, *y, *anchor));
         });
 
@@ -1182,8 +1585,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 machine, *string, *values[0], *values[1],
                 "Graphics.drawSubstring");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto rendered = translated_characters(
+                machine, *text, translated);
             return status_result(graphics::draw_text(
-                *bound->target, *bound->context, *text,
+                *bound->target, *bound->context, rendered,
                 *values[2], *values[3], *values[4]));
         });
 
@@ -1234,8 +1640,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 machine, *data, *values[0], *values[1],
                 "Graphics.drawChars");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto rendered = translated_characters(
+                machine, *text, translated);
             return status_result(graphics::draw_text(
-                *bound->target, *bound->context, *text,
+                *bound->target, *bound->context, rendered,
                 *values[2], *values[3], *values[4]));
         });
 
@@ -1368,8 +1777,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = char_array_characters(machine, *data, *offset, *length,
                                               "Font.charsWidth");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto measured = translated_characters(
+                machine, *text, translated);
             return std::optional<Value>(Value::from_int(
-                font->chars_width(*text)));
+                font->chars_width(measured)));
         });
 
     add(registry, font_owner, "stringWidth", "(Ljava/lang/String;)I",
@@ -1385,8 +1797,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = string_characters(machine, *string,
                                           "Font.stringWidth");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto measured = translated_characters(
+                machine, *text, translated);
             return std::optional<Value>(Value::from_int(
-                font->chars_width(*text)));
+                font->chars_width(measured)));
         });
 
     add(registry, font_owner, "substringWidth",
@@ -1409,8 +1824,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = substring_characters(machine, *string, *offset, *length,
                                              "Font.substringWidth");
             if (!text) return std::unexpected(text.error());
+            std::shared_ptr<const std::vector<char32_t>> translated;
+            const auto measured = translated_characters(
+                machine, *text, translated);
             return std::optional<Value>(Value::from_int(
-                font->chars_width(*text)));
+                font->chars_width(measured)));
         });
 
     constexpr const char* direct_impl =
@@ -1525,6 +1943,14 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 *transform, *x, *y, *anchor));
         });
 
+    add(registry, direct_owner, "drawPixels", "([B[BIIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto drawn = draw_nokia_byte_pixels(
+                machine, arguments, "DirectGraphics.drawPixels(byte[])");
+            if (!drawn) return std::unexpected(drawn.error());
+            return std::optional<Value> {};
+        });
     add(registry, direct_owner, "drawPixels", "([SZIIIIIIII)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1539,6 +1965,14 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto drawn = draw_nokia_pixels(
                 machine, arguments, false, "DirectGraphics.drawPixels(int[])");
             if (!drawn) return std::unexpected(drawn.error());
+            return std::optional<Value> {};
+        });
+    add(registry, direct_owner, "getPixels", "([B[BIIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto read = get_nokia_byte_pixels(
+                machine, arguments, "DirectGraphics.getPixels(byte[])");
+            if (!read) return std::unexpected(read.error());
             return std::optional<Value> {};
         });
     add(registry, direct_owner, "getPixels", "([SIIIIIII)V",
@@ -1800,6 +2234,27 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    add(registry, device_control, "flashLights", "(J)V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "DeviceControl.flashLights expects a duration");
+            }
+            auto duration = arguments[0].as_long();
+            if (!duration) return std::unexpected(duration.error());
+            if (*duration < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "DeviceControl light duration is negative");
+            }
+#if defined(__APPLE__)
+            if (*duration != 0 && phoneme_ios_device_flash_lights != nullptr) {
+                (void)phoneme_ios_device_flash_lights(*duration);
+            }
+#endif
+            return std::optional<Value> {};
+        });
+
     add(registry, device_control, "startVibra", "(IJ)V",
         [](Machine&, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1815,12 +2270,25 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "DeviceControl vibration arguments are invalid");
             }
+#if defined(__APPLE__)
+            if ((*frequency == 0 || *duration == 0) &&
+                phoneme_ios_device_stop_vibrate != nullptr) {
+                (void)phoneme_ios_device_stop_vibrate();
+            } else if (phoneme_ios_device_start_vibrate != nullptr) {
+                (void)phoneme_ios_device_start_vibrate(*frequency, *duration);
+            }
+#endif
             return std::optional<Value> {};
         });
 
     add(registry, device_control, "stopVibra", "()V",
         [](Machine&, std::span<const Value>)
             -> Result<std::optional<Value>> {
+#if defined(__APPLE__)
+            if (phoneme_ios_device_stop_vibrate != nullptr) {
+                (void)phoneme_ios_device_stop_vibrate();
+            }
+#endif
             return std::optional<Value> {};
         });
 }

@@ -17,6 +17,7 @@ struct LCDUIState: Equatable, Sendable {
     struct Item: Equatable, Identifiable, Sendable {
         var id: Int32
         var parentID: Int32
+        var formIndex: Int = -1
         var type: ComponentType
         var label: String
         var text: String
@@ -230,6 +231,11 @@ struct LCDUIState: Equatable, Sendable {
         return items.values
             .filter { $0.parentID == screen.id && $0.isVisible }
             .sorted {
+                let lhsIndex = $0.formIndex >= 0 ? $0.formIndex : Int.max
+                let rhsIndex = $1.formIndex >= 0 ? $1.formIndex : Int.max
+                if lhsIndex != rhsIndex {
+                    return lhsIndex < rhsIndex
+                }
                 if $0.frame.y != $1.frame.y {
                     return $0.frame.y < $1.frame.y
                 }
@@ -422,6 +428,9 @@ struct LCDUIState: Equatable, Sendable {
         )
 
         value.parentID = event.parentID
+        if event.index >= 0 {
+            value.formIndex = Int(event.index)
+        }
         value.type = type
         value.label = event.text
 

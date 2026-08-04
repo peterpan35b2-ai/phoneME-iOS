@@ -24,6 +24,8 @@ namespace {
         register_lcdui_classes(result);
         register_game_classes(result);
         register_m3g_classes(result);
+        register_xml_classes(result);
+        register_vendor_classes(result);
         return result;
     }();
     return registry;

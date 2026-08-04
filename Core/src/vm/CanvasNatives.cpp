@@ -205,7 +205,35 @@ void register_canvas_natives(NativeMethodRegistry& registry) {
         return std::optional<Value> {};
     };
     add(registry, kCanvas, "<init>", "()V", initialize_canvas);
-    add(registry, kNokiaFullCanvas, "<init>", "()V", initialize_canvas);
+    add(registry, kNokiaFullCanvas, "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto canvas = receiver(arguments, "FullCanvas.<init>");
+            if (!canvas) return std::unexpected(canvas.error());
+            auto initialized = initialize_canvas_object(
+                machine, *canvas, false, false);
+            if (!initialized) return std::unexpected(initialized.error());
+            auto runtime = bridge(machine);
+            if (!runtime) return std::unexpected(runtime.error());
+            auto fullscreen = (*runtime)->set_fullscreen(*canvas, true);
+            if (!fullscreen) return std::unexpected(fullscreen.error());
+            return std::optional<Value> {};
+        });
+    for (const char* method_name : {"addCommand", "setCommandListener"}) {
+        add(registry, kNokiaFullCanvas, method_name,
+            method_name == std::string_view("addCommand")
+                ? "(Ljavax/microedition/lcdui/Command;)V"
+                : "(Ljavax/microedition/lcdui/CommandListener;)V",
+            [method_name](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto canvas = receiver(arguments, method_name);
+                if (!canvas) return std::unexpected(canvas.error());
+                return fail_java(
+                    "java/lang/IllegalStateException",
+                    std::string(method_name) +
+                        " is not supported by Nokia FullCanvas");
+            });
+    }
 
     add(registry, kCanvas, "getWidth", "()I",
         [](Machine& machine, std::span<const Value> arguments) {

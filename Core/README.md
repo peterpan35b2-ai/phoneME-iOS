@@ -23,7 +23,7 @@ reference while a module is rewritten.
 
 - iPhoneOS only
 - arm64 only
-- iOS 16.0 or newer
+- iOS 15.0 or newer
 - C++23 and libc++
 - one object per `.cpp`
 - no merged source

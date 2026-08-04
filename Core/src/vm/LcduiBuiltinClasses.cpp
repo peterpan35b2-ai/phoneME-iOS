@@ -110,7 +110,27 @@ using namespace builtin;
         const u16 api = kPublic | kAbstract;
         return make_class("com/nokia/mid/ui/DirectGraphics",
                           "java/lang/Object",
-                          kPublic | kInterface | kAbstract, {}, {
+                          kPublic | kInterface | kAbstract, {
+            field(kPublic | kStatic | kFinal, "FLIP_HORIZONTAL", "I"),
+            field(kPublic | kStatic | kFinal, "FLIP_VERTICAL", "I"),
+            field(kPublic | kStatic | kFinal, "ROTATE_90", "I"),
+            field(kPublic | kStatic | kFinal, "ROTATE_180", "I"),
+            field(kPublic | kStatic | kFinal, "ROTATE_270", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_BYTE_1_GRAY", "I"),
+            field(kPublic | kStatic | kFinal,
+                  "TYPE_BYTE_1_GRAY_VERTICAL", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_BYTE_2_GRAY", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_BYTE_4_GRAY", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_BYTE_8_GRAY", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_BYTE_332_RGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_USHORT_4444_ARGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_USHORT_444_RGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_USHORT_555_RGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_USHORT_1555_ARGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_USHORT_565_RGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_INT_888_RGB", "I"),
+            field(kPublic | kStatic | kFinal, "TYPE_INT_8888_ARGB", "I"),
+        }, {
             method(api, "setARGBColor", "(I)V"),
             method(api, "getAlphaComponent", "()I"),
             method(api, "getNativePixelFormat", "()I"),
@@ -120,8 +140,10 @@ using namespace builtin;
             method(api, "fillTriangle", "(IIIIIII)V"),
             method(api, "fillPolygon", "([II[IIII)V"),
             method(api, "drawPolygon", "([II[IIII)V"),
+            method(api, "drawPixels", "([B[BIIIIIIII)V"),
             method(api, "drawPixels", "([IZIIIIIIII)V"),
             method(api, "drawPixels", "([SZIIIIIIII)V"),
+            method(api, "getPixels", "([B[BIIIIIII)V"),
             method(api, "getPixels", "([IIIIIIII)V"),
             method(api, "getPixels", "([SIIIIIII)V"),
         });
@@ -144,8 +166,10 @@ using namespace builtin;
             method(api, "fillTriangle", "(IIIIIII)V"),
             method(api, "fillPolygon", "([II[IIII)V"),
             method(api, "drawPolygon", "([II[IIII)V"),
+            method(api, "drawPixels", "([B[BIIIIIIII)V"),
             method(api, "drawPixels", "([IZIIIIIIII)V"),
             method(api, "drawPixels", "([SZIIIIIIII)V"),
+            method(api, "getPixels", "([B[BIIIIIII)V"),
             method(api, "getPixels", "([IIIIIIII)V"),
             method(api, "getPixels", "([SIIIIIII)V"),
         }, {"com/nokia/mid/ui/DirectGraphics"});
@@ -166,6 +190,7 @@ using namespace builtin;
         return make_class("com/nokia/mid/ui/DeviceControl",
                           "java/lang/Object", kOrdinary | kFinal, {}, {
             method(kPublic | kStatic, "setLights", "(II)V"),
+            method(kPublic | kStatic, "flashLights", "(J)V"),
             method(kPublic | kStatic, "startVibra", "(IJ)V"),
             method(kPublic | kStatic, "stopVibra", "()V"),
         });
@@ -173,8 +198,22 @@ using namespace builtin;
     if (name == "com/nokia/mid/ui/FullCanvas") {
         return make_class("com/nokia/mid/ui/FullCanvas",
                           "javax/microedition/lcdui/Canvas",
-                          kOrdinary | kAbstract, {}, {
+                          kOrdinary | kAbstract, {
+            field(kPublic | kStatic | kFinal, "KEY_UP_ARROW", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_DOWN_ARROW", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_LEFT_ARROW", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_RIGHT_ARROW", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_SOFTKEY1", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_SOFTKEY2", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_SOFTKEY3", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_SEND", "I"),
+            field(kPublic | kStatic | kFinal, "KEY_END", "I"),
+        }, {
             method(kProtected, "<init>", "()V"),
+            method(kPublic, "addCommand",
+                   "(Ljavax/microedition/lcdui/Command;)V"),
+            method(kPublic, "setCommandListener",
+                   "(Ljavax/microedition/lcdui/CommandListener;)V"),
         });
     }
     if (name == "javax/microedition/lcdui/Canvas") {
@@ -215,9 +254,9 @@ using namespace builtin;
             method(kPublic, "getGameAction", "(I)I"),
             method(kPublic, "getKeyCode", "(I)I"),
             method(kPublic, "getKeyName", "(I)Ljava/lang/String;"),
-            method(kPublic, "repaint", "()V"),
-            method(kPublic, "repaint", "(IIII)V"),
-            method(kPublic, "serviceRepaints", "()V"),
+            method(kPublic | kFinal, "repaint", "()V"),
+            method(kPublic | kFinal, "repaint", "(IIII)V"),
+            method(kPublic | kFinal, "serviceRepaints", "()V"),
             method(kPublic, "setFullScreenMode", "(Z)V"),
             method(kProtected, "keyPressed", "(I)V"),
             method(kProtected, "keyReleased", "(I)V"),
@@ -245,7 +284,7 @@ using namespace builtin;
             field(kPublic | kStatic | kFinal, "GAME_D_PRESSED", "I"),
         }, {
             method(kProtected, "<init>", "(Z)V"),
-            method(kProtected, "paint",
+            method(kPublic, "paint",
                    "(Ljavax/microedition/lcdui/Graphics;)V"),
             method(kPublic, "getKeyStates", "()I"),
             method(kProtected, "getGraphics",
@@ -318,8 +357,10 @@ using namespace builtin;
             method(kPublic, "fillTriangle", "(IIIIIII)V"),
             method(kPublic, "fillPolygon", "([II[IIII)V"),
             method(kPublic, "drawPolygon", "([II[IIII)V"),
+            method(kPublic, "drawPixels", "([B[BIIIIIIII)V"),
             method(kPublic, "drawPixels", "([IZIIIIIIII)V"),
             method(kPublic, "drawPixels", "([SZIIIIIIII)V"),
+            method(kPublic, "getPixels", "([B[BIIIIIII)V"),
             method(kPublic, "getPixels", "([IIIIIIII)V"),
             method(kPublic, "getPixels", "([SIIIIIII)V"),
         }, {"com/nokia/mid/ui/DirectGraphics"});

@@ -294,7 +294,7 @@ void add(NativeMethodRegistry& registry,
                                                 std::string_view id,
                                                 i32 raw_offset) {
     auto zone = machine.class_states().allocate_instance(
-        machine.heap(), "java/util/TimeZone");
+        machine.heap(), "com/sun/cldc/util/j2me/TimeZoneImpl");
     if (!zone) return std::unexpected(zone.error());
     auto id_string = create_string(machine, ascii_text(id));
     if (!id_string) return std::unexpected(id_string.error());
@@ -601,7 +601,7 @@ void register_time_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*string));
         });
 
-    add(registry, "java/util/TimeZone", "<init>", "()V",
+    const NativeMethod timezone_constructor =
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto zone = receiver(arguments);
@@ -614,8 +614,8 @@ void register_time_natives(NativeMethodRegistry& registry) {
             if (!stored_id) return std::unexpected(stored_id.error());
             if (!stored_offset) return std::unexpected(stored_offset.error());
             return std::optional<Value> {};
-        });
-    add(registry, "java/util/TimeZone", "getOffset", "(IIIIII)I",
+        };
+    const NativeMethod timezone_get_offset =
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             if (arguments.size() != 7U) {
@@ -624,11 +624,34 @@ void register_time_natives(NativeMethodRegistry& registry) {
             }
             auto zone = receiver(arguments);
             if (!zone) return std::unexpected(zone.error());
+            std::array<i32, 6> fields {};
+            for (usize index = 0U; index < fields.size(); ++index) {
+                auto parsed = arguments[index + 1U].as_int();
+                if (!parsed) return std::unexpected(parsed.error());
+                fields[index] = *parsed;
+            }
+            static constexpr std::array<i32, 12> month_lengths {{
+                31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+            }};
+            const i32 era = fields[0];
+            const i32 month = fields[2];
+            const i32 day = fields[3];
+            const i32 day_of_week = fields[4];
+            const i32 millis = fields[5];
+            if ((era != 0 && era != 1) || month < 0 || month >= 12 ||
+                day < 1 ||
+                (month >= 0 && month < 12 &&
+                 day > month_lengths[static_cast<usize>(month)]) ||
+                day_of_week < 1 || day_of_week > 7 || millis < 0 ||
+                static_cast<i64>(millis) >= kMillisPerDay) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "TimeZone date fields are out of range");
+            }
             auto offset = timezone_offset(machine, *zone);
             if (!offset) return std::unexpected(offset.error());
             return std::optional<Value>(Value::from_int(*offset));
-        });
-    add(registry, "java/util/TimeZone", "getRawOffset", "()I",
+        };
+    const NativeMethod timezone_get_raw_offset =
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto zone = receiver(arguments);
@@ -636,7 +659,30 @@ void register_time_natives(NativeMethodRegistry& registry) {
             auto offset = timezone_offset(machine, *zone);
             if (!offset) return std::unexpected(offset.error());
             return std::optional<Value>(Value::from_int(*offset));
-        });
+        };
+    const NativeMethod timezone_use_daylight =
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto zone = receiver(arguments);
+            if (!zone) return std::unexpected(zone.error());
+            return std::optional<Value>(Value::from_int(0));
+        };
+    const NativeMethod timezone_get_id =
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto zone = receiver(arguments);
+            if (!zone) return std::unexpected(zone.error());
+            auto id = reference_field(machine, *zone, kZoneIdField);
+            if (!id) return std::unexpected(id.error());
+            return std::optional<Value>(Value::from_reference(*id));
+        };
+
+    add(registry, "java/util/TimeZone", "<init>", "()V",
+        timezone_constructor);
+    add(registry, "java/util/TimeZone", "getOffset", "(IIIIII)I",
+        timezone_get_offset);
+    add(registry, "java/util/TimeZone", "getRawOffset", "()I",
+        timezone_get_raw_offset);
     add(registry, "java/util/TimeZone", "setRawOffset", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -650,21 +696,19 @@ void register_time_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
     add(registry, "java/util/TimeZone", "useDaylightTime", "()Z",
-        [](Machine&, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto zone = receiver(arguments);
-            if (!zone) return std::unexpected(zone.error());
-            return std::optional<Value>(Value::from_int(0));
-        });
+        timezone_use_daylight);
     add(registry, "java/util/TimeZone", "getID", "()Ljava/lang/String;",
-        [](Machine& machine, std::span<const Value> arguments)
-            -> Result<std::optional<Value>> {
-            auto zone = receiver(arguments);
-            if (!zone) return std::unexpected(zone.error());
-            auto id = reference_field(machine, *zone, kZoneIdField);
-            if (!id) return std::unexpected(id.error());
-            return std::optional<Value>(Value::from_reference(*id));
-        });
+        timezone_get_id);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "<init>", "()V",
+        timezone_constructor);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "getOffset",
+        "(IIIIII)I", timezone_get_offset);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "getRawOffset", "()I",
+        timezone_get_raw_offset);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "useDaylightTime",
+        "()Z", timezone_use_daylight);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "getID",
+        "()Ljava/lang/String;", timezone_get_id);
     add(registry, "java/util/TimeZone", "setID", "(Ljava/lang/String;)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -739,13 +783,16 @@ void register_time_natives(NativeMethodRegistry& registry) {
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
-    add(registry, "java/util/TimeZone", "getAvailableIDs",
-        "()[Ljava/lang/String;",
+    const NativeMethod timezone_get_ids =
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
-            if (!arguments.empty()) {
+            if (arguments.size() > 1U) {
                 return fail(ErrorCode::invalid_argument,
-                            "TimeZone.getAvailableIDs expects no arguments");
+                            "TimeZone ID enumeration has invalid arguments");
+            }
+            if (arguments.size() == 1U) {
+                auto impl = receiver(arguments);
+                if (!impl) return std::unexpected(impl.error());
             }
             auto array = machine.heap().allocate_array(
                 "[Ljava/lang/String;", 2U, Value::from_reference({}));
@@ -761,6 +808,34 @@ void register_time_natives(NativeMethodRegistry& registry) {
             if (!first) return std::unexpected(first.error());
             if (!second) return std::unexpected(second.error());
             return std::optional<Value>(Value::from_reference(*array));
+        };
+    add(registry, "java/util/TimeZone", "getAvailableIDs",
+        "()[Ljava/lang/String;", timezone_get_ids);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "getIDs",
+        "()[Ljava/lang/String;", timezone_get_ids);
+    add(registry, "com/sun/cldc/util/j2me/TimeZoneImpl", "getInstance",
+        "(Ljava/lang/String;)Ljava/util/TimeZone;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto impl = receiver(arguments);
+            if (!impl) return std::unexpected(impl.error());
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "TimeZoneImpl.getInstance expects one ID");
+            }
+            auto id_reference = arguments[1].as_reference();
+            if (!id_reference) return std::unexpected(id_reference.error());
+            std::string id = "GMT";
+            if (!id_reference->is_null()) {
+                auto parsed_id = ascii_string(machine, *id_reference);
+                if (!parsed_id) return std::unexpected(parsed_id.error());
+                id = std::move(*parsed_id);
+            }
+            auto parsed = parse_timezone_id(std::move(id));
+            if (!parsed) return std::unexpected(parsed.error());
+            auto zone = create_timezone(machine, parsed->first, parsed->second);
+            if (!zone) return std::unexpected(zone.error());
+            return std::optional<Value>(Value::from_reference(*zone));
         });
 
     const NativeMethod calendar_constructor =

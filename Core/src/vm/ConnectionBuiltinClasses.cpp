@@ -119,6 +119,24 @@ using namespace builtin;
                           },
                           {"javax/microedition/io/Connection"});
     }
+    if (name == "java/net/Socket") {
+        return make_class(name.data(), "java/lang/Object", kOrdinary,
+                          {
+                              field(kPrivate, "handle", "I"),
+                              field(kPrivate, "generation", "I"),
+                          },
+                          {
+                              method(kPublic, "<init>", "()V"),
+                              method(kPublic, "<init>",
+                                     "(Ljava/lang/String;I)V"),
+                              method(kPublic, "getInputStream",
+                                     "()Ljava/io/InputStream;"),
+                              method(kPublic, "getOutputStream",
+                                     "()Ljava/io/OutputStream;"),
+                              method(kPublic, "close", "()V"),
+                              method(kPublic, "isClosed", "()Z"),
+                          });
+    }
     if (name == "javax/microedition/io/SocketConnection") {
         return make_class(name.data(), "java/lang/Object",
                           kPublic | kInterface | kAbstract,
@@ -392,6 +410,9 @@ using namespace builtin;
                               field(kPrivate, "generation", "I"),
                               field(kPrivate, "closed", "Z"),
                               field(kPrivate, "ownsConnection", "Z"),
+                              field(kPrivate, "buffer", "[B"),
+                              field(kPrivate, "bufferPosition", "I"),
+                              field(kPrivate, "bufferCount", "I"),
                           },
                           {
                               method(kPublic, "read", "()I"),

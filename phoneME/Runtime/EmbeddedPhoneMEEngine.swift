@@ -367,6 +367,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         frameRateLimit: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
+        translateChineseToVietnamese: Bool,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -430,6 +431,15 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 let loadedAPI = try PhoneMECAPI.load(gameID: gameID)
                 guard let createdRuntime = loadedAPI.createRuntime() else {
                     throw PhoneMECoreError.runtimeCreationFailed
+                }
+
+                let translationResult = loadedAPI.configureTranslation(
+                    createdRuntime,
+                    enabled: translateChineseToVietnamese
+                )
+                guard translationResult == 0 else {
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw PhoneMECoreError.launchFailed(translationResult)
                 }
 
                 let keymapResult = loadedAPI.configureKeymap(
@@ -592,6 +602,132 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    func exportRMS(
+        gameID: UUID,
+        jarURL: URL,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        let context = runtimeContext
+        runtimeQueue.async {
+            let result: Result<Data, Error>
+            do {
+                guard context.appIDs.isEmpty else {
+                    throw PhoneMERMSBackupError.runtimeBusy
+                }
+                let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
+                    in: context
+                )
+                let suiteID = try Self.resolveSuiteID(
+                    gameID: gameID,
+                    jarURL: jarURL,
+                    api: loadedAPI,
+                    runtime: createdRuntime,
+                    context: context
+                )
+                result = .success(
+                    try PhoneMERuntimeResources.exportRMSBackup(
+                        suiteID: suiteID,
+                        jarURL: jarURL
+                    )
+                )
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    func importRMS(
+        from sourceURL: URL,
+        gameID: UUID,
+        jarURL: URL,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let context = runtimeContext
+        runtimeQueue.async {
+            let result: Result<Void, Error>
+            do {
+                guard context.appIDs.isEmpty else {
+                    throw PhoneMERMSBackupError.runtimeBusy
+                }
+                let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
+                    in: context
+                )
+                let suiteID = try Self.resolveSuiteID(
+                    gameID: gameID,
+                    jarURL: jarURL,
+                    api: loadedAPI,
+                    runtime: createdRuntime,
+                    context: context
+                )
+                try PhoneMERuntimeResources.importRMSBackup(
+                    from: sourceURL,
+                    suiteID: suiteID,
+                    jarURL: jarURL
+                )
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    func deleteStoredData(
+        gameID: UUID,
+        jarURL: URL,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let context = runtimeContext
+        runtimeQueue.async { [weak self] in
+            let result: Result<Void, Error>
+            do {
+                let (loadedAPI, createdRuntime) = try Self.ensureRuntime(
+                    in: context
+                )
+                let suiteID = try Self.resolveSuiteID(
+                    gameID: gameID,
+                    jarURL: jarURL,
+                    api: loadedAPI,
+                    runtime: createdRuntime,
+                    context: context
+                )
+                let status = loadedAPI.uninstallSuite(
+                    createdRuntime,
+                    suiteID: suiteID,
+                    removeData: true
+                )
+                guard status == PHONEME_OK else {
+                    throw PhoneMECoreError.launchFailed(status)
+                }
+                context.suiteIDs.removeValue(forKey: gameID)
+
+                if context.appIDs.isEmpty {
+                    loadedAPI.stop(createdRuntime)
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    context.reset()
+                }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                if context.runtime == nil {
+                    self?.api = nil
+                    self?.runtime = nil
+                    self?.runtimeIsSuspended = false
+                    self?.runtimeSuspensionRequested = false
+                }
+                completion(result)
+            }
+        }
+    }
+
     func launchApplication(
         gameID: UUID,
         jarURL: URL,
@@ -604,6 +740,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         frameRateLimit: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
+        translateChineseToVietnamese: Bool,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -659,8 +796,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     in: context
                 )
 
-                var suiteID = context.suiteIDs[gameID]
-                if suiteID == nil {
+                let resolvedSuiteID: Int32
+                if let preparedSuiteID = context.suiteIDs[gameID] {
+                    resolvedSuiteID = preparedSuiteID
+                } else {
                     let install = loadedAPI.installJar(
                         createdRuntime,
                         jarURL: jarURL
@@ -672,11 +811,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         throw PhoneMECoreError.launchFailed(install.status)
                     }
                     context.suiteIDs[gameID] = installedSuiteID
-                    suiteID = installedSuiteID
-                }
-
-                guard let resolvedSuiteID = suiteID else {
-                    throw PhoneMECoreError.launchFailed(-1)
+                    resolvedSuiteID = installedSuiteID
                 }
                 // Trust is persisted with the installed suite, but reassert it
                 // on every launch so prepared/reused suites cannot regress to
@@ -699,6 +834,14 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     guard systemStartResult == 0 else {
                         throw PhoneMECoreError.launchFailed(systemStartResult)
                     }
+                }
+
+                let translationResult = loadedAPI.configureTranslation(
+                    createdRuntime,
+                    enabled: translateChineseToVietnamese
+                )
+                guard translationResult == 0 else {
+                    throw PhoneMECoreError.launchFailed(translationResult)
                 }
 
                 let keymapResult = loadedAPI.configureKeymap(
@@ -758,23 +901,23 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         }
                     } else {
                         appID = existingAppID
-                        if existingState == .paused {
-                            let resumeResult = loadedAPI.resumeMidlet(
-                                createdRuntime,
-                                appID: existingAppID
-                            )
-                            guard resumeResult == 0 else {
-                                throw PhoneMECoreError.launchFailed(resumeResult)
-                            }
+                        guard try Self.resumeApplicationIfNeeded(
+                            api: loadedAPI,
+                            runtime: createdRuntime,
+                            appID: existingAppID,
+                            token: currentLaunchToken
+                        ) else {
+                            return
                         }
-                        let foregroundResult = loadedAPI.setForeground(
-                            createdRuntime,
+                        guard try Self.restoreForegroundApplication(
+                            api: loadedAPI,
+                            runtime: createdRuntime,
                             appID: existingAppID,
                             screenWidth: screenWidth,
-                            screenHeight: screenHeight
-                        )
-                        guard foregroundResult == 0 else {
-                            throw PhoneMECoreError.launchFailed(foregroundResult)
+                            screenHeight: screenHeight,
+                            token: currentLaunchToken
+                        ) else {
+                            return
                         }
                     }
                 } else {
@@ -1019,6 +1162,112 @@ final class EmbeddedPhoneMEEngine: NSObject {
         return (api, runtime)
     }
 
+    nonisolated private static func resolveSuiteID(
+        gameID: UUID,
+        jarURL: URL,
+        api: PhoneMECAPI,
+        runtime: PhoneMECAPI.RuntimeHandle,
+        context: RuntimeContext
+    ) throws -> Int32 {
+        if let suiteID = context.suiteIDs[gameID] {
+            return suiteID
+        }
+
+        let install = api.installJar(runtime, jarURL: jarURL)
+        guard install.status == PHONEME_OK,
+              let suiteID = install.suiteID else {
+            throw PhoneMECoreError.launchFailed(install.status)
+        }
+        context.suiteIDs[gameID] = suiteID
+        return suiteID
+    }
+
+    nonisolated private static func resumeApplicationIfNeeded(
+        api: PhoneMECAPI,
+        runtime: PhoneMECAPI.RuntimeHandle,
+        appID: Int32,
+        token: LaunchToken,
+        timeout: TimeInterval = 2
+    ) throws -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var lastResult = Int32(PHONEME_OK)
+
+        repeat {
+            if token.isCancelled {
+                return false
+            }
+
+            switch api.midletState(runtime, appID: appID) {
+            case .active:
+                return true
+            case .paused:
+                lastResult = api.resumeMidlet(runtime, appID: appID)
+                if lastResult == PHONEME_OK {
+                    return true
+                }
+                if lastResult != PHONEME_ERROR_SYSTEM_START {
+                    throw PhoneMECoreError.launchFailed(lastResult)
+                }
+            case .none, .destroyed, .error:
+                throw PhoneMECoreError.foregroundActivationFailed
+            }
+
+            Thread.sleep(forTimeInterval: 0.005)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+
+        throw PhoneMECoreError.launchFailed(lastResult)
+    }
+
+    nonisolated private static func restoreForegroundApplication(
+        api: PhoneMECAPI,
+        runtime: PhoneMECAPI.RuntimeHandle,
+        appID: Int32,
+        screenWidth: Int,
+        screenHeight: Int,
+        token: LaunchToken,
+        timeout: TimeInterval = 2
+    ) throws -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var lastResult = Int32(PHONEME_OK)
+
+        repeat {
+            if token.isCancelled {
+                return false
+            }
+
+            let state = api.midletState(runtime, appID: appID)
+            if state == .none || state == .destroyed || state == .error {
+                throw PhoneMECoreError.foregroundActivationFailed
+            }
+
+            lastResult = api.setForeground(
+                runtime,
+                appID: appID,
+                screenWidth: screenWidth,
+                screenHeight: screenHeight
+            )
+            if lastResult == PHONEME_OK {
+                return true
+            }
+            if lastResult != PHONEME_ERROR_SYSTEM_START {
+                throw PhoneMECoreError.launchFailed(lastResult)
+            }
+
+            let updatedState = api.midletState(runtime, appID: appID)
+            if updatedState == .none || updatedState == .destroyed ||
+                updatedState == .error {
+                throw PhoneMECoreError.foregroundActivationFailed
+            }
+
+            // Error -6 also represents Core's transient invalid_state while a
+            // lifecycle or visibility callback is still completing. Simulator
+            // scheduling makes that window much easier to hit after Hide.
+            Thread.sleep(forTimeInterval: 0.005)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+
+        throw PhoneMECoreError.launchFailed(lastResult)
+    }
+
     nonisolated private static func waitForForegroundApplication(
         api: PhoneMECAPI,
         runtime: PhoneMECAPI.RuntimeHandle,
@@ -1047,14 +1296,16 @@ final class EmbeddedPhoneMEEngine: NSObject {
             if state == .active,
                !didReassertForeground,
                api.foregroundAppID(runtime) != appID {
-                let result = api.setForeground(
-                    runtime,
+                guard try restoreForegroundApplication(
+                    api: api,
+                    runtime: runtime,
                     appID: appID,
                     screenWidth: screenWidth,
-                    screenHeight: screenHeight
-                )
-                guard result == 0 else {
-                    throw PhoneMECoreError.launchFailed(result)
+                    screenHeight: screenHeight,
+                    token: token,
+                    timeout: 0.5
+                ) else {
+                    return false
                 }
                 didReassertForeground = true
                 settleDeadline = ProcessInfo.processInfo.systemUptime + 0.25
@@ -1146,17 +1397,50 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    func resetForStorageChange() {
+        launchToken.cancel()
+        launchIdentifier = UUID()
+        pendingForegroundGameID = nil
+        clearCurrentRuntime()
+
+        let context = runtimeContext
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
+        runtimeQueue.async { [weak self] in
+            inputQueue.sync { }
+            pollQueue.sync { }
+            renderQueue.sync { }
+
+            if let loadedAPI = context.api,
+               let createdRuntime = context.runtime {
+                loadedAPI.stop(createdRuntime)
+                loadedAPI.destroyRuntime(createdRuntime)
+            }
+            context.reset()
+
+            DispatchQueue.main.async {
+                self?.api = nil
+                self?.runtime = nil
+                self?.runtimeIsSuspended = false
+                self?.runtimeSuspensionRequested = false
+                self?.setState(.idle)
+            }
+        }
+    }
+
     func enterBackground() {
         shouldRunInForeground = false
-        pauseHostPollingForBackground()
 
-        // Do not call midp_suspend() for an iOS scene transition. MIDP turns
-        // that into PAUSE_ALL_EVENT/pauseApp(), and many online games close
-        // their TCP socket from pauseApp() even though the user only pressed
-        // Home. Let iOS suspend the process naturally instead. When the
-        // optional Core Location keeper is enabled, the VM thread continues
-        // running in the background while rendering and LCDUI polling remain
-        // stopped.
+        // Suspend the host-facing runtime state, not the MIDlet lifecycle.
+        // Core's Runtime::suspend() never invokes pauseApp() and never closes
+        // sockets. It marks Canvas as detached (discarding repaint/flush work),
+        // coalesces duplicate callSerially callbacks, throttles Java execution,
+        // and suspends media while the optional background keeper can preserve
+        // an online connection. Merely stopping the Swift poll timer leaves the
+        // core believing the screen is visible, so callbacks accumulate and are
+        // replayed in a burst when the scene becomes active again.
+        suspendRuntimeIfNeeded()
     }
 
     func enterForeground() {
@@ -1508,6 +1792,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 }
             }
 
+            if context.visibleScreen?.usesNativeLCDUI == true {
+                // Native LCDUI screens do not request Canvas frames, so pump
+                // the VM explicitly to advance Alert timeouts, callSerially,
+                // repaint coalescing, and other LCDUI event-thread work.
+                api.pumpEvents(runtime)
+            }
+
             let lcdUIEvents = api.drainLCDUIEvents(
                 runtime,
                 maximumCount: 512
@@ -1700,8 +1991,52 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 ? .failed("The J2ME application stopped unexpectedly.")
                 : .stopped
         )
-        runtimeQueue.async {
+
+        // A MIDlet calling notifyDestroyed() must follow the same native
+        // teardown path as the host Exit action. Otherwise the Swift session
+        // disappears while its runtime, sockets, media and worker queues stay
+        // alive in RuntimeContext.
+        let inputQueue = inputQueue
+        let pollQueue = pollQueue
+        let renderQueue = renderQueue
+        runtimeQueue.async { [weak self] in
+            inputQueue.sync { }
+            pollQueue.sync { }
+            renderQueue.sync { }
+
+            guard
+                let loadedAPI = context.api,
+                let createdRuntime = context.runtime
+            else {
+                context.removeApplication(gameID: gameID)
+                return
+            }
+
+            if let appID = context.appIDs[gameID] {
+                _ = loadedAPI.destroyMidlet(createdRuntime, appID: appID)
+            }
             context.removeApplication(gameID: gameID)
+
+            let shouldShutdown = context.appIDs.isEmpty
+            if shouldShutdown {
+                loadedAPI.stop(createdRuntime)
+                loadedAPI.destroyRuntime(createdRuntime)
+                context.reset()
+            }
+
+            guard shouldShutdown else { return }
+            DispatchQueue.main.async {
+                guard
+                    let self,
+                    self.runtime == createdRuntime
+                else {
+                    return
+                }
+                self.api = nil
+                self.runtime = nil
+                self.runtimeIsSuspended = false
+                self.runtimeSuspensionRequested = false
+            }
         }
     }
 

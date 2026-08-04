@@ -72,8 +72,14 @@ struct EmulatorView: View {
         !presentsFullscreenSurface && !session.lcdUI.commands.isEmpty
     }
 
+    // MIDP fullscreen controls the emulated Canvas chrome only. It must not
+    // override the user's native ActionBar/status-bar preferences.
+    private var presentsEdgeToEdgeSurface: Bool {
+        presentsFullscreenSurface && !enableActionBar && !enableStatusBar
+    }
+
     var body: some View {
-        NavigationStack {
+        PhoneMENavigationStack {
             GeometryReader { geometry in
                 ZStack {
                     Color.playSurfaceBackground
@@ -205,9 +211,24 @@ struct EmulatorView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
-                            .padding(10)
-                            .background(.regularMaterial, in: Capsule())
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                .regularMaterial,
+                                in: RoundedRectangle(
+                                    cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                                    style: .continuous
+                                )
+                            )
+                            .overlay {
+                                RoundedRectangle(
+                                    cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                                    style: .continuous
+                                )
+                                .stroke(Color.phoneMEHairline, lineWidth: 0.5)
+                            }
+                            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                            .padding(.horizontal, PhoneMEVisualMetrics.horizontalInset)
                             .padding(.top, 8)
 
                             Spacer()
@@ -221,8 +242,7 @@ struct EmulatorView: View {
                     }
 
                     if session.state == .starting {
-                        ProgressView()
-                            .controlSize(.large)
+                        EmulatorLoadingOverlay(title: "Starting \(game.title)")
                     }
                 }
                 .coordinateSpace(name: "emulatorSurface")
@@ -237,25 +257,20 @@ struct EmulatorView: View {
             }
             .ignoresSafeArea(
                 .container,
-                edges: presentsFullscreenSurface ? .all : []
+                edges: presentsEdgeToEdgeSurface ? .all : []
             )
 #if os(iOS)
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar(
-                enableActionBar && !presentsFullscreenSurface
-                    ? .visible
-                    : .hidden,
-                for: .navigationBar
-            )
+            .phoneMENavigationBarBackgroundVisible()
+            .phoneMENavigationBarVisible(enableActionBar)
 #else
             .navigationTitle(navigationTitle)
 #endif
         }
         .coordinateSpace(name: "emulatorCaptureWindow")
 #if os(iOS)
-        .statusBarHidden(!enableStatusBar || presentsFullscreenSurface)
+        .statusBarHidden(!enableStatusBar)
 #endif
         .onAppear {
             if !playNativeChromeDefaultApplied {
@@ -316,7 +331,7 @@ struct EmulatorView: View {
             }
         }
         .sheet(isPresented: $showHiddenKeysEditor) {
-            NavigationStack {
+            PhoneMENavigationStack {
                 KeyboardVisibilityEditor(
                     controls: KeyboardLayoutCatalog.controlChoices(for: runtimeProfile),
                     hiddenControlIDs: $hiddenKeyDraft,
@@ -334,13 +349,13 @@ struct EmulatorView: View {
         } message: {
             Text(errorMessage)
         }
-        .alert("Confirmation required", isPresented: $showExitConfirmation) {
+        .alert("Exit application?", isPresented: $showExitConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("OK", role: .destructive) {
+            Button("Exit", role: .destructive) {
                 close()
             }
         } message: {
-            Text("Force-closing the application may result in data loss or even break it completely!\nProceed?")
+            Text("Unsaved progress may be lost.")
         }
     }
 
@@ -739,13 +754,17 @@ struct EmulatorView: View {
             return
         }
 
-        scene.windows
-            .first(where: \.isKeyWindow)?
-            .rootViewController?
-            .setNeedsUpdateOfSupportedInterfaceOrientations()
-        scene.requestGeometryUpdate(
-            .iOS(interfaceOrientations: mask)
-        ) { _ in }
+        if #available(iOS 16.0, *) {
+            scene.windows
+                .first(where: \.isKeyWindow)?
+                .rootViewController?
+                .setNeedsUpdateOfSupportedInterfaceOrientations()
+            scene.requestGeometryUpdate(
+                .iOS(interfaceOrientations: mask)
+            ) { _ in }
+        } else {
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
     }
 #endif
 }
@@ -755,6 +774,46 @@ private struct NativeLCDUICaptureRectPreferenceKey: PreferenceKey {
 
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
+    }
+}
+
+private struct EmulatorLoadingOverlay: View {
+    let title: String
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+
+            VStack(spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("Preparing the Java ME runtime…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .frame(maxWidth: 320)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(
+                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                style: .continuous
+            )
+        )
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                style: .continuous
+            )
+            .stroke(Color.phoneMEHairline, lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 12, y: 5)
+        .padding(PhoneMEVisualMetrics.horizontalInset)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -813,13 +872,13 @@ private struct EmulatorToolbarAnchor: View, Equatable {
 
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: toggleKeyboardAction) {
-                        Image(systemName: "keyboard")
+                        PhoneMEToolbarIconLabel(systemImage: "keyboard")
                     }
                     .accessibilityLabel("Keyboard (IME)")
                     .disabled(keyboardDisabled)
 
                     Button(action: screenshotAction) {
-                        Image(systemName: "camera")
+                        PhoneMEToolbarIconLabel(systemImage: "camera")
                     }
                     .accessibilityLabel("Take screenshot")
 
@@ -874,8 +933,9 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                             )
                         }
                     } label: {
-                        Image(systemName: "ellipsis")
+                        PhoneMEToolbarIconLabel(systemImage: "ellipsis")
                     }
+                    .accessibilityLabel("More")
                 }
             }
     }
@@ -890,14 +950,28 @@ private struct KeyboardVisibilityEditor: View {
 
     var body: some View {
         List {
-            ForEach(controls) { control in
-                Toggle(
-                    control.accessibilityLabel.capitalized,
-                    isOn: visibilityBinding(for: control.id)
+            Section {
+                ForEach(controls) { control in
+                    Toggle(
+                        control.accessibilityLabel.capitalized,
+                        isOn: visibilityBinding(for: control.id)
+                    )
+                    .frame(minHeight: PhoneMEVisualMetrics.minimumRowHeight)
+                    .listRowBackground(Color.phoneMECardBackground)
+                }
+            } header: {
+                PhoneMESectionTitle(
+                    title: "Visible controls",
+                    subtitle: "Turn off controls you do not need for this game."
                 )
             }
         }
-        .navigationTitle("Hide buttons")
+        .listStyle(.insetGrouped)
+        .phoneMEScrollContentBackgroundHidden()
+        .background(Color.phoneMEAppBackground)
+        .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
+        .frame(maxWidth: .infinity)
+        .navigationTitle("Virtual buttons")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
@@ -1409,19 +1483,29 @@ struct PhoneMEToolbarTitle: View {
             .font(.headline)
             .lineLimit(1)
             .truncationMode(.tail)
-            .frame(maxWidth: 150, alignment: .leading)
+            .frame(maxWidth: 190, alignment: .leading)
             .accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct PhoneMEToolbarIconLabel: View {
+    let systemImage: String
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.body.weight(.medium))
+            .imageScale(.medium)
     }
 }
 
 private extension Color {
     static var playSurfaceBackground: Color {
 #if canImport(UIKit)
-        Color(uiColor: .systemBackground)
+        Color(uiColor: .systemGroupedBackground)
 #elseif canImport(AppKit)
         Color(nsColor: .windowBackgroundColor)
 #else
-        Color.white
+        Color.phoneMEAppBackground
 #endif
     }
 }

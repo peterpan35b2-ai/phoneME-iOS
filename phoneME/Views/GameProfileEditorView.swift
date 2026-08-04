@@ -43,6 +43,10 @@ struct GameProfileEditorView: View {
             fontSection
             inputSection
         }
+        .phoneMEScrollContentBackgroundHidden()
+        .background(Color.phoneMEAppBackground)
+        .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
+        .frame(maxWidth: .infinity)
         .navigationTitle(title)
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -50,25 +54,32 @@ struct GameProfileEditorView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if game != nil {
-                    Button("Start") {
+                    Button {
                         persistProfile()
                         startAction?()
+                    } label: {
+                        Label("Start", systemImage: "play.fill")
                     }
                 }
 
                 Menu {
-                    Button("Reset settings", role: .destructive) {
+                    Button {
                         profile = .default
+                    } label: {
+                        Label("Reset settings", systemImage: "arrow.counterclockwise")
                     }
-                    Button("Reset key layout") {
+                    Button {
                         profile.keyLayout = .nokiaSE
                         profile.resetCustomKeyMappings()
                         profile.virtualKeyboardType = .arrowsNumbers
                         profile.resetKeyboardLayoutCustomization()
+                    } label: {
+                        Label("Reset key layout", systemImage: "keyboard")
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
+                    Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityLabel("More")
             }
         }
         .onDisappear {
@@ -98,14 +109,14 @@ struct GameProfileEditorView: View {
             Button("360 × 640") { setFontPreset(22, 26, 30) }
         }
         .sheet(isPresented: $showKeyMappings) {
-            NavigationStack {
+            PhoneMENavigationStack {
                 KeyMappingsView(profile: $profile)
             }
         }
     }
 
     private var displaySection: some View {
-        Section("Display") {
+        Section {
             HStack(spacing: 10) {
                 IntegerTextField(value: $profile.screenWidth, placeholder: "Width")
                 Text("×")
@@ -170,11 +181,17 @@ struct GameProfileEditorView: View {
             Text("Canvas output supports up to 60 FPS. Enter 0 to use the 60 FPS default.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        } header: {
+            PhoneMESectionTitle(
+                title: "Display",
+                subtitle: "Canvas size, scaling and rendering"
+            )
         }
+        .listRowBackground(Color.phoneMECardBackground)
     }
 
     private var fontSection: some View {
-        Section("Fonts") {
+        Section {
             HStack(spacing: 8) {
                 IntegerTextField(value: $profile.fontSmall, placeholder: "Small")
                 IntegerTextField(value: $profile.fontMedium, placeholder: "Medium")
@@ -191,11 +208,17 @@ struct GameProfileEditorView: View {
                 "Use Dynamic Type scaling",
                 isOn: $profile.fontValuesAreScaledPixels
             )
+        } header: {
+            PhoneMESectionTitle(
+                title: "Fonts",
+                subtitle: "Native LCDUI and Canvas text sizes"
+            )
         }
+        .listRowBackground(Color.phoneMECardBackground)
     }
 
     private var inputSection: some View {
-        Section("Input") {
+        Section {
             Toggle("Touch input", isOn: $profile.touchInput)
             NativeProfilePicker("J2ME key layout", selection: $profile.keyLayout)
 
@@ -249,7 +272,13 @@ struct GameProfileEditorView: View {
                     .foregroundStyle(.secondary)
             }
             .disabled(!profile.showVirtualKeyboard)
+        } header: {
+            PhoneMESectionTitle(
+                title: "Input",
+                subtitle: "Touch, key mapping and virtual controls"
+            )
         }
+        .listRowBackground(Color.phoneMECardBackground)
     }
 
     private func persistProfile() {
@@ -312,8 +341,23 @@ private struct IntegerTextField: View {
             .foregroundStyle(.primary)
             .tint(.accentColor)
             .multilineTextAlignment(.center)
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: width ?? .infinity)
+            .textFieldStyle(.plain)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: width ?? .infinity, minHeight: 36)
+            .background(Color.phoneMEControlBackground)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: PhoneMEVisualMetrics.controlCornerRadius,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: PhoneMEVisualMetrics.controlCornerRadius,
+                    style: .continuous
+                )
+                .stroke(Color.phoneMEHairline, lineWidth: 0.5)
+            }
 #if os(iOS)
             .keyboardType(.numberPad)
 #endif
@@ -326,13 +370,18 @@ private struct KeyMappingsView: View {
 
     var body: some View {
         Form {
-            Picker("Layout", selection: $profile.keyLayout) {
-                ForEach(GameProfile.KeyLayout.allCases) { layout in
-                    Text(layout.title).tag(layout)
+            Section {
+                Picker("Layout", selection: $profile.keyLayout) {
+                    ForEach(GameProfile.KeyLayout.allCases) { layout in
+                        Text(layout.title).tag(layout)
+                    }
                 }
+            } header: {
+                PhoneMESectionTitle(title: "Layout")
             }
+            .listRowBackground(Color.phoneMECardBackground)
 
-            Section("MIDP key codes") {
+            Section {
                 ForEach(J2MEKey.configurableKeys) { key in
                     HStack {
                         Text(key.mappingTitle)
@@ -358,14 +407,29 @@ private struct KeyMappingsView: View {
                         }
                     }
                 }
+            } header: {
+                PhoneMESectionTitle(
+                    title: "MIDP key codes",
+                    subtitle: profile.keyLayout == .custom
+                        ? "Enter the Java ME key code for each control."
+                        : "Switch to Custom to edit these values."
+                )
             }
+            .listRowBackground(Color.phoneMECardBackground)
 
             if profile.keyLayout == .custom {
-                Button("Reset custom mappings", role: .destructive) {
-                    profile.resetCustomKeyMappings()
+                Section {
+                    Button("Reset custom mappings", role: .destructive) {
+                        profile.resetCustomKeyMappings()
+                    }
                 }
+                .listRowBackground(Color.phoneMECardBackground)
             }
         }
+        .phoneMEScrollContentBackgroundHidden()
+        .background(Color.phoneMEAppBackground)
+        .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
+        .frame(maxWidth: .infinity)
         .navigationTitle("Key mappings")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

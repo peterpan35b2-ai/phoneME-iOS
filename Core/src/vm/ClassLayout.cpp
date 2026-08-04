@@ -138,6 +138,7 @@ namespace phoneme::vm
               .index = 0,
               .is_static = true,
               .constant_value_index = field.constant_value_index,
+              .storage_key = field_key(current, name, descriptor),
           });
         }
 
@@ -160,6 +161,7 @@ namespace phoneme::vm
             .index = offset->second,
             .is_static = false,
             .constant_value_index = std::nullopt,
+            .storage_key = key,
         });
       }
       current = (*loaded)->super_name();
@@ -218,13 +220,19 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "requested field is not static");
     }
-    const std::string key = field_key(field.declaring_class,
-                                      field.name,
-                                      field.descriptor);
+    std::string fallback_key;
+    const std::string* key = &field.storage_key;
+    if (key->empty())
+    {
+      fallback_key = field_key(field.declaring_class,
+                               field.name,
+                               field.descriptor);
+      key = &fallback_key;
+    }
 
     {
       std::scoped_lock lock(mutex_);
-      if (const auto iterator = static_fields_.find(key);
+      if (const auto iterator = static_fields_.find(*key);
           iterator != static_fields_.end())
       {
         return iterator->second;
@@ -270,7 +278,7 @@ namespace phoneme::vm
     }
 
     std::scoped_lock lock(mutex_);
-    const auto [iterator, inserted] = static_fields_.emplace(key, *initial);
+    const auto [iterator, inserted] = static_fields_.emplace(*key, *initial);
     (void)inserted;
     return iterator->second;
   }
@@ -283,35 +291,33 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "requested field is not static");
     }
-    auto descriptor = parse_field_descriptor(field.descriptor);
-    if (!descriptor)
+    if (field.descriptor.empty())
     {
-      return std::unexpected(descriptor.error());
+      return fail(ErrorCode::malformed_class,
+                  "static field descriptor is empty");
     }
-
     const bool compatible = [&]() noexcept
     {
-      switch (descriptor->kind)
+      switch (field.descriptor.front())
       {
-      case JavaTypeKind::boolean:
-      case JavaTypeKind::byte:
-      case JavaTypeKind::character:
-      case JavaTypeKind::short_integer:
-      case JavaTypeKind::integer:
+      case 'Z':
+      case 'B':
+      case 'C':
+      case 'S':
+      case 'I':
         return value.kind() == ValueKind::int32;
-      case JavaTypeKind::float32:
+      case 'F':
         return value.kind() == ValueKind::float32;
-      case JavaTypeKind::long_integer:
+      case 'J':
         return value.kind() == ValueKind::int64;
-      case JavaTypeKind::float64:
+      case 'D':
         return value.kind() == ValueKind::float64;
-      case JavaTypeKind::reference:
-      case JavaTypeKind::array:
+      case 'L':
+      case '[':
         return value.kind() == ValueKind::reference;
-      case JavaTypeKind::void_type:
+      default:
         return false;
       }
-      return false;
     }();
 
     if (!compatible)
@@ -320,11 +326,17 @@ namespace phoneme::vm
                   "static field value does not match its descriptor");
     }
 
-    const std::string key = field_key(field.declaring_class,
-                                      field.name,
-                                      field.descriptor);
+    std::string fallback_key;
+    const std::string* key = &field.storage_key;
+    if (key->empty())
+    {
+      fallback_key = field_key(field.declaring_class,
+                               field.name,
+                               field.descriptor);
+      key = &fallback_key;
+    }
     std::scoped_lock lock(mutex_);
-    static_fields_.insert_or_assign(key, value);
+    static_fields_.insert_or_assign(*key, value);
     return {};
   }
 

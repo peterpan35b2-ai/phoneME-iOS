@@ -29,6 +29,12 @@ import javax.microedition.midlet.MIDlet;
 public final class LcduiApp extends MIDlet
         implements CommandListener, ItemCommandListener,
         ItemStateListener, Runnable {
+    private static final class MenuList extends List {
+        MenuList(String title, int type, String[] strings) {
+            super(title, type, strings, null);
+        }
+    }
+
     private Display display;
     private Form form;
     private StringItem status;
@@ -135,7 +141,11 @@ public final class LcduiApp extends MIDlet
             status.setText(command == List.SELECT_COMMAND
                     ? "List " + list.getSelectedIndex()
                     : "Wrong list command");
-            display.setCurrent(form);
+            display.callSerially(new Runnable() {
+                public void run() {
+                    display.setCurrent(form);
+                }
+            });
             return;
         }
         if (displayable instanceof TextBox) {
@@ -148,11 +158,12 @@ public final class LcduiApp extends MIDlet
         if (displayable instanceof Alert) {
             status.setText(command == Alert.DISMISS_COMMAND
                     ? "Alert dismissed" : "Wrong alert command");
+            display.setCurrent(form);
             return;
         }
         if (command == menuCommand) {
-            List list = new List("Menu", Choice.IMPLICIT,
-                    new String[] {"One", "Two"}, null);
+            List list = new MenuList("Menu", Choice.IMPLICIT,
+                    new String[] {"One", "Two"});
             list.setCommandListener(this);
             display.setCurrent(list);
             return;

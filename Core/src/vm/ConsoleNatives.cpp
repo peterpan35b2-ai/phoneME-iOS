@@ -569,6 +569,10 @@ template <typename Number>
         return fail_java("java/lang/IllegalArgumentException",
                          "System property key is empty");
     }
+    if (auto configured = machine.configured_system_property(*text);
+        configured.has_value()) {
+        return configured;
+    }
     struct Property final {
         std::u16string_view key;
         std::u16string_view value;

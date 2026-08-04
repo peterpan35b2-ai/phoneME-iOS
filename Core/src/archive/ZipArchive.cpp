@@ -251,6 +251,7 @@ Status ZipArchive::parse_directory() {
 
     central_directory_offset_ = directory_offset;
     entries_.clear();
+    entry_index_.clear();
     entries_.reserve(total_entries);
     std::unordered_set<std::string> names;
     if (limits_.reject_duplicate_names) {
@@ -402,15 +403,20 @@ Status ZipArchive::parse_directory() {
                     "ZIP central-directory size does not match its entries");
     }
 
+    entry_index_.reserve(entries_.size());
+    for (usize index = 0; index < entries_.size(); ++index) {
+        entry_index_.emplace(entries_[index].name, index);
+    }
+
     return {};
 }
 
 const ZipEntry* ZipArchive::find(std::string_view name) const noexcept {
-    const auto iterator = std::find_if(entries_.begin(), entries_.end(),
-                                       [name](const ZipEntry& entry) {
-                                           return entry.name == name;
-                                       });
-    return iterator == entries_.end() ? nullptr : &*iterator;
+    const auto iterator = entry_index_.find(name);
+    if (iterator == entry_index_.end() || iterator->second >= entries_.size()) {
+        return nullptr;
+    }
+    return &entries_[iterator->second];
 }
 
 Result<std::vector<u8>> ZipArchive::read(std::string_view name) const {

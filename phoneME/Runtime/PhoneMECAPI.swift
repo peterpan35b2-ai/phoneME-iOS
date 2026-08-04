@@ -211,6 +211,22 @@ final class PhoneMECAPI: @unchecked Sendable {
         )
     }
 
+    func configureTranslation(
+        _ runtime: RuntimeHandle?,
+        enabled: Bool
+    ) -> Int32 {
+        "auto".withCString { sourceLanguage in
+            "vi".withCString { targetLanguage in
+                phoneme_configure_translation(
+                    runtime?.rawValue,
+                    enabled ? 1 : 0,
+                    sourceLanguage,
+                    targetLanguage
+                )
+            }
+        }
+    }
+
     func installJar(
         _ runtime: RuntimeHandle?,
         jarURL: URL
@@ -220,6 +236,18 @@ final class PhoneMECAPI: @unchecked Sendable {
             phoneme_install_jar(runtime?.rawValue, path, &suiteID)
         }
         return (status, status == 0 ? suiteID : nil)
+    }
+
+    func uninstallSuite(
+        _ runtime: RuntimeHandle?,
+        suiteID: Int32,
+        removeData: Bool
+    ) -> Int32 {
+        phoneme_uninstall_suite(
+            runtime?.rawValue,
+            suiteID,
+            removeData ? 1 : 0
+        )
     }
 
     func setSuiteTrusted(
@@ -459,6 +487,10 @@ final class PhoneMECAPI: @unchecked Sendable {
         action: Int32
     ) {
         phoneme_send_pointer(runtime?.rawValue, x, y, action)
+    }
+
+    func pumpEvents(_ runtime: RuntimeHandle?) {
+        phoneme_pump_events(runtime?.rawValue)
     }
 
     func drainLCDUIEvents(

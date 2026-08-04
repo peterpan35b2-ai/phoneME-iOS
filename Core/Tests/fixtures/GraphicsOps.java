@@ -2,6 +2,9 @@ package corefixture;
 
 import java.io.ByteArrayInputStream;
 
+import com.nokia.mid.ui.DeviceControl;
+import com.nokia.mid.ui.DirectGraphics;
+import com.nokia.mid.ui.DirectUtils;
 import javax.microedition.lcdui.Font;
 import javax.microedition.lcdui.Graphics;
 import javax.microedition.lcdui.Image;
@@ -9,6 +12,7 @@ import javax.microedition.lcdui.Image;
 public final class GraphicsOps {
     private static final int TRANS_NONE = 0;
     private static final int TRANS_ROT90 = 5;
+    private static int nokiaStage;
 
     private GraphicsOps() {
     }
@@ -59,6 +63,99 @@ public final class GraphicsOps {
         } catch (ArrayIndexOutOfBoundsException expected) {
             return true;
         }
+    }
+
+    private static boolean testNokiaBytePixels() {
+        nokiaStage = 1;
+        Image grayImage = Image.createImage(2, 2);
+        DirectGraphics gray = DirectUtils.getDirectGraphics(
+                grayImage.getGraphics());
+        byte[] grayPixels = new byte[] {0, 85, (byte)170, (byte)255};
+        gray.drawPixels(grayPixels, new byte[] {(byte)0xB0},
+                0, 2, 0, 0, 2, 2, 0, DirectGraphics.TYPE_BYTE_8_GRAY);
+        int[] argb = new int[4];
+        grayImage.getRGB(argb, 0, 2, 0, 0, 2, 2);
+        if (argb[0] != 0xFF000000) { nokiaStage = 11; return false; }
+        if (argb[1] != 0xFFFFFFFF) { nokiaStage = 12; return false; }
+        int grayRed = (argb[2] >>> 16) & 0xFF;
+        int grayGreen = (argb[2] >>> 8) & 0xFF;
+        int grayValue = argb[2] & 0xFF;
+        if (grayRed < 166 || grayRed > 176 ||
+                grayGreen < 166 || grayGreen > 176 ||
+                grayValue < 166 || grayValue > 176) {
+            nokiaStage = 13;
+            return false;
+        }
+        if (argb[3] != 0xFFFFFFFF) { nokiaStage = 14; return false; }
+        nokiaStage = 2;
+        byte[] grayOut = new byte[4];
+        byte[] grayMask = new byte[1];
+        gray.getPixels(grayOut, grayMask, 0, 2, 0, 0, 2, 2,
+                DirectGraphics.TYPE_BYTE_8_GRAY);
+        int grayOutValue = grayOut[2] & 0xFF;
+        if ((grayOut[0] & 0xFF) != 0 || (grayOut[1] & 0xFF) != 255 ||
+                grayOutValue < 166 || grayOutValue > 176 ||
+                (grayOut[3] & 0xFF) != 255 ||
+                (grayMask[0] & 0xF0) != 0xF0) {
+            return false;
+        }
+
+        nokiaStage = 3;
+        Image packedImage = Image.createImage(4, 1);
+        DirectGraphics packed = DirectUtils.getDirectGraphics(
+                packedImage.getGraphics());
+        packed.drawPixels(new byte[] {(byte)0x1B}, null,
+                0, 4, 0, 0, 4, 1, 0, DirectGraphics.TYPE_BYTE_2_GRAY);
+        byte[] packedOut = new byte[1];
+        packed.getPixels(packedOut, null, 0, 4, 0, 0, 4, 1,
+                DirectGraphics.TYPE_BYTE_2_GRAY);
+        if ((packedOut[0] & 0xFF) != 0x1B) return false;
+
+        nokiaStage = 4;
+        Image rgbImage = Image.createImage(1, 1);
+        DirectGraphics rgb = DirectUtils.getDirectGraphics(
+                rgbImage.getGraphics());
+        rgb.drawPixels(new byte[] {(byte)0xE3}, null,
+                0, 1, 0, 0, 1, 1, 0, DirectGraphics.TYPE_BYTE_332_RGB);
+        byte[] rgbOut = new byte[1];
+        rgb.getPixels(rgbOut, null, 0, 1, 0, 0, 1, 1,
+                DirectGraphics.TYPE_BYTE_332_RGB);
+        if ((rgbOut[0] & 0xFF) != 0xE3) return false;
+
+        nokiaStage = 5;
+        Image verticalImage = Image.createImage(2, 8);
+        DirectGraphics vertical = DirectUtils.getDirectGraphics(
+                verticalImage.getGraphics());
+        vertical.drawPixels(new byte[] {0x55, (byte)0xAA}, null,
+                0, 2, 0, 0, 2, 8, 0,
+                DirectGraphics.TYPE_BYTE_1_GRAY_VERTICAL);
+        byte[] verticalOut = new byte[2];
+        vertical.getPixels(verticalOut, null, 0, 2, 0, 0, 2, 8,
+                DirectGraphics.TYPE_BYTE_1_GRAY_VERTICAL);
+        if ((verticalOut[0] & 0xFF) != 0x55 ||
+                (verticalOut[1] & 0xFF) != 0xAA) return false;
+
+        nokiaStage = 6;
+        try {
+            gray.drawPixels(new byte[1], null, 0, 1, 0, 0, 1, 1, 0, 3);
+            return false;
+        } catch (IllegalArgumentException expected) {
+        }
+        nokiaStage = 7;
+        try {
+            DeviceControl.flashLights(-1L);
+            return false;
+        } catch (IllegalArgumentException expected) {
+        }
+        try {
+            DeviceControl.startVibra(101, 1L);
+            return false;
+        } catch (IllegalArgumentException expected) {
+        }
+        DeviceControl.flashLights(0L);
+        DeviceControl.startVibra(0, 0L);
+        DeviceControl.stopVibra();
+        return true;
     }
 
     private static boolean testUnicodeText() {
@@ -210,6 +307,9 @@ public final class GraphicsOps {
         }
         if (!testGraphicsRules(canvas, graphics)) {
             return 15;
+        }
+        if (!testNokiaBytePixels()) {
+            return 180 + nokiaStage;
         }
 
         byte[] png = new byte[] {

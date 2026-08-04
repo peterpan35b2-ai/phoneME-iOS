@@ -38,7 +38,8 @@ thread_local HeapAccessContext g_heap_access_context {};
                          std::string(g_heap_access_context.method) +
                          std::string(g_heap_access_context.descriptor) +
                          " at bytecode " +
-                         std::to_string(g_heap_access_context.bytecode_pc);
+                         std::to_string(
+                             g_heap_access_context.current_bytecode_pc());
     }
     error.message += ": " + detail;
     return std::unexpected(std::move(error));
@@ -196,6 +197,113 @@ Status Heap::set_element(ObjectRef reference, usize index, Value value) {
         return fail(ErrorCode::out_of_range, "array index is out of range");
     }
     object.elements[index] = value;
+    return {};
+}
+
+Status Heap::copy_array_range(ObjectRef source,
+                              usize source_index,
+                              ObjectRef destination,
+                              usize destination_index,
+                              usize length) {
+    std::scoped_lock lock(mutex_);
+    auto source_slot = resolve_slot_unlocked(source);
+    if (!source_slot) {
+        return heap_access_error(source_slot.error(),
+                                 "Heap.copy_array_range source", source);
+    }
+    auto destination_slot = resolve_slot_unlocked(destination);
+    if (!destination_slot) {
+        return heap_access_error(destination_slot.error(),
+                                 "Heap.copy_array_range destination",
+                                 destination);
+    }
+
+    Object& source_object = slots_[*source_slot].object;
+    Object& destination_object = slots_[*destination_slot].object;
+    if (!source_object.is_array || !destination_object.is_array) {
+        return fail(ErrorCode::invalid_state,
+                    "array range copy requires array objects");
+    }
+    if (source_index > source_object.elements.size() ||
+        length > source_object.elements.size() - source_index ||
+        destination_index > destination_object.elements.size() ||
+        length > destination_object.elements.size() - destination_index) {
+        return fail(ErrorCode::out_of_range,
+                    "array range copy is outside array bounds");
+    }
+    if (length == 0U) return {};
+
+    auto source_begin = source_object.elements.begin() +
+                        static_cast<std::ptrdiff_t>(source_index);
+    auto destination_begin = destination_object.elements.begin() +
+                             static_cast<std::ptrdiff_t>(destination_index);
+    if (*source_slot == *destination_slot &&
+        destination_index > source_index &&
+        destination_index < source_index + length) {
+        std::copy_backward(
+            source_begin,
+            source_begin + static_cast<std::ptrdiff_t>(length),
+            destination_begin + static_cast<std::ptrdiff_t>(length));
+    } else {
+        std::copy_n(source_begin, length, destination_begin);
+    }
+    return {};
+}
+
+Result<std::vector<u8>> Heap::read_byte_array(ObjectRef reference,
+                                               usize offset,
+                                               usize length) const {
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(),
+                                 "Heap.read_byte_array", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array || object.class_name != "[B") {
+        return fail(ErrorCode::invalid_argument,
+                    "byte array read requires byte[]");
+    }
+    if (offset > object.elements.size() ||
+        length > object.elements.size() - offset) {
+        return fail(ErrorCode::out_of_range,
+                    "byte array read is outside array bounds");
+    }
+
+    std::vector<u8> bytes;
+    bytes.reserve(length);
+    for (usize index = 0; index < length; ++index) {
+        auto integer = object.elements[offset + index].as_int();
+        if (!integer) return std::unexpected(integer.error());
+        bytes.push_back(static_cast<u8>(static_cast<i8>(*integer)));
+    }
+    return bytes;
+}
+
+Status Heap::write_byte_array(ObjectRef reference,
+                              usize offset,
+                              std::span<const u8> bytes) {
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(),
+                                 "Heap.write_byte_array", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (!object.is_array || object.class_name != "[B") {
+        return fail(ErrorCode::invalid_argument,
+                    "byte array write requires byte[]");
+    }
+    if (offset > object.elements.size() ||
+        bytes.size() > object.elements.size() - offset) {
+        return fail(ErrorCode::out_of_range,
+                    "byte array write is outside array bounds");
+    }
+
+    for (usize index = 0; index < bytes.size(); ++index) {
+        object.elements[offset + index] = Value::from_int(
+            static_cast<i32>(static_cast<i8>(bytes[index])));
+    }
     return {};
 }
 
@@ -389,6 +497,11 @@ void Heap::clear() noexcept {
     peak_bytes_ = 0U;
     collections_ = 0U;
     failed_allocations_ = 0U;
+}
+
+usize Heap::estimated_bytes() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return live_bytes_;
 }
 
 HeapStats Heap::stats() const noexcept {

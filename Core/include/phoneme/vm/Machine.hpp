@@ -22,6 +22,7 @@
 #include "phoneme/push/PushRegistry.hpp"
 #include "phoneme/runtime/RecordStoreRegistry.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
+#include "phoneme/translation/TranslationService.hpp"
 #include "phoneme/vm/CanvasBridge.hpp"
 #include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/Interpreter.hpp"
@@ -65,6 +66,12 @@ namespace phoneme::vm
     resume_requested,
   };
 
+  enum class InstructionBudgetMode : u8
+  {
+    total,
+    progress_watchdog,
+  };
+
   class Machine final
   {
   public:
@@ -95,7 +102,8 @@ namespace phoneme::vm
         std::string_view method_name,
         std::string_view descriptor,
         std::span<const Value> arguments = {},
-        u64 instruction_budget = 10'000'000);
+        u64 instruction_budget = 10'000'000,
+        InstructionBudgetMode budget_mode = InstructionBudgetMode::total);
 
     [[nodiscard]] Heap &heap() noexcept { return heap_; }
     [[nodiscard]] const Heap &heap() const noexcept { return heap_; }
@@ -133,6 +141,14 @@ namespace phoneme::vm
     [[nodiscard]] const graphics::GraphicsStore& graphics() const noexcept {
       return graphics_;
     }
+    void configure_translation_service(
+        std::shared_ptr<translation::TranslationService> service) noexcept {
+      translation_service_ = std::move(service);
+    }
+    [[nodiscard]] const std::shared_ptr<translation::TranslationService>&
+    translation_service() const noexcept {
+      return translation_service_;
+    }
     [[nodiscard]] double next_random_double() noexcept;
     void configure_ui_bridge(i32 app_namespace, UiEventSink sink);
     [[nodiscard]] i32 allocate_ui_component_id() noexcept;
@@ -141,6 +157,10 @@ namespace phoneme::vm
     [[nodiscard]] Status pump_serial_callbacks(usize maximum_callbacks = 8U);
     [[nodiscard]] usize pending_serial_callbacks() const noexcept;
     void set_serial_callback_coalescing(bool enabled) noexcept;
+    [[nodiscard]] Status schedule_lcdui_alert_timeout(ObjectRef alert,
+                                                       i32 timeout_millis);
+    void cancel_lcdui_alert_timeout(ObjectRef alert = {}) noexcept;
+    [[nodiscard]] Result<std::optional<ObjectRef>> take_due_lcdui_alert();
     [[nodiscard]] Status register_ui_component(i32 component_id,
                                                ObjectRef object);
     void unregister_ui_component(i32 component_id) noexcept;
@@ -171,6 +191,7 @@ namespace phoneme::vm
     }
     void signal_midlet(MidletSignal signal) noexcept;
     [[nodiscard]] MidletSignal consume_midlet_signal() noexcept;
+    [[nodiscard]] bool consume_midlet_destroyed_signal() noexcept;
     [[nodiscard]] Result<ObjectRef> class_mirror(
         std::string_view class_name);
     [[nodiscard]] Result<std::string> mirrored_class_name(
@@ -225,6 +246,9 @@ namespace phoneme::vm
     void set_app_property(std::u16string key, std::u16string value);
     [[nodiscard]] Result<std::optional<std::u16string>> app_property(
         ObjectRef key) const;
+    void set_system_property(std::u16string key, std::u16string value);
+    [[nodiscard]] std::optional<std::u16string> configured_system_property(
+        std::u16string_view key) const;
 
   private:
     friend class Scheduler;
@@ -254,7 +278,8 @@ namespace phoneme::vm
     [[nodiscard]] Status initialize_system_streams();
     [[nodiscard]] Result<ExecutionResult> execute(
         Invocation invocation,
-        u64 instruction_budget);
+        u64 instruction_budget,
+        InstructionBudgetMode budget_mode = InstructionBudgetMode::total);
     [[nodiscard]] Result<Invocation> prepare_invocation(
         ResolvedMethod method,
         std::span<const Value> arguments,
@@ -309,6 +334,7 @@ namespace phoneme::vm
     MonitorTable monitors_;
     mutable std::recursive_mutex execution_mutex_;
     graphics::GraphicsStore graphics_;
+    std::shared_ptr<translation::TranslationService> translation_service_;
     runtime::RecordStoreRegistry record_stores_;
     security::SharedPermissionPolicy permission_policy_;
     push::PushRegistry push_registry_;
@@ -323,13 +349,17 @@ namespace phoneme::vm
     mutable std::mutex serial_callbacks_mutex_;
     std::deque<NativeRootScope> serial_callbacks_;
     bool serial_callback_coalescing_ {false};
+    mutable std::mutex lcd_ui_alert_timeout_mutex_;
+    std::optional<NativeRootScope> lcd_ui_alert_timeout_root_;
+    std::chrono::steady_clock::time_point lcd_ui_alert_timeout_deadline_ {};
     ObjectRef emergency_out_of_memory_error_ {};
     std::unordered_set<std::string> initialized_classes_;
     std::unordered_set<std::string> initializing_classes_;
     std::unordered_set<std::string> erroneous_classes_;
     std::unordered_map<std::u16string, std::u16string> app_properties_;
+    std::unordered_map<std::u16string, std::u16string> system_properties_;
     u64 random_state_{0x9E3779B97F4A7C15ULL};
-    MidletSignal midlet_signal_{MidletSignal::none};
+    std::atomic<MidletSignal> midlet_signal_{MidletSignal::none};
     UiEventSink ui_event_sink_;
     CanvasBridge* canvas_bridge_{nullptr};
     i32 next_ui_component_id_{1};

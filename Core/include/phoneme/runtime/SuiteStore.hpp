@@ -67,6 +67,8 @@ struct SuiteUninstallPolicy final {
     bool remove_rms {false};
     bool remove_files {false};
     bool remove_permissions {false};
+    bool remove_push {false};
+    bool remove_temporary {false};
 };
 
 class SuiteStore final {

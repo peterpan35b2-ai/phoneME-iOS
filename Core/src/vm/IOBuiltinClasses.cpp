@@ -81,6 +81,8 @@ using namespace builtin;
             method(kPublic, "<init>", "(Ljava/io/InputStream;)V"),
             method(kPublic, "<init>",
                    "(Ljava/io/InputStream;Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V"),
             method(kPublic, "getEncoding", "()Ljava/lang/String;"),
             method(kPublic, "read", "()I"),
             method(kPublic, "read", "([CII)I"),
@@ -103,12 +105,46 @@ using namespace builtin;
             method(kPublic, "<init>", "(Ljava/io/OutputStream;)V"),
             method(kPublic, "<init>",
                    "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/io/OutputStream;Ljava/nio/charset/Charset;)V"),
             method(kPublic, "getEncoding", "()Ljava/lang/String;"),
             method(kPublic, "write", "(I)V"),
             method(kPublic, "write", "([CII)V"),
             method(kPublic, "write", "(Ljava/lang/String;II)V"),
             method(kPublic, "flush", "()V"),
             method(kPublic, "close", "()V"),
+        });
+    }
+    if (name == "java/io/BufferedReader") {
+        return make_class("java/io/BufferedReader", "java/io/Reader",
+                          kOrdinary, {
+            field(kPrivate, "in", "Ljava/io/Reader;"),
+            field(kPrivate, "closed", "Z"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/io/Reader;)V"),
+            method(kPublic, "read", "()I"),
+            method(kPublic, "read", "([CII)I"),
+            method(kPublic, "readLine", "()Ljava/lang/String;"),
+            method(kPublic, "ready", "()Z"),
+            method(kPublic, "close", "()V"),
+        });
+    }
+    if (name == "java/io/PrintWriter") {
+        return make_class("java/io/PrintWriter", "java/io/Writer",
+                          kOrdinary, {
+            field(kPrivate, "out", "Ljava/io/Writer;"),
+            field(kPrivate, "trouble", "Z"),
+            field(kPrivate, "autoFlush", "Z"),
+            field(kPrivate, "closed", "Z"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/io/Writer;)V"),
+            method(kPublic, "<init>", "(Ljava/io/Writer;Z)V"),
+            method(kPublic, "print", "(Ljava/lang/String;)V"),
+            method(kPublic, "println", "()V"),
+            method(kPublic, "println", "(Ljava/lang/String;)V"),
+            method(kPublic, "flush", "()V"),
+            method(kPublic, "close", "()V"),
+            method(kPublic, "checkError", "()Z"),
         });
     }
     if (name == "java/io/FilterInputStream") {
@@ -142,8 +178,12 @@ using namespace builtin;
         });
     }
     if (name == "java/io/PrintStream") {
-        return make_class("java/io/PrintStream", "java/io/FilterOutputStream",
+        return make_class("java/io/PrintStream", "java/io/OutputStream",
                           kOrdinary, {
+            // CLDC PrintStream extends OutputStream directly and owns its
+            // delegate. Keep this field first: ConsoleNatives intentionally
+            // uses the stable native layout [out, trouble, autoFlush, console].
+            field(kPrivate, "out", "Ljava/io/OutputStream;"),
             field(kPrivate, "trouble", "Z"),
             field(kPrivate, "autoFlush", "Z"),
             field(kPrivate, "console", "Z"),
@@ -310,6 +350,18 @@ using namespace builtin;
             method(kPublic | kFinal, "writeUTF", "(Ljava/lang/String;)V"),
             method(kPublic | kFinal, "size", "()I"),
         }, {"java/io/DataOutput"});
+    }
+    if (name == "java/nio/charset/Charset") {
+        return make_class("java/nio/charset/Charset", "java/lang/Object",
+                          kOrdinary);
+    }
+    if (name == "java/nio/charset/StandardCharsets") {
+        return make_class("java/nio/charset/StandardCharsets",
+                          "java/lang/Object", kOrdinary | kFinal,
+                          {
+                              field(kPublic | kStatic | kFinal, "UTF_8",
+                                    "Ljava/nio/charset/Charset;"),
+                          });
     }
     if (name == "java/io/Serializable") {
         return make_class("java/io/Serializable", "java/lang/Object",

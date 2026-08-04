@@ -21,6 +21,7 @@ struct FieldLocation final {
     usize index {0};
     bool is_static {false};
     std::optional<u16> constant_value_index;
+    std::string storage_key;
 };
 
 struct ClassLayout final {

@@ -35,5 +35,7 @@ void register_security_classes(BuiltinClassRegistry& registry);
 void register_midlet_classes(BuiltinClassRegistry& registry);
 void register_media_classes(BuiltinClassRegistry& registry);
 void register_push_classes(BuiltinClassRegistry& registry);
+void register_xml_classes(BuiltinClassRegistry& registry);
+void register_vendor_classes(BuiltinClassRegistry& registry);
 
 } // namespace phoneme::vm

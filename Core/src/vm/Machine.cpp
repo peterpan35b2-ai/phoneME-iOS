@@ -33,6 +33,9 @@ namespace phoneme::vm
     constexpr u16 kAccAbstract = 0x0400U;
     constexpr usize kMaximumCallDepth = 1'024;
     constexpr u64 kSchedulerQuantum = 10'000U;
+    constexpr u64 kMaintenancePollInterval = 256U;
+    static_assert((kMaintenancePollInterval &
+                   (kMaintenancePollInterval - 1U)) == 0U);
 
     [[nodiscard]] constexpr usize heap_capacity_with_emergency_reserve(
         usize requested) noexcept
@@ -108,6 +111,74 @@ namespace phoneme::vm
                         kPattern.begin()) &&
              std::equal(bytecode.begin() + 18U, bytecode.end(),
                         kPattern.begin() + 18U);
+    }
+
+    [[nodiscard]] bool matches_range_decoder_bit_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(I)I" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 150U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0xB2U}, {3U, 0x10U}, {4U, 11U}, {5U, 0x7BU},
+          {6U, 0xB2U}, {9U, 0x1AU}, {10U, 0x35U}, {11U, 0x85U},
+          {12U, 0x69U}, {13U, 0x40U}, {14U, 0xB2U}, {17U, 0x1FU},
+          {18U, 0x94U}, {19U, 0x9CU}, {22U, 0x1FU}, {23U, 0xB3U},
+          {26U, 0x11U}, {27U, 0x08U}, {28U, 0x00U}, {29U, 0xB2U},
+          {32U, 0x1AU}, {33U, 0x35U}, {34U, 0x64U}, {35U, 0x3EU},
+          {36U, 0xB2U}, {39U, 0x1AU}, {40U, 0x5CU}, {41U, 0x35U},
+          {42U, 0x1DU}, {43U, 0x08U}, {44U, 0x7AU}, {45U, 0x60U},
+          {46U, 0x93U}, {47U, 0x56U}, {48U, 0xB2U}, {51U, 0x14U},
+          {54U, 0x94U}, {55U, 0x9CU}, {58U, 0xB2U}, {61U, 0x10U},
+          {62U, 8U}, {63U, 0x79U}, {64U, 0xB8U}, {67U, 0x85U},
+          {68U, 0x81U}, {69U, 0xB3U}, {72U, 0xB2U}, {75U, 0x10U},
+          {76U, 8U}, {77U, 0x79U}, {78U, 0xB3U}, {81U, 0x03U},
+          {82U, 0xACU}, {83U, 0xB2U}, {86U, 0x1FU}, {87U, 0x65U},
+          {88U, 0xB3U}, {91U, 0xB2U}, {94U, 0x1FU}, {95U, 0x65U},
+          {96U, 0xB3U}, {99U, 0xB2U}, {102U, 0x1AU}, {103U, 0x5CU},
+          {104U, 0x35U}, {105U, 0xB2U}, {108U, 0x1AU}, {109U, 0x35U},
+          {110U, 0x08U}, {111U, 0x7AU}, {112U, 0x64U}, {113U, 0x93U},
+          {114U, 0x56U}, {115U, 0xB2U}, {118U, 0x14U},
+          {121U, 0x94U}, {122U, 0x9CU}, {125U, 0xB2U},
+          {128U, 0x10U}, {129U, 8U}, {130U, 0x79U}, {131U, 0xB8U},
+          {134U, 0x85U}, {135U, 0x81U}, {136U, 0xB3U},
+          {139U, 0xB2U}, {142U, 0x10U}, {143U, 8U}, {144U, 0x79U},
+          {145U, 0xB3U}, {148U, 0x04U}, {149U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return true;
+    }
+
+    [[nodiscard]] bool matches_range_decoder_input_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "()I" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 31U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0xB2U}, {3U, 0xB2U}, {6U, 0xA0U},
+          {9U, 0x11U}, {10U, 0x00U}, {11U, 0xFFU}, {12U, 0xACU},
+          {13U, 0xB2U}, {16U, 0xB2U}, {19U, 0x59U}, {20U, 0x04U},
+          {21U, 0x60U}, {22U, 0xB3U}, {25U, 0x33U},
+          {26U, 0x11U}, {27U, 0x00U}, {28U, 0xFFU},
+          {29U, 0x7EU}, {30U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return true;
     }
 
     [[nodiscard]] bool matches_vector_key_sort_initializer(
@@ -1559,6 +1630,57 @@ namespace phoneme::vm
     serial_callbacks_ = std::move(compacted);
   }
 
+  Status Machine::schedule_lcdui_alert_timeout(ObjectRef alert,
+                                                i32 timeout_millis)
+  {
+    if (alert.is_null() || timeout_millis <= 0)
+    {
+      return fail(ErrorCode::invalid_argument,
+                  "LCDUI alert timeout schedule is invalid");
+    }
+    auto root = pin_native_root(alert);
+    if (!root)
+      return std::unexpected(root.error());
+    std::scoped_lock lock(lcd_ui_alert_timeout_mutex_);
+    lcd_ui_alert_timeout_root_ = std::move(*root);
+    lcd_ui_alert_timeout_deadline_ =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeout_millis);
+    return {};
+  }
+
+  void Machine::cancel_lcdui_alert_timeout(ObjectRef alert) noexcept
+  {
+    std::scoped_lock lock(lcd_ui_alert_timeout_mutex_);
+    if (!lcd_ui_alert_timeout_root_.has_value())
+      return;
+    if (!alert.is_null())
+    {
+      auto scheduled = lcd_ui_alert_timeout_root_->get();
+      if (!scheduled || *scheduled != alert)
+        return;
+    }
+    lcd_ui_alert_timeout_root_.reset();
+    lcd_ui_alert_timeout_deadline_ = {};
+  }
+
+  Result<std::optional<ObjectRef>> Machine::take_due_lcdui_alert()
+  {
+    std::scoped_lock lock(lcd_ui_alert_timeout_mutex_);
+    if (!lcd_ui_alert_timeout_root_.has_value() ||
+        std::chrono::steady_clock::now() < lcd_ui_alert_timeout_deadline_)
+    {
+      return std::optional<ObjectRef> {};
+    }
+    auto scheduled = lcd_ui_alert_timeout_root_->get();
+    if (!scheduled)
+      return std::unexpected(scheduled.error());
+    const ObjectRef alert = *scheduled;
+    lcd_ui_alert_timeout_root_.reset();
+    lcd_ui_alert_timeout_deadline_ = {};
+    return std::optional<ObjectRef>(alert);
+  }
+
   Status Machine::register_ui_component(i32 component_id,
                                         ObjectRef object)
   {
@@ -1657,6 +1779,23 @@ namespace phoneme::vm
     return std::optional<std::u16string>(property->second);
   }
 
+  void Machine::set_system_property(std::u16string key,
+                                    std::u16string value)
+  {
+    if (key.empty())
+      return;
+    system_properties_.insert_or_assign(std::move(key), std::move(value));
+  }
+
+  std::optional<std::u16string> Machine::configured_system_property(
+      std::u16string_view key) const
+  {
+    const auto property = system_properties_.find(std::u16string(key));
+    if (property == system_properties_.end())
+      return std::nullopt;
+    return property->second;
+  }
+
   Status Machine::configure_record_store_root(std::string root)
   {
     return record_stores_.configure(std::move(root));
@@ -1704,18 +1843,35 @@ namespace phoneme::vm
 
   void Machine::signal_midlet(MidletSignal signal) noexcept
   {
-    if (signal == MidletSignal::destroyed ||
-        midlet_signal_ != MidletSignal::destroyed)
+    MidletSignal current = midlet_signal_.load(std::memory_order_acquire);
+    for (;;)
     {
-      midlet_signal_ = signal;
+      if (current == MidletSignal::destroyed &&
+          signal != MidletSignal::destroyed)
+        return;
+      if (midlet_signal_.compare_exchange_weak(
+              current,
+              signal,
+              std::memory_order_acq_rel,
+              std::memory_order_acquire))
+        return;
     }
   }
 
   MidletSignal Machine::consume_midlet_signal() noexcept
   {
-    const MidletSignal signal = midlet_signal_;
-    midlet_signal_ = MidletSignal::none;
-    return signal;
+    return midlet_signal_.exchange(MidletSignal::none,
+                                   std::memory_order_acq_rel);
+  }
+
+  bool Machine::consume_midlet_destroyed_signal() noexcept
+  {
+    MidletSignal expected = MidletSignal::destroyed;
+    return midlet_signal_.compare_exchange_strong(
+        expected,
+        MidletSignal::none,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire);
   }
 
   Result<ExecutionResult> Machine::invoke_static(
@@ -1765,7 +1921,8 @@ namespace phoneme::vm
       std::string_view method_name,
       std::string_view descriptor,
       std::span<const Value> arguments,
-      u64 instruction_budget)
+      u64 instruction_budget,
+      InstructionBudgetMode budget_mode)
   {
     if (receiver.is_null())
     {
@@ -1818,7 +1975,7 @@ namespace phoneme::vm
     {
       return std::unexpected(invocation.error());
     }
-    return execute(std::move(*invocation), instruction_budget);
+    return execute(std::move(*invocation), instruction_budget, budget_mode);
   }
 
   Result<Machine::Invocation> Machine::prepare_invocation(
@@ -2267,6 +2424,54 @@ namespace phoneme::vm
       auto stored = set_int_constants(constants);
       if (!stored) return std::unexpected(stored.error());
     }
+    else if (canonical_name == "com/nokia/mid/sound/Sound")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"FORMAT_TONE", 1},
+          {"FORMAT_WAV", 5}, {"SOUND_PLAYING", 0},
+          {"SOUND_STOPPED", 1}, {"SOUND_UNINITIALIZED", 3},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "com/nokia/mid/ui/DirectGraphics")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"FLIP_HORIZONTAL", 0x2000},
+          {"FLIP_VERTICAL", 0x4000}, {"ROTATE_90", 90},
+          {"ROTATE_180", 180}, {"ROTATE_270", 270},
+          {"TYPE_BYTE_1_GRAY", 1}, {"TYPE_BYTE_1_GRAY_VERTICAL", -1},
+          {"TYPE_BYTE_2_GRAY", 2}, {"TYPE_BYTE_4_GRAY", 4},
+          {"TYPE_BYTE_8_GRAY", 8}, {"TYPE_BYTE_332_RGB", 332},
+          {"TYPE_USHORT_4444_ARGB", 4444}, {"TYPE_USHORT_444_RGB", 444},
+          {"TYPE_USHORT_555_RGB", 555}, {"TYPE_USHORT_1555_ARGB", 1555},
+          {"TYPE_USHORT_565_RGB", 565}, {"TYPE_INT_888_RGB", 888},
+          {"TYPE_INT_8888_ARGB", 8888},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "com/nokia/mid/ui/FullCanvas")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"KEY_UP_ARROW", -1},
+          {"KEY_DOWN_ARROW", -2}, {"KEY_LEFT_ARROW", -3},
+          {"KEY_RIGHT_ARROW", -4}, {"KEY_SOFTKEY1", -6},
+          {"KEY_SOFTKEY2", -7}, {"KEY_SOFTKEY3", -5},
+          {"KEY_SEND", -10}, {"KEY_END", -11},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/io/file/FileSystemListener")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"ROOT_ADDED", 0},
+          {"ROOT_REMOVED", 1},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
     else if (canonical_name == "javax/microedition/media/Player")
     {
       constexpr std::pair<std::string_view, i32> constants[] {
@@ -2293,8 +2498,10 @@ namespace phoneme::vm
     }
     else if (canonical_name == "javax/microedition/media/Manager")
     {
-      auto stored = set_static_string("TONE_DEVICE_LOCATOR", "device://tone");
-      if (!stored) return std::unexpected(stored.error());
+      auto tone = set_static_string("TONE_DEVICE_LOCATOR", "device://tone");
+      auto midi = set_static_string("MIDI_DEVICE_LOCATOR", "device://midi");
+      if (!tone) return std::unexpected(tone.error());
+      if (!midi) return std::unexpected(midi.error());
     }
     else if (canonical_name == "javax/microedition/media/PlayerListener")
     {
@@ -2305,13 +2512,71 @@ namespace phoneme::vm
           {"DEVICE_UNAVAILABLE", "deviceUnavailable"},
           {"DEVICE_AVAILABLE", "deviceAvailable"},
           {"VOLUME_CHANGED", "volumeChanged"}, {"ERROR", "error"},
-          {"CLOSED", "closed"},
+          {"CLOSED", "closed"}, {"BUFFERING_STARTED", "bufferingStarted"},
+          {"BUFFERING_STOPPED", "bufferingStopped"},
+          {"RECORD_STARTED", "recordStarted"},
+          {"RECORD_STOPPED", "recordStopped"},
+          {"RECORD_ERROR", "recordError"}, {"SIZE_CHANGED", "sizeChanged"},
+          {"STOPPED_AT_TIME", "stoppedAtTime"},
       };
       for (const auto &[field_name, value] : constants)
       {
         auto stored = set_static_string(field_name, value);
         if (!stored) return std::unexpected(stored.error());
       }
+    }
+    else if (canonical_name == "javax/microedition/media/control/GUIControl")
+    {
+      const std::array<std::pair<std::string_view, i32>, 1> constants {{
+          {"USE_GUI_PRIMITIVE", 0},
+      }};
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/control/MIDIControl")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"NOTE_ON", 0x90},
+          {"CONTROL_CHANGE", 0xB0},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/control/MetaDataControl")
+    {
+      constexpr std::pair<std::string_view, std::string_view> constants[] {
+          std::pair<std::string_view, std::string_view>{"AUTHOR_KEY", "author"},
+          {"COPYRIGHT_KEY", "copyright"}, {"DATE_KEY", "date"},
+          {"TITLE_KEY", "title"},
+      };
+      for (const auto &[field_name, value] : constants)
+      {
+        auto stored = set_static_string(field_name, value);
+        if (!stored) return std::unexpected(stored.error());
+      }
+    }
+    else if (canonical_name == "javax/microedition/media/control/StopTimeControl")
+    {
+      auto stored = set_static_constant(
+          "RESET", "J", Value::from_long(std::numeric_limits<i64>::max()));
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/control/VideoControl")
+    {
+      const std::array<std::pair<std::string_view, i32>, 1> constants {{
+          {"USE_DIRECT_VIDEO", 1},
+      }};
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
+    }
+    else if (canonical_name == "javax/microedition/media/protocol/SourceStream")
+    {
+      constexpr std::pair<std::string_view, i32> constants[] {
+          std::pair<std::string_view, i32>{"NOT_SEEKABLE", 0},
+          {"SEEKABLE_TO_START", 1}, {"RANDOM_ACCESSIBLE", 2},
+      };
+      auto stored = set_int_constants(constants);
+      if (!stored) return std::unexpected(stored.error());
     }
     else if (canonical_name == "javax/microedition/rms/RecordComparator")
     {
@@ -3175,8 +3440,10 @@ namespace phoneme::vm
     return constant_value(owner, index, category_two_only);
   }
 
-  Result<ExecutionResult> Machine::execute(Invocation invocation,
-                                           u64 instruction_budget)
+  Result<ExecutionResult> Machine::execute(
+      Invocation invocation,
+      u64 instruction_budget,
+      InstructionBudgetMode budget_mode)
   {
     if (g_execution_machine != nullptr && g_execution_machine != this)
     {
@@ -3193,6 +3460,7 @@ namespace phoneme::vm
     const JavaThreadId invocation_thread = scheduler_.current_thread_id();
     const HeapAccessContext previous_heap_context =
         current_heap_access_context();
+    usize current_heap_access_pc = 0U;
     u64 accounted_instructions = 0U;
     auto cleanup = [invocation_depth,
                     invocation_thread,
@@ -3338,6 +3606,14 @@ namespace phoneme::vm
     frames.reserve(32);
     frames.push_back(std::move(*root_frame));
     u64 executed = 0;
+    u64 watchdog_instructions = 0;
+    const u64 progress_total_budget =
+        instruction_budget > std::numeric_limits<u64>::max() / 32U
+            ? std::numeric_limits<u64>::max()
+            : instruction_budget * 32U;
+    u64 next_scheduler_quantum = kSchedulerQuantum;
+    const classfile::ClassFile* heap_access_owner = nullptr;
+    const classfile::Method* heap_access_method = nullptr;
 
     const auto collect_active_garbage =
         [this, &frames, invocation_depth](
@@ -3441,6 +3717,273 @@ namespace phoneme::vm
       return heap_.allocate_array(std::string(class_name),
                                   length,
                                   initial_value);
+    };
+
+    struct RangeDecoderIntrinsicFields final
+    {
+      FieldLocation range;
+      FieldLocation code;
+      FieldLocation probabilities;
+      FieldLocation input_position;
+      FieldLocation input_length;
+      FieldLocation input_bytes;
+    };
+    std::unordered_map<const classfile::Method*,
+                       std::optional<RangeDecoderIntrinsicFields>>
+        range_decoder_intrinsic_cache;
+
+    const auto resolve_range_decoder_intrinsic =
+        [this](const Invocation& candidate)
+        -> Result<std::optional<RangeDecoderIntrinsicFields>>
+    {
+      if (candidate.method.owner == nullptr ||
+          candidate.method.method == nullptr || candidate.has_receiver ||
+          candidate.arguments.size() != 1U ||
+          !matches_range_decoder_bit_intrinsic(*candidate.method.method))
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      const auto& owner = *candidate.method.owner;
+      const auto& code = candidate.method.method->code->bytecode;
+      const auto cp_index = [](const std::vector<u8>& bytecode,
+                               usize offset) -> u16
+      {
+        return static_cast<u16>(
+            (static_cast<u16>(bytecode[offset]) << 8U) |
+            static_cast<u16>(bytecode[offset + 1U]));
+      };
+      const u16 range_index = cp_index(code, 1U);
+      const u16 probabilities_index = cp_index(code, 7U);
+      const u16 decoder_code_index = cp_index(code, 15U);
+      const u16 input_method_index = cp_index(code, 65U);
+      for (usize offset : {24U, 49U, 73U, 79U, 84U, 89U,
+                           116U, 140U, 146U})
+      {
+        if (cp_index(code, offset) != range_index)
+          return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      for (usize offset : {30U, 37U, 100U, 106U})
+      {
+        if (cp_index(code, offset) != probabilities_index)
+          return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      for (usize offset : {59U, 70U, 92U, 97U, 126U, 137U})
+      {
+        if (cp_index(code, offset) != decoder_code_index)
+          return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      if (cp_index(code, 132U) != input_method_index ||
+          cp_index(code, 52U) != cp_index(code, 119U))
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+
+      auto normalization_constant = owner.constant(cp_index(code, 52U));
+      if (!normalization_constant ||
+          (*normalization_constant)->kind !=
+              classfile::ConstantKind::long64 ||
+          (*normalization_constant)->bits != 16'777'216ULL)
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      auto range_reference = owner.member_reference(range_index);
+      auto probabilities_reference = owner.member_reference(probabilities_index);
+      auto decoder_code_reference = owner.member_reference(decoder_code_index);
+      auto input_reference = owner.member_reference(input_method_index);
+      if (!range_reference || !probabilities_reference ||
+          !decoder_code_reference || !input_reference)
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      if (range_reference->descriptor != "J" ||
+          probabilities_reference->descriptor != "[S" ||
+          decoder_code_reference->descriptor != "J" ||
+          input_reference->descriptor != "()I")
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+
+      auto input_method = classes_.resolve_declared_method(
+          input_reference->owner,
+          input_reference->name,
+          input_reference->descriptor);
+      if (!input_method ||
+          !matches_range_decoder_input_intrinsic(*input_method->method))
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      const auto& input_code = input_method->method->code->bytecode;
+      const u16 position_index = cp_index(input_code, 1U);
+      const u16 length_index = cp_index(input_code, 4U);
+      const u16 bytes_index = cp_index(input_code, 14U);
+      if (cp_index(input_code, 17U) != position_index ||
+          cp_index(input_code, 23U) != position_index)
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      auto position_reference =
+          input_method->owner->member_reference(position_index);
+      auto length_reference = input_method->owner->member_reference(length_index);
+      auto bytes_reference = input_method->owner->member_reference(bytes_index);
+      if (!position_reference || !length_reference || !bytes_reference ||
+          position_reference->descriptor != "I" ||
+          length_reference->descriptor != "I" ||
+          bytes_reference->descriptor != "[B")
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+
+      auto range_field = states_.resolve_field(
+          range_reference->owner, range_reference->name,
+          range_reference->descriptor, true);
+      auto decoder_code_field = states_.resolve_field(
+          decoder_code_reference->owner, decoder_code_reference->name,
+          decoder_code_reference->descriptor, true);
+      auto probabilities_field = states_.resolve_field(
+          probabilities_reference->owner, probabilities_reference->name,
+          probabilities_reference->descriptor, true);
+      auto position_field = states_.resolve_field(
+          position_reference->owner, position_reference->name,
+          position_reference->descriptor, true);
+      auto length_field = states_.resolve_field(
+          length_reference->owner, length_reference->name,
+          length_reference->descriptor, true);
+      auto bytes_field = states_.resolve_field(
+          bytes_reference->owner, bytes_reference->name,
+          bytes_reference->descriptor, true);
+      if (!range_field || !decoder_code_field || !probabilities_field ||
+          !position_field || !length_field || !bytes_field)
+      {
+        return std::optional<RangeDecoderIntrinsicFields>{};
+      }
+      return std::optional<RangeDecoderIntrinsicFields>(
+          RangeDecoderIntrinsicFields {
+              .range = std::move(*range_field),
+              .code = std::move(*decoder_code_field),
+              .probabilities = std::move(*probabilities_field),
+              .input_position = std::move(*position_field),
+              .input_length = std::move(*length_field),
+              .input_bytes = std::move(*bytes_field),
+          });
+    };
+
+    const auto try_range_decoder_bit_intrinsic =
+        [this, &range_decoder_intrinsic_cache,
+         &resolve_range_decoder_intrinsic](const Invocation& candidate)
+        -> Result<std::optional<Value>>
+    {
+      if (candidate.method.method == nullptr || candidate.has_receiver ||
+          candidate.arguments.size() != 1U ||
+          !matches_range_decoder_bit_intrinsic(*candidate.method.method))
+      {
+        return std::optional<Value>{};
+      }
+      auto cached = range_decoder_intrinsic_cache.find(
+          candidate.method.method);
+      if (cached == range_decoder_intrinsic_cache.end())
+      {
+        auto resolved = resolve_range_decoder_intrinsic(candidate);
+        if (!resolved) return std::unexpected(resolved.error());
+        cached = range_decoder_intrinsic_cache.emplace(
+            candidate.method.method, std::move(*resolved)).first;
+      }
+      if (!cached->second.has_value()) return std::optional<Value>{};
+      const RangeDecoderIntrinsicFields& fields = *cached->second;
+
+      auto probability_index = candidate.arguments[0].as_int();
+      auto range_value = states_.static_field(fields.range);
+      auto decoder_code_value = states_.static_field(fields.code);
+      auto probabilities_value = states_.static_field(fields.probabilities);
+      auto position_value = states_.static_field(fields.input_position);
+      auto length_value = states_.static_field(fields.input_length);
+      auto bytes_value = states_.static_field(fields.input_bytes);
+      if (!probability_index || !range_value || !decoder_code_value ||
+          !probabilities_value || !position_value || !length_value ||
+          !bytes_value)
+      {
+        return std::optional<Value>{};
+      }
+      auto range = range_value->as_long();
+      auto decoder_code = decoder_code_value->as_long();
+      auto probabilities = probabilities_value->as_reference();
+      auto position = position_value->as_int();
+      auto input_length = length_value->as_int();
+      auto input_bytes = bytes_value->as_reference();
+      if (!range || !decoder_code || !probabilities || !position ||
+          !input_length || !input_bytes || probabilities->is_null() ||
+          input_bytes->is_null() || *probability_index < 0 ||
+          *position < 0 || *input_length < *position)
+      {
+        return std::optional<Value>{};
+      }
+      auto probability_count = heap_.array_length(*probabilities);
+      auto input_capacity = heap_.array_length(*input_bytes);
+      if (!probability_count || !input_capacity ||
+          static_cast<usize>(*probability_index) >= *probability_count ||
+          static_cast<usize>(*input_length) > *input_capacity)
+      {
+        return std::optional<Value>{};
+      }
+      auto probability_value = heap_.element(
+          *probabilities, static_cast<usize>(*probability_index));
+      if (!probability_value) return std::optional<Value>{};
+      auto probability = probability_value->as_int();
+      if (!probability || *probability < 0 || *probability > 2'048)
+        return std::optional<Value>{};
+
+      u64 next_range = static_cast<u64>(*range);
+      u64 next_code = static_cast<u64>(*decoder_code);
+      const u64 bound = (next_range >> 11U) *
+                        static_cast<u64>(*probability);
+      i32 next_probability = *probability;
+      i32 decoded_bit = 0;
+      if (next_code < bound)
+      {
+        next_range = bound;
+        next_probability += (2'048 - next_probability) >> 5;
+      }
+      else
+      {
+        next_range -= bound;
+        next_code -= bound;
+        next_probability -= next_probability >> 5;
+        decoded_bit = 1;
+      }
+
+      i32 next_position = *position;
+      if (next_range < 16'777'216ULL)
+      {
+        u8 next_byte = 0xFFU;
+        if (next_position != *input_length)
+        {
+          auto byte_value = heap_.element(
+              *input_bytes, static_cast<usize>(next_position));
+          if (!byte_value) return std::optional<Value>{};
+          auto byte = byte_value->as_int();
+          if (!byte) return std::optional<Value>{};
+          next_byte = static_cast<u8>(static_cast<i8>(*byte));
+          ++next_position;
+        }
+        next_code = (next_code << 8U) | next_byte;
+        next_range <<= 8U;
+      }
+
+      auto probability_stored = heap_.set_element(
+          *probabilities,
+          static_cast<usize>(*probability_index),
+          Value::from_int(static_cast<i32>(
+              static_cast<i16>(next_probability))));
+      auto range_stored = states_.set_static_field(
+          fields.range, Value::from_long(static_cast<i64>(next_range)));
+      auto code_stored = states_.set_static_field(
+          fields.code, Value::from_long(static_cast<i64>(next_code)));
+      auto position_stored = states_.set_static_field(
+          fields.input_position, Value::from_int(next_position));
+      if (!probability_stored) return std::unexpected(probability_stored.error());
+      if (!range_stored) return std::unexpected(range_stored.error());
+      if (!code_stored) return std::unexpected(code_stored.error());
+      if (!position_stored) return std::unexpected(position_stored.error());
+      return std::optional<Value>(Value::from_int(decoded_bit));
     };
 
     const auto try_vector_key_sort_intrinsic =
@@ -3915,16 +4458,22 @@ namespace phoneme::vm
 
     while (!frames.empty())
     {
-      if (scheduler_.current_stop_requested())
+      const bool maintenance_boundary =
+          (executed & (kMaintenancePollInterval - 1U)) == 0U;
+      if (maintenance_boundary && scheduler_.current_stop_requested())
       {
         return fail(ErrorCode::invalid_state,
                     "VM execution was cancelled by scheduler shutdown");
       }
 
-      const bool quantum_boundary =
-          executed != 0U && (executed % kSchedulerQuantum) == 0U;
-      const bool collect_requested =
-          gc_requested_.exchange(false, std::memory_order_acq_rel);
+      const bool quantum_boundary = executed == next_scheduler_quantum;
+      bool collect_requested = false;
+      if (maintenance_boundary &&
+          gc_requested_.load(std::memory_order_relaxed))
+      {
+        collect_requested =
+            gc_requested_.exchange(false, std::memory_order_acq_rel);
+      }
       if (quantum_boundary || collect_requested)
       {
         std::vector<ObjectRef> published_roots;
@@ -3939,15 +4488,26 @@ namespace phoneme::vm
             return std::unexpected(collected.error());
         }
         if (quantum_boundary)
+        {
+          next_scheduler_quantum += kSchedulerQuantum;
           scheduler_.cooperative_quantum(*this);
+        }
       }
 
-      if (executed >= instruction_budget)
+      const bool progress_watchdog =
+          budget_mode == InstructionBudgetMode::progress_watchdog;
+      const bool budget_exhausted = progress_watchdog
+          ? watchdog_instructions >= instruction_budget ||
+                executed >= progress_total_budget
+          : executed >= instruction_budget;
+      if (budget_exhausted)
       {
         const ExecutionFrame& exhausted_frame = frames.back();
         return fail(
             ErrorCode::invalid_state,
-            "VM instruction budget was exhausted in " +
+            std::string(progress_watchdog
+                            ? "VM progress watchdog was exhausted in "
+                            : "VM instruction budget was exhausted in ") +
                 exhausted_frame.owner().name() + "." +
                 exhausted_frame.method().name +
                 exhausted_frame.method().descriptor +
@@ -3960,17 +4520,27 @@ namespace phoneme::vm
                     "VM call stack exceeded its maximum depth");
       }
       ++executed;
+      if (watchdog_instructions != std::numeric_limits<u64>::max())
+        ++watchdog_instructions;
       accounted_instructions = executed;
 
       ExecutionFrame &frame = frames.back();
       const usize opcode_pc = frame.pc();
       frame.begin_instruction(opcode_pc);
-      set_heap_access_context(HeapAccessContext {
-          .owner = frame.owner().name(),
-          .method = frame.method().name,
-          .descriptor = frame.method().descriptor,
-          .bytecode_pc = opcode_pc,
-      });
+      current_heap_access_pc = opcode_pc;
+      if (heap_access_owner != &frame.owner() ||
+          heap_access_method != &frame.method())
+      {
+        heap_access_owner = &frame.owner();
+        heap_access_method = &frame.method();
+        set_heap_access_context(HeapAccessContext {
+            .owner = frame.owner().name(),
+            .method = frame.method().name,
+            .descriptor = frame.method().descriptor,
+            .bytecode_pc = opcode_pc,
+            .live_bytecode_pc = &current_heap_access_pc,
+        });
+      }
       auto opcode_result = frame.read_u8();
       if (!opcode_result)
       {
@@ -5881,6 +6451,26 @@ namespace phoneme::vm
         }
         if (!nested_is_native)
         {
+          auto range_decoded = try_range_decoder_bit_intrinsic(*nested);
+          if (!range_decoded)
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            return std::unexpected(range_decoded.error());
+          }
+          if (range_decoded->has_value())
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            if (budget_mode == InstructionBudgetMode::progress_watchdog)
+              watchdog_instructions = 0U;
+            auto pushed = frame.push(**range_decoded);
+            if (!pushed)
+              return std::unexpected(pushed.error());
+            break;
+          }
           auto sorted = try_vector_key_sort_intrinsic(*nested);
           if (!sorted)
           {
@@ -5894,6 +6484,8 @@ namespace phoneme::vm
             auto released = release_synchronized_monitor(*nested_monitor);
             if (!released)
               return std::unexpected(released.error());
+            if (budget_mode == InstructionBudgetMode::progress_watchdog)
+              watchdog_instructions = 0U;
             break;
           }
           auto intrinsic = try_long_bit_permutation_intrinsic(*nested);
@@ -5909,6 +6501,8 @@ namespace phoneme::vm
             auto released = release_synchronized_monitor(*nested_monitor);
             if (!released)
               return std::unexpected(released.error());
+            if (budget_mode == InstructionBudgetMode::progress_watchdog)
+              watchdog_instructions = 0U;
             auto pushed = frame.push(**intrinsic);
             if (!pushed)
               return std::unexpected(pushed.error());
@@ -5954,6 +6548,8 @@ namespace phoneme::vm
             }
             return std::unexpected(native_result.error());
           }
+          if (budget_mode == InstructionBudgetMode::progress_watchdog)
+            watchdog_instructions = 0U;
           std::optional<Value> nested_return = *native_result;
           if (!nested_return.has_value() &&
               nested->return_override.has_value())

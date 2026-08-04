@@ -13,6 +13,7 @@
 #include "phoneme/runtime/Framebuffer.hpp"
 #include "phoneme/runtime/SuiteStore.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
+#include "phoneme/translation/TranslationService.hpp"
 
 namespace phoneme::runtime {
 
@@ -67,6 +68,8 @@ struct App final {
     std::string console_output;
 };
 
+struct UiTranslationReplayState;
+
 class Runtime final {
 public:
     Runtime();
@@ -82,12 +85,18 @@ public:
         bool pointer_events,
         bool pointer_motion,
         bool repeat_events);
+    [[nodiscard]] Status configure_translation(
+        bool enabled,
+        std::string source_language = "auto",
+        std::string target_language = "vi");
     [[nodiscard]] Status configure_permission_prompt(
         security::PermissionPromptCallback prompt);
     [[nodiscard]] Status set_suite_trust(
         SuiteId suite_id,
         security::SuiteTrust trust);
     [[nodiscard]] Result<SuiteId> install_jar(const std::string& jar_path);
+    [[nodiscard]] Status uninstall_suite(SuiteId suite_id,
+                                         bool remove_data);
     [[nodiscard]] Status start_system();
     [[nodiscard]] Status start_midlet(SuiteId suite_id,
                                       std::string main_class,
@@ -119,7 +128,7 @@ public:
         SuiteId suite_id,
         u64 request_id);
 
-    [[nodiscard]] AppState app_state(AppId app_id) const noexcept;
+    [[nodiscard]] AppState app_state(AppId app_id) noexcept;
     [[nodiscard]] AppId foreground_app_id() const noexcept;
     [[nodiscard]] i64 app_used_memory(AppId app_id) const noexcept;
     [[nodiscard]] std::string app_console_output(AppId app_id) const;
@@ -134,6 +143,7 @@ public:
 
     void send_key(i32 key_code, bool pressed);
     void send_pointer(i32 x, i32 y, i32 action);
+    void pump_events();
 
     [[nodiscard]] FrameMetadata frame_metadata();
     [[nodiscard]] FrameMetadata copy_current_frame_rgba(
@@ -162,6 +172,9 @@ private:
     void finalize_deferred_start(
         AppId app_id,
         const std::shared_ptr<ApplicationVM>& vm);
+    void finalize_pending_destruction(
+        AppId app_id,
+        const std::shared_ptr<ApplicationVM>& vm) noexcept;
     void mark_canvas_failure_unlocked(App& app, const Error& error);
     void push_ui_action(i32 kind, i32 component_id, i32 first, i64 value64,
                         std::string text = {});
@@ -172,6 +185,7 @@ private:
     std::string runtime_home_;
     std::string optional_class_archive_;
     std::array<i32, 7> keymap_ {-1, -2, -3, -4, -5, -6, -7};
+    std::shared_ptr<translation::TranslationService> translation_service_;
     bool pointer_events_supported_ {true};
     bool pointer_motion_supported_ {true};
     bool repeat_events_supported_ {true};
@@ -190,6 +204,7 @@ private:
     Framebuffer framebuffer_;
     ConcurrentQueue<InputEvent> input_queue_;
     ConcurrentQueue<UiEvent> ui_queue_;
+    std::shared_ptr<UiTranslationReplayState> ui_translation_replay_;
 };
 
 } // namespace phoneme::runtime

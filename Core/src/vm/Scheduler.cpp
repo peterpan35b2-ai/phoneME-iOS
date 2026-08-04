@@ -494,6 +494,12 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         // large obfuscated <clinit> blocks into minute-long launches.
         std::this_thread::yield();
     } else {
+        // Pace sustained foreground interpreter work instead of merely
+        // surrendering the remainder of the current host timeslice. A plain
+        // yield can immediately reschedule the same VM thread, starving the
+        // framebuffer poll/render queues and producing uneven frame delivery.
+        // Bootstrap and paint callbacks opt into the unpaced branch above, so
+        // large class initializers and bounded rendering work remain fast.
         std::this_thread::sleep_for(backoff);
     }
     machine.resume_execution_after_blocking(depth);

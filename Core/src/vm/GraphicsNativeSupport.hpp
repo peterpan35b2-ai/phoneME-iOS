@@ -148,17 +148,10 @@ namespace phoneme::vm::graphics_native {
         return fail_java("java/lang/ArrayIndexOutOfBoundsException",
                          std::string(operation) + " byte[] slice is outside the array");
     }
-    std::vector<u8> result;
-    result.reserve(static_cast<usize>(length));
-    for (i32 index = 0; index < length; ++index) {
-        auto value = machine.heap().element(
-            array, static_cast<usize>(offset + index));
-        if (!value) return std::unexpected(value.error());
-        auto integer = value->as_int();
-        if (!integer) return std::unexpected(integer.error());
-        result.push_back(static_cast<u8>(static_cast<i8>(*integer)));
-    }
-    return result;
+    return machine.heap().read_byte_array(
+        array,
+        static_cast<usize>(offset),
+        static_cast<usize>(length));
 }
 
 [[nodiscard]] inline Result<std::vector<graphics::Pixel>> int_array(

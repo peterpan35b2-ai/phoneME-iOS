@@ -17,7 +17,7 @@ using namespace builtin;
             method(kPublic | kAbstract, "run", "()V"),
             method(kPublic, "cancel", "()Z"),
             method(kPublic, "scheduledExecutionTime", "()J"),
-        });
+        }, {"java/lang/Runnable"});
     }
     if (name == "java/util/Timer") {
         return make_class("java/util/Timer", "java/lang/Object", kOrdinary,
@@ -55,16 +55,19 @@ using namespace builtin;
         }, {"java/lang/Cloneable", "java/io/Serializable"});
     }
     if (name == "java/util/TimeZone") {
-        return make_class("java/util/TimeZone", "java/lang/Object", kOrdinary, {
+        return make_class("java/util/TimeZone", "java/lang/Object",
+                          kOrdinary | kAbstract, {
+            // Kept in the base layout so native operations work for every
+            // concrete phoneME-compatible implementation.
             field(kPrivate, "id", "Ljava/lang/String;"),
             field(kPrivate, "rawOffset", "I"),
             field(kPrivate | kStatic, "defaultZone", "Ljava/util/TimeZone;"),
         }, {
             method(kPublic, "<init>", "()V"),
-            method(kPublic, "getOffset", "(IIIIII)I"),
-            method(kPublic, "getRawOffset", "()I"),
+            method(kPublic | kAbstract, "getOffset", "(IIIIII)I"),
+            method(kPublic | kAbstract, "getRawOffset", "()I"),
             method(kPublic, "setRawOffset", "(I)V"),
-            method(kPublic, "useDaylightTime", "()Z"),
+            method(kPublic | kAbstract, "useDaylightTime", "()Z"),
             method(kPublic, "getID", "()Ljava/lang/String;"),
             method(kPublic, "setID", "(Ljava/lang/String;)V"),
             method(kPublic, "hasSameRules", "(Ljava/util/TimeZone;)Z"),
@@ -74,6 +77,20 @@ using namespace builtin;
             method(kPublic | kStatic, "setDefault", "(Ljava/util/TimeZone;)V"),
             method(kPublic | kStatic, "getAvailableIDs", "()[Ljava/lang/String;"),
         }, {"java/lang/Cloneable", "java/io/Serializable"});
+    }
+    if (name == "com/sun/cldc/util/j2me/TimeZoneImpl") {
+        return make_class("com/sun/cldc/util/j2me/TimeZoneImpl",
+                          "java/util/TimeZone", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "getOffset", "(IIIIII)I"),
+            method(kPublic, "getRawOffset", "()I"),
+            method(kPublic, "useDaylightTime", "()Z"),
+            method(kPublic, "getID", "()Ljava/lang/String;"),
+            method(kPublic | kSynchronized, "getInstance",
+                   "(Ljava/lang/String;)Ljava/util/TimeZone;"),
+            method(kPublic | kSynchronized, "getIDs",
+                   "()[Ljava/lang/String;"),
+        });
     }
     if (name == "java/util/Calendar") {
         return make_class("java/util/Calendar", "java/lang/Object",

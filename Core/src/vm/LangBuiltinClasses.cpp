@@ -253,7 +253,7 @@ using namespace builtin;
                           std::move(methods));
     };
     if (name == "java/lang/Byte") {
-        return number_wrapper("java/lang/Byte", "java/lang/Number", "B", {
+        return number_wrapper("java/lang/Byte", "java/lang/Object", "B", {
             method(kPublic, "<init>", "(B)V"),
             method(kPublic, "byteValue", "()B"),
             method(kPublic, "shortValue", "()S"),
@@ -271,7 +271,7 @@ using namespace builtin;
         });
     }
     if (name == "java/lang/Short") {
-        return number_wrapper("java/lang/Short", "java/lang/Number", "S", {
+        return number_wrapper("java/lang/Short", "java/lang/Object", "S", {
             method(kPublic, "<init>", "(S)V"),
             method(kPublic, "byteValue", "()B"),
             method(kPublic, "shortValue", "()S"),
@@ -289,7 +289,7 @@ using namespace builtin;
         });
     }
     if (name == "java/lang/Integer") {
-        return number_wrapper("java/lang/Integer", "java/lang/Number", "I", {
+        return number_wrapper("java/lang/Integer", "java/lang/Object", "I", {
             method(kPublic, "<init>", "(I)V"),
             method(kPublic, "byteValue", "()B"),
             method(kPublic, "shortValue", "()S"),
@@ -316,7 +316,7 @@ using namespace builtin;
         });
     }
     if (name == "java/lang/Long") {
-        return number_wrapper("java/lang/Long", "java/lang/Number", "J", {
+        return number_wrapper("java/lang/Long", "java/lang/Object", "J", {
             method(kPublic, "<init>", "(J)V"),
             method(kPublic, "byteValue", "()B"),
             method(kPublic, "shortValue", "()S"),
@@ -366,7 +366,7 @@ using namespace builtin;
         });
     }
     if (name == "java/lang/Float") {
-        return number_wrapper("java/lang/Float", "java/lang/Number", "F", {
+        return number_wrapper("java/lang/Float", "java/lang/Object", "F", {
             method(kPublic, "<init>", "(F)V"),
             method(kPublic, "<init>", "(D)V"),
             method(kPublic, "byteValue", "()B"),
@@ -391,7 +391,7 @@ using namespace builtin;
         });
     }
     if (name == "java/lang/Double") {
-        return number_wrapper("java/lang/Double", "java/lang/Number", "D", {
+        return number_wrapper("java/lang/Double", "java/lang/Object", "D", {
             method(kPublic, "<init>", "(D)V"),
             method(kPublic, "byteValue", "()B"),
             method(kPublic, "shortValue", "()S"),
@@ -539,7 +539,7 @@ using namespace builtin;
         {"java/lang/VirtualMachineError", "java/lang/Error"},
         {"java/lang/LinkageError", "java/lang/Error"},
         {"java/lang/BootstrapMethodError", "java/lang/LinkageError"},
-        {"java/lang/NoClassDefFoundError", "java/lang/LinkageError"},
+        {"java/lang/NoClassDefFoundError", "java/lang/Error"},
         {"java/lang/ClassFormatError", "java/lang/LinkageError"},
         {"java/lang/VerifyError", "java/lang/LinkageError"},
         {"java/lang/IncompatibleClassChangeError", "java/lang/LinkageError"},

@@ -262,12 +262,16 @@ void append_utf8(std::string& output, u32 code_point) {
 
 [[nodiscard]] Result<ChoiceLayout> layout_for(Machine& machine,
                                               ObjectRef object) {
-    auto class_name = machine.heap().class_name(object);
-    if (!class_name) return std::unexpected(class_name.error());
-    if (*class_name == "javax/microedition/lcdui/List") return kListLayout;
-    if (*class_name == "javax/microedition/lcdui/ChoiceGroup") {
-        return kGroupLayout;
-    }
+    auto is_list = machine.object_is_instance(
+        object, "javax/microedition/lcdui/List");
+    if (!is_list) return std::unexpected(is_list.error());
+    if (*is_list) return kListLayout;
+
+    auto is_group = machine.object_is_instance(
+        object, "javax/microedition/lcdui/ChoiceGroup");
+    if (!is_group) return std::unexpected(is_group.error());
+    if (*is_group) return kGroupLayout;
+
     return fail(ErrorCode::invalid_argument,
                 "object is not an LCDUI Choice implementation");
 }

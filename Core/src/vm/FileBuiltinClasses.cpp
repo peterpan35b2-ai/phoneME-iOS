@@ -117,13 +117,35 @@ using namespace builtin;
                               method(kPublic | kStatic, "openDataOutputStream", "(Ljava/lang/String;)Ljava/io/DataOutputStream;"),
                           });
     }
+    if (name == "javax/microedition/io/file/FileSystemListener") {
+        return make_class("javax/microedition/io/file/FileSystemListener",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {
+            field(kPublic | kStatic | kFinal, "ROOT_ADDED", "I"),
+            field(kPublic | kStatic | kFinal, "ROOT_REMOVED", "I"),
+        }, {
+            method(kPublic | kAbstract, "rootChanged",
+                   "(ILjava/lang/String;)V"),
+        });
+    }
     if (name == "javax/microedition/io/file/FileSystemRegistry") {
         return make_class("javax/microedition/io/file/FileSystemRegistry",
-                          "java/lang/Object", kOrdinary | kFinal, {},
+                          "java/lang/Object", kOrdinary | kFinal, {
+                              field(kPrivate | kStatic, "listeners",
+                                    "Ljava/util/Vector;"),
+                          },
                           {
                               method(kPrivate, "<init>", "()V"),
                               method(kPublic | kStatic, "listRoots",
                                      "()Ljava/util/Enumeration;"),
+                              method(kPublic | kStatic,
+                                     "addFileSystemListener",
+                                     "(Ljavax/microedition/io/file/"
+                                     "FileSystemListener;)Z"),
+                              method(kPublic | kStatic,
+                                     "removeFileSystemListener",
+                                     "(Ljavax/microedition/io/file/"
+                                     "FileSystemListener;)Z"),
                           });
     }
     if (name == "javax/microedition/io/file/FileConnection") {

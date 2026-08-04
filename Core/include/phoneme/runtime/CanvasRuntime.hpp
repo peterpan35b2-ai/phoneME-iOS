@@ -114,6 +114,7 @@ private:
         bool fullscreen {false};
         bool size_change_pending {false};
         bool service_requested {false};
+        bool initial_paint_completed {false};
         i32 key_states {0};
         std::unordered_set<i32> pressed_keys;
         std::unordered_map<i32, std::chrono::steady_clock::time_point>
@@ -160,6 +161,10 @@ private:
     [[nodiscard]] Status process_repaints();
     [[nodiscard]] CanvasState* active_visible_state() noexcept;
     [[nodiscard]] const CanvasState* active_visible_state() const noexcept;
+    [[nodiscard]] Result<bool> invoke_paint(
+        vm::ObjectRef receiver,
+        vm::ObjectRef graphics,
+        bool initial_paint);
     [[nodiscard]] Status invoke_void(
         vm::ObjectRef receiver,
         std::string_view declared_class,
@@ -198,6 +203,7 @@ private:
     bool pointer_events_supported_ {true};
     bool pointer_motion_supported_ {true};
     bool repeat_events_supported_ {true};
+    u64 observed_translation_generation_ {0U};
     bool pumping_ {false};
 };
 

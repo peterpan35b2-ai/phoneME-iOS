@@ -4,7 +4,7 @@ struct ContentView: View {
     @AppStorage("appTheme") private var appTheme = AppTheme.system.rawValue
 
     var body: some View {
-        NavigationStack {
+        PhoneMENavigationStack {
             LibraryView()
         }
         .preferredColorScheme(AppTheme(rawValue: appTheme)?.colorScheme)

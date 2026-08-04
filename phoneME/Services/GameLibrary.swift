@@ -1,40 +1,67 @@
 import Foundation
 
+enum GameRemovalDataPolicy {
+    case keepData
+    case deleteData
+}
+
+private struct RetainedGameData: Codable {
+    let id: UUID
+    let title: String
+    let vendor: String
+    let version: String
+    let mainClass: String
+    let deletedAt: Date
+
+    init(game: Game) {
+        id = game.id
+        title = game.title
+        vendor = game.vendor
+        version = game.version
+        mainClass = game.mainClass
+        deletedAt = Date()
+    }
+}
+
 @MainActor
 final class GameLibrary: ObservableObject {
     @Published private(set) var games: [Game] = []
 
     private let fileManager: FileManager
-    private let rootURL: URL
-    private let gamesURL: URL
-    private let iconsURL: URL
-    private let metadataURL: URL
+    private let storage: PhoneMEStorageController
+    private var retainedData: [RetainedGameData] = []
 
-    init(fileManager: FileManager = .default) {
+    private var rootURL: URL { storage.rootURL }
+    private var gamesURL: URL {
+        rootURL.appendingPathComponent("Games", isDirectory: true)
+    }
+    private var iconsURL: URL {
+        rootURL.appendingPathComponent("Icons", isDirectory: true)
+    }
+    private var metadataURL: URL {
+        rootURL.appendingPathComponent("library.json", isDirectory: false)
+    }
+    private var retainedDataURL: URL {
+        rootURL.appendingPathComponent("retained-data.json", isDirectory: false)
+    }
+
+    init(
+        storage: PhoneMEStorageController,
+        fileManager: FileManager = .default
+    ) {
+        self.storage = storage
         self.fileManager = fileManager
+        reloadFromStorage()
+    }
 
-        let applicationSupport = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? fileManager.temporaryDirectory
-
-        rootURL = applicationSupport.appendingPathComponent("phoneME", isDirectory: true)
-        gamesURL = rootURL.appendingPathComponent("Games", isDirectory: true)
-        iconsURL = rootURL.appendingPathComponent("Icons", isDirectory: true)
-        metadataURL = rootURL.appendingPathComponent("library.json", isDirectory: false)
-
+    func reloadFromStorage() {
         do {
-            try fileManager.createDirectory(
-                at: gamesURL,
-                withIntermediateDirectories: true
-            )
-            try fileManager.createDirectory(
-                at: iconsURL,
-                withIntermediateDirectories: true
-            )
+            try prepareDirectories()
+            try loadRetainedData()
             try load()
         } catch {
             games = []
+            retainedData = []
         }
     }
 
@@ -76,7 +103,10 @@ final class GameLibrary: ObservableObject {
             .lastPathComponent
             .replacingOccurrences(of: "/", with: "-")
         let metadata = try? JarMetadataReader.read(from: sourceURL)
-        let id = UUID()
+        let retainedIndex = retainedData.firstIndex {
+            matchesRetainedData($0, metadata: metadata, fallbackTitle: safeName)
+        }
+        let id = retainedIndex.map { retainedData[$0].id } ?? UUID()
         let storedName = "\(id.uuidString)-\(safeName).jar"
         let destinationURL = gamesURL.appendingPathComponent(storedName)
         let iconFileName = try storeIcon(from: metadata, gameID: id)
@@ -101,11 +131,17 @@ final class GameLibrary: ObservableObject {
         )
         games.append(game)
         sortGames()
+        let previousRetainedData = retainedData
+        if let retainedIndex {
+            retainedData.remove(at: retainedIndex)
+        }
 
         do {
             try save()
+            try saveRetainedData()
         } catch {
             games.removeAll { $0.id == game.id }
+            retainedData = previousRetainedData
             try? fileManager.removeItem(at: destinationURL)
             removeIcon(for: game)
             throw error
@@ -172,19 +208,35 @@ final class GameLibrary: ObservableObject {
             let jarURL = fileURL(for: game)
             try? fileManager.removeItem(at: jarURL)
             removeIcon(for: game)
+            retainedData.removeAll { $0.id == game.id }
             PhoneMERuntimeResources.removeStorage(for: game.id)
         }
         try? save()
+        try? saveRetainedData()
     }
 
-    func remove(_ game: Game) {
-        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+    func remove(
+        _ game: Game,
+        dataPolicy: GameRemovalDataPolicy
+    ) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else {
+            return
+        }
+
         games.remove(at: index)
         let jarURL = fileURL(for: game)
         try? fileManager.removeItem(at: jarURL)
         removeIcon(for: game)
-        PhoneMERuntimeResources.removeStorage(for: game.id)
+
+        retainedData.removeAll { $0.id == game.id }
+        if dataPolicy == .keepData {
+            retainedData.append(RetainedGameData(game: game))
+        } else {
+            PhoneMERuntimeResources.removeStorage(for: game.id)
+        }
+
         try? save()
+        try? saveRetainedData()
     }
 
     func rename(_ game: Game, to title: String) {
@@ -282,6 +334,69 @@ final class GameLibrary: ObservableObject {
     private func removeIcon(for game: Game) {
         guard let iconFileName = game.iconFileName else { return }
         try? fileManager.removeItem(at: iconsURL.appendingPathComponent(iconFileName))
+    }
+
+    private func prepareDirectories() throws {
+        try fileManager.createDirectory(
+            at: gamesURL,
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: iconsURL,
+            withIntermediateDirectories: true
+        )
+    }
+
+    private func loadRetainedData() throws {
+        guard fileManager.fileExists(atPath: retainedDataURL.path) else {
+            retainedData = []
+            return
+        }
+        let data = try Data(contentsOf: retainedDataURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        retainedData = try decoder.decode([RetainedGameData].self, from: data)
+    }
+
+    private func saveRetainedData() throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(retainedData)
+        try data.write(to: retainedDataURL, options: .atomic)
+    }
+
+    private func matchesRetainedData(
+        _ retained: RetainedGameData,
+        metadata: JarMetadata?,
+        fallbackTitle: String
+    ) -> Bool {
+        let retainedMainClass = normalizedIdentity(retained.mainClass)
+        let currentMainClass = normalizedIdentity(metadata?.mainClass ?? "")
+        let retainedVendor = normalizedIdentity(retained.vendor)
+        let currentVendor = normalizedIdentity(metadata?.vendor ?? "")
+
+        if !retainedMainClass.isEmpty,
+           retainedMainClass == currentMainClass,
+           (retainedVendor.isEmpty || currentVendor.isEmpty
+               || retainedVendor == currentVendor) {
+            return true
+        }
+
+        let retainedTitle = normalizedIdentity(retained.title)
+        let currentTitle = normalizedIdentity(metadata?.title ?? fallbackTitle)
+        return !retainedTitle.isEmpty
+            && retainedTitle == currentTitle
+            && (retainedVendor.isEmpty || currentVendor.isEmpty
+                || retainedVendor == currentVendor)
+    }
+
+    private func normalizedIdentity(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
     }
 
     private func save() throws {

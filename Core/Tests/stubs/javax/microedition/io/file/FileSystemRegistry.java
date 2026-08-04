@@ -7,4 +7,8 @@ public final class FileSystemRegistry {
     }
 
     public static native Enumeration listRoots();
+    public static native boolean addFileSystemListener(
+            FileSystemListener listener);
+    public static native boolean removeFileSystemListener(
+            FileSystemListener listener);
 }

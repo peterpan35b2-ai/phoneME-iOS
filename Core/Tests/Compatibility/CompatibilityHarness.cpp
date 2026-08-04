@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "phoneme/base/Error.hpp"
@@ -29,6 +30,7 @@ struct Options final {
     std::string frame_path;
     phoneme::i32 width {320};
     phoneme::i32 height {240};
+    phoneme::i32 observe_ms {0};
 };
 
 struct HarnessResult final {
@@ -74,7 +76,7 @@ struct HarnessResult final {
         if (argument == "--help") {
             error = "usage: CompatibilityHarness --jar FILE --main CLASS "
                     "--runtime-home DIR --result FILE --frame FILE "
-                    "[--width N --height N]";
+                    "[--width N --height N --observe-ms N]";
             return false;
         }
         if (index + 1 >= argc) {
@@ -106,6 +108,13 @@ struct HarnessResult final {
                 return false;
             }
             options.height = *parsed;
+        } else if (argument == "--observe-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 0 || *parsed > 120'000) {
+                error = "invalid observe duration: " + value;
+                return false;
+            }
+            options.observe_ms = *parsed;
         } else {
             error = "unknown argument: " + std::string(argument);
             return false;
@@ -267,7 +276,8 @@ void emit_string_array(std::ostream& output,
         output.write(rgb, static_cast<std::streamsize>(sizeof(rgb)));
     }
     if (!output) return false;
-    result.frames_produced = 1U;
+    result.frames_produced = std::max<phoneme::usize>(
+        result.frames_produced, 1U);
     result.nonzero_frame_bytes = static_cast<phoneme::usize>(std::count_if(
         frame.rgba.begin(), frame.rgba.end(), [](phoneme::u8 value) {
             return value != 0U;
@@ -407,9 +417,35 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     (void)write_result(options, result);
 
     collect_ui_events(runtime, result);
+    auto latest_frame = runtime.frame_snapshot();
     if (result.canvas_event_count != 0U) {
-        (void)write_ppm(options, runtime.frame_snapshot(), result);
+        (void)write_ppm(options, latest_frame, result);
     }
+
+    if (options.observe_ms > 0 &&
+        runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
+        add_milestone(result, "observation-begin");
+        const auto deadline = Clock::now() +
+            std::chrono::milliseconds(options.observe_ms);
+        phoneme::u64 last_generation = latest_frame.generation;
+        while (Clock::now() < deadline &&
+               runtime.app_state(kAppId) !=
+                   phoneme::runtime::AppState::destroyed) {
+            collect_ui_events(runtime, result);
+            auto frame = runtime.frame_snapshot();
+            if (frame.generation != last_generation) {
+                last_generation = frame.generation;
+                latest_frame = std::move(frame);
+                ++result.frames_produced;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (result.canvas_event_count != 0U && !latest_frame.rgba.empty()) {
+            (void)write_ppm(options, latest_frame, result);
+        }
+        add_milestone(result, "observation-end");
+    }
+
     const auto console_output = runtime.app_console_output(kAppId);
     if (!console_output.empty()) {
         std::cout << console_output;

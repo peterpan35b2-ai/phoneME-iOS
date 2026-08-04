@@ -685,6 +685,7 @@ void append_utf8(std::string& output, u32 code_point) {
         .component_id = *id,
         .parent_id = *parent,
         .component_type = *type,
+        .index = -1,
         .text = std::move(*label_text),
     };
     auto is_custom = machine.object_is_instance(
@@ -820,6 +821,7 @@ void append_utf8(std::string& output, u32 code_point) {
         .component_id = *id,
         .parent_id = *parent,
         .component_type = *type,
+        .index = -1,
         .arguments = {*layout, appearance, fit_policy,
                       kItemStyleMetadata},
         .text = std::move(*label_text),
@@ -867,12 +869,15 @@ void append_utf8(std::string& output, u32 code_point) {
 
 [[nodiscard]] Status emit_item(Machine& machine,
                                ObjectRef item,
-                               i32 kind) {
+                               i32 kind,
+                               i32 form_index = -1) {
     auto event = item_event(machine, item, kind);
     if (!event) return std::unexpected(event.error());
+    event->index = form_index;
     machine.emit_ui_event(std::move(*event));
     auto style = item_style_event(machine, item, kind);
     if (!style) return std::unexpected(style.error());
+    style->index = form_index;
     machine.emit_ui_event(std::move(*style));
     return {};
 }
@@ -1024,10 +1029,10 @@ void append_utf8(std::string& output, u32 code_point) {
                                        *form_id);
     if (!parent_stored) return parent_stored;
     if (emit_created) {
-        auto created = emit_item(machine, item, kEventItemCreated);
+        auto created = emit_item(machine, item, kEventItemCreated, index);
         if (!created) return created;
     }
-    auto shown = emit_item(machine, item, kEventItemShown);
+    auto shown = emit_item(machine, item, kEventItemShown, index);
     if (!shown) return shown;
     auto is_choice_group = machine.object_is_instance(
         item, "javax/microedition/lcdui/ChoiceGroup");
@@ -1044,10 +1049,9 @@ void append_utf8(std::string& output, u32 code_point) {
         if (!form_shown) return std::unexpected(form_shown.error());
         auto lifecycle = layout_custom_item(machine, item, *form_shown);
         if (!lifecycle) return lifecycle;
-        auto updated = emit_item(machine, item, kEventItemUpdated);
+        auto updated = emit_item(machine, item, kEventItemUpdated, index);
         if (!updated) return updated;
     }
-    (void)index;
     return {};
 }
 
@@ -1103,6 +1107,31 @@ void append_utf8(std::string& output, u32 code_point) {
     auto value = machine.heap().element(*items, static_cast<usize>(index));
     if (!value) return std::unexpected(value.error());
     return value->as_reference();
+}
+
+[[nodiscard]] Status emit_form_item_order(Machine& machine,
+                                          ObjectRef form,
+                                          i32 start_index) {
+    auto count = int_field(machine, form, kFormItemCountField);
+    auto items = reference_field(machine, form, kFormItemsField);
+    if (!count) return std::unexpected(count.error());
+    if (!items) return std::unexpected(items.error());
+    if (items->is_null()) return {};
+
+    const i32 first = std::clamp(start_index, 0, *count);
+    for (i32 index = first; index < *count; ++index) {
+        auto value = machine.heap().element(
+            *items, static_cast<usize>(index));
+        if (!value) return std::unexpected(value.error());
+        auto item = value->as_reference();
+        if (!item) return std::unexpected(item.error());
+        if (item->is_null()) continue;
+        auto event = item_style_event(machine, *item, kEventItemUpdated);
+        if (!event) return std::unexpected(event.error());
+        event->index = index;
+        machine.emit_ui_event(std::move(*event));
+    }
+    return {};
 }
 
 [[nodiscard]] Status update_item_if_attached(Machine& machine,
@@ -1444,6 +1473,43 @@ void append_utf8(std::string& output, u32 code_point) {
     return reference_field(machine, *display, kDisplayCurrentField);
 }
 
+[[nodiscard]] Status refresh_alert_timeout(Machine& machine,
+                                           ObjectRef displayable) {
+    auto is_alert = machine.object_is_instance(
+        displayable, "javax/microedition/lcdui/Alert");
+    if (!is_alert) return std::unexpected(is_alert.error());
+    if (!*is_alert) return {};
+
+    auto shown = int_field(machine, displayable, kDisplayableShownField);
+    auto timeout = int_field(machine, displayable, kAlertTimeoutField);
+    auto command_count = int_field(machine, displayable,
+                                   kDisplayableCommandCountField);
+    if (!shown) return std::unexpected(shown.error());
+    if (!timeout) return std::unexpected(timeout.error());
+    if (!command_count) return std::unexpected(command_count.error());
+
+    if (*shown == 0 || *timeout == kAlertForever || *command_count != 1) {
+        machine.cancel_lcdui_alert_timeout(displayable);
+        return {};
+    }
+    return machine.schedule_lcdui_alert_timeout(displayable, *timeout);
+}
+
+[[nodiscard]] Status set_alert_indicator_visible(Machine& machine,
+                                                  ObjectRef displayable,
+                                                  bool visible) {
+    auto is_alert = machine.object_is_instance(
+        displayable, "javax/microedition/lcdui/Alert");
+    if (!is_alert) return std::unexpected(is_alert.error());
+    if (!*is_alert) return {};
+    auto indicator = reference_field(machine, displayable,
+                                     kAlertIndicatorField);
+    if (!indicator) return std::unexpected(indicator.error());
+    if (indicator->is_null()) return {};
+    return emit_item(machine, *indicator,
+                     visible ? kEventItemShown : kEventItemHidden);
+}
+
 [[nodiscard]] Status set_current_displayable(Machine& machine,
                                              ObjectRef display,
                                              ObjectRef next) {
@@ -1460,6 +1526,10 @@ void append_utf8(std::string& output, u32 code_point) {
     if (!current) return std::unexpected(current.error());
     if (*current == next) return {};
     if (!current->is_null()) {
+        machine.cancel_lcdui_alert_timeout(*current);
+        auto indicator_hidden = set_alert_indicator_visible(
+            machine, *current, false);
+        if (!indicator_hidden) return indicator_hidden;
         auto custom_hidden = notify_custom_items(machine, *current, false);
         if (!custom_hidden) return custom_hidden;
         auto hidden = screen_event(machine, *current, kEventScreenHidden);
@@ -1494,9 +1564,26 @@ void append_utf8(std::string& output, u32 code_point) {
     }
     auto custom_shown = notify_custom_items(machine, next, true);
     if (!custom_shown) return custom_shown;
+    auto indicator_shown = set_alert_indicator_visible(machine, next, true);
+    if (!indicator_shown) return indicator_shown;
     auto shown = screen_event(machine, next, kEventScreenShown);
     if (!shown) return std::unexpected(shown.error());
     machine.emit_ui_event(std::move(*shown));
+
+    // A List keeps its Choice elements alive while another Displayable is on
+    // top. When Back reveals the same List again, replay the element metadata
+    // so the host can request the real per-row images instead of depending on
+    // a stale image cache from the previous presentation.
+    auto is_list = machine.object_is_instance(
+        next, "javax/microedition/lcdui/List");
+    if (!is_list) return std::unexpected(is_list.error());
+    if (*is_list) {
+        auto choices = emit_choice_elements(machine, next);
+        if (!choices) return choices;
+    }
+
+    auto alert_timeout = refresh_alert_timeout(machine, next);
+    if (!alert_timeout) return alert_timeout;
     return emit_commands(machine, next);
 }
 
@@ -1599,6 +1686,50 @@ void append_utf8(std::string& output, u32 code_point) {
     auto value = machine.class_states().static_field(*field);
     if (!value) return std::unexpected(value.error());
     return value->as_reference();
+}
+
+[[nodiscard]] Result<ObjectRef> alert_dismiss_command(Machine& machine) {
+    auto field = machine.class_states().resolve_field(
+        "javax/microedition/lcdui/Alert", "DISMISS_COMMAND",
+        "Ljavax/microedition/lcdui/Command;", true);
+    if (!field) return std::unexpected(field.error());
+    auto value = machine.class_states().static_field(*field);
+    if (!value) return std::unexpected(value.error());
+    return value->as_reference();
+}
+
+[[nodiscard]] Result<ObjectRef> sole_alert_command(Machine& machine,
+                                                   ObjectRef alert) {
+    auto commands = reference_field(machine, alert,
+                                    kDisplayableCommandsField);
+    auto count = int_field(machine, alert, kDisplayableCommandCountField);
+    if (!commands) return std::unexpected(commands.error());
+    if (!count) return std::unexpected(count.error());
+    if (*count != 1 || commands->is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "timed Alert does not have exactly one command");
+    }
+    auto value = machine.heap().element(*commands, 0U);
+    if (!value) return std::unexpected(value.error());
+    return value->as_reference();
+}
+
+[[nodiscard]] Status dispatch_alert_command(Machine& machine,
+                                            ObjectRef alert,
+                                            ObjectRef command) {
+    auto listener = reference_field(machine, alert,
+                                    kDisplayableListenerField);
+    if (!listener) return std::unexpected(listener.error());
+    if (!listener->is_null()) {
+        return dispatch_command_listener(machine, command, alert);
+    }
+
+    auto next = reference_field(machine, alert, kAlertNextField);
+    if (!next) return std::unexpected(next.error());
+    auto display = display_singleton(machine);
+    if (!display) return std::unexpected(display.error());
+    if (display->is_null()) return {};
+    return set_current_displayable(machine, *display, *next);
 }
 
 [[nodiscard]] Result<std::optional<Value>> invoke_custom(
@@ -2363,6 +2494,33 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto next = reference_argument(arguments, 1U);
             if (!display) return std::unexpected(display.error());
             if (!next) return std::unexpected(next.error());
+            // MIDP treats setCurrent(null) as a background request; it does
+            // not clear or hide the current Displayable.
+            if (next->is_null()) return std::optional<Value> {};
+
+            auto next_is_alert = machine.object_is_instance(
+                *next, "javax/microedition/lcdui/Alert");
+            if (!next_is_alert) return std::unexpected(next_is_alert.error());
+            if (*next_is_alert) {
+                auto current = reference_field(machine, *display,
+                                               kDisplayCurrentField);
+                if (!current) return std::unexpected(current.error());
+                if (*current == *next) return std::optional<Value> {};
+                if (!current->is_null()) {
+                    auto current_is_alert = machine.object_is_instance(
+                        *current, "javax/microedition/lcdui/Alert");
+                    if (!current_is_alert)
+                        return std::unexpected(current_is_alert.error());
+                    if (*current_is_alert) {
+                        return fail_java(
+                            "java/lang/IllegalArgumentException",
+                            "MIDP does not allow stacking Alerts");
+                    }
+                }
+                auto stored = set_reference_field(machine, *next,
+                                                  kAlertNextField, *current);
+                if (!stored) return std::unexpected(stored.error());
+            }
             auto switched = set_current_displayable(machine, *display, *next);
             if (!switched) return std::unexpected(switched.error());
             return std::optional<Value> {};
@@ -2374,7 +2532,7 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto display = receiver(arguments);
             auto alert = reference_argument(arguments, 1U, false);
-            auto next = reference_argument(arguments, 2U);
+            auto next = reference_argument(arguments, 2U, false);
             if (!display) return std::unexpected(display.error());
             if (!alert) return std::unexpected(alert.error());
             if (!next) return std::unexpected(next.error());
@@ -2385,15 +2543,15 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "Display.setCurrent alert is invalid");
             }
-            if (!next->is_null()) {
-                auto valid_next = machine.object_is_instance(
-                    *next, "javax/microedition/lcdui/Displayable");
-                if (!valid_next)
-                    return std::unexpected(valid_next.error());
-                if (!*valid_next || *next == *alert) {
-                    return fail_java("java/lang/IllegalArgumentException",
-                                     "Alert next displayable is invalid");
-                }
+            auto valid_next = machine.object_is_instance(
+                *next, "javax/microedition/lcdui/Displayable");
+            if (!valid_next) return std::unexpected(valid_next.error());
+            auto next_is_alert = machine.object_is_instance(
+                *next, "javax/microedition/lcdui/Alert");
+            if (!next_is_alert) return std::unexpected(next_is_alert.error());
+            if (!*valid_next || *next_is_alert) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Alert return screen must be a non-Alert Displayable");
             }
             auto stored = set_reference_field(machine, *alert,
                                               kAlertNextField, *next);
@@ -2953,6 +3111,8 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                 return std::unexpected(count_stored.error());
             auto attached = attach_item(machine, *form, *item, *index, true);
             if (!attached) return std::unexpected(attached.error());
+            auto reordered = emit_form_item_order(machine, *form, *index);
+            if (!reordered) return std::unexpected(reordered.error());
             return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Form", "delete", "(I)V",
@@ -3000,6 +3160,8 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             if (!cleared) return std::unexpected(cleared.error());
             if (!count_stored)
                 return std::unexpected(count_stored.error());
+            auto reordered = emit_form_item_order(machine, *form, *index);
+            if (!reordered) return std::unexpected(reordered.error());
             return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Form", "deleteAll", "()V",
@@ -4190,8 +4352,16 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto alert = receiver(arguments);
             if (!alert) return std::unexpected(alert.error());
             auto timeout = int_field(machine, *alert, kAlertTimeoutField);
+            auto command_count = int_field(machine, *alert,
+                                           kDisplayableCommandCountField);
             if (!timeout) return std::unexpected(timeout.error());
-            return std::optional<Value>(Value::from_int(*timeout));
+            if (!command_count)
+                return std::unexpected(command_count.error());
+            // Two or more commands make an Alert modal regardless of the
+            // timeout value requested by the MIDlet.
+            const i32 effective = *command_count >= 2
+                ? kAlertForever : *timeout;
+            return std::optional<Value>(Value::from_int(effective));
         });
     add(registry, "javax/microedition/lcdui/Alert", "setTimeout", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -4207,6 +4377,10 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             auto stored = set_int_field(machine, *alert,
                                         kAlertTimeoutField, *timeout);
             if (!stored) return std::unexpected(stored.error());
+            auto updated = emit_screen_update(machine, *alert);
+            if (!updated) return std::unexpected(updated.error());
+            auto scheduled = refresh_alert_timeout(machine, *alert);
+            if (!scheduled) return std::unexpected(scheduled.error());
             return std::optional<Value> {};
         });
     add(registry, "javax/microedition/lcdui/Alert", "getDefaultTimeout",
@@ -4262,6 +4436,13 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                                      "Alert indicator already has an owner");
                 }
             }
+            auto shown = is_shown(machine, *alert);
+            if (!shown) return std::unexpected(shown.error());
+            if (*shown && !current->is_null()) {
+                auto hidden = set_alert_indicator_visible(
+                    machine, *alert, false);
+                if (!hidden) return std::unexpected(hidden.error());
+            }
             if (!current->is_null()) {
                 auto detached = set_int_field(machine, *current,
                                               kItemParentField, 0);
@@ -4279,6 +4460,12 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                                               kAlertIndicatorField,
                                               *indicator);
             if (!stored) return std::unexpected(stored.error());
+            if (*shown && !indicator->is_null()) {
+                auto displayed = set_alert_indicator_visible(
+                    machine, *alert, true);
+                if (!displayed)
+                    return std::unexpected(displayed.error());
+            }
             auto updated = emit_screen_update(machine, *alert);
             if (!updated) return std::unexpected(updated.error());
             return std::optional<Value> {};
@@ -4930,10 +5117,89 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
                      name, descriptor);
     };
 
-    for (const char* name : {"addCommand", "removeCommand"}) {
-        displayable_alias("javax/microedition/lcdui/Alert", name,
-                          "(Ljavax/microedition/lcdui/Command;)V");
-    }
+    add(registry, "javax/microedition/lcdui/Alert", "addCommand",
+        "(Ljavax/microedition/lcdui/Command;)V",
+        [&registry](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto command = reference_argument(arguments, 1U, false);
+            if (!alert) return std::unexpected(alert.error());
+            if (!command) return std::unexpected(command.error());
+            auto dismiss = alert_dismiss_command(machine);
+            if (!dismiss) return std::unexpected(dismiss.error());
+            if (*command == *dismiss) return std::optional<Value> {};
+
+            auto commands = reference_field(machine, *alert,
+                                            kDisplayableCommandsField);
+            auto count = int_field(machine, *alert,
+                                   kDisplayableCommandCountField);
+            if (!commands) return std::unexpected(commands.error());
+            if (!count) return std::unexpected(count.error());
+            if (*count == 1 && !commands->is_null()) {
+                auto first = machine.heap().element(*commands, 0U);
+                if (!first) return std::unexpected(first.error());
+                auto existing = first->as_reference();
+                if (!existing) return std::unexpected(existing.error());
+                if (*existing == *dismiss) {
+                    const Value remove_arguments[] {
+                        Value::from_reference(*alert),
+                        Value::from_reference(*dismiss),
+                    };
+                    auto removed = registry.invoke(
+                        machine, "javax/microedition/lcdui/Displayable",
+                        "removeCommand",
+                        "(Ljavax/microedition/lcdui/Command;)V",
+                        remove_arguments);
+                    if (!removed) return std::unexpected(removed.error());
+                }
+            }
+
+            auto added = registry.invoke(
+                machine, "javax/microedition/lcdui/Displayable",
+                "addCommand",
+                "(Ljavax/microedition/lcdui/Command;)V", arguments);
+            if (!added) return std::unexpected(added.error());
+            auto scheduled = refresh_alert_timeout(machine, *alert);
+            if (!scheduled) return std::unexpected(scheduled.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "javax/microedition/lcdui/Alert", "removeCommand",
+        "(Ljavax/microedition/lcdui/Command;)V",
+        [&registry](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto alert = receiver(arguments);
+            auto command = reference_argument(arguments, 1U);
+            if (!alert) return std::unexpected(alert.error());
+            if (!command) return std::unexpected(command.error());
+            if (command->is_null()) return std::optional<Value> {};
+            auto dismiss = alert_dismiss_command(machine);
+            if (!dismiss) return std::unexpected(dismiss.error());
+            if (*command == *dismiss) return std::optional<Value> {};
+
+            auto removed = registry.invoke(
+                machine, "javax/microedition/lcdui/Displayable",
+                "removeCommand",
+                "(Ljavax/microedition/lcdui/Command;)V", arguments);
+            if (!removed) return std::unexpected(removed.error());
+            auto count = int_field(machine, *alert,
+                                   kDisplayableCommandCountField);
+            if (!count) return std::unexpected(count.error());
+            if (*count == 0) {
+                const Value add_arguments[] {
+                    Value::from_reference(*alert),
+                    Value::from_reference(*dismiss),
+                };
+                auto restored = registry.invoke(
+                    machine, "javax/microedition/lcdui/Displayable",
+                    "addCommand",
+                    "(Ljavax/microedition/lcdui/Command;)V",
+                    add_arguments);
+                if (!restored) return std::unexpected(restored.error());
+            }
+            auto scheduled = refresh_alert_timeout(machine, *alert);
+            if (!scheduled) return std::unexpected(scheduled.error());
+            return std::optional<Value> {};
+        });
     displayable_alias("javax/microedition/lcdui/Alert",
                       "setCommandListener",
                       "(Ljavax/microedition/lcdui/CommandListener;)V");
@@ -4964,6 +5230,32 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
     item_alias("javax/microedition/lcdui/ImageItem", "setLayout", "(I)V");
     item_alias("javax/microedition/lcdui/StringItem", "setPreferredSize",
                "(II)V");
+}
+
+Status pump_lcdui_alert_timeouts(Machine& machine) {
+    auto due = machine.take_due_lcdui_alert();
+    if (!due) return std::unexpected(due.error());
+    if (!due->has_value()) return {};
+
+    const ObjectRef alert = **due;
+    auto current = current_displayable(machine);
+    if (!current) return std::unexpected(current.error());
+    if (*current != alert) return {};
+
+    auto shown = int_field(machine, alert, kDisplayableShownField);
+    auto timeout = int_field(machine, alert, kAlertTimeoutField);
+    auto command_count = int_field(machine, alert,
+                                   kDisplayableCommandCountField);
+    if (!shown) return std::unexpected(shown.error());
+    if (!timeout) return std::unexpected(timeout.error());
+    if (!command_count) return std::unexpected(command_count.error());
+    if (*shown == 0 || *timeout == kAlertForever || *command_count != 1) {
+        return {};
+    }
+
+    auto command = sole_alert_command(machine, alert);
+    if (!command) return std::unexpected(command.error());
+    return dispatch_alert_command(machine, alert, *command);
 }
 
 Status handle_lcdui_action(Machine& machine,
@@ -5252,33 +5544,7 @@ Status handle_lcdui_action(Machine& machine,
             *current, "javax/microedition/lcdui/Alert");
         if (!is_alert) return std::unexpected(is_alert.error());
         if (*is_alert) {
-            auto dismiss_field = machine.class_states().resolve_field(
-                "javax/microedition/lcdui/Alert", "DISMISS_COMMAND",
-                "Ljavax/microedition/lcdui/Command;", true);
-            if (!dismiss_field)
-                return std::unexpected(dismiss_field.error());
-            auto dismiss_value = machine.class_states().static_field(
-                *dismiss_field);
-            if (!dismiss_value)
-                return std::unexpected(dismiss_value.error());
-            auto dismiss = dismiss_value->as_reference();
-            if (!dismiss) return std::unexpected(dismiss.error());
-            if (*component == *dismiss) {
-                auto callback = dispatch_command_listener(
-                    machine, *component, *current);
-                if (!callback) return callback;
-                auto still_current = current_displayable(machine);
-                if (!still_current)
-                    return std::unexpected(still_current.error());
-                if (*still_current != *current) return {};
-                auto next = reference_field(machine, *current,
-                                            kAlertNextField);
-                if (!next) return std::unexpected(next.error());
-                auto display = display_singleton(machine);
-                if (!display) return std::unexpected(display.error());
-                if (display->is_null()) return {};
-                return set_current_displayable(machine, *display, *next);
-            }
+            return dispatch_alert_command(machine, *current, *component);
         }
         return dispatch_command_listener(machine, *component, *current);
     }

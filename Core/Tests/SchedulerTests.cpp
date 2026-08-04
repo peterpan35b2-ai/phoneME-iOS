@@ -48,6 +48,10 @@ Status dispatch_media_event(Machine&,
     return {};
 }
 
+Status pump_lcdui_alert_timeouts(Machine&) {
+    return {};
+}
+
 } // namespace phoneme::vm
 
 namespace {

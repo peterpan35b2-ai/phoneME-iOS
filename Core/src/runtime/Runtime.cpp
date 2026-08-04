@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -28,6 +29,78 @@
 
 namespace phoneme::runtime {
 
+struct UiTranslationReplayState final {
+    std::mutex mutex;
+    ConcurrentQueue<UiEvent>* queue {nullptr};
+    bool active {true};
+    u64 reset_epoch {0U};
+    u64 commands_reset_generation {0U};
+    std::unordered_map<i32, u64> deleted_components;
+    std::unordered_map<u64, u64> deleted_choices;
+
+    [[nodiscard]] static u64 choice_key(i32 component_id, i32 index) noexcept {
+        return (static_cast<u64>(static_cast<u32>(component_id)) << 32U) |
+               static_cast<u32>(index);
+    }
+
+    [[nodiscard]] u64 current_epoch() {
+        std::scoped_lock lock(mutex);
+        return reset_epoch;
+    }
+
+    void publish(UiEvent event, bool replay, u64 expected_epoch = 0U) {
+        std::scoped_lock lock(mutex);
+        if (!active || queue == nullptr) return;
+        if (replay) {
+            if (expected_epoch != reset_epoch) return;
+            if (const auto deleted = deleted_components.find(event.component_id);
+                deleted != deleted_components.end() &&
+                event.generation < deleted->second) {
+                return;
+            }
+            if (event.kind == 12) {
+                const auto exact = deleted_choices.find(
+                    choice_key(event.component_id, event.index));
+                const auto all = deleted_choices.find(
+                    choice_key(event.component_id, -1));
+                if ((exact != deleted_choices.end() &&
+                     event.generation < exact->second) ||
+                    (all != deleted_choices.end() &&
+                     event.generation < all->second)) {
+                    return;
+                }
+            }
+            if (event.kind == 15 &&
+                event.generation < commands_reset_generation) {
+                return;
+            }
+        } else {
+            if (event.kind == 1) {
+                ++reset_epoch;
+                deleted_components.clear();
+                deleted_choices.clear();
+            } else if (event.kind == 6 || event.kind == 11) {
+                deleted_components[event.component_id] = event.generation;
+            } else if (event.kind == 13) {
+                deleted_choices[choice_key(event.component_id, event.index)] =
+                    event.generation;
+            } else if (event.kind == 14) {
+                commands_reset_generation = std::max(
+                    commands_reset_generation, event.generation);
+            }
+        }
+        queue->push(std::move(event));
+    }
+
+    void deactivate() noexcept {
+        std::scoped_lock lock(mutex);
+        active = false;
+        queue = nullptr;
+        deleted_components.clear();
+        deleted_choices.clear();
+    }
+};
+
 struct AsyncLifecycleState final {
     std::atomic<bool> completed {false};
     std::mutex mutex;
@@ -37,9 +110,11 @@ struct AsyncLifecycleState final {
 
 class ApplicationVM final {
 public:
-    ApplicationVM(Dimensions dimensions,
-                  std::array<i32, 7> keymap,
-                  Framebuffer& framebuffer);
+    ApplicationVM(
+        Dimensions dimensions,
+        std::array<i32, 7> keymap,
+        Framebuffer& framebuffer,
+        std::shared_ptr<translation::TranslationService> translation_service);
     ~ApplicationVM();
 
     std::recursive_mutex operation_mutex;
@@ -70,6 +145,135 @@ constexpr usize kListImagesField = 12;
 constexpr u32 kChoiceImageIndexBits = 8U;
 constexpr i64 kChoiceImageIndexMask =
     (1LL << kChoiceImageIndexBits) - 1LL;
+
+[[nodiscard]] i32 replay_event_kind(i32 kind) noexcept;
+
+struct PendingUiTranslation final {
+    PendingUiTranslation(
+        UiEvent initial_event,
+        std::weak_ptr<UiTranslationReplayState> replay_target,
+        u64 initial_epoch)
+        : event(std::move(initial_event)),
+          replay(std::move(replay_target)),
+          replay_epoch(initial_epoch) {}
+
+    std::mutex mutex;
+    UiEvent event;
+    std::weak_ptr<UiTranslationReplayState> replay;
+    u64 replay_epoch {0U};
+
+    void replace_text(bool detail, std::string translated) {
+        UiEvent snapshot;
+        {
+            std::scoped_lock lock(mutex);
+            if (detail) {
+                event.detail = std::move(translated);
+            } else {
+                event.text = std::move(translated);
+            }
+            snapshot = event;
+            snapshot.kind = replay_event_kind(snapshot.kind);
+        }
+        if (auto target = replay.lock()) {
+            target->publish(std::move(snapshot), true, replay_epoch);
+        }
+    }
+
+    void replace_cached(bool detail, std::string translated) {
+        std::scoped_lock lock(mutex);
+        if (detail) {
+            event.detail = std::move(translated);
+        } else {
+            event.text = std::move(translated);
+        }
+    }
+
+    [[nodiscard]] UiEvent snapshot() {
+        std::scoped_lock lock(mutex);
+        return event;
+    }
+};
+
+[[nodiscard]] i32 replay_event_kind(i32 kind) noexcept {
+    if (kind == 2 || kind == 4) return 3;
+    if (kind == 7 || kind == 9) return 8;
+    return kind;
+}
+
+[[nodiscard]] bool should_translate_ui_detail(const UiEvent& event) noexcept {
+    // Screen detail is Alert body or Ticker text. Command detail is the long
+    // label. Item detail is translatable only for StringItem and ImageItem;
+    // TextField detail is editable user input and DateField detail is a zone ID.
+    if (event.kind == 2 || event.kind == 3 || event.kind == 4 ||
+        event.kind == 15) {
+        return true;
+    }
+    if (event.kind != 7 && event.kind != 8 && event.kind != 9) return false;
+    return (event.component_type >= 8 && event.component_type <= 10) ||
+           (event.component_type >= 12 && event.component_type <= 14);
+}
+
+[[nodiscard]] bool capability_separator(char16_t character) noexcept {
+    return character == u' ' || character == u'\t' ||
+           character == u'\r' || character == u'\n';
+}
+
+[[nodiscard]] bool contains_capability_token(
+    std::u16string_view declared,
+    std::u16string_view expected) noexcept {
+    usize offset = 0U;
+    while (offset < declared.size()) {
+        while (offset < declared.size() &&
+               capability_separator(declared[offset])) {
+            ++offset;
+        }
+        if (offset >= declared.size()) break;
+        usize end = offset;
+        while (end < declared.size() &&
+               !capability_separator(declared[end])) {
+            ++end;
+        }
+        if (declared.substr(offset, end - offset) == expected) return true;
+        offset = end;
+    }
+    return false;
+}
+
+template <usize Size>
+[[nodiscard]] std::optional<std::u16string> selected_capability(
+    const std::unordered_map<std::u16string, std::u16string>& properties,
+    std::u16string_view key,
+    const std::array<std::u16string_view, Size>& preference_order) {
+    const auto found = properties.find(std::u16string(key));
+    if (found == properties.end()) return std::nullopt;
+    for (const std::u16string_view candidate : preference_order) {
+        if (contains_capability_token(found->second, candidate)) {
+            return std::u16string(candidate);
+        }
+    }
+    return std::nullopt;
+}
+
+void configure_suite_capabilities(vm::Machine& machine, const Suite& suite) {
+    static constexpr std::array<std::u16string_view, 3> profiles {{
+        u"MIDP-2.1", u"MIDP-2.0", u"MIDP-1.0",
+    }};
+    static constexpr std::array<std::u16string_view, 3> configurations {{
+        u"CLDC-1.1.1", u"CLDC-1.1", u"CLDC-1.0",
+    }};
+    if (auto profile = selected_capability(
+            suite.properties, u"MicroEdition-Profile", profiles)) {
+        machine.set_system_property(u"microedition.profiles",
+                                    std::move(*profile));
+    }
+    if (auto configuration = selected_capability(
+            suite.properties,
+            u"MicroEdition-Configuration",
+            configurations)) {
+        machine.set_system_property(u"microedition.configuration",
+                                    std::move(*configuration));
+    }
+}
 
 struct LCDUIImageSource final {
     vm::ObjectRef image;
@@ -554,11 +758,14 @@ void append_utf8(std::string& output, std::u16string_view text) {
 
 } // namespace
 
-ApplicationVM::ApplicationVM(Dimensions dimensions,
-                             std::array<i32, 7> keymap,
-                             Framebuffer& framebuffer)
+ApplicationVM::ApplicationVM(
+    Dimensions dimensions,
+    std::array<i32, 7> keymap,
+    Framebuffer& framebuffer,
+    std::shared_ptr<translation::TranslationService> translation_service)
     : machine(classes), canvas(machine, dimensions, keymap) {
     machine.configure_canvas_bridge(&canvas);
+    machine.configure_translation_service(std::move(translation_service));
     CanvasRenderHooks hooks;
     hooks.acquire_paint_graphics = [this, &framebuffer](
         vm::Machine& target_machine,
@@ -611,9 +818,17 @@ ApplicationVM::~ApplicationVM() {
     machine.configure_canvas_bridge(nullptr);
 }
 
-Runtime::Runtime() : input_queue_(1'024), ui_queue_(1'024) {}
+Runtime::Runtime()
+    : input_queue_(1'024),
+      ui_queue_(1'024),
+      ui_translation_replay_(std::make_shared<UiTranslationReplayState>()) {
+    ui_translation_replay_->queue = &ui_queue_;
+}
 
-Runtime::~Runtime() { stop(); }
+Runtime::~Runtime() {
+    ui_translation_replay_->deactivate();
+    stop();
+}
 
 Status Runtime::configure(std::string runtime_home,
                           std::string optional_class_archive) {
@@ -682,6 +897,53 @@ Status Runtime::configure_input_capabilities(bool pointer_events,
     return {};
 }
 
+Status Runtime::configure_translation(bool enabled,
+                                      std::string source_language,
+                                      std::string target_language) {
+    std::string runtime_home;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!configured_) {
+            return fail(ErrorCode::not_configured,
+                        "translation requires a configured runtime");
+        }
+        if (!enabled) {
+            // This is the default for subsequently created MIDlets. Existing
+            // application VMs retain the service selected at launch so MVM
+            // profiles do not unexpectedly change each other.
+            translation_service_.reset();
+            return {};
+        }
+        runtime_home = runtime_home_;
+    }
+
+    const auto sanitize = [](std::string value) {
+        for (char& character : value) {
+            const auto byte = static_cast<unsigned char>(character);
+            if (std::isalnum(byte) == 0 && character != '-') character = '_';
+        }
+        return value;
+    };
+    translation::TranslationConfiguration configuration {
+        .enabled = true,
+        .source_language = std::move(source_language),
+        .target_language = std::move(target_language),
+    };
+    configuration.cache_path = runtime_home +
+        "/translation-gtx-" + sanitize(configuration.source_language) +
+        "-" + sanitize(configuration.target_language) + "-v1.bin";
+    auto service = std::make_shared<translation::TranslationService>(
+        std::move(configuration));
+    if (!service->enabled()) {
+        return fail(ErrorCode::invalid_argument,
+                    "translation language configuration is invalid");
+    }
+
+    std::scoped_lock lock(mutex_);
+    translation_service_ = std::move(service);
+    return {};
+}
+
 Status Runtime::configure_permission_prompt(
     security::PermissionPromptCallback prompt) {
     std::scoped_lock lock(mutex_);
@@ -705,6 +967,18 @@ Status Runtime::set_suite_trust(SuiteId suite_id,
         return fail(ErrorCode::invalid_argument,
                     "suite trust references an unknown suite");
     }
+    const auto existing_trust = suite_trust_.find(suite_id.value);
+    const security::SuiteTrust current_trust =
+        existing_trust == suite_trust_.end()
+            ? security::SuiteTrust::untrusted
+            : existing_trust->second;
+    if (current_trust == trust) {
+        // Reasserting the host policy is part of every foreground launch. It
+        // must remain safe while an existing MIDlet isolate is alive; only an
+        // actual domain change would invalidate its permission policy.
+        return {};
+    }
+
     for (const auto& [app_id, app] : apps_) {
         (void)app_id;
         if (app.suite_id == suite_id && app.vm != nullptr &&
@@ -733,6 +1007,44 @@ Result<SuiteId> Runtime::install_jar(const std::string& jar_path) {
     // MIDlet owns an immutable copy of its Suite and its own class repository,
     // so adding another JAR is safe while unrelated applications are running.
     return suite_store_.install(jar_path);
+}
+
+Status Runtime::uninstall_suite(SuiteId suite_id,
+                                bool remove_data) {
+    if (!suite_id.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "suite uninstall requires a valid suite ID");
+    }
+
+    std::scoped_lock lock(mutex_);
+    if (!configured_) {
+        return fail(ErrorCode::not_configured,
+                    "runtime must be configured before uninstalling a suite");
+    }
+    for (const auto& [app_id, app] : apps_) {
+        (void)app_id;
+        if (app.suite_id == suite_id && app.vm != nullptr &&
+            app.state != AppState::destroyed) {
+            return fail(ErrorCode::invalid_state,
+                        "suite cannot be uninstalled while its MIDlet is alive");
+        }
+    }
+
+    const SuiteUninstallPolicy policy {
+        .remove_rms = remove_data,
+        .remove_files = remove_data,
+        .remove_permissions = remove_data,
+        .remove_push = remove_data,
+        .remove_temporary = remove_data,
+    };
+    auto uninstalled = suite_store_.uninstall(suite_id, policy);
+    if (!uninstalled) {
+        return uninstalled;
+    }
+
+    suite_trust_.erase(suite_id.value);
+    permission_policies_.erase(suite_id.value);
+    return {};
 }
 
 Status Runtime::start_system() {
@@ -768,6 +1080,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
     bool pointer_motion_supported = true;
     bool repeat_events_supported = true;
     security::SharedPermissionPolicy permission_policy;
+    std::shared_ptr<translation::TranslationService> translation_service;
     security::SuiteTrust suite_trust = security::SuiteTrust::untrusted;
     security::PermissionPromptCallback permission_prompt;
     u64 lifecycle_token = 0;
@@ -796,6 +1109,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         pointer_motion_supported = pointer_motion_supported_;
         repeat_events_supported = repeat_events_supported_;
         permission_prompt = permission_prompt_;
+        translation_service = translation_service_;
         if (const auto existing = permission_policies_.find(suite_id.value);
             existing != permission_policies_.end()) {
             permission_policy = existing->second;
@@ -869,40 +1183,71 @@ Status Runtime::start_midlet(SuiteId suite_id,
     }
 
     application_vm = std::make_shared<ApplicationVM>(
-        dimensions, keymap, framebuffer_);
+        dimensions, keymap, framebuffer_, std::move(translation_service));
     application_vm->canvas.set_input_capabilities(
         pointer_events_supported,
         pointer_motion_supported,
         repeat_events_supported);
     application_vm->machine.set_permission_policy(permission_policy);
     ApplicationVM* const ui_observer = application_vm.get();
+    const auto ui_replay = ui_translation_replay_;
+    const auto ui_translation = application_vm->machine.translation_service();
     application_vm->machine.configure_ui_bridge(
         app_id.value,
-        [this, ui_observer](vm::UiBridgeEvent event) {
+        [ui_observer, ui_replay, ui_translation](vm::UiBridgeEvent event) {
             ui_observer->ui_event_count.fetch_add(1U,
                                                   std::memory_order_release);
-            ui_queue_.push(UiEvent {
-                .kind = event.kind,
-                .component_id = event.component_id,
-                .parent_id = event.parent_id,
-                .component_type = event.component_type,
-                .index = event.index,
-                .arguments = event.arguments,
-                .value64 = event.value64,
-                .generation = event.generation,
-                .text = std::move(event.text),
-                .detail = std::move(event.detail),
-            });
+            auto pending = std::make_shared<PendingUiTranslation>(
+                UiEvent {
+                    .kind = event.kind,
+                    .component_id = event.component_id,
+                    .parent_id = event.parent_id,
+                    .component_type = event.component_type,
+                    .index = event.index,
+                    .arguments = event.arguments,
+                    .value64 = event.value64,
+                    .generation = event.generation,
+                    .text = std::move(event.text),
+                    .detail = std::move(event.detail),
+                },
+                ui_replay,
+                ui_replay->current_epoch());
+
+            if (ui_translation && ui_translation->enabled()) {
+                const UiEvent original = pending->snapshot();
+                if (!original.text.empty()) {
+                    auto translated = ui_translation->lookup_or_request_utf8(
+                        original.text,
+                        [pending](std::string value) {
+                            pending->replace_text(false, std::move(value));
+                        });
+                    if (translated) {
+                        pending->replace_cached(false, std::move(*translated));
+                    }
+                }
+                if (!original.detail.empty() &&
+                    should_translate_ui_detail(original)) {
+                    auto translated = ui_translation->lookup_or_request_utf8(
+                        original.detail,
+                        [pending](std::string value) {
+                            pending->replace_text(true, std::move(value));
+                        });
+                    if (translated) {
+                        pending->replace_cached(true, std::move(*translated));
+                    }
+                }
+            }
+            ui_replay->publish(pending->snapshot(), false);
         });
     // Clear the host's presentation state before the constructor/startApp can
     // emit SCREEN_SHOWN or Canvas events. Emitting RESET after startApp caused
     // an entire poll batch to build a native Form/List and then erase it again,
     // leaving physical iOS devices on an empty framebuffer for LCDUI MIDlets.
-    ui_queue_.push(UiEvent {
+    ui_translation_replay_->publish(UiEvent {
         .kind = 1,
         .component_id = app_id.value,
         .generation = lifecycle_token,
-    });
+    }, false);
     auto configured = application_vm->machine.configure_network_owner(
         app_id.value);
     if (!configured) return fail_start(configured.error());
@@ -927,6 +1272,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
     for (const auto& [key, value] : suite.properties) {
         application_vm->machine.set_app_property(key, value);
     }
+    configure_suite_capabilities(application_vm->machine, suite);
     apply_legacy_property_defaults(application_vm->machine, suite);
     auto is_midlet = application_vm->classes.is_assignable(
         main_class, "javax/microedition/midlet/MIDlet");
@@ -1769,7 +2115,22 @@ Status Runtime::acknowledge_push_launch_request(
     return registry.acknowledge_launch_request(request_id);
 }
 
-AppState Runtime::app_state(AppId app_id) const noexcept {
+AppState Runtime::app_state(AppId app_id) noexcept {
+    std::shared_ptr<ApplicationVM> vm;
+    {
+        std::scoped_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr) return AppState::none;
+        if (app->vm == nullptr || app->lifecycle_busy ||
+            app->state == AppState::destroyed ||
+            app->state == AppState::error) {
+            return app->state;
+        }
+        vm = app->vm;
+    }
+
+    finalize_pending_destruction(app_id, vm);
+
     std::scoped_lock lock(mutex_);
     const App* app = find_app_unlocked(app_id);
     return app == nullptr ? AppState::none : app->state;
@@ -1792,12 +2153,11 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
     }
     if (vm != nullptr) {
         std::scoped_lock vm_operation(vm->operation_mutex);
-        const vm::HeapStats heap_stats = vm->machine.heap().stats();
-        if (heap_stats.estimated_bytes >
-            std::numeric_limits<usize>::max() - estimated) {
+        const usize heap_bytes = vm->machine.heap().estimated_bytes();
+        if (heap_bytes > std::numeric_limits<usize>::max() - estimated) {
             return std::numeric_limits<i64>::max();
         }
-        estimated += heap_stats.estimated_bytes;
+        estimated += heap_bytes;
         const usize canvas_bytes = vm->canvas.estimated_bytes();
         if (canvas_bytes > std::numeric_limits<usize>::max() - estimated) {
             return std::numeric_limits<i64>::max();
@@ -2029,7 +2389,7 @@ void Runtime::send_pointer(i32 x, i32 y, i32 action) {
     dispatch_input();
 }
 
-FrameMetadata Runtime::frame_metadata() {
+void Runtime::pump_events() {
     std::shared_ptr<ApplicationVM> vm;
     AppId app_id;
     u64 generation = 0;
@@ -2046,21 +2406,25 @@ FrameMetadata Runtime::frame_metadata() {
             }
         }
     }
-    if (vm != nullptr) {
-        {
-            std::scoped_lock vm_operation(vm->operation_mutex);
-            auto pumped = vm->canvas.try_pump();
-            if (!pumped) {
-                std::unique_lock lock(mutex_);
-                App* app = find_app_unlocked(app_id);
-                if (app != nullptr && app->vm == vm &&
-                    app->generation == generation) {
-                    mark_canvas_failure_unlocked(*app, pumped.error());
-                }
+    if (vm == nullptr) return;
+
+    {
+        std::scoped_lock vm_operation(vm->operation_mutex);
+        auto pumped = vm->canvas.try_pump();
+        if (!pumped) {
+            std::unique_lock lock(mutex_);
+            App* app = find_app_unlocked(app_id);
+            if (app != nullptr && app->vm == vm &&
+                app->generation == generation) {
+                mark_canvas_failure_unlocked(*app, pumped.error());
             }
         }
-        finalize_deferred_start(app_id, vm);
     }
+    finalize_deferred_start(app_id, vm);
+}
+
+FrameMetadata Runtime::frame_metadata() {
+    pump_events();
     return framebuffer_.metadata();
 }
 
@@ -2335,6 +2699,72 @@ void Runtime::finalize_deferred_start(
         .detail = signal == vm::MidletSignal::destroyed
             ? "Deferred MIDlet startApp notified destruction"
             : "Deferred MIDlet startApp notified pause",
+    });
+}
+
+void Runtime::finalize_pending_destruction(
+    AppId app_id,
+    const std::shared_ptr<ApplicationVM>& vm) noexcept {
+    if (vm == nullptr) return;
+
+    bool was_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app == nullptr || app->vm != vm || app->lifecycle_busy ||
+            app->state == AppState::destroyed ||
+            app->state == AppState::error) {
+            return;
+        }
+        was_foreground = foreground_app_id_ == app_id;
+    }
+
+    std::string console_output;
+    {
+        std::scoped_lock vm_operation(vm->operation_mutex);
+        if (!vm->machine.consume_midlet_destroyed_signal()) return;
+
+        if (was_foreground) {
+            auto hidden = vm->canvas.set_host_foreground(false);
+            if (!hidden) {
+                append_ascii_console(
+                    vm->machine,
+                    "[Lifecycle] self-destroy ignored foreground hide failure: " +
+                        hidden.error().message);
+            } else {
+                auto pumped = vm->canvas.pump();
+                if (!pumped) {
+                    append_ascii_console(
+                        vm->machine,
+                        "[Lifecycle] self-destroy ignored Canvas callback failure: " +
+                            pumped.error().message);
+                }
+            }
+            vm->machine.scheduler().set_host_foreground(false);
+        }
+        vm->machine.media().suspend();
+        vm->machine.close_connections();
+        append_utf8(console_output, vm->machine.console_output());
+    }
+
+    std::unique_lock lock(mutex_);
+    App* app = find_app_unlocked(app_id);
+    if (app == nullptr || app->vm != vm) return;
+
+    app->state = AppState::destroyed;
+    app->lifecycle_busy = false;
+    app->generation = ++sequence_;
+    app->console_output = std::move(console_output);
+    app->vm.reset();
+    if (foreground_app_id_ == app_id) {
+        foreground_app_id_ = {};
+        framebuffer_.clear();
+    }
+    ui_queue_.push(UiEvent {
+        .kind = 1,
+        .component_id = app_id.value,
+        .generation = sequence_,
+        .detail = "MIDlet notified destruction",
     });
 }
 

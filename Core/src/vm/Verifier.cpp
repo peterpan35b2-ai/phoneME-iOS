@@ -754,8 +754,7 @@ void replace_uninitialized(FrameState& state,
     const classfile::CodeAttribute& code,
     usize pc,
     const FrameState& input,
-    std::span<const usize> jsr_return_sites,
-    bool allow_legacy_return_stack) {
+    std::span<const usize> jsr_return_sites) {
     TransferResult result {.state = input};
     Cursor cursor(code.bytecode, pc);
     auto opcode_result = cursor.read_u8("opcode");
@@ -1462,9 +1461,9 @@ void replace_uninitialized(FrameState& state,
             ? pop_reference(result.state)
             : pop_kind(result.state, opcode_kind);
         if (!returned) return std::unexpected(returned.error());
-        if (!result.state.stack.empty() && !allow_legacy_return_stack) {
-            return verify_fail(method, pc, "return leaves values on stack");
-        }
+        // Returning discards the entire current frame. Values below the
+        // returned operand are legal and are emitted by several real-world
+        // obfuscators, including Java 8 J2ME builds.
         result.falls_through = false;
         break;
     }
@@ -1483,9 +1482,7 @@ void replace_uninitialized(FrameState& state,
                                pc,
                                "constructor returns before this is initialized");
         }
-        if (!result.state.stack.empty() && !allow_legacy_return_stack) {
-            return verify_fail(method, pc, "return leaves values on stack");
-        }
+        // A void return also discards all remaining operands with the frame.
         result.falls_through = false;
         break;
     case 0xB2: case 0xB3: case 0xB4: case 0xB5: {
@@ -1998,8 +1995,6 @@ void replace_uninitialized(FrameState& state,
     if (!stack_maps) return std::unexpected(stack_maps.error());
     auto jsr_return_sites = collect_jsr_return_sites(code.bytecode);
     if (!jsr_return_sites) return std::unexpected(jsr_return_sites.error());
-    const bool allow_legacy_return_stack =
-        !enforce_stack_maps && owner.major_version() <= 50U;
 
     FrameState entry_state = *initial;
     if (const auto entry_map = stack_maps->find(0U);
@@ -2061,8 +2056,7 @@ void replace_uninitialized(FrameState& state,
                                              code,
                                              pc,
                                              input,
-                                             *jsr_return_sites,
-                                             allow_legacy_return_stack);
+                                             *jsr_return_sites);
         if (!transfer) {
             const std::string prefix = method.name + method.descriptor +
                 " at bytecode ";
@@ -2125,18 +2119,11 @@ Status verify_method(const classfile::ClassFile& owner,
         [](const classfile::StackMapFrame& frame) {
             return frame.kind == classfile::StackMapFrameKind::cldc_full;
         });
-    const bool legacy_return_stack =
-        owner.major_version() <= 48U &&
-        method.code->stack_map_frames.empty() &&
-        strict.error().message.find("return leaves values on stack") !=
-            std::string::npos;
-    if (!has_cldc_stack_map && !legacy_return_stack) return strict;
+    if (!has_cldc_stack_map) return strict;
 
     // Some preverified MIDP 1.x/2.x JARs contain stale CLDC StackMap metadata
-    // after obfuscation. A small number of class-file 45..48 games also leave
-    // an obsolete value on the operand stack at a void return. The fallback
-    // still performs complete bytecode data-flow verification; it only ignores
-    // the legacy hint table and permits that pre-Java-6 return-stack quirk.
+    // after obfuscation. The fallback still performs complete bytecode
+    // data-flow verification; it only ignores the legacy hint table.
     return verify_method_impl(owner, method, false);
 }
 

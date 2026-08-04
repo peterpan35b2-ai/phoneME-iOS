@@ -84,12 +84,12 @@ if [[ "$RUN_IPHONEOS" == "1" ]]; then
   run_step iphoneos-archive "${PHONEME_MATRIX_TIMEOUT:-3600}" \
     env PHONEME_CORE_BUILD_DIR="$IPHONE_ROOT" \
         PHONEME_CORE_OUTPUT="$IPHONE_ARCHIVE" \
-        IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}" \
+        IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}" \
         bash "$SCRIPT_DIR/build-iphoneos.sh"
   run_step iphoneos-verify "${PHONEME_MATRIX_TIMEOUT:-900}" \
     env PHONEME_CORE_BUILD_DIR="$IPHONE_ROOT" \
         PHONEME_CORE_OUTPUT="$IPHONE_ARCHIVE" \
-        IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}" \
+        IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}" \
         bash "$SCRIPT_DIR/verify-iphoneos.sh"
 fi
 
@@ -106,7 +106,7 @@ if [[ "$RUN_XCODE" == "1" ]]; then
         -configuration "$configuration" \
         ARCHS=arm64 \
         ONLY_ACTIVE_ARCH=YES \
-        IPHONEOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.0}" \
+        IPHONEOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}" \
         CODE_SIGNING_ALLOWED=NO \
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGN_IDENTITY= \

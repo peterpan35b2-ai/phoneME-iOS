@@ -30,6 +30,10 @@ constexpr usize kHandleIdField = 0;
 constexpr usize kHandleGenerationField = 1;
 constexpr usize kStreamClosedField = 2;
 constexpr usize kStreamOwnsConnectionField = 3;
+constexpr usize kStreamBufferField = 4;
+constexpr usize kStreamBufferPositionField = 5;
+constexpr usize kStreamBufferCountField = 6;
+constexpr usize kStreamReadBufferSize = 4096;
 
 constexpr usize kDatagramDataField = 0;
 constexpr usize kDatagramOffsetField = 1;
@@ -37,6 +41,7 @@ constexpr usize kDatagramLengthField = 2;
 constexpr usize kDatagramPositionField = 3;
 constexpr usize kDatagramAddressField = 4;
 
+constexpr std::string_view kJavaNetSocketClass = "java/net/Socket";
 constexpr std::string_view kInputStreamClass =
     "javax/microedition/io/NativeInputStream";
 constexpr std::string_view kOutputStreamClass =
@@ -766,6 +771,17 @@ try_open_wireless_connection(Machine& machine,
     auto owns = set_int_field(machine, *stream, kStreamOwnsConnectionField,
                               owns_connection ? 1 : 0);
     if (!owns) return std::unexpected(owns.error());
+    if (input) {
+        auto buffer = set_reference_field(machine, *stream,
+                                          kStreamBufferField, {});
+        auto position = set_int_field(machine, *stream,
+                                      kStreamBufferPositionField, 0);
+        auto count = set_int_field(machine, *stream,
+                                   kStreamBufferCountField, 0);
+        if (!buffer) return std::unexpected(buffer.error());
+        if (!position) return std::unexpected(position.error());
+        if (!count) return std::unexpected(count.error());
+    }
     return *stream;
 }
 
@@ -918,11 +934,63 @@ try_open_wireless_connection(Machine& machine,
     if (!*is_native) return std::optional<i32> {};
     auto open = require_open_stream(machine, stream);
     if (!open) return std::unexpected(open.error());
+
+    auto position = int_field(machine, stream, kStreamBufferPositionField);
+    auto count = int_field(machine, stream, kStreamBufferCountField);
+    if (!position) return std::unexpected(position.error());
+    if (!count) return std::unexpected(count.error());
+    if (*position < 0 || *count < *position) {
+        return fail(ErrorCode::invalid_state,
+                    "network input buffer state is invalid");
+    }
+    if (*position < *count) {
+        auto buffer = reference_field(machine, stream, kStreamBufferField);
+        if (!buffer) return std::unexpected(buffer.error());
+        if (buffer->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "network input buffer is missing");
+        }
+        auto byte = byte_at(machine, *buffer,
+                            static_cast<usize>(*position));
+        if (!byte) return std::unexpected(byte.error());
+        auto advanced = set_int_field(machine, stream,
+                                      kStreamBufferPositionField,
+                                      *position + 1);
+        if (!advanced) return std::unexpected(advanced.error());
+        return std::optional<i32>(static_cast<i32>(*byte));
+    }
+
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
-    auto bytes = java_network_result(machine.connections().read(*token, 1U));
+    auto bytes = java_network_result(machine.connections().read(
+        *token, kStreamReadBufferSize));
     if (!bytes) return std::unexpected(bytes.error());
-    if (bytes->empty()) return std::optional<i32>(-1);
+    if (bytes->empty()) {
+        (void)set_reference_field(machine, stream, kStreamBufferField, {});
+        (void)set_int_field(machine, stream, kStreamBufferPositionField, 0);
+        (void)set_int_field(machine, stream, kStreamBufferCountField, 0);
+        return std::optional<i32>(-1);
+    }
+
+    auto buffer = machine.heap().allocate_array(
+        "[B", bytes->size(), Value::from_int(0));
+    if (!buffer) return std::unexpected(buffer.error());
+    auto root = machine.pin_native_root(*buffer);
+    if (!root) return std::unexpected(root.error());
+    for (usize index = 0; index < bytes->size(); ++index) {
+        auto stored = set_byte(machine, *buffer, index, (*bytes)[index]);
+        if (!stored) return std::unexpected(stored.error());
+    }
+    auto linked = set_reference_field(machine, stream,
+                                      kStreamBufferField, *buffer);
+    auto stored_position = set_int_field(machine, stream,
+                                         kStreamBufferPositionField, 1);
+    auto stored_count = set_int_field(
+        machine, stream, kStreamBufferCountField,
+        static_cast<i32>(bytes->size()));
+    if (!linked) return std::unexpected(linked.error());
+    if (!stored_position) return std::unexpected(stored_position.error());
+    if (!stored_count) return std::unexpected(stored_count.error());
     return std::optional<i32>(static_cast<i32>(bytes->front()));
 }
 
@@ -938,6 +1006,38 @@ try_open_wireless_connection(Machine& machine,
     if (length == 0) return 0;
     auto open = require_open_stream(machine, stream);
     if (!open) return std::unexpected(open.error());
+
+    auto position = int_field(machine, stream, kStreamBufferPositionField);
+    auto count = int_field(machine, stream, kStreamBufferCountField);
+    if (!position) return std::unexpected(position.error());
+    if (!count) return std::unexpected(count.error());
+    if (*position < 0 || *count < *position) {
+        return fail(ErrorCode::invalid_state,
+                    "network input buffer state is invalid");
+    }
+    if (*position < *count) {
+        auto buffer = reference_field(machine, stream, kStreamBufferField);
+        if (!buffer) return std::unexpected(buffer.error());
+        if (buffer->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "network input buffer is missing");
+        }
+        const i32 copied = std::min(length, *count - *position);
+        for (i32 index = 0; index < copied; ++index) {
+            auto byte = byte_at(machine, *buffer,
+                                static_cast<usize>(*position + index));
+            if (!byte) return std::unexpected(byte.error());
+            auto stored = set_byte(machine, destination,
+                                   static_cast<usize>(offset + index), *byte);
+            if (!stored) return std::unexpected(stored.error());
+        }
+        auto advanced = set_int_field(machine, stream,
+                                      kStreamBufferPositionField,
+                                      *position + copied);
+        if (!advanced) return std::unexpected(advanced.error());
+        return copied;
+    }
+
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
     auto bytes = java_network_result(machine.connections().read(
@@ -983,6 +1083,106 @@ try_open_wireless_connection(Machine& machine,
     (void)set_int_field(machine, *connection, kHandleIdField, 0);
     (void)set_int_field(machine, *connection, kHandleGenerationField, 0);
     return std::optional<Value> {};
+}
+
+void register_java_net_socket(NativeMethodRegistry& registry) {
+    add(registry, std::string(kJavaNetSocketClass), "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto socket = receiver(arguments, "Socket.<init>");
+            if (!socket) return std::unexpected(socket.error());
+            auto id = set_int_field(machine, *socket, kHandleIdField, 0);
+            if (!id) return std::unexpected(id.error());
+            auto generation = set_int_field(
+                machine, *socket, kHandleGenerationField, 0);
+            if (!generation) return std::unexpected(generation.error());
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kJavaNetSocketClass), "<init>",
+        "(Ljava/lang/String;I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto socket = receiver(arguments, "Socket.<init>");
+            auto host_object = reference_argument(arguments, 1, "socket host");
+            auto port = int_argument(arguments, 2, "socket port");
+            if (!socket) return std::unexpected(socket.error());
+            if (!host_object) return std::unexpected(host_object.error());
+            if (!port) return std::unexpected(port.error());
+            if (*port <= 0 || *port > 65'535) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "socket port is outside 1..65535");
+            }
+            auto host = utf8_text(machine, *host_object);
+            if (!host) return std::unexpected(host.error());
+            if (host->empty()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "socket host is empty");
+            }
+            std::string endpoint;
+            endpoint.reserve(host->size() + 24U);
+            endpoint.append("socket://");
+            const bool ipv6_literal = host->find(':') != std::string::npos &&
+                !(host->starts_with('[') && host->ends_with(']'));
+            if (ipv6_literal) endpoint.push_back('[');
+            endpoint.append(*host);
+            if (ipv6_literal) endpoint.push_back(']');
+            endpoint.push_back(':');
+            endpoint.append(std::to_string(*port));
+
+            auto permitted = require_network_permission(machine, endpoint);
+            if (!permitted) return std::unexpected(permitted.error());
+            auto opened = java_network_result(machine.connections().open(
+                endpoint, network::ConnectionMode::read_write, true));
+            if (!opened) return std::unexpected(opened.error());
+            if (opened->kind != network::ConnectionKind::stream) {
+                (void)machine.connections().close(opened->token);
+                return fail_java("java/io/IOException",
+                                 "java.net.Socket requires a stream connection");
+            }
+            auto stored = store_token(machine, *socket, opened->token);
+            if (!stored) {
+                (void)machine.connections().close(opened->token);
+                return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kJavaNetSocketClass), "getInputStream",
+        "()Ljava/io/InputStream;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto socket = receiver(arguments, "Socket.getInputStream");
+            if (!socket) return std::unexpected(socket.error());
+            auto stream = open_stream_from_connection(
+                machine, *socket, true, false, false);
+            if (!stream) return std::unexpected(stream.error());
+            return std::optional<Value>(Value::from_reference(*stream));
+        });
+    add(registry, std::string(kJavaNetSocketClass), "getOutputStream",
+        "()Ljava/io/OutputStream;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto socket = receiver(arguments, "Socket.getOutputStream");
+            if (!socket) return std::unexpected(socket.error());
+            auto stream = open_stream_from_connection(
+                machine, *socket, false, false, false);
+            if (!stream) return std::unexpected(stream.error());
+            return std::optional<Value>(Value::from_reference(*stream));
+        });
+    add(registry, std::string(kJavaNetSocketClass), "close", "()V",
+        close_connection);
+    add(registry, std::string(kJavaNetSocketClass), "isClosed", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto socket = receiver(arguments, "Socket.isClosed");
+            if (!socket) return std::unexpected(socket.error());
+            auto id = int_field(machine, *socket, kHandleIdField);
+            auto generation = int_field(
+                machine, *socket, kHandleGenerationField);
+            if (!id) return std::unexpected(id.error());
+            if (!generation) return std::unexpected(generation.error());
+            return std::optional<Value>(Value::from_int(
+                *id <= 0 || *generation <= 0 ? 1 : 0));
+        });
 }
 
 void register_connector(NativeMethodRegistry& registry) {
@@ -1156,9 +1356,31 @@ void register_native_streams(NativeMethodRegistry& registry) {
             if (*requested <= 0) {
                 return std::optional<Value>(Value::from_long(0));
             }
+            auto open = require_open_stream(machine, *stream);
+            if (!open) return std::unexpected(open.error());
+            auto position = int_field(machine, *stream,
+                                      kStreamBufferPositionField);
+            auto count = int_field(machine, *stream,
+                                   kStreamBufferCountField);
+            if (!position) return std::unexpected(position.error());
+            if (!count) return std::unexpected(count.error());
+            if (*position < 0 || *count < *position) {
+                return fail(ErrorCode::invalid_state,
+                            "network input buffer state is invalid");
+            }
+            i64 skipped = std::min<i64>(*requested,
+                                        *count - *position);
+            if (skipped > 0) {
+                auto advanced = set_int_field(
+                    machine, *stream, kStreamBufferPositionField,
+                    *position + static_cast<i32>(skipped));
+                if (!advanced) return std::unexpected(advanced.error());
+            }
+            if (skipped >= *requested) {
+                return std::optional<Value>(Value::from_long(skipped));
+            }
             auto token = token_from_object(machine, *stream);
             if (!token) return std::unexpected(token.error());
-            i64 skipped = 0;
             while (skipped < *requested) {
                 const usize amount = static_cast<usize>(std::min<i64>(
                     *requested - skipped, 4'096));
@@ -3460,18 +3682,30 @@ Result<std::optional<usize>> connection_stream_available(
     if (!*is_native) return std::optional<usize> {};
     auto open = require_open_stream(machine, stream);
     if (!open) return std::unexpected(open.error());
+    auto position = int_field(machine, stream, kStreamBufferPositionField);
+    auto count = int_field(machine, stream, kStreamBufferCountField);
+    if (!position) return std::unexpected(position.error());
+    if (!count) return std::unexpected(count.error());
+    if (*position < 0 || *count < *position) {
+        return fail(ErrorCode::invalid_state,
+                    "network input buffer state is invalid");
+    }
+    const usize buffered = static_cast<usize>(*count - *position);
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
     auto available = java_network_result(
         machine.connections().available(*token));
     if (!available) return std::unexpected(available.error());
-    return std::optional<usize>(*available);
+    if (*available > std::numeric_limits<usize>::max() - buffered) {
+        return std::optional<usize>(std::numeric_limits<usize>::max());
+    }
+    return std::optional<usize>(buffered + *available);
 }
 
-Result<std::optional<bool>> connection_stream_write_one(
+Result<std::optional<bool>> connection_stream_write_bytes(
     Machine& machine,
     ObjectRef stream,
-    u8 byte) {
+    std::span<const u8> bytes) {
     auto is_native = machine.object_is_instance(stream, kOutputStreamClass);
     if (!is_native) return std::unexpected(is_native.error());
     if (!*is_native) return std::optional<bool> {};
@@ -3479,11 +3713,18 @@ Result<std::optional<bool>> connection_stream_write_one(
     if (!open) return std::unexpected(open.error());
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
-    const std::array<u8, 1> bytes {byte};
     auto written = java_network_status(
         machine.connections().write(*token, bytes));
     if (!written) return std::unexpected(written.error());
     return std::optional<bool>(true);
+}
+
+Result<std::optional<bool>> connection_stream_write_one(
+    Machine& machine,
+    ObjectRef stream,
+    u8 byte) {
+    const std::array<u8, 1> bytes {byte};
+    return connection_stream_write_bytes(machine, stream, bytes);
 }
 
 Result<std::optional<bool>> connection_stream_flush(
@@ -3523,6 +3764,7 @@ Result<std::optional<bool>> connection_stream_close_output(
 
 void register_connection_natives(NativeMethodRegistry& registry) {
     register_connection_constants(registry);
+    register_java_net_socket(registry);
     register_connector(registry);
     register_stream_connections(registry);
     register_native_streams(registry);

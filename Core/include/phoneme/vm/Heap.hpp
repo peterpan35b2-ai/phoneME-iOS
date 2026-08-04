@@ -32,6 +32,11 @@ struct HeapAccessContext final {
     std::string_view method;
     std::string_view descriptor;
     usize bytecode_pc {0};
+    const usize* live_bytecode_pc {nullptr};
+
+    [[nodiscard]] usize current_bytecode_pc() const noexcept {
+        return live_bytecode_pc != nullptr ? *live_bytecode_pc : bytecode_pc;
+    }
 };
 
 [[nodiscard]] HeapAccessContext current_heap_access_context() noexcept;
@@ -53,6 +58,18 @@ public:
     [[nodiscard]] Status set_field(ObjectRef reference, usize index, Value value);
     [[nodiscard]] Result<Value> element(ObjectRef reference, usize index) const;
     [[nodiscard]] Status set_element(ObjectRef reference, usize index, Value value);
+    [[nodiscard]] Status copy_array_range(ObjectRef source,
+                                          usize source_index,
+                                          ObjectRef destination,
+                                          usize destination_index,
+                                          usize length);
+    [[nodiscard]] Result<std::vector<u8>> read_byte_array(
+        ObjectRef reference,
+        usize offset,
+        usize length) const;
+    [[nodiscard]] Status write_byte_array(ObjectRef reference,
+                                          usize offset,
+                                          std::span<const u8> bytes);
     [[nodiscard]] Result<usize> array_length(ObjectRef reference) const;
     [[nodiscard]] Result<std::string> class_name(ObjectRef reference) const;
     [[nodiscard]] Status attach_string(ObjectRef reference,
@@ -67,6 +84,7 @@ public:
 
     [[nodiscard]] Status collect(std::span<const ObjectRef> roots);
     void clear() noexcept;
+    [[nodiscard]] usize estimated_bytes() const noexcept;
     [[nodiscard]] HeapStats stats() const noexcept;
 
 private:

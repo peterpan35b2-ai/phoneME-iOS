@@ -51,6 +51,7 @@ public final class LcduiExtendedOps extends MIDlet
     private static Alert alert;
     private static Alert foreverAlert;
     private static Command staleCommand;
+    private static StringItem orderProbe;
 
     private static int stateCalls;
     private static int itemCommandCalls;
@@ -177,6 +178,22 @@ public final class LcduiExtendedOps extends MIDlet
         if (!rejected) return 91;
         constrainedBox.setString("-42");
 
+        Alert commandProbe = new Alert("Commands");
+        commandProbe.setTimeout(333);
+        Command firstAlertCommand = new Command("One", Command.OK, 1);
+        Command secondAlertCommand = new Command("Two", Command.CANCEL, 2);
+        commandProbe.addCommand(firstAlertCommand);
+        if (commandProbe.getTimeout() != 333) return 93;
+        commandProbe.addCommand(secondAlertCommand);
+        if (commandProbe.getTimeout() != Alert.FOREVER) return 94;
+        commandProbe.removeCommand(firstAlertCommand);
+        if (commandProbe.getTimeout() != 333) return 95;
+        commandProbe.removeCommand(secondAlertCommand);
+        if (commandProbe.getTimeout() != 333) return 96;
+
+        display.setCurrent((Displayable)null);
+        if (display.getCurrent() != form) return 97;
+
         foreverAlert = new Alert("Alert", "Alert body", image,
                                  AlertType.INFO);
         foreverAlert.setTimeout(Alert.FOREVER);
@@ -264,6 +281,16 @@ public final class LcduiExtendedOps extends MIDlet
         form.delete(ephemeralIndex);
     }
 
+    public static void insertOrderProbe() {
+        orderProbe = new StringItem("OrderProbe", "inserted");
+        form.insert(1, orderProbe);
+    }
+
+    public static void deleteOrderProbe() {
+        form.delete(1);
+        orderProbe = null;
+    }
+
     public static void removeStaleCommand() {
         form.removeCommand(staleCommand);
     }
@@ -273,6 +300,19 @@ public final class LcduiExtendedOps extends MIDlet
         alert.setTimeout(250);
         alert.setCommandListener(app);
         display.setCurrent(alert, form);
+    }
+
+    public static void showLoadingThenData() {
+        final Alert loading = new Alert(
+            "Loading", "Loading...", null, AlertType.INFO);
+        loading.setTimeout(Alert.FOREVER);
+        loading.setIndicator(new Gauge(null, false, -1, 2));
+        display.setCurrent(loading, form);
+        display.callSerially(new Runnable() {
+            public void run() {
+                display.setCurrent(form);
+            }
+        });
     }
 
     public void itemStateChanged(Item item) {
@@ -290,6 +330,9 @@ public final class LcduiExtendedOps extends MIDlet
 
     public void commandAction(Command command, Displayable displayable) {
         screenCommandCalls++;
+        if (displayable instanceof Alert) {
+            display.setCurrent(form);
+        }
     }
 
     private static final class Probe extends CustomItem {

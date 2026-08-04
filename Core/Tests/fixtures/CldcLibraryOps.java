@@ -266,6 +266,37 @@ public final class CldcLibraryOps {
         return 0;
     }
 
+    private static int cldcHierarchyAndTimeZone() throws Exception {
+        Object integer = Integer.valueOf(7);
+        if (integer instanceof Number) return 181;
+
+        Object stream = new PrintStream(new ByteArrayOutputStream());
+        if (stream instanceof java.io.FilterOutputStream) return 182;
+
+        java.util.TimeZone zone = java.util.TimeZone.getTimeZone("GMT+07:00");
+        if (!"GMT+07:00".equals(zone.getID())) return 183;
+        if (zone.getRawOffset() != 7 * 60 * 60 * 1000) return 184;
+        if (zone.getOffset(1, 2026, 7, 4, 3, 0) !=
+                7 * 60 * 60 * 1000) return 185;
+        try {
+            zone.getOffset(1, 2026, 12, 1, 1, 0);
+            return 186;
+        } catch (IllegalArgumentException expected) {
+        }
+        String[] ids = java.util.TimeZone.getAvailableIDs();
+        if (ids.length < 2 || !"GMT".equals(ids[0]) ||
+                !"UTC".equals(ids[1])) return 187;
+        return 0;
+    }
+
+    public static int versionProperties() {
+        if (!"MIDP-2.1".equals(
+                System.getProperty("microedition.profiles"))) return 191;
+        if (!"CLDC-1.1.1".equals(
+                System.getProperty("microedition.configuration"))) return 192;
+        return 0;
+    }
+
     public static int runAll() {
         try {
             int result = readerWriterRoundTrip();
@@ -284,7 +315,9 @@ public final class CldcLibraryOps {
             if (result != 0) return result;
             result = permissionCompatibility();
             if (result != 0) return result;
-            return throwableSemantics();
+            result = throwableSemantics();
+            if (result != 0) return result;
+            return cldcHierarchyAndTimeZone();
         } catch (Throwable failure) {
             failure.printStackTrace();
             return 199;

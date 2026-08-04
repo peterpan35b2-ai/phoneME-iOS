@@ -22,6 +22,21 @@ void require_method(const phoneme::vm::BuiltinClassRegistry::ClassPtr& klass,
             message);
 }
 
+void require_method_flags(
+    const phoneme::vm::BuiltinClassRegistry::ClassPtr& klass,
+    std::string_view name,
+    std::string_view descriptor,
+    std::uint16_t mask,
+    std::uint16_t expected,
+    const char* message) {
+    const auto* method = klass == nullptr
+        ? nullptr
+        : klass->find_method(name, descriptor);
+    require(method != nullptr &&
+                (method->access_flags & mask) == expected,
+            message);
+}
+
 void test_lang_registry() {
     phoneme::vm::BuiltinClassRegistry registry;
     phoneme::vm::register_lang_classes(registry);
@@ -32,6 +47,8 @@ void test_lang_registry() {
     const auto system = registry.find("java/lang/System");
     const auto runtime = registry.find("java/lang/Runtime");
     const auto thread = registry.find("java/lang/Thread");
+    const auto integer = registry.find("java/lang/Integer");
+    const auto no_class = registry.find("java/lang/NoClassDefFoundError");
 
     require(object != nullptr && object->super_name().empty(),
             "lang registry owns Object");
@@ -61,6 +78,10 @@ void test_lang_registry() {
                    "Thread exposes CLDC access check");
     require_method(thread, "toString", "()Ljava/lang/String;",
                    "Thread exposes CLDC text form");
+    require(integer != nullptr && integer->super_name() == "java/lang/Object",
+            "CLDC Integer extends Object directly");
+    require(no_class != nullptr && no_class->super_name() == "java/lang/Error",
+            "CLDC NoClassDefFoundError extends Error directly");
     require(registry.find("java/util/Vector") == nullptr,
             "lang registry does not claim util classes");
 }
@@ -74,6 +95,7 @@ void test_io_registry() {
     const auto data_output = registry.find("java/io/DataOutputStream");
     const auto byte_output = registry.find("java/io/ByteArrayOutputStream");
     const auto interrupted = registry.find("java/io/InterruptedIOException");
+    const auto print_stream = registry.find("java/io/PrintStream");
 
     require(input != nullptr && input->super_name() == "java/lang/Object",
             "io registry owns InputStream");
@@ -104,6 +126,12 @@ void test_io_registry() {
     require(!interrupted->fields().empty() &&
                 interrupted->fields().front().name == "bytesTransferred",
             "InterruptedIOException exposes bytesTransferred");
+    require(print_stream != nullptr &&
+                print_stream->super_name() == "java/io/OutputStream",
+            "CLDC PrintStream extends OutputStream directly");
+    require(print_stream != nullptr && !print_stream->fields().empty() &&
+                print_stream->fields().front().name == "out",
+            "PrintStream preserves native delegate layout");
     require(registry.find("java/util/Calendar") == nullptr,
             "io registry does not claim util classes");
 }
@@ -118,6 +146,9 @@ void test_util_registry() {
     const auto random = registry.find("java/util/Random");
     const auto calendar = registry.find("java/util/Calendar");
     const auto zone = registry.find("java/util/TimeZone");
+    const auto zone_impl =
+        registry.find("com/sun/cldc/util/j2me/TimeZoneImpl");
+    const auto timer_task = registry.find("java/util/TimerTask");
 
     require(vector != nullptr && vector->fields().size() == 3U,
             "Vector preserves native field layout");
@@ -136,6 +167,17 @@ void test_util_registry() {
     require_method(zone, "getTimeZone",
                    "(Ljava/lang/String;)Ljava/util/TimeZone;",
                    "TimeZone exposes ID lookup");
+    require(zone != nullptr && (zone->access_flags() & 0x0400U) != 0U,
+            "TimeZone remains abstract like CLDC");
+    require_method_flags(zone, "getOffset", "(IIIIII)I",
+                         0x0401U, 0x0401U,
+                         "TimeZone.getOffset is public abstract");
+    require(zone_impl != nullptr &&
+                zone_impl->super_name() == "java/util/TimeZone",
+            "phoneME TimeZoneImpl is the concrete implementation");
+    require(timer_task != nullptr && timer_task->interfaces().size() == 1U &&
+                timer_task->interfaces().front() == "java/lang/Runnable",
+            "TimerTask implements Runnable");
     require(registry.find("java/io/DataInputStream") == nullptr,
             "util registry does not claim io classes");
 }
@@ -213,6 +255,10 @@ void test_game_registry() {
     require_method(sprite, "collidesWith",
                    "(Ljavax/microedition/lcdui/game/TiledLayer;Z)Z",
                    "Sprite exposes TiledLayer collision");
+    require_method_flags(sprite, "collidesWith",
+                         "(Ljavax/microedition/lcdui/game/TiledLayer;Z)Z",
+                         0x0011U, 0x0011U,
+                         "Sprite collision methods are final");
     require(tiled != nullptr &&
                 tiled->super_name() == "javax/microedition/lcdui/game/Layer",
             "TiledLayer extends Layer");
@@ -223,6 +269,48 @@ void test_game_registry() {
                    "LayerManager exposes viewport painting");
     require(registry.find("javax/microedition/lcdui/Form") == nullptr,
             "game registry does not claim LCDUI screen classes");
+}
+
+void test_vendor_registry() {
+    phoneme::vm::BuiltinClassRegistry registry;
+    phoneme::vm::register_vendor_classes(registry);
+
+    const auto system = registry.find("com/sprintpcs/util/System");
+    const auto listener =
+        registry.find("com/sprintpcs/util/SystemEventListener");
+    require_method(system, "setExitURI", "(Ljava/lang/String;)V",
+                   "SprintPCS System exposes exit URI compatibility");
+    require_method(system, "getProtectedProperty",
+                   "(Ljava/lang/String;)Ljava/lang/String;",
+                   "SprintPCS System exposes protected property lookup");
+    require(listener != nullptr &&
+                (listener->access_flags() & 0x0200U) != 0U,
+            "SprintPCS SystemEventListener is an interface");
+}
+
+void test_xml_registry() {
+    phoneme::vm::BuiltinClassRegistry registry;
+    phoneme::vm::register_xml_classes(registry);
+
+    const auto factory = registry.find("javax/xml/parsers/SAXParserFactory");
+    const auto parser = registry.find("javax/xml/parsers/SAXParser");
+    const auto input = registry.find("org/xml/sax/InputSource");
+    const auto handler = registry.find("org/xml/sax/helpers/DefaultHandler");
+    const auto attributes = registry.find("org/xml/sax/Attributes");
+
+    require_method(factory, "newInstance",
+                   "()Ljavax/xml/parsers/SAXParserFactory;",
+                   "JAXP exposes SAXParserFactory.newInstance");
+    require_method(parser, "parse",
+                   "(Lorg/xml/sax/InputSource;Lorg/xml/sax/helpers/DefaultHandler;)V",
+                   "JAXP SAXParser exposes InputSource parse");
+    require_method(input, "<init>", "(Ljava/io/InputStream;)V",
+                   "SAX InputSource accepts InputStream");
+    require(handler != nullptr && handler->interfaces().size() == 4U,
+            "DefaultHandler implements the SAX callback interfaces");
+    require(attributes != nullptr &&
+                (attributes->access_flags() & 0x0200U) != 0U,
+            "SAX Attributes is an interface");
 }
 
 void test_composed_registry() {
@@ -252,6 +340,9 @@ void test_lcdui_registry() {
     const auto form = registry.find("javax/microedition/lcdui/Form");
     const auto list = registry.find("javax/microedition/lcdui/List");
     const auto text_field = registry.find("javax/microedition/lcdui/TextField");
+    const auto canvas = registry.find("javax/microedition/lcdui/Canvas");
+    const auto game_canvas =
+        registry.find("javax/microedition/lcdui/game/GameCanvas");
 
     require(choice != nullptr && choice->interfaces().empty(),
             "Choice is declared as an interface class");
@@ -265,6 +356,13 @@ void test_lcdui_registry() {
             "List implements Choice");
     require_method(text_field, "setConstraints", "(I)V",
                    "TextField exposes constraints");
+    require_method_flags(canvas, "repaint", "()V",
+                         0x0011U, 0x0011U,
+                         "Canvas.repaint is public final");
+    require_method_flags(game_canvas, "paint",
+                         "(Ljavax/microedition/lcdui/Graphics;)V",
+                         0x0005U, 0x0001U,
+                         "GameCanvas.paint is public");
     require(registry.find("java/lang/String") == nullptr,
             "lcdui registry does not claim lang classes");
 }
@@ -278,6 +376,8 @@ int main() {
     test_lcdui_registry();
     test_connection_registry();
     test_game_registry();
+    test_vendor_registry();
+    test_xml_registry();
     test_composed_registry();
     std::cout << "Builtin registry package tests passed\n";
     return 0;

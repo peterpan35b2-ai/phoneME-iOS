@@ -572,16 +572,7 @@ void append_utf8(std::string& output, u32 code_point) {
     }
     auto length = machine.heap().array_length(array);
     if (!length) return std::unexpected(length.error());
-    std::vector<u8> bytes;
-    bytes.reserve(*length);
-    for (usize index = 0; index < *length; ++index) {
-        auto value = machine.heap().element(array, index);
-        if (!value) return std::unexpected(value.error());
-        auto integer = value->as_int();
-        if (!integer) return std::unexpected(integer.error());
-        bytes.push_back(static_cast<u8>(static_cast<u32>(*integer) & 0xFFU));
-    }
-    return bytes;
+    return machine.heap().read_byte_array(array, 0U, *length);
 }
 
 [[nodiscard]] Result<std::vector<u8>> read_input_stream(Machine& machine,
@@ -627,15 +618,10 @@ void append_utf8(std::string& output, u32 code_point) {
             return fail_java("java/io/IOException",
                              "media stream exceeds 32 MiB buffer limit");
         }
-        for (i32 index = 0; index < *count; ++index) {
-            auto value = machine.heap().element(*buffer,
-                                                static_cast<usize>(index));
-            if (!value) return std::unexpected(value.error());
-            auto integer = value->as_int();
-            if (!integer) return std::unexpected(integer.error());
-            output.push_back(
-                static_cast<u8>(static_cast<u32>(*integer) & 0xFFU));
-        }
+        auto chunk = machine.heap().read_byte_array(
+            *buffer, 0U, static_cast<usize>(*count));
+        if (!chunk) return std::unexpected(chunk.error());
+        output.insert(output.end(), chunk->begin(), chunk->end());
     }
     return output;
 }
@@ -734,25 +720,18 @@ void append_utf8(std::string& output, u32 code_point) {
     return std::optional<Value>(Value::from_reference(*player));
 }
 
-[[nodiscard]] Result<std::optional<Value>> create_player_from_stream(
+[[nodiscard]] Result<std::optional<Value>> create_player_from_bytes(
     Machine& machine,
-    ObjectRef stream,
-    ObjectRef type_string) {
-    auto data = read_input_stream(machine, stream);
-    if (!data) return std::unexpected(data.error());
-    std::string type;
-    if (!type_string.is_null()) {
-        auto text = string_utf8(machine, type_string);
-        if (!text) return std::unexpected(text.error());
-        type = normalize_content_type(std::move(*text));
-    }
+    std::vector<u8> data,
+    std::string type) {
+    type = normalize_content_type(std::move(type));
     if (type.empty() || type == "application/octet-stream") {
-        if (data->size() >= 12U &&
-            std::equal(data->begin(), data->begin() + 4, "RIFF") &&
-            std::equal(data->begin() + 8, data->begin() + 12, "WAVE")) {
+        if (data.size() >= 12U &&
+            std::equal(data.begin(), data.begin() + 4, "RIFF") &&
+            std::equal(data.begin() + 8, data.begin() + 12, "WAVE")) {
             type = "audio/x-wav";
-        } else if (data->size() >= 3U && (*data)[0] == 'I' &&
-                   (*data)[1] == 'D' && (*data)[2] == '3') {
+        } else if (data.size() >= 3U && data[0] == 'I' &&
+                   data[1] == 'D' && data[2] == '3') {
             type = "audio/mpeg";
         }
     }
@@ -760,13 +739,8 @@ void append_utf8(std::string& output, u32 code_point) {
         return fail_java("javax/microedition/media/MediaException",
                          "unsupported or unknown media content type");
     }
-    auto native_id = machine.media().create_data(std::move(*data), type);
+    auto native_id = machine.media().create_data(std::move(data), type);
     if (!native_id) {
-        // Manager.createPlayer(InputStream, type) is specified to surface
-        // player-construction failures as MediaException. Platform adapters
-        // use invalid_argument for malformed/empty payloads internally, but
-        // exposing that as IllegalArgumentException breaks legacy games that
-        // correctly catch MediaException and continue without sound.
         return fail_java("javax/microedition/media/MediaException",
                          native_id.error().message);
     }
@@ -782,6 +756,204 @@ void append_utf8(std::string& output, u32 code_point) {
         return std::unexpected(registered.error());
     }
     return std::optional<Value>(Value::from_reference(*player));
+}
+
+[[nodiscard]] Result<std::optional<Value>> create_player_from_stream(
+    Machine& machine,
+    ObjectRef stream,
+    ObjectRef type_string) {
+    auto data = read_input_stream(machine, stream);
+    if (!data) return std::unexpected(data.error());
+    std::string type;
+    if (!type_string.is_null()) {
+        auto text = string_utf8(machine, type_string);
+        if (!text) return std::unexpected(text.error());
+        type = std::move(*text);
+    }
+    return create_player_from_bytes(machine, std::move(*data),
+                                    std::move(type));
+}
+
+[[nodiscard]] Result<std::optional<Value>> invoke_media_object(
+    Machine& machine,
+    ObjectRef object,
+    std::string_view declared_class,
+    std::string_view method,
+    std::string_view descriptor,
+    std::span<const Value> arguments = {}) {
+    auto invoked = machine.invoke_instance(
+        object, declared_class, method, descriptor, arguments, 4'000'000);
+    if (!invoked) return std::unexpected(invoked.error());
+    if (invoked->throwable.has_value()) {
+        auto class_name = machine.heap().class_name(*invoked->throwable);
+        return fail_java(class_name ? *class_name : "java/lang/Exception",
+                         std::string(method) + " failed");
+    }
+    return invoked->return_value;
+}
+
+[[nodiscard]] Result<std::optional<Value>> create_player_from_data_source(
+    Machine& machine,
+    ObjectRef source) {
+    constexpr std::string_view source_class =
+        "javax/microedition/media/protocol/DataSource";
+    constexpr std::string_view stream_class =
+        "javax/microedition/media/protocol/SourceStream";
+    bool connected = false;
+    bool started = false;
+
+    auto operation = [&]() -> Result<std::optional<Value>> {
+        auto connected_result = invoke_media_object(
+            machine, source, source_class, "connect", "()V");
+        if (!connected_result) return std::unexpected(connected_result.error());
+        connected = true;
+        auto started_result = invoke_media_object(
+            machine, source, source_class, "start", "()V");
+        if (!started_result) return std::unexpected(started_result.error());
+        started = true;
+
+        auto streams_result = invoke_media_object(
+            machine, source, source_class, "getStreams",
+            "()[Ljavax/microedition/media/protocol/SourceStream;");
+        if (!streams_result) return std::unexpected(streams_result.error());
+        if (!streams_result->has_value()) {
+            return fail(ErrorCode::internal_error,
+                        "DataSource.getStreams returned no value");
+        }
+        auto streams = streams_result->value().as_reference();
+        if (!streams) return std::unexpected(streams.error());
+        if (streams->is_null()) {
+            return fail_java("javax/microedition/media/MediaException",
+                             "DataSource contains no SourceStream");
+        }
+        auto stream_count = machine.heap().array_length(*streams);
+        if (!stream_count) return std::unexpected(stream_count.error());
+        if (*stream_count == 0U) {
+            return fail_java("javax/microedition/media/MediaException",
+                             "DataSource contains no SourceStream");
+        }
+        auto first_stream_value = machine.heap().element(*streams, 0U);
+        if (!first_stream_value) {
+            return std::unexpected(first_stream_value.error());
+        }
+        auto stream = first_stream_value->as_reference();
+        if (!stream) return std::unexpected(stream.error());
+        if (stream->is_null()) {
+            return fail_java("javax/microedition/media/MediaException",
+                             "DataSource contains a null SourceStream");
+        }
+
+        usize transfer_size = 4'096U;
+        auto transfer_result = invoke_media_object(
+            machine, *stream, stream_class, "getTransferSize", "()I");
+        if (!transfer_result) return std::unexpected(transfer_result.error());
+        if (transfer_result->has_value()) {
+            auto requested = transfer_result->value().as_int();
+            if (!requested) return std::unexpected(requested.error());
+            if (*requested >= 256 && *requested <= 65'536) {
+                transfer_size = static_cast<usize>(*requested);
+            }
+        }
+        auto buffer = machine.heap().allocate_array(
+            "[B", transfer_size, Value::from_int(0));
+        if (!buffer) return std::unexpected(buffer.error());
+        std::vector<u8> data;
+        for (;;) {
+            const std::array<Value, 3> read_arguments {
+                Value::from_reference(*buffer),
+                Value::from_int(0),
+                Value::from_int(static_cast<i32>(transfer_size)),
+            };
+            auto read_result = invoke_media_object(
+                machine, *stream, stream_class, "read", "([BII)I",
+                read_arguments);
+            if (!read_result) return std::unexpected(read_result.error());
+            if (!read_result->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "SourceStream.read returned no value");
+            }
+            auto count = read_result->value().as_int();
+            if (!count) return std::unexpected(count.error());
+            if (*count < 0) break;
+            if (*count == 0) continue;
+            if (static_cast<usize>(*count) > transfer_size ||
+                data.size() > kMaximumStreamBytes -
+                                  static_cast<usize>(*count)) {
+                return fail_java("java/io/IOException",
+                                 "DataSource exceeds 32 MiB buffer limit");
+            }
+            for (i32 index = 0; index < *count; ++index) {
+                auto value = machine.heap().element(
+                    *buffer, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto byte = value->as_int();
+                if (!byte) return std::unexpected(byte.error());
+                data.push_back(static_cast<u8>(
+                    static_cast<u32>(*byte) & 0xFFU));
+            }
+        }
+
+        std::string content_type;
+        auto type_result = invoke_media_object(
+            machine, source, source_class, "getContentType",
+            "()Ljava/lang/String;");
+        if (!type_result) return std::unexpected(type_result.error());
+        if (type_result->has_value()) {
+            auto type_reference = type_result->value().as_reference();
+            if (!type_reference) return std::unexpected(type_reference.error());
+            if (!type_reference->is_null()) {
+                auto type = string_utf8(machine, *type_reference);
+                if (!type) return std::unexpected(type.error());
+                content_type = std::move(*type);
+            }
+        }
+        if (content_type.empty()) {
+            auto descriptor_result = invoke_media_object(
+                machine, *stream, stream_class, "getContentDescriptor",
+                "()Ljavax/microedition/media/protocol/ContentDescriptor;");
+            if (!descriptor_result) {
+                return std::unexpected(descriptor_result.error());
+            }
+            if (descriptor_result->has_value()) {
+                auto descriptor = descriptor_result->value().as_reference();
+                if (!descriptor) return std::unexpected(descriptor.error());
+                if (!descriptor->is_null()) {
+                    auto descriptor_type = invoke_media_object(
+                        machine, *descriptor,
+                        "javax/microedition/media/protocol/ContentDescriptor",
+                        "getContentType", "()Ljava/lang/String;");
+                    if (!descriptor_type) {
+                        return std::unexpected(descriptor_type.error());
+                    }
+                    if (descriptor_type->has_value()) {
+                        auto type_reference =
+                            descriptor_type->value().as_reference();
+                        if (!type_reference) {
+                            return std::unexpected(type_reference.error());
+                        }
+                        if (!type_reference->is_null()) {
+                            auto type = string_utf8(machine, *type_reference);
+                            if (!type) return std::unexpected(type.error());
+                            content_type = std::move(*type);
+                        }
+                    }
+                }
+            }
+        }
+        return create_player_from_bytes(
+            machine, std::move(data), std::move(content_type));
+    };
+
+    auto result = operation();
+    if (started) {
+        (void)invoke_media_object(
+            machine, source, source_class, "stop", "()V");
+    }
+    if (connected) {
+        (void)invoke_media_object(
+            machine, source, source_class, "disconnect", "()V");
+    }
+    return result;
 }
 
 [[nodiscard]] Result<ObjectRef> player_from_control(Machine& machine,
@@ -891,6 +1063,29 @@ void register_manager(NativeMethodRegistry& registry) {
 
     add(registry,
         "javax/microedition/media/Manager",
+        "createPlayer",
+        "(Ljavax/microedition/media/protocol/DataSource;)"
+        "Ljavax/microedition/media/Player;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = reference_argument(arguments, 0U, true);
+            if (!source) return std::unexpected(source.error());
+            if (source->is_null()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "media DataSource is null");
+            }
+            auto valid = machine.object_is_instance(
+                *source, "javax/microedition/media/protocol/DataSource");
+            if (!valid) return std::unexpected(valid.error());
+            if (!*valid) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "object is not a media DataSource");
+            }
+            return create_player_from_data_source(machine, *source);
+        });
+
+    add(registry,
+        "javax/microedition/media/Manager",
         "playTone",
         "(III)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -932,6 +1127,25 @@ void register_player(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
+            return std::optional<Value> {};
+        });
+    add(registry,
+        "javax/microedition/media/IOSPlayer",
+        "run",
+        "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto player = receiver(arguments);
+            if (!player) return std::unexpected(player.error());
+            auto id = player_id(machine, *player);
+            if (!id) return std::unexpected(id.error());
+            auto event = machine.media().synchronize(*id);
+            if (!event) return map_media_error(event.error());
+            if (event->has_value()) {
+                auto dispatched = dispatch_event_impl(
+                    machine, *player, **event);
+                if (!dispatched) return std::unexpected(dispatched.error());
+            }
             return std::optional<Value> {};
         });
 
@@ -1879,6 +2093,53 @@ void register_nokia_sound(NativeMethodRegistry& registry) {
             if (!gain) return std::unexpected(gain.error());
             return std::optional<Value>(Value::from_int(*gain));
         });
+    add(registry, owner, "run", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            if (!sound) return std::unexpected(sound.error());
+            auto native_id = int_field(
+                machine, *sound, kNokiaSoundNativeIdField);
+            if (!native_id) return std::unexpected(native_id.error());
+            if (*native_id > 0) {
+                auto event = machine.media().synchronize(*native_id);
+                if (!event) return map_media_error(event.error());
+                if (event->has_value() &&
+                    ((**event).kind == media::MediaEventKind::end_of_media ||
+                     (**event).kind == media::MediaEventKind::error ||
+                     (**event).kind == media::MediaEventKind::closed)) {
+                    auto stopped = set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    if (!stopped) return std::unexpected(stopped.error());
+                }
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, owner, "playerUpdate",
+        "(Ljavax/microedition/media/Player;Ljava/lang/String;"
+        "Ljava/lang/Object;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto sound = receiver(arguments);
+            auto event = reference_argument(arguments, 2U, false);
+            if (!sound) return std::unexpected(sound.error());
+            if (!event) return std::unexpected(event.error());
+            auto event_name = string_utf8(machine, *event);
+            if (!event_name) return std::unexpected(event_name.error());
+            if (*event_name == "endOfMedia" || *event_name == "error" ||
+                *event_name == "closed") {
+                auto state = int_field(
+                    machine, *sound, kNokiaSoundStateField);
+                if (!state) return std::unexpected(state.error());
+                if (*state != kNokiaSoundUninitialized) {
+                    auto stopped = set_nokia_sound_state(
+                        machine, *sound, kNokiaSoundStopped);
+                    if (!stopped) return std::unexpected(stopped.error());
+                }
+            }
+            return std::optional<Value> {};
+        });
+
     add(registry, owner, "setSoundListener",
         "(Lcom/nokia/mid/sound/SoundListener;)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1900,6 +2161,62 @@ void register_nokia_sound(NativeMethodRegistry& registry) {
                 machine, *sound, kNokiaSoundListenerField, *listener);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
+        });
+}
+
+void register_protocol_natives(NativeMethodRegistry& registry) {
+    constexpr const char* descriptor_owner =
+        "javax/microedition/media/protocol/ContentDescriptor";
+    constexpr const char* source_owner =
+        "javax/microedition/media/protocol/DataSource";
+
+    add(registry, descriptor_owner, "<init>", "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto descriptor = receiver(arguments);
+            auto content_type = reference_argument(arguments, 1U, true);
+            if (!descriptor) return std::unexpected(descriptor.error());
+            if (!content_type) return std::unexpected(content_type.error());
+            if (content_type->is_null()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "ContentDescriptor type is null");
+            }
+            auto stored = set_reference_field(
+                machine, *descriptor, 0U, *content_type);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, descriptor_owner, "getContentType",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto descriptor = receiver(arguments);
+            if (!descriptor) return std::unexpected(descriptor.error());
+            auto content_type = reference_field(machine, *descriptor, 0U);
+            if (!content_type) return std::unexpected(content_type.error());
+            return std::optional<Value>(
+                Value::from_reference(*content_type));
+        });
+
+    add(registry, source_owner, "<init>", "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = receiver(arguments);
+            auto locator = reference_argument(arguments, 1U, true);
+            if (!source) return std::unexpected(source.error());
+            if (!locator) return std::unexpected(locator.error());
+            auto stored = set_reference_field(machine, *source, 0U, *locator);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, source_owner, "getLocator", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = receiver(arguments);
+            if (!source) return std::unexpected(source.error());
+            auto locator = reference_field(machine, *source, 0U);
+            if (!locator) return std::unexpected(locator.error());
+            return std::optional<Value>(Value::from_reference(*locator));
         });
 }
 
@@ -1941,6 +2258,7 @@ void register_media_natives(NativeMethodRegistry& registry) {
     register_player(registry);
     register_controls(registry);
     register_nokia_sound(registry);
+    register_protocol_natives(registry);
     register_time_base(registry);
 }
 

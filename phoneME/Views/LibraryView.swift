@@ -33,17 +33,19 @@ struct LibraryView: View {
     @State private var activeGame: Game?
     @State private var configuringGame: Game?
     @State private var pendingGameToLaunch: Game?
-    @State private var installedGame: Game?
     @State private var renameGame: Game?
     @State private var renameText = ""
     @State private var deleteGame: Game?
     @State private var isImporting = false
-    @State private var showSearch = false
-    @State private var searchText = ""
-    @State private var showSort = false
+    @State private var rmsImportGame: Game?
+    @State private var isImportingRMS = false
+    @State private var rmsExportDocument: RMSBackupDocument?
+    @State private var isExportingRMS = false
+    @State private var rmsExportFileName = "RMS Backup"
     @State private var showSettings = false
     @State private var showProfiles = false
     @State private var errorMessage: String?
+    @State private var noticeMessage: String?
 
     private var jarType: UTType {
         UTType(filenameExtension: "jar") ?? .data
@@ -54,13 +56,7 @@ struct LibraryView: View {
     }
 
     private var visibleGames: [Game] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = query.isEmpty ? library.games : library.games.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.vendor.localizedCaseInsensitiveContains(query)
-        }
-
-        return filtered.sorted { lhs, rhs in
+        library.games.sorted { lhs, rhs in
             let result: ComparisonResult
             switch sort {
             case .name:
@@ -79,21 +75,6 @@ struct LibraryView: View {
 
     var body: some View {
         libraryChromeContent
-        .sheet(item: $installedGame) { game in
-            InstallerSuccessView(
-                game: game,
-                iconURL: library.iconURL(for: game),
-                closeAction: {
-                    installedGame = nil
-                },
-                startAction: {
-                    installedGame = nil
-                    DispatchQueue.main.async {
-                        open(game)
-                    }
-                }
-            )
-        }
         .gamePresentation(item: $activeGame, onDismiss: {
             session.hideCurrent()
         }) { game in
@@ -106,7 +87,7 @@ struct LibraryView: View {
             )
         }
         .sheet(item: $configuringGame, onDismiss: launchPendingGame) { game in
-            NavigationStack {
+            PhoneMENavigationStack {
                 GameProfileEditorView(
                     game: game,
                     initialProfile: profiles.profile(for: game)
@@ -117,10 +98,10 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            NavigationStack { SettingsView() }
+            PhoneMENavigationStack { SettingsView() }
         }
         .sheet(isPresented: $showProfiles) {
-            NavigationStack { ProfilesView() }
+            PhoneMENavigationStack { ProfilesView() }
         }
         .alert("Rename", isPresented: renameAlertBinding) {
             TextField("App name", text: $renameText)
@@ -134,26 +115,35 @@ struct LibraryView: View {
             }
         }
         .confirmationDialog(
-            "Do you really want to delete this app?",
+            "Delete \(deleteGame?.title ?? "this app")?",
             isPresented: deleteDialogBinding,
             titleVisibility: .visible
         ) {
-            Button("OK", role: .destructive) {
-                if let deleteGame {
-                    session.terminate(gameID: deleteGame.id)
-                    profiles.removeProfile(for: deleteGame)
-                    library.remove(deleteGame)
-                }
-                self.deleteGame = nil
+            Button("Delete App & Data", role: .destructive) {
+                guard let game = deleteGame else { return }
+                deleteGame = nil
+                remove(game, dataPolicy: .deleteData)
+            }
+            Button("Delete App Only", role: .destructive) {
+                guard let game = deleteGame else { return }
+                deleteGame = nil
+                remove(game, dataPolicy: .keepData)
             }
             Button("Cancel", role: .cancel) {
                 deleteGame = nil
             }
+        } message: {
+            Text("Keep data to restore saves and settings when the same JAR is imported again, or delete all RMS, files and app settings permanently.")
         }
         .alert("Error", isPresented: errorAlertBinding) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
+        }
+        .alert("RMS", isPresented: noticeAlertBinding) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(noticeMessage ?? "")
         }
         .onOpenURL { url in
             do {
@@ -192,22 +182,27 @@ struct LibraryView: View {
             .toolbar {
                 libraryToolbar
             }
-            .confirmationDialog(
-                "App sort order",
-                isPresented: $showSort,
-                titleVisibility: .visible
-            ) {
-                ForEach(LibrarySort.allCases) { item in
-                    Button(sortButtonTitle(item)) {
-                        selectSort(item)
-                    }
-                }
-            }
             .jarFileImporter(
                 isPresented: $isImporting,
                 contentTypes: [jarType],
                 onCompletion: importFiles
             )
+            .jarFileImporter(
+                isPresented: $isImportingRMS,
+                contentTypes: [.phoneMERMSBackup],
+                onCompletion: importRMSFiles
+            )
+            .fileExporter(
+                isPresented: $isExportingRMS,
+                document: rmsExportDocument,
+                contentType: .phoneMERMSBackup,
+                defaultFilename: rmsExportFileName
+            ) { result in
+                rmsExportDocument = nil
+                if case .failure(let error) = result {
+                    errorMessage = error.localizedDescription
+                }
+            }
     }
 
     @ViewBuilder
@@ -216,7 +211,6 @@ struct LibraryView: View {
         librarySurface
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
 #else
         librarySurface
             .navigationTitle("J2ME Loader")
@@ -224,118 +218,149 @@ struct LibraryView: View {
     }
 
     private var librarySurface: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack {
+            Color.phoneMEAppBackground
+                .ignoresSafeArea()
+
             VStack(spacing: 0) {
-                if showSearch {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                        TextField("Search", text: $searchText)
-                            .foregroundStyle(.primary)
-                            .tint(.accentColor)
-                            .textFieldStyle(.plain)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        if !searchText.isEmpty {
-                            Button {
-                                searchText = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 44)
-                    .background(Color.phoneMELibraryRow)
-                    Divider()
-                }
-
-                if library.games.isEmpty {
-                    Text("No data")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, 10)
-                } else {
-                    List(visibleGames) { game in
-                        Button {
-                            open(game)
-                        } label: {
-                            GameRow(
-                                game: game,
-                                iconURL: library.iconURL(for: game),
-                                runningState: session.runningApplications[game.id]?.state,
-                                resourceUsage: session.backgroundRuntimeUsage,
-                                applicationMemoryBytes: session.backgroundApplicationMemoryUsage[game.id]
-                            )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .listRowInsets(
-                            EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+                Group {
+                    if library.games.isEmpty {
+                        PhoneMEEmptyStateView(
+                            title: "No apps yet",
+                            message: "Import a J2ME JAR file to add it to your library.",
+                            systemImage: "square.stack.3d.up.slash",
+                            actionTitle: "Import JAR",
+                            action: { isImporting = true }
                         )
-                        .contextMenu {
-                            contextMenu(for: game)
-                        }
-                    }
-                    .listStyle(.plain)
-#if os(iOS)
-                    .environment(\.defaultMinListRowHeight, 76)
-#endif
-                }
-            }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 10) {
+                                libraryListHeader
 
-            Button {
-                isImporting = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.title2.weight(.medium))
-                    .foregroundStyle(.white)
-                    .frame(width: 56, height: 56)
-                    .background(Color.red, in: Circle())
-                    .shadow(radius: 5, y: 3)
+                                ForEach(visibleGames) { game in
+                                    Button {
+                                        open(game)
+                                    } label: {
+                                        GameRow(
+                                            game: game,
+                                            iconURL: library.iconURL(for: game),
+                                            runningState: session.runningApplications[game.id]?.state,
+                                            resourceUsage: session.backgroundRuntimeUsage,
+                                            applicationMemoryBytes: session.backgroundApplicationMemoryUsage[game.id]
+                                        )
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(PhoneMEPressedButtonStyle())
+                                    .contextMenu {
+                                        contextMenu(for: game)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: PhoneMEVisualMetrics.contentMaxWidth)
+                            .padding(.horizontal, PhoneMEVisualMetrics.horizontalInset)
+                            .padding(.top, 12)
+                            .padding(.bottom, 24)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .phoneMEScrollDismissesKeyboardInteractively()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .buttonStyle(.plain)
-            .padding(16)
-            .accessibilityLabel("Add")
         }
+    }
+
+    private var libraryListHeader: some View {
+        HStack(spacing: 12) {
+            Text(libraryCountTitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 12)
+
+            Menu {
+                Picker("Sort by", selection: $sortRawValue) {
+                    ForEach(LibrarySort.allCases) { item in
+                        Text(item.title)
+                            .tag(item.rawValue)
+                    }
+                }
+
+                Picker("Order", selection: $sortDescending) {
+                    Label("Ascending", systemImage: "arrow.up")
+                        .tag(false)
+                    Label("Descending", systemImage: "arrow.down")
+                        .tag(true)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(sort.title)
+                    Image(systemName: sortDescending ? "arrow.down" : "arrow.up")
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Sort apps")
+            .accessibilityValue(sortAccessibilityValue)
+        }
+        .padding(.horizontal, 2)
+        .padding(.bottom, 2)
+    }
+
+    private var libraryCountTitle: String {
+        let count = library.games.count
+        return "\(count) \(count == 1 ? "App" : "Apps")"
+    }
+
+    private var sortAccessibilityValue: String {
+        "\(sort.title), \(sortDescending ? "descending" : "ascending")"
     }
 
     @ToolbarContentBuilder
     private var libraryToolbar: some ToolbarContent {
 #if os(iOS)
         ToolbarItem(placement: .navigationBarLeading) {
-            PhoneMEToolbarTitle("J2ME Loader")
+            importToolbarButton
         }
-#endif
 
         ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    showSearch.toggle()
-                    if !showSearch { searchText = "" }
-                }
-            } label: {
-                Image(systemName: "magnifyingglass")
-            }
-            .accessibilityLabel("Search")
-
-            Button {
-                showSort = true
-            } label: {
-                Image(systemName: "arrow.up.arrow.down")
-            }
-            .accessibilityLabel("App sort order")
-
-            Menu {
-                Button("Settings") { showSettings = true }
-                Button("Profiles") { showProfiles = true }
-            } label: {
-                Image(systemName: "ellipsis")
-            }
+            moreToolbarMenu
         }
+#else
+        ToolbarItemGroup(placement: .primaryAction) {
+            importToolbarButton
+            moreToolbarMenu
+        }
+#endif
+    }
+
+    private var importToolbarButton: some View {
+        Button {
+            isImporting = true
+        } label: {
+            Image(systemName: "plus")
+        }
+        .accessibilityLabel("Import JAR")
+    }
+
+    private var moreToolbarMenu: some View {
+        Menu {
+            Button {
+                showSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            Button {
+                showProfiles = true
+            } label: {
+                Label("Profiles", systemImage: "slider.horizontal.3")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .accessibilityLabel("More")
     }
 
     @ViewBuilder
@@ -345,6 +370,24 @@ struct LibraryView: View {
                 session.terminate(gameID: game.id)
             }
         }
+
+        Button {
+            exportRMS(for: game)
+        } label: {
+            Label("Export RMS", systemImage: "square.and.arrow.up")
+        }
+        .disabled(!session.runningApplications.isEmpty)
+
+        Button {
+            rmsImportGame = game
+            isImportingRMS = true
+        } label: {
+            Label("Import RMS", systemImage: "square.and.arrow.down")
+        }
+        .disabled(!session.runningApplications.isEmpty)
+
+        Divider()
+
         Button("Rename") { beginRename(game) }
         Button("Settings") { configuringGame = game }
         Button("Delete", role: .destructive) { deleteGame = game }
@@ -370,30 +413,99 @@ struct LibraryView: View {
         renameGame = game
     }
 
-    private func selectSort(_ item: LibrarySort) {
-        if item == sort {
-            sortDescending.toggle()
-        } else {
-            sortRawValue = item.rawValue
-            sortDescending = false
-        }
-    }
-
-    private func sortButtonTitle(_ item: LibrarySort) -> String {
-        guard item == sort else { return item.title }
-        return item.title + (sortDescending ? " ↑" : " ↓")
-    }
-
     private func importFiles(_ result: Result<[URL], Error>) {
         do {
             let urls = try result.get()
             guard let url = urls.first else { return }
             let game = try library.importJar(from: url)
             applyDefaultProfile(to: game)
-            installedGame = game
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func remove(
+        _ game: Game,
+        dataPolicy: GameRemovalDataPolicy
+    ) {
+        switch dataPolicy {
+        case .keepData:
+            session.terminate(gameID: game.id)
+            library.remove(game, dataPolicy: .keepData)
+
+        case .deleteData:
+            do {
+                let jarURL = try library.prepareJarForLaunch(game)
+                session.terminate(gameID: game.id)
+                session.deleteStoredData(
+                    for: game,
+                    jarURL: jarURL
+                ) { result in
+                    switch result {
+                    case .success:
+                        profiles.removeProfile(for: game)
+                        library.remove(game, dataPolicy: .deleteData)
+                    case .failure(let error):
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportRMS(for game: Game) {
+        do {
+            let jarURL = try library.prepareJarForLaunch(game)
+            session.exportRMS(for: game, jarURL: jarURL) { result in
+                switch result {
+                case .success(let data):
+                    rmsExportDocument = RMSBackupDocument(data: data)
+                    rmsExportFileName = rmsBackupFileName(for: game)
+                    isExportingRMS = true
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func importRMSFiles(_ result: Result<[URL], Error>) {
+        guard let game = rmsImportGame else { return }
+        rmsImportGame = nil
+
+        do {
+            let urls = try result.get()
+            guard let sourceURL = urls.first else { return }
+            let jarURL = try library.prepareJarForLaunch(game)
+            session.importRMS(
+                from: sourceURL,
+                for: game,
+                jarURL: jarURL
+            ) { result in
+                switch result {
+                case .success:
+                    noticeMessage = "RMS data was imported for \(game.title)."
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func rmsBackupFileName(for game: Game) -> String {
+        let invalidCharacters = CharacterSet.alphanumerics.inverted
+        let components = game.title.components(separatedBy: invalidCharacters)
+        let safeTitle = components
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+        let baseName = safeTitle.isEmpty ? "Game" : safeTitle
+        return String(baseName.prefix(80)) + "-RMS"
     }
 
     private func applyDefaultProfile(to game: Game) {
@@ -430,6 +542,13 @@ struct LibraryView: View {
             set: { if !$0 { errorMessage = nil } }
         )
     }
+
+    private var noticeAlertBinding: Binding<Bool> {
+        Binding(
+            get: { noticeMessage != nil },
+            set: { if !$0 { noticeMessage = nil } }
+        )
+    }
 }
 
 private struct GameRow: View {
@@ -440,80 +559,135 @@ private struct GameRow: View {
     let applicationMemoryBytes: UInt64?
 
     var body: some View {
-        HStack(spacing: 14) {
-            GameIconView(iconURL: iconURL)
-                .frame(width: 50, height: 50)
+        VStack(spacing: 8) {
+            HStack(spacing: 14) {
+                GameIconView(iconURL: iconURL)
+                    .frame(width: 56, height: 56)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(game.title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                HStack(spacing: 10) {
-                    Text(game.vendor)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if !game.version.isEmpty {
-                        Text(game.version)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(game.title)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
-                    }
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
 
-                if runningState == .background || runningState == .paused {
-                    Label {
-                        Text(
-                            runningState == .paused
-                                ? "Paused in background"
-                                : "Running in background"
-                        )
-                    } icon: {
-                        Circle()
-                            .fill(runningState == .paused ? .orange : .green)
-                            .frame(width: 7, height: 7)
-                    }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-
-                    if let resourceUsage {
-                        HStack(spacing: 10) {
-                            Label(
-                                "CPU \(formattedCPU(resourceUsage.cpuPercent))",
-                                systemImage: "cpu"
-                            )
-                            .frame(width: 106, alignment: .leading)
-
-                            Group {
-                                if let applicationMemoryBytes {
-                                    Label(
-                                        "RAM \(formattedMemory(applicationMemoryBytes))",
-                                        systemImage: "memorychip"
-                                    )
-                                } else {
-                                    Label("RAM measuring", systemImage: "memorychip")
-                                }
-                            }
-                            .frame(width: 106, alignment: .leading)
+                        if !game.version.isEmpty {
+                            Text(game.version)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.phoneMEControlBackground, in: Capsule())
                         }
-                        .font(.caption2.monospacedDigit())
+                    }
+
+                    Text(game.vendor.isEmpty ? "Unknown vendor" : game.vendor)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
+            .frame(height: 56)
+
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 7, height: 7)
+                    Text(statusTitle ?? "Running")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(runningState == nil ? 0 : 1)
+
+                usageBadge(
+                    resourceUsage.map {
+                        "CPU \(formattedCPU($0.cpuPercent))"
+                    } ?? "CPU —",
+                    systemImage: "cpu",
+                    width: 82
+                )
+                .opacity(showsResourceUsage ? 1 : 0)
+
+                usageBadge(
+                    applicationMemoryBytes.map {
+                        "RAM \(formattedMemory($0))"
+                    } ?? "RAM…",
+                    systemImage: "memorychip",
+                    width: 96
+                )
+                .opacity(showsResourceUsage ? 1 : 0)
+            }
+            .frame(height: 22)
         }
+        .padding(14)
         .frame(
             maxWidth: .infinity,
-            minHeight: runningState == nil ? 76 : (showsResourceUsage ? 108 : 90),
+            minHeight: 112,
+            maxHeight: 112,
             alignment: .leading
         )
+        .background(Color.phoneMECardBackground)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                style: .continuous
+            )
+        )
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: PhoneMEVisualMetrics.cardCornerRadius,
+                style: .continuous
+            )
+            .stroke(Color.phoneMEHairline, lineWidth: 0.5)
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(game.title)
         .accessibilityValue(accessibilityDetails)
+    }
+
+    private func usageBadge(
+        _ title: String,
+        systemImage: String,
+        width: CGFloat
+    ) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption2.monospacedDigit().weight(.medium))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .allowsTightening(true)
+            .frame(width: width, height: 22)
+            .background(Color.phoneMEControlBackground, in: Capsule())
+    }
+
+    private var statusTitle: String? {
+        switch runningState {
+        case .background: return "Running"
+        case .paused: return "Paused"
+        case .foreground: return "Open"
+        case .starting: return "Starting"
+        case .failed: return "Stopped"
+        case nil: return nil
+        }
+    }
+
+    private var statusColor: Color {
+        switch runningState {
+        case .background, .foreground: return .green
+        case .paused, .starting: return .orange
+        case .failed: return .red
+        case nil: return .secondary
+        }
     }
 
     private var accessibilityDetails: String {
@@ -611,39 +785,33 @@ private struct GameIconView: View {
     }
 }
 
-private struct InstallerSuccessView: View {
-    let game: Game
-    let iconURL: URL?
-    let closeAction: () -> Void
-    let startAction: () -> Void
+private extension UTType {
+    static let phoneMERMSBackup = UTType(
+        exportedAs: "dev.phoneme.rms-backup",
+        conformingTo: .data
+    )
+}
 
-    var body: some View {
-        VStack(spacing: 18) {
-            Text("MIDlet installer")
-                .font(.headline)
+private struct RMSBackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] {
+        [.phoneMERMSBackup]
+    }
 
-            GameIconView(iconURL: iconURL)
-                .frame(width: 48, height: 48)
+    let data: Data
 
-            Text("Application successfully installed!")
-                .multilineTextAlignment(.center)
+    init(data: Data) {
+        self.data = data
+    }
 
-            HStack {
-                Button("Close", action: closeAction)
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Start", action: startAction)
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw PhoneMERMSBackupError.invalidBackup
         }
-        .padding(20)
-        .frame(minWidth: 300)
-        .interactiveDismissDisabled()
-#if os(iOS)
-        .presentationDetents([.height(230)])
-        .presentationDragIndicator(.hidden)
-#endif
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 

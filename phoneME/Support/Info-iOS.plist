@@ -37,6 +37,29 @@
         </dict>
     </array>
 
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>dev.phoneme.rms-backup</string>
+            <key>UTTypeDescription</key>
+            <string>phoneME RMS Backup</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>phonemerms</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/vnd.phoneme.rms-backup</string>
+            </dict>
+        </dict>
+    </array>
+
     <key>UTImportedTypeDeclarations</key>
     <array>
         <dict>
@@ -91,6 +114,20 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>NSUbiquitousContainers</key>
+    <dict>
+        <key>iCloud.dev.phoneme.emulator</key>
+        <dict>
+            <key>NSUbiquitousContainerIsDocumentScopePublic</key>
+            <true/>
+            <key>NSUbiquitousContainerName</key>
+            <string>J2ME Loader</string>
+            <key>NSUbiquitousContainerSupportedFolderLevels</key>
+            <string>Any</string>
+        </dict>
+    </dict>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

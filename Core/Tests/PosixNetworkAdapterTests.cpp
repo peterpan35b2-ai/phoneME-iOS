@@ -31,6 +31,10 @@ std::atomic<int> g_close_count {0};
 std::atomic<int32_t> g_redirect_limit {-1};
 std::atomic_bool g_next_request_certificate_error {false};
 std::atomic<int32_t> g_certificate_error_handle {0};
+std::mutex g_collection_mutex;
+std::condition_variable g_collection_condition;
+bool g_block_collection {false};
+bool g_collection_entered {false};
 
 using namespace std::chrono_literals;
 
@@ -52,6 +56,27 @@ void complete_bridge_request(int32_t handle) {
     }
     require(request.completion != nullptr, "Apple HTTP request has callback");
     request.completion(handle, request.context);
+}
+
+void block_bridge_collection() {
+    std::scoped_lock lock(g_collection_mutex);
+    g_collection_entered = false;
+    g_block_collection = true;
+}
+
+void wait_for_bridge_collection() {
+    std::unique_lock lock(g_collection_mutex);
+    const bool entered = g_collection_condition.wait_for(
+        lock, 2s, [] { return g_collection_entered; });
+    require(entered, "Apple HTTP callback enters result collection");
+}
+
+void release_bridge_collection() {
+    {
+        std::scoped_lock lock(g_collection_mutex);
+        g_block_collection = false;
+    }
+    g_collection_condition.notify_all();
 }
 
 template <typename T>
@@ -115,6 +140,7 @@ int32_t phoneme_ios_https_execute_async(
     int32_t,
     int32_t,
     int32_t redirect_limit,
+    int64_t,
     BridgeCompletion completion,
     void* context) {
     g_redirect_limit.store(redirect_limit, std::memory_order_release);
@@ -129,7 +155,16 @@ int32_t phoneme_ios_https_execute_async(
     return handle;
 }
 
-int32_t phoneme_ios_https_get_status_code(int32_t) { return 200; }
+int32_t phoneme_ios_https_get_status_code(int32_t) {
+    std::unique_lock lock(g_collection_mutex);
+    if (g_block_collection) {
+        g_collection_entered = true;
+        g_collection_condition.notify_all();
+        g_collection_condition.wait(
+            lock, [] { return !g_block_collection; });
+    }
+    return 200;
+}
 
 int32_t phoneme_ios_https_copy_string(int32_t handle,
                                       int32_t field,
@@ -174,6 +209,8 @@ void phoneme_ios_https_cancel(int32_t) {
 void phoneme_ios_https_close(int32_t) {
     g_close_count.fetch_add(1, std::memory_order_relaxed);
 }
+
+void phoneme_ios_https_clear_session(int64_t) {}
 
 } // extern "C"
 
@@ -888,7 +925,7 @@ void test_blocking_listeners_do_not_starve_new_operations() {
     NativeConnection server = std::move(**server_result);
 
     std::atomic<int> callback_count {0};
-    std::array<OperationId, 12> listeners {};
+    std::array<OperationId, 36> listeners {};
     for (auto& listener : listeners) {
         auto started = adapter->accept(
             server.handle, 0,
@@ -1198,6 +1235,28 @@ int main() {
                 g_close_count.load(std::memory_order_relaxed) == 2,
             "Apple HTTP cancellation and result cleanup are balanced");
 
+    std::atomic_bool raced_completion {false};
+    auto raced = adapter->perform_http(
+        request,
+        [&raced_completion](phoneme::Result<phoneme::network::HttpResponse>) {
+            raced_completion.store(true, std::memory_order_release);
+        });
+    require(raced.has_value(),
+            "start Apple HTTP cancellation-race request");
+    const int32_t raced_handle =
+        g_next_handle.load(std::memory_order_acquire) - 1;
+    block_bridge_collection();
+    std::jthread raced_callback([raced_handle] {
+        complete_bridge_request(raced_handle);
+    });
+    wait_for_bridge_collection();
+    require(adapter->cancel(*raced).has_value(),
+            "cancel Apple HTTP request while callback collects result");
+    release_bridge_collection();
+    raced_callback.join();
+    require(!raced_completion.load(std::memory_order_acquire),
+            "cancellation wins against an in-flight Apple HTTP callback");
+
     g_next_request_certificate_error.store(true, std::memory_order_release);
     std::optional<phoneme::Result<phoneme::network::HttpResponse>>
         certificate_error_result;
@@ -1208,7 +1267,7 @@ int main() {
         });
     require(certificate_error.has_value(),
             "start Apple HTTPS certificate-error request");
-    complete_bridge_request(3);
+    complete_bridge_request(4);
     require(certificate_error_result.has_value() &&
                 !certificate_error_result->has_value() &&
                 certificate_error_result->error().code ==
@@ -1216,7 +1275,7 @@ int main() {
                 certificate_error_result->error().java_exception_class ==
                     "java/lang/SecurityException",
             "Apple certificate trust error maps to SecurityException");
-    require(g_close_count.load(std::memory_order_relaxed) == 3,
+    require(g_close_count.load(std::memory_order_relaxed) == 4,
             "certificate-error result handle is released");
 
     test_http_parser_hardening();
