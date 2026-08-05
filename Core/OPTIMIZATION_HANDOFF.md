@@ -349,7 +349,7 @@ Recommended commit sequence:
 
 Each commit must pass the full correctness suite before the next phase begins.
 
-### Implementation status — 2026-08-04
+### Implementation status — 2026-08-05
 
 Implemented and validated in the current checkout:
 
@@ -375,42 +375,62 @@ Implemented and validated in the current checkout:
   - runtime `PHONEME_USE_DECODED_EXECUTION=0` switch supports legacy-vs-decoded differential execution from one decoded-enabled binary;
   - deterministic differential fixtures and full host/sanitizer suites pass with decoded execution both disabled and enabled.
 
-Latest reproducible host run:
+Latest reproducible host and corpus runs:
 
 ```text
-Core/build/performance/phase2-all-operands-final/benchmark-run.json
-Core/build/performance/phase2-all-operands-final/full-core-profile.json
-Core/build/performance/decoded-differential.json
+Core/build/performance/phase2-complete-final/benchmark-run.json
+Core/build/performance/phase2-complete-final/full-core-profile.json
+Core/build/performance/decoded-differential-m3g-final.json
+Core/build/performance/decoded-corpus-no-bypass-final/comparison.json
+Core/build/performance/decoded-corpus-no-bypass-final/legacy/report.json
+Core/build/performance/decoded-corpus-no-bypass-final/decoded/report.json
+Core/build/sanitizer-host-m3g-split2/results.json
+Core/build/iphoneos-m3g-split-final/build-result.env
 ```
 
-Selected counters from that run:
+Selected counters from the final full-Core profile:
 
 ```text
-executed bytecodes                 5,083,323
-method invocations                    2,775
-native invocations                    2,305
-decoded methods                         296
-decoded instructions                 11,367
-decoded opcode dispatches          5,083,323
-decoded operand dispatches         1,724,183
-virtual inline-cache hits / misses   821 / 648
-direct-call cache hits / misses      452 / 353
-method-resolution cache hits            465
-declared-method cache hits               20
-field-resolution cache hits             978
-GC count / maximum host pause         45 / 38,041 ns
+executed bytecodes                   5,085,526
+method invocations                       3,019
+native invocations                       2,488
+decoded methods                            325
+decoded instructions                    11,711
+decoded opcode dispatches             5,085,526
+decoded operand dispatches            1,725,561
+virtual inline-cache hits / misses      365 / 1,263
+direct-call cache hits / misses         298 / 578
+operand-resolution hits / misses      1,290 / 2,472
+stable operand-resolution failures             14
+native registry lookups                       1,278
+metadata key constructions                  87,627
+GC count / maximum host pause            45 / 39,625 ns
 ```
 
-Compared with the pre-inline-cache Phase 1 profile, the virtual and direct call-site caches remove 1,273 repeated target lookups. Method-resolution cache hits fell from 1,414 to 465 and declared-method cache hits fell from 344 to 20 while the executed-bytecode total, exception count and opcode histogram remain unchanged.
+Phase 2 resolved-linkage completion — 2026-08-05:
 
-`Core/Tools/test-decoded-differential-host.sh` runs one decoded-enabled binary in legacy and decoded modes. `vm-invocation`, `vm-extended` and `micro3d` currently match exactly for executed bytecodes, method/native calls, exception dispatches, class initialization, opcode histogram and deterministic heap/metadata/scheduler counters.
+- each decoded `RuntimeMethod` owns an operand-resolution side table indexed by decoded operand index and bound to the instruction's original BCI;
+- resolved instance/static fields, direct static/special calls, monomorphic virtual/interface calls, native IDs and class/type operands use the runtime-method side table;
+- `new`, `anewarray`, `checkcast`, `instanceof` and `multianewarray` resolve their target classes at the Java instruction while class initialization remains a separate state transition;
+- native IDs are scoped to `NativeMethodRegistry::generation()`, missing natives are cached, and repeated call sites reuse one method-level binding instead of rebuilding string keys;
+- linkage entries enforce `unresolved -> resolving -> resolved/failed`, reject BCI/index mismatches and preserve stable Java `NoClassDefFoundError`, `NoSuchFieldError`, `NoSuchMethodError` and `IncompatibleClassChangeError` payloads;
+- generated linkage fixtures compile against deliberately missing or incompatible stubs and execute each failing instruction twice at the same BCI, including array/type instructions with null receivers;
+- decoded-vs-legacy fixtures compare heap-visible instance fields, static fields, throwable class/message, instruction counts, opcode histograms and deterministic runtime state;
+- `test-decoded-corpus-host.sh` builds one decoded-enabled CompatibilityHarness and runs the seven SHA-256-pinned JARs with decoded execution OFF and ON; both modes reach the same `STARTED_FRAME`/`STARTED_UI` classification for all seven targets;
+- per-JAR observation durations now keep only NSO, Avatar and Opera alive for 12 seconds; deterministic login/connection probes assert required milestones, minimum frame/color/nonblack metrics and three stable PPM region hashes in both modes;
+- the final screen-oracle report passes 7/7 with `manual_verification_required=false`; NSO and Avatar validate their login screens and Opera validates its connection screen without relying on timing-sensitive full-frame hashes;
+- a sampled Opera teardown hang was traced to `Scheduler::shutdown()` joining a Java worker that consumed its interrupt and then entered indefinite `Object.wait()` after the one-shot monitor clear; `Machine::wait_on_object()` now treats scheduler stop as a wake condition and `MonitorTable::clear()` leaves terminal cancellation active for monitors created late during shutdown;
+- focused monitor/shutdown tests pass normally and under ASan/UBSan, twelve consecutive 12-second Opera decoded teardown runs finish with `midlet-destroyed`, and the final seven-JAR corpus validates the real teardown path without `exit-after-observation`;
+- the full-host sanitizer stack overflow was traced to one oversized `m3g_class()` stack frame containing every M3G class initializer; the factory is split into seven bounded builders, the decoded-enabled full host passes ASan/UBSan in `Core/build/sanitizer-host-m3g-split2`, and the no-bypass seven-JAR corpus remains 7/7;
+- native-binding deduplication reduced full-profile native registry lookups from 2,156 to 1,278 and metadata-key constructions from 88,666 to 87,627 without changing method/native invocation counts;
+- the iPhoneOS arm64 C++23 archive builds and `verify-iphoneos.sh` passes with complete source/object inventory, required symbols present, no forbidden vendor symbols and an explicit provenance check that decoded execution was compiled as requested.
 
-Remaining Phase 2 work:
+`Core/Tools/test-decoded-differential-host.sh` runs one decoded-enabled binary in legacy and decoded modes. `vm-invocation`, `vm-dispatch` and `micro3d` match for executed bytecodes, method/native calls, exception dispatches, class initialization, opcode histogram and deterministic heap/scheduler state. `vm-dispatch` includes one `invokeinterface` call site exercised with two different receiver classes. The decoded `vm-dispatch` path also passes focused ASan/UBSan. Optimization-only metadata counters are reported separately because the decoded path intentionally warms per-instruction side tables.
 
-- move successful field, class, static/special method and native target resolution into per-method decoded runtime side tables rather than the current Machine-local call-site maps;
-- add explicit `unresolved -> resolving -> resolved/failed` linkage states and cache stable Java linkage failures at the original BCI;
-- extend differential fixtures to compare selected heap-visible/static-field effects and stable thrown messages;
-- re-run representative JAR corpus tests before changing decoded execution from default OFF.
+Remaining Phase 2 release gates:
+
+- run real-device startup/gameplay checks with decoded execution explicitly enabled, including input, background/resume, RMS and online reconnect behavior;
+- keep `PHONEME_ENABLE_DECODED_EXECUTION` default OFF until the real-device release gate passes.
 
 Phases 3 and later have not started. Heap locking, generic `Value` arrays, frame vectors and scheduler deque scans remain intentionally unchanged until Phase 2 is finished and remeasured.
 
@@ -2182,14 +2202,11 @@ Continue Phase 2 only. Do not begin typed arrays, heap arenas or scheduler rewri
 Concrete next task:
 
 1. inspect current `git status` and preserve unrelated changes;
-2. add a per-`RuntimeMethod` operand-resolution side table indexed by decoded operand index;
-3. migrate resolved field and direct static/special call targets from Machine-local maps into that side table without changing execution semantics;
-4. implement explicit `unresolved -> resolving -> resolved/failed` states and cache stable Java linkage failures at the original BCI;
-5. extend decoded-vs-legacy differential fixtures with heap/static-field effects and stable throwable class/message checks;
-6. run decoded OFF, decoded ON, profiling ON, differential and ASan/UBSan suites;
-7. compare the resulting profile with `phase2-all-operands-final` before migrating class/type operands.
+2. install the decoded-enabled signed Debug build on an actual iPhone/iPad and record startup/gameplay, input, background/resume, RMS and online reconnect results;
+3. re-run decoded differential, deterministic screen-oracle corpus, focused sanitizers and iPhoneOS verification after any device-only fix;
+4. change decoded execution from default OFF only after the real-device release gate passes.
 
-Keep `PHONEME_ENABLE_DECODED_EXECUTION` disabled by default until all resolved operand categories and the differential corpus pass.
+Do not begin Phase 3 heap locking work while decoded execution still has an unresolved release gate.
 
 ---
 

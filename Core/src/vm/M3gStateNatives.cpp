@@ -1,6 +1,8 @@
 #include "M3gNativeModules.hpp"
 
 #include <array>
+#include <cmath>
+#include <utility>
 
 #include "M3gNativeSupport.hpp"
 
@@ -50,18 +52,70 @@ void register_background(NativeMethodRegistry& registry) {
             if (!initialized) return initialized;
             auto color = set_int_field(machine, object, kBackground,
                                        "color", static_cast<i32>(0xFF000000U));
+            auto mode_x = set_int_field(machine, object, kBackground,
+                                        "imageModeX", 32);
+            auto mode_y = set_int_field(machine, object, kBackground,
+                                        "imageModeY", 32);
             auto color_clear = set_int_field(machine, object, kBackground,
                                              "colorClear", 1, "Z");
             auto depth_clear = set_int_field(machine, object, kBackground,
                                              "depthClear", 1, "Z");
             if (!color) return color;
+            if (!mode_x) return mode_x;
+            if (!mode_y) return mode_y;
             if (!color_clear) return color_clear;
             return depth_clear;
         });
     register_int_property(registry, kBackground, kBackground, "color",
                           "setColor", "getColor");
-    register_nullable_reference_property(registry, kBackground, kBackground,
-        "image", "Ljavax/microedition/m3g/Image2D;", "setImage", "getImage");
+    add(registry, kBackground, "setImage",
+        "(Ljavax/microedition/m3g/Image2D;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Background.setImage");
+            auto image = reference_argument(arguments, 1U,
+                                            "Background.setImage", true);
+            if (!object) return std::unexpected(object.error());
+            if (!image) return std::unexpected(image.error());
+            if (!image->is_null()) {
+                auto format = int_field(machine, *image, kImage2D, "format");
+                auto width = int_field(machine, *image, kImage2D, "width");
+                auto height = int_field(machine, *image, kImage2D, "height");
+                if (!format) return std::unexpected(format.error());
+                if (!width) return std::unexpected(width.error());
+                if (!height) return std::unexpected(height.error());
+                if (*format != 99 && *format != 100) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Background image must be RGB or RGBA");
+                }
+                const std::array<Status, 4> crop {
+                    set_int_field(machine, *object, kBackground, "cropX", 0),
+                    set_int_field(machine, *object, kBackground, "cropY", 0),
+                    set_int_field(machine, *object, kBackground,
+                                  "cropWidth", *width),
+                    set_int_field(machine, *object, kBackground,
+                                  "cropHeight", *height),
+                };
+                for (const Status& status : crop) {
+                    if (!status) return std::unexpected(status.error());
+                }
+            }
+            auto stored = set_reference_field(machine, *object, kBackground,
+                "image", "Ljavax/microedition/m3g/Image2D;", *image);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, kBackground, "getImage",
+        "()Ljavax/microedition/m3g/Image2D;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Background.getImage");
+            if (!object) return std::unexpected(object.error());
+            auto image = reference_field(machine, *object, kBackground,
+                "image", "Ljavax/microedition/m3g/Image2D;");
+            if (!image) return std::unexpected(image.error());
+            return std::optional<Value>(Value::from_reference(*image));
+        });
     add(registry, kBackground, "setImageMode", "(II)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -71,6 +125,10 @@ void register_background(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
+            if ((*x != 32 && *x != 33) || (*y != 32 && *y != 33)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Background image mode is invalid");
+            }
             auto first = set_int_field(machine, *object, kBackground,
                                        "imageModeX", *x);
             auto second = set_int_field(machine, *object, kBackground,
@@ -98,14 +156,22 @@ void register_background(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments, "Background.setCrop");
             if (!object) return std::unexpected(object.error());
-            const std::array<const char*, 4> names {
-                "cropX", "cropY", "cropWidth", "cropHeight"};
-            for (usize index = 0; index < names.size(); ++index) {
+            std::array<i32, 4> values {};
+            for (usize index = 0; index < values.size(); ++index) {
                 auto value = int_argument(arguments, index + 1U,
                                           "Background.setCrop");
                 if (!value) return std::unexpected(value.error());
+                values[index] = *value;
+            }
+            if (values[2U] < 0 || values[3U] < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Background crop dimensions are negative");
+            }
+            const std::array<const char*, 4> names {
+                "cropX", "cropY", "cropWidth", "cropHeight"};
+            for (usize index = 0; index < names.size(); ++index) {
                 auto stored = set_int_field(machine, *object, kBackground,
-                                            names[index], *value);
+                                            names[index], values[index]);
                 if (!stored) return std::unexpected(stored.error());
             }
             return std::optional<Value> {};
@@ -198,6 +264,9 @@ void register_compositing(NativeMethodRegistry& registry) {
         [](Machine& machine, ObjectRef object) -> Status {
             auto initialized = initialize_object3d(machine, object);
             if (!initialized) return initialized;
+            auto blending = set_int_field(machine, object, kCompositingMode,
+                                          "blending", 68);
+            if (!blending) return blending;
             for (const char* name : {"alphaWrite", "colorWrite",
                                      "depthWrite", "depthTest"}) {
                 auto stored = set_int_field(machine, object, kCompositingMode,
@@ -262,7 +331,7 @@ void register_polygon(NativeMethodRegistry& registry) {
             auto winding = set_int_field(machine, object, kPolygonMode,
                                          "winding", 168);
             auto perspective = set_int_field(machine, object, kPolygonMode,
-                                             "perspectiveCorrection", 1, "Z");
+                                             "perspectiveCorrection", 0, "Z");
             if (!culling) return culling;
             if (!shading) return shading;
             if (!winding) return winding;
@@ -435,7 +504,29 @@ void register_polygon(NativeMethodRegistry& registry) {
 }
 
 void register_material(NativeMethodRegistry& registry) {
-    register_noop_constructor(registry, kMaterial, "()V", initialize_object3d);
+    register_noop_constructor(registry, kMaterial, "()V",
+        [](Machine& machine, ObjectRef object) -> Status {
+            auto initialized = initialize_object3d(machine, object);
+            if (!initialized) return initialized;
+            const std::array<Status, 6> stored {
+                set_int_field(machine, object, kMaterial,
+                              "ambient", 0x00333333),
+                set_int_field(machine, object, kMaterial,
+                              "diffuse", static_cast<i32>(0xFFCCCCCCU)),
+                set_int_field(machine, object, kMaterial,
+                              "emissive", 0),
+                set_int_field(machine, object, kMaterial,
+                              "specular", 0),
+                set_float_field(machine, object, kMaterial,
+                                "shininess", 0.0F),
+                set_int_field(machine, object, kMaterial,
+                              "vertexColorTracking", 0, "Z"),
+            };
+            for (const Status& status : stored) {
+                if (!status) return status;
+            }
+            return {};
+        });
     add(registry, kMaterial, "setColor", "(II)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -445,12 +536,26 @@ void register_material(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             if (!target) return std::unexpected(target.error());
             if (!color) return std::unexpected(color.error());
-            const char* field_name = (*target & 0x400) != 0 ? "diffuse"
-                : (*target & 0x800) != 0 ? "emissive"
-                : (*target & 0x1000) != 0 ? "specular" : "ambient";
-            auto stored = set_int_field(machine, *object, kMaterial,
-                                        field_name, *color);
-            if (!stored) return std::unexpected(stored.error());
+            constexpr i32 kAllTargets = 1024 | 2048 | 4096 | 8192;
+            if ((*target & kAllTargets) == 0 ||
+                (*target & ~kAllTargets) != 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Material color target mask is invalid");
+            }
+            const std::array<std::pair<i32, const char*>, 4> fields {{
+                {1024, "ambient"}, {2048, "diffuse"},
+                {4096, "emissive"}, {8192, "specular"},
+            }};
+            for (const auto& [mask, field_name] : fields) {
+                if ((*target & mask) == 0) continue;
+                const i32 stored_color = mask == 2048
+                    ? *color
+                    : static_cast<i32>(
+                        static_cast<u32>(*color) & 0x00FFFFFFU);
+                auto stored = set_int_field(machine, *object, kMaterial,
+                                            field_name, stored_color);
+                if (!stored) return std::unexpected(stored.error());
+            }
             return std::optional<Value> {};
         });
     add(registry, kMaterial, "getColor", "(I)I",
@@ -460,15 +565,45 @@ void register_material(NativeMethodRegistry& registry) {
             auto target = int_argument(arguments, 1U, "Material.getColor");
             if (!object) return std::unexpected(object.error());
             if (!target) return std::unexpected(target.error());
-            const char* field_name = (*target & 0x400) != 0 ? "diffuse"
-                : (*target & 0x800) != 0 ? "emissive"
-                : (*target & 0x1000) != 0 ? "specular" : "ambient";
+            const char* field_name = *target == 1024 ? "ambient"
+                : *target == 2048 ? "diffuse"
+                : *target == 4096 ? "emissive"
+                : *target == 8192 ? "specular" : nullptr;
+            if (field_name == nullptr) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Material color target is invalid");
+            }
             auto value = int_field(machine, *object, kMaterial, field_name);
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(Value::from_int(*value));
         });
-    register_float_property(registry, kMaterial, kMaterial, "shininess",
-                            "setShininess", "getShininess");
+    add(registry, kMaterial, "setShininess", "(F)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Material.setShininess");
+            auto value = float_argument(arguments, 1U,
+                                        "Material.setShininess");
+            if (!object) return std::unexpected(object.error());
+            if (!value) return std::unexpected(value.error());
+            if (!std::isfinite(*value) || *value < 0.0F || *value > 128.0F) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Material shininess is outside 0..128");
+            }
+            auto stored = set_float_field(machine, *object, kMaterial,
+                                          "shininess", *value);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, kMaterial, "getShininess", "()F",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Material.getShininess");
+            if (!object) return std::unexpected(object.error());
+            auto value = float_field(machine, *object, kMaterial,
+                                     "shininess");
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_float(*value));
+        });
     register_int_property(registry, kMaterial, kMaterial,
                           "vertexColorTracking",
                           "setVertexColorTrackingEnable",
@@ -476,13 +611,74 @@ void register_material(NativeMethodRegistry& registry) {
 }
 
 void register_fog(NativeMethodRegistry& registry) {
-    register_noop_constructor(registry, kFog, "()V", initialize_object3d);
-    register_int_property(registry, kFog, kFog, "mode",
-                          "setMode", "getMode");
+    register_noop_constructor(registry, kFog, "()V",
+        [](Machine& machine, ObjectRef object) -> Status {
+            auto initialized = initialize_object3d(machine, object);
+            if (!initialized) return initialized;
+            const std::array<Status, 5> stored {
+                set_int_field(machine, object, kFog, "mode", 81),
+                set_int_field(machine, object, kFog, "color", 0),
+                set_float_field(machine, object, kFog, "density", 1.0F),
+                set_float_field(machine, object, kFog, "nearDistance", 0.0F),
+                set_float_field(machine, object, kFog, "farDistance", 1.0F),
+            };
+            for (const Status& status : stored) {
+                if (!status) return status;
+            }
+            return {};
+        });
+    add(registry, kFog, "setMode", "(I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Fog.setMode");
+            auto value = int_argument(arguments, 1U, "Fog.setMode");
+            if (!object) return std::unexpected(object.error());
+            if (!value) return std::unexpected(value.error());
+            if (*value != 80 && *value != 81) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Fog mode is invalid");
+            }
+            auto stored = set_int_field(machine, *object, kFog,
+                                        "mode", *value);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, kFog, "getMode", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Fog.getMode");
+            if (!object) return std::unexpected(object.error());
+            auto value = int_field(machine, *object, kFog, "mode");
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(*value));
+        });
     register_int_property(registry, kFog, kFog, "color",
                           "setColor", "getColor");
-    register_float_property(registry, kFog, kFog, "density",
-                            "setDensity", "getDensity");
+    add(registry, kFog, "setDensity", "(F)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Fog.setDensity");
+            auto value = float_argument(arguments, 1U, "Fog.setDensity");
+            if (!object) return std::unexpected(object.error());
+            if (!value) return std::unexpected(value.error());
+            if (!std::isfinite(*value) || *value < 0.0F) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Fog density is negative or non-finite");
+            }
+            auto stored = set_float_field(machine, *object, kFog,
+                                          "density", *value);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, kFog, "getDensity", "()F",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Fog.getDensity");
+            if (!object) return std::unexpected(object.error());
+            auto value = float_field(machine, *object, kFog, "density");
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_float(*value));
+        });
     add(registry, kFog, "setLinear", "(FF)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

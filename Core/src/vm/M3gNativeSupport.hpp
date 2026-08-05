@@ -46,6 +46,14 @@ constexpr const char* kRayIntersection = "javax/microedition/m3g/RayIntersection
 constexpr const char* kLoader = "javax/microedition/m3g/Loader";
 
 using Matrix = std::array<float, 16>;
+
+struct Quaternion final {
+    float x {0.0F};
+    float y {0.0F};
+    float z {0.0F};
+    float w {1.0F};
+};
+
 using Initializer = Status (*)(Machine&, ObjectRef);
 
 inline void add(NativeMethodRegistry& registry,
@@ -269,48 +277,83 @@ inline void add(NativeMethodRegistry& registry,
     return result;
 }
 
-[[nodiscard]] inline Result<Matrix> rotation_matrix(float angle,
-                                                    float x,
-                                                    float y,
-                                                    float z) {
+[[nodiscard]] inline Result<Quaternion> axis_angle_quaternion(
+    float angle,
+    float x,
+    float y,
+    float z) {
+    if (!std::isfinite(angle) || !std::isfinite(x) ||
+        !std::isfinite(y) || !std::isfinite(z)) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "M3G rotation is not finite");
+    }
     const float length = std::sqrt(x * x + y * y + z * z);
-    if (!std::isfinite(angle) || !std::isfinite(length) || length <= 1.0e-7F) {
+    if (std::abs(angle) <= 1.0e-7F) return Quaternion {};
+    if (!std::isfinite(length) || length <= 1.0e-7F) {
         return fail_java("java/lang/IllegalArgumentException",
                          "M3G rotation axis is invalid");
     }
-    x /= length;
-    y /= length;
-    z /= length;
     const float radians = angle * (std::numbers::pi_v<float> / 180.0F);
-    const float c = std::cos(radians);
-    const float s = std::sin(radians);
-    const float t = 1.0F - c;
-    Matrix result = identity_matrix();
-    result[0] = x * x * t + c;
-    result[1] = x * y * t - z * s;
-    result[2] = x * z * t + y * s;
-    result[4] = y * x * t + z * s;
-    result[5] = y * y * t + c;
-    result[6] = y * z * t - x * s;
-    result[8] = z * x * t - y * s;
-    result[9] = z * y * t + x * s;
-    result[10] = z * z * t + c;
-    return result;
+    const float half = radians * 0.5F;
+    const float scale = std::sin(half) / length;
+    return Quaternion {
+        .x = x * scale,
+        .y = y * scale,
+        .z = z * scale,
+        .w = std::cos(half),
+    };
 }
 
-[[nodiscard]] inline Result<Matrix> quaternion_matrix(float x,
-                                                      float y,
-                                                      float z,
-                                                      float w) {
-    const float length = std::sqrt(x * x + y * y + z * z + w * w);
+[[nodiscard]] inline Result<Quaternion> normalized_quaternion(
+    Quaternion value) {
+    const float length = std::sqrt(value.x * value.x + value.y * value.y +
+                                   value.z * value.z + value.w * value.w);
     if (!std::isfinite(length) || length <= 1.0e-7F) {
         return fail_java("java/lang/IllegalArgumentException",
                          "M3G quaternion is invalid");
     }
-    x /= length;
-    y /= length;
-    z /= length;
-    w /= length;
+    value.x /= length;
+    value.y /= length;
+    value.z /= length;
+    value.w /= length;
+    return value;
+}
+
+[[nodiscard]] inline Result<Quaternion> multiply_quaternion(
+    Quaternion left,
+    Quaternion right) {
+    auto normalized_left = normalized_quaternion(left);
+    auto normalized_right = normalized_quaternion(right);
+    if (!normalized_left) return std::unexpected(normalized_left.error());
+    if (!normalized_right) return std::unexpected(normalized_right.error());
+    const Quaternion product {
+        .x = normalized_left->w * normalized_right->x +
+             normalized_left->x * normalized_right->w +
+             normalized_left->y * normalized_right->z -
+             normalized_left->z * normalized_right->y,
+        .y = normalized_left->w * normalized_right->y -
+             normalized_left->x * normalized_right->z +
+             normalized_left->y * normalized_right->w +
+             normalized_left->z * normalized_right->x,
+        .z = normalized_left->w * normalized_right->z +
+             normalized_left->x * normalized_right->y -
+             normalized_left->y * normalized_right->x +
+             normalized_left->z * normalized_right->w,
+        .w = normalized_left->w * normalized_right->w -
+             normalized_left->x * normalized_right->x -
+             normalized_left->y * normalized_right->y -
+             normalized_left->z * normalized_right->z,
+    };
+    return normalized_quaternion(product);
+}
+
+[[nodiscard]] inline Result<Matrix> quaternion_matrix(Quaternion value) {
+    auto normalized = normalized_quaternion(value);
+    if (!normalized) return std::unexpected(normalized.error());
+    const float x = normalized->x;
+    const float y = normalized->y;
+    const float z = normalized->z;
+    const float w = normalized->w;
     Matrix result = identity_matrix();
     result[0] = 1.0F - 2.0F * (y * y + z * z);
     result[1] = 2.0F * (x * y - z * w);
@@ -322,6 +365,53 @@ inline void add(NativeMethodRegistry& registry,
     result[9] = 2.0F * (y * z + x * w);
     result[10] = 1.0F - 2.0F * (x * x + y * y);
     return result;
+}
+
+[[nodiscard]] inline Result<Matrix> quaternion_matrix(float x,
+                                                      float y,
+                                                      float z,
+                                                      float w) {
+    return quaternion_matrix(Quaternion {.x = x, .y = y, .z = z, .w = w});
+}
+
+[[nodiscard]] inline Result<Matrix> rotation_matrix(float angle,
+                                                    float x,
+                                                    float y,
+                                                    float z) {
+    auto quaternion = axis_angle_quaternion(angle, x, y, z);
+    if (!quaternion) return std::unexpected(quaternion.error());
+    return quaternion_matrix(*quaternion);
+}
+
+[[nodiscard]] inline std::array<float, 4> quaternion_angle_axis(
+    Quaternion value) noexcept {
+    const float length = std::sqrt(value.x * value.x + value.y * value.y +
+                                   value.z * value.z + value.w * value.w);
+    if (!std::isfinite(length) || length <= 1.0e-7F) {
+        return {0.0F, 0.0F, 0.0F, 1.0F};
+    }
+    value.x /= length;
+    value.y /= length;
+    value.z /= length;
+    value.w /= length;
+    if (value.w < 0.0F) {
+        value.x = -value.x;
+        value.y = -value.y;
+        value.z = -value.z;
+        value.w = -value.w;
+    }
+    const float clamped_w = std::clamp(value.w, -1.0F, 1.0F);
+    const float angle = 2.0F * std::acos(clamped_w);
+    const float sine = std::sqrt(std::max(0.0F, 1.0F - clamped_w * clamped_w));
+    if (sine <= 1.0e-6F || angle <= 1.0e-7F) {
+        return {0.0F, 0.0F, 0.0F, 1.0F};
+    }
+    return {
+        angle * (180.0F / std::numbers::pi_v<float>),
+        value.x / sine,
+        value.y / sine,
+        value.z / sine,
+    };
 }
 
 [[nodiscard]] inline Result<Matrix> inverse_matrix(const Matrix& input) {
@@ -477,15 +567,127 @@ inline void add(NativeMethodRegistry& registry,
     return {};
 }
 
+[[nodiscard]] inline Result<ObjectRef> local_transform(
+    Machine& machine,
+    ObjectRef object);
+
+[[nodiscard]] inline Result<ObjectRef> generic_transform(
+    Machine& machine,
+    ObjectRef object) {
+    auto transform = reference_field(machine, object, kTransformable,
+                                     "genericTransform",
+                                     "Ljavax/microedition/m3g/Transform;");
+    if (!transform) return std::unexpected(transform.error());
+    if (!transform->is_null()) return *transform;
+    auto replacement = new_transform(machine);
+    if (!replacement) return std::unexpected(replacement.error());
+    auto stored = set_reference_field(machine, object, kTransformable,
+                                      "genericTransform",
+                                      "Ljavax/microedition/m3g/Transform;",
+                                      *replacement);
+    if (!stored) return std::unexpected(stored.error());
+    return *replacement;
+}
+
+[[nodiscard]] inline Result<Quaternion> transformable_quaternion(
+    Machine& machine,
+    ObjectRef object) {
+    auto x = float_field(machine, object, kTransformable, "orientationX");
+    auto y = float_field(machine, object, kTransformable, "orientationY");
+    auto z = float_field(machine, object, kTransformable, "orientationZ");
+    auto w = float_field(machine, object, kTransformable, "orientationW");
+    if (!x) return std::unexpected(x.error());
+    if (!y) return std::unexpected(y.error());
+    if (!z) return std::unexpected(z.error());
+    if (!w) return std::unexpected(w.error());
+    return normalized_quaternion(
+        Quaternion {.x = *x, .y = *y, .z = *z, .w = *w});
+}
+
+[[nodiscard]] inline Status set_transformable_quaternion(
+    Machine& machine,
+    ObjectRef object,
+    Quaternion value) {
+    auto normalized = normalized_quaternion(value);
+    if (!normalized) return std::unexpected(normalized.error());
+    const std::array<Status, 4> stored {
+        set_float_field(machine, object, kTransformable,
+                        "orientationX", normalized->x),
+        set_float_field(machine, object, kTransformable,
+                        "orientationY", normalized->y),
+        set_float_field(machine, object, kTransformable,
+                        "orientationZ", normalized->z),
+        set_float_field(machine, object, kTransformable,
+                        "orientationW", normalized->w),
+    };
+    for (const Status& status : stored) {
+        if (!status) return status;
+    }
+    return {};
+}
+
+[[nodiscard]] inline Status rebuild_transformable_matrix(
+    Machine& machine,
+    ObjectRef object) {
+    auto tx = float_field(machine, object, kTransformable, "translationX");
+    auto ty = float_field(machine, object, kTransformable, "translationY");
+    auto tz = float_field(machine, object, kTransformable, "translationZ");
+    auto sx = float_field(machine, object, kTransformable, "scaleX");
+    auto sy = float_field(machine, object, kTransformable, "scaleY");
+    auto sz = float_field(machine, object, kTransformable, "scaleZ");
+    auto orientation = transformable_quaternion(machine, object);
+    auto generic = generic_transform(machine, object);
+    if (!tx) return std::unexpected(tx.error());
+    if (!ty) return std::unexpected(ty.error());
+    if (!tz) return std::unexpected(tz.error());
+    if (!sx) return std::unexpected(sx.error());
+    if (!sy) return std::unexpected(sy.error());
+    if (!sz) return std::unexpected(sz.error());
+    if (!orientation) return std::unexpected(orientation.error());
+    if (!generic) return std::unexpected(generic.error());
+    auto rotation = quaternion_matrix(*orientation);
+    auto generic_matrix = transform_matrix(machine, *generic);
+    if (!rotation) return std::unexpected(rotation.error());
+    if (!generic_matrix) return std::unexpected(generic_matrix.error());
+    const Matrix composite = multiply(
+        multiply(
+            multiply(translation_matrix(*tx, *ty, *tz), *rotation),
+            scale_matrix(*sx, *sy, *sz)),
+        *generic_matrix);
+    auto local = local_transform(machine, object);
+    if (!local) return std::unexpected(local.error());
+    return set_transform_matrix(machine, *local, composite);
+}
+
 [[nodiscard]] inline Status initialize_transformable(
     Machine& machine,
     ObjectRef object) {
-    auto transform = new_transform(machine);
-    if (!transform) return std::unexpected(transform.error());
-    return set_reference_field(machine, object, kTransformable,
-                               "localTransform",
-                               "Ljavax/microedition/m3g/Transform;",
-                               *transform);
+    auto local = new_transform(machine);
+    auto generic = new_transform(machine);
+    if (!local) return std::unexpected(local.error());
+    if (!generic) return std::unexpected(generic.error());
+    const std::array<Status, 12> stored {
+        set_reference_field(machine, object, kTransformable,
+                            "localTransform",
+                            "Ljavax/microedition/m3g/Transform;", *local),
+        set_reference_field(machine, object, kTransformable,
+                            "genericTransform",
+                            "Ljavax/microedition/m3g/Transform;", *generic),
+        set_float_field(machine, object, kTransformable, "translationX", 0.0F),
+        set_float_field(machine, object, kTransformable, "translationY", 0.0F),
+        set_float_field(machine, object, kTransformable, "translationZ", 0.0F),
+        set_float_field(machine, object, kTransformable, "scaleX", 1.0F),
+        set_float_field(machine, object, kTransformable, "scaleY", 1.0F),
+        set_float_field(machine, object, kTransformable, "scaleZ", 1.0F),
+        set_float_field(machine, object, kTransformable, "orientationX", 0.0F),
+        set_float_field(machine, object, kTransformable, "orientationY", 0.0F),
+        set_float_field(machine, object, kTransformable, "orientationZ", 0.0F),
+        set_float_field(machine, object, kTransformable, "orientationW", 1.0F),
+    };
+    for (const Status& status : stored) {
+        if (!status) return status;
+    }
+    return {};
 }
 
 [[nodiscard]] inline Status initialize_node(Machine& machine,
@@ -520,6 +722,48 @@ inline void add(NativeMethodRegistry& registry,
                                       *replacement);
     if (!stored) return std::unexpected(stored.error());
     return *replacement;
+}
+
+[[nodiscard]] inline Result<Matrix> node_composite_matrix(
+    Machine& machine,
+    ObjectRef object) {
+    std::vector<ObjectRef> chain;
+    ObjectRef current = object;
+    for (usize depth = 0U; depth < 1'024U && !current.is_null(); ++depth) {
+        chain.push_back(current);
+        auto parent = reference_field(machine, current, kNode,
+                                      "parent",
+                                      "Ljavax/microedition/m3g/Node;");
+        if (!parent) return std::unexpected(parent.error());
+        current = *parent;
+    }
+    if (!current.is_null()) {
+        return fail(ErrorCode::invalid_state,
+                    "M3G scene graph parent chain is too deep");
+    }
+    std::reverse(chain.begin(), chain.end());
+    Matrix result = identity_matrix();
+    for (const ObjectRef node : chain) {
+        auto local = local_transform(machine, node);
+        if (!local) return std::unexpected(local.error());
+        auto matrix = transform_matrix(machine, *local);
+        if (!matrix) return std::unexpected(matrix.error());
+        result = multiply(result, *matrix);
+    }
+    return result;
+}
+
+[[nodiscard]] inline Result<Matrix> node_transform_to(
+    Machine& machine,
+    ObjectRef source,
+    ObjectRef target) {
+    auto source_matrix = node_composite_matrix(machine, source);
+    auto target_matrix = node_composite_matrix(machine, target);
+    if (!source_matrix) return std::unexpected(source_matrix.error());
+    if (!target_matrix) return std::unexpected(target_matrix.error());
+    auto inverse_target = inverse_matrix(*target_matrix);
+    if (!inverse_target) return std::unexpected(inverse_target.error());
+    return multiply(*inverse_target, *source_matrix);
 }
 
 [[nodiscard]] inline Status initialize_group(Machine& machine,

@@ -577,23 +577,19 @@ template <typename Number>
         std::u16string_view key;
         std::u16string_view value;
     };
-    static constexpr std::array<Property, 13> properties {{
-        // Legacy games commonly slice at least the first nine characters to
-        // select a device profile. Keep the iOS identity, but expose a stable
-        // phoneME-compatible value long enough for those probes.
-        {u"microedition.platform", u"iPhone-iOS"},
-        {u"microedition.profiles", u"MIDP-2.0"},
+    static constexpr std::array<Property, 10> properties {{
+        // Match phoneME's generated MIDP system configuration. MIDlets use
+        // this value as a protocol capability, not as the host OS identity.
+        {u"microedition.platform", u"j2me"},
+        {u"microedition.profiles", u"MIDP-2.1"},
         {u"microedition.configuration", u"CLDC-1.1"},
         {u"microedition.locale", u"en-US"},
         {u"microedition.encoding", u"ISO8859_1"},
+        {u"microedition.jtwi.version", u"1.0"},
+        {u"microedition.msa.version", u"1.1"},
         {u"file.separator", u"/"},
         {u"path.separator", u":"},
         {u"line.separator", u"\n"},
-        {u"java.version", u"1.8.0-phoneME"},
-        {u"java.vendor", u"phoneME C++"},
-        {u"java.vm.name", u"phoneME C++ VM"},
-        {u"os.name", u"iPhoneOS"},
-        {u"os.arch", u"aarch64"},
     }};
     for (const Property& property : properties) {
         if (*text == property.key) {

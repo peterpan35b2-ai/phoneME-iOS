@@ -8,6 +8,8 @@ public final class ThreadOps {
     private static int completed;
     private static int interrupted;
     private static int rooted;
+    private static int classInitReaderStarted;
+    private static int classInitRead;
     private static int busyStarted;
     private static Thread busyThread;
     private static Thread additionalBusyThread;
@@ -28,6 +30,16 @@ public final class ThreadOps {
                     Thread.yield();
                 }
             }
+        }
+    }
+
+    private static final class OverrideThread extends Thread {
+        OverrideThread(Runnable target) {
+            super(target);
+        }
+
+        public void run() {
+            rooted = 91;
         }
     }
 
@@ -99,6 +111,113 @@ public final class ThreadOps {
                 }
             }
             rooted = marker.hashCode() == 0 ? 2 : 1;
+        }
+    }
+
+    private interface ConstructorCallback {
+        void run();
+    }
+
+    private static final class BlockingNestedArgument
+            implements ConstructorCallback {
+        BlockingNestedArgument(long token) {
+            synchronized (WAIT_LOCK) {
+                signal++;
+                try {
+                    WAIT_LOCK.wait(1000L);
+                } catch (InterruptedException unexpected) {
+                    rooted = -1;
+                }
+            }
+        }
+
+        public void run() {
+        }
+    }
+
+    private static final class BlockingClassInitArgument
+            implements ConstructorCallback {
+        static {
+            synchronized (WAIT_LOCK) {
+                signal++;
+                try {
+                    WAIT_LOCK.wait(1000L);
+                } catch (InterruptedException unexpected) {
+                    rooted = -1;
+                }
+            }
+        }
+
+        BlockingClassInitArgument(long token) {
+        }
+
+        public void run() {
+        }
+    }
+
+    private static final class BlockingSharedInitializer {
+        static int value;
+
+        static {
+            synchronized (WAIT_LOCK) {
+                signal++;
+                try {
+                    WAIT_LOCK.wait(1000L);
+                } catch (InterruptedException unexpected) {
+                    rooted = -2;
+                }
+            }
+            value = 73;
+        }
+    }
+
+    private static final class ClassInitOwnerTask implements Runnable {
+        public void run() {
+            completed = BlockingSharedInitializer.value;
+        }
+    }
+
+    private static final class ClassInitReaderTask implements Runnable {
+        public void run() {
+            classInitReaderStarted = 1;
+            classInitRead = BlockingSharedInitializer.value;
+        }
+    }
+
+    private static final class PendingConstructor {
+        private short state;
+        private String label;
+        private ConstructorCallback callback;
+
+        PendingConstructor(String label, ConstructorCallback callback,
+                           long token) {
+            state = -1;
+            this.label = label;
+            this.callback = callback;
+            if (token == 0L) {
+                state = 0;
+            }
+        }
+    }
+
+    private static final class ConstructorRootTask implements Runnable {
+        public void run() {
+            PendingConstructor value = new PendingConstructor(
+                "avatar", new BlockingNestedArgument(7L), 11L);
+            rooted = value.state == -1
+                    && value.label.equals("avatar")
+                    && value.callback != null ? 1 : 2;
+        }
+    }
+
+    private static final class ConstructorClassInitRootTask
+            implements Runnable {
+        public void run() {
+            PendingConstructor value = new PendingConstructor(
+                "avatar", new BlockingClassInitArgument(7L), 11L);
+            rooted = value.state == -1
+                    && value.label.equals("avatar")
+                    && value.callback != null ? 1 : 2;
         }
     }
 
@@ -180,6 +299,107 @@ public final class ThreadOps {
                 return 0;
             }
         }
+    }
+
+    public static int constructorRootRace() {
+        signal = 0;
+        rooted = 0;
+        Thread constructorRootThread = new Thread(new ConstructorRootTask());
+        constructorRootThread.start();
+        if (!waitForSignal(1, 1000L)) {
+            return 41;
+        }
+        System.gc();
+        int gcSafepointWork = 0;
+        for (int index = 0; index < 1024; ++index) {
+            gcSafepointWork ^= index;
+        }
+        if (gcSafepointWork == -1) {
+            return 44;
+        }
+        synchronized (WAIT_LOCK) {
+            WAIT_LOCK.notifyAll();
+        }
+        try {
+            constructorRootThread.join();
+        } catch (InterruptedException unexpected) {
+            return 42;
+        }
+        return rooted == 1 ? 0 : 43;
+    }
+
+    public static int classInitializationWaitsForOwner() {
+        signal = 0;
+        completed = 0;
+        rooted = 0;
+        classInitReaderStarted = 0;
+        classInitRead = 0;
+
+        Thread owner = new Thread(new ClassInitOwnerTask());
+        owner.start();
+        if (!waitForSignal(1, 1000L)) {
+            return 51;
+        }
+
+        Thread reader = new Thread(new ClassInitReaderTask());
+        reader.start();
+        long readerDeadline = System.currentTimeMillis() + 1000L;
+        while (classInitReaderStarted == 0
+                && System.currentTimeMillis() < readerDeadline) {
+            Thread.yield();
+        }
+        if (classInitReaderStarted == 0) {
+            return 52;
+        }
+        for (int index = 0; index < 256; ++index) {
+            Thread.yield();
+        }
+        if (!reader.isAlive() || classInitRead != 0) {
+            return 53;
+        }
+
+        synchronized (WAIT_LOCK) {
+            WAIT_LOCK.notifyAll();
+        }
+        try {
+            owner.join(1000L);
+            reader.join(1000L);
+        } catch (InterruptedException unexpected) {
+            return 54;
+        }
+        if (owner.isAlive() || reader.isAlive()) {
+            return 55;
+        }
+        return completed == 73 && classInitRead == 73 && rooted == 0
+                ? 0 : 56;
+    }
+
+    public static int constructorClassInitRootRace() {
+        signal = 0;
+        rooted = 0;
+        Thread constructorRootThread = new Thread(
+            new ConstructorClassInitRootTask());
+        constructorRootThread.start();
+        if (!waitForSignal(1, 1000L)) {
+            return 45;
+        }
+        System.gc();
+        int gcSafepointWork = 0;
+        for (int index = 0; index < 1024; ++index) {
+            gcSafepointWork ^= index;
+        }
+        if (gcSafepointWork == -1) {
+            return 48;
+        }
+        synchronized (WAIT_LOCK) {
+            WAIT_LOCK.notifyAll();
+        }
+        try {
+            constructorRootThread.join();
+        } catch (InterruptedException unexpected) {
+            return 46;
+        }
+        return rooted == 1 ? 0 : 47;
     }
 
     public static int run() {
@@ -375,6 +595,11 @@ public final class ThreadOps {
             return 20;
         }
 
+        int constructorRootResult = constructorRootRace();
+        if (constructorRootResult != 0) {
+            return constructorRootResult;
+        }
+
         Thread throwing = new Thread(new ThrowTask());
         throwing.start();
         try {
@@ -414,6 +639,23 @@ public final class ThreadOps {
         }
         synchronized (LOCK) {
             if (counter != beforeNamed + 1) return 25;
+        }
+
+        rooted = 0;
+        int beforeOverride;
+        synchronized (LOCK) {
+            beforeOverride = counter;
+        }
+        Thread override = new OverrideThread(new CounterTask(10));
+        override.start();
+        try {
+            override.join();
+        } catch (InterruptedException unexpected) {
+            return 26;
+        }
+        if (rooted != 91) return 27;
+        synchronized (LOCK) {
+            if (counter != beforeOverride) return 28;
         }
 
         return 0;

@@ -210,15 +210,44 @@ final class PhoneMECAPI: @unchecked Sendable {
         )
     }
 
+    func configureApplicationFramePacing(
+        _ runtime: RuntimeHandle?,
+        appID: Int32,
+        framesPerSecond: Int,
+        mode: GameProfile.FramePacingMode
+    ) -> Int32 {
+        phoneme_configure_app_frame_pacing(
+            runtime?.rawValue,
+            appID,
+            Int32(clamping: framesPerSecond),
+            mode.coreValue
+        )
+    }
+
+    func configureApplicationHeap(
+        _ runtime: RuntimeHandle?,
+        appID: Int32,
+        heapMegabytes: Int
+    ) -> Int32 {
+        phoneme_configure_app_heap(
+            runtime?.rawValue,
+            appID,
+            Int32(clamping: heapMegabytes)
+        )
+    }
+
     func configureTranslation(
         _ runtime: RuntimeHandle?,
-        enabled: Bool
+        enabled: Bool,
+        provider: TranslationProvider,
+        sourceLanguage: TranslationSourceLanguage
     ) -> Int32 {
-        "auto".withCString { sourceLanguage in
+        sourceLanguage.rawValue.withCString { sourceLanguage in
             "vi".withCString { targetLanguage in
-                phoneme_configure_translation(
+                phoneme_configure_translation_v2(
                     runtime?.rawValue,
                     enabled ? 1 : 0,
+                    provider.coreValue,
                     sourceLanguage,
                     targetLanguage
                 )
@@ -229,14 +258,17 @@ final class PhoneMECAPI: @unchecked Sendable {
     func configureApplicationTranslation(
         _ runtime: RuntimeHandle?,
         appID: Int32,
-        enabled: Bool
+        enabled: Bool,
+        provider: TranslationProvider,
+        sourceLanguage: TranslationSourceLanguage
     ) -> Int32 {
-        "auto".withCString { sourceLanguage in
+        sourceLanguage.rawValue.withCString { sourceLanguage in
             "vi".withCString { targetLanguage in
-                phoneme_configure_app_translation(
+                phoneme_configure_app_translation_v2(
                     runtime?.rawValue,
                     appID,
                     enabled ? 1 : 0,
+                    provider.coreValue,
                     sourceLanguage,
                     targetLanguage
                 )

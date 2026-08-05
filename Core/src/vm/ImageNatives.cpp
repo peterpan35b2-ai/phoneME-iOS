@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <exception>
 #include <limits>
 #include <span>
@@ -184,6 +185,21 @@ void add(NativeMethodRegistry& registry,
         bytes.insert(bytes.end(), copied->begin(), copied->end());
     }
     return bytes;
+}
+
+[[nodiscard]] i32 wrapping_add(i32 left, i32 right) noexcept {
+    return std::bit_cast<i32>(static_cast<u32>(left) +
+                              static_cast<u32>(right));
+}
+
+[[nodiscard]] i32 wrapping_subtract(i32 left, i32 right) noexcept {
+    return std::bit_cast<i32>(static_cast<u32>(left) -
+                              static_cast<u32>(right));
+}
+
+[[nodiscard]] i32 wrapping_multiply(i32 left, i32 right) noexcept {
+    return std::bit_cast<i32>(static_cast<u32>(left) *
+                              static_cast<u32>(right));
 }
 
 [[nodiscard]] Result<usize> required_pixel_count(i32 width, i32 height) {
@@ -437,7 +453,7 @@ void register_image_natives(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto image_reference = receiver(arguments, "Image.getRGB");
             auto destination = reference_argument(arguments, 1U,
-                                                  "Image.getRGB");
+                                                  "Image.getRGB", true);
             auto offset = int_argument(arguments, 2U, "Image.getRGB");
             auto scan_length = int_argument(arguments, 3U, "Image.getRGB");
             auto x = int_argument(arguments, 4U, "Image.getRGB");
@@ -454,20 +470,32 @@ void register_image_natives(NativeMethodRegistry& registry) {
             if (!height) return std::unexpected(height.error());
             auto image = image_payload(machine, *image_reference);
             if (!image) return std::unexpected(image.error());
-            const i64 source_right = static_cast<i64>(*x) + *width;
-            const i64 source_bottom = static_cast<i64>(*y) + *height;
-            if (*x < 0 || *y < 0 ||
-                source_right > (*image)->width() ||
-                source_bottom > (*image)->height()) {
+
+            // Mirror the reference Image.getRGB Java logic in the same order.
+            // This order is observable: negative dimensions are a no-op before
+            // rgbData is dereferenced, while zero dimensions still reach the
+            // destination-array bounds checks.
+            if (*scan_length >= 0 && *scan_length < *width) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "getRGB scanlength overlaps source rows");
+            }
+            if (*scan_length < 0 &&
+                wrapping_subtract(0, *scan_length) < *width) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "getRGB scanlength overlaps source rows");
+            }
+            if (*y < 0 || *x < 0 ||
+                wrapping_add(*x, *width) > (*image)->width() ||
+                wrapping_add(*y, *height) > (*image)->height()) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "getRGB source region is outside the image");
             }
-            const i64 scan_magnitude = *scan_length < 0
-                ? -static_cast<i64>(*scan_length)
-                : static_cast<i64>(*scan_length);
-            if (scan_magnitude < static_cast<i64>(*width)) {
-                return fail_java("java/lang/IllegalArgumentException",
-                                 "getRGB scanlength overlaps source rows");
+            if (*height < 0 || *width < 0) {
+                return std::optional<Value> {};
+            }
+            if (destination->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Image.getRGB argument is null");
             }
             auto class_name = machine.heap().class_name(*destination);
             auto destination_length = machine.heap().array_length(*destination);
@@ -475,16 +503,31 @@ void register_image_natives(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "getRGB destination must be int[]");
             }
-            if (*width <= 0 || *height <= 0) {
+
+            const i32 row_delta = wrapping_multiply(
+                wrapping_subtract(*height, 1), *scan_length);
+            const i32 last_row = wrapping_add(*offset, row_delta);
+            const i32 exclusive_end = wrapping_add(last_row, *width);
+            if (*offset < 0 ||
+                exclusive_end > static_cast<i32>(*destination_length) ||
+                last_row < 0) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "getRGB destination slice exceeds int[]");
+            }
+            if (*width == 0 || *height == 0) {
                 return std::optional<Value> {};
             }
+
+            // The reference precheck above uses Java int arithmetic. Keep a
+            // second non-wrapping guard only to prevent native memory access if
+            // deliberately overflowing arguments bypass that Java-era check.
             const i64 first = *offset;
-            const i64 last_row = static_cast<i64>(*offset) +
-                static_cast<i64>(*height - 1) * *scan_length;
-            const i64 minimum = std::min(first, last_row);
-            const i64 maximum = std::max(first, last_row) + *width - 1;
+            const i64 actual_last_row = static_cast<i64>(*offset) +
+                (static_cast<i64>(*height) - 1) * *scan_length;
+            const i64 minimum = std::min(first, actual_last_row);
+            const i64 maximum = std::max(first, actual_last_row) + *width - 1;
             if (minimum < 0 || maximum < 0 ||
-                static_cast<u64>(maximum) >= *destination_length) {
+                maximum >= static_cast<i64>(*destination_length)) {
                 return fail_java("java/lang/ArrayIndexOutOfBoundsException",
                                  "getRGB destination slice exceeds int[]");
             }

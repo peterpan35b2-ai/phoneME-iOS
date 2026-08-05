@@ -7,6 +7,7 @@
 
 #include "phoneme/base/Checked.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
+#include "phoneme/vm/VmTrace.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -64,6 +65,7 @@ Heap::Heap(HeapLimits limits) : limits_(limits) {
     const usize hard_limit =
         static_cast<usize>(std::numeric_limits<u32>::max()) - 1U;
     limits_.maximum_objects = std::min(limits_.maximum_objects, hard_limit);
+    update_automatic_collection_threshold_unlocked();
 }
 
 Result<ObjectRef> Heap::allocate_object(std::string class_name,
@@ -475,6 +477,7 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
     PerformanceCounters::record_locked_heap_operation();
     const auto collection_started = std::chrono::steady_clock::now();
     std::scoped_lock lock(mutex_);
+    const usize bytes_before = live_bytes_;
     usize objects_scanned = 0U;
     usize primitive_bytes_scanned = 0U;
     for (Slot& slot : slots_) {
@@ -491,6 +494,12 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
             slot.object.marked = false;
         }
     }
+    vm_trace("gc",
+             "begin roots=%zu live=%zu bytes=%zu capacity=%zu",
+             roots.size(),
+             objects_scanned,
+             bytes_before,
+             slots_.size());
 
     std::vector<ObjectRef> pending;
     pending.reserve(roots.size());
@@ -545,6 +554,7 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         free_slots_.push_back(index);
     }
     ++collections_;
+    update_automatic_collection_threshold_unlocked();
     const auto collection_finished = std::chrono::steady_clock::now();
     const auto pause = std::chrono::duration_cast<std::chrono::nanoseconds>(
         collection_finished - collection_started).count();
@@ -554,6 +564,18 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         objects_scanned,
         objects_reclaimed,
         primitive_bytes_scanned);
+    vm_trace("gc",
+             "end roots=%zu scanned=%zu reclaimed=%zu live=%zu->%zu "
+             "bytes=%zu->%zu pause_us=%lld collections=%llu",
+             roots.size(),
+             objects_scanned,
+             objects_reclaimed,
+             objects_scanned,
+             objects_scanned - objects_reclaimed,
+             bytes_before,
+             live_bytes_,
+             static_cast<long long>(pause / 1'000),
+             static_cast<unsigned long long>(collections_));
     return {};
 }
 
@@ -563,6 +585,7 @@ void Heap::clear() noexcept {
     free_slots_.clear();
     live_bytes_ = 0U;
     peak_bytes_ = 0U;
+    update_automatic_collection_threshold_unlocked();
     collections_ = 0U;
     failed_allocations_ = 0U;
 }
@@ -570,6 +593,12 @@ void Heap::clear() noexcept {
 usize Heap::estimated_bytes() const noexcept {
     std::scoped_lock lock(mutex_);
     return live_bytes_;
+}
+
+bool Heap::automatic_collection_due() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return automatic_collection_threshold_ != 0U &&
+           live_bytes_ >= automatic_collection_threshold_;
 }
 
 HeapStats Heap::stats() const noexcept {
@@ -661,6 +690,31 @@ Status Heap::ensure_capacity_unlocked(usize object_bytes) noexcept {
         return fail(ErrorCode::overflow, "Java heap byte limit reached");
     }
     return {};
+}
+
+void Heap::update_automatic_collection_threshold_unlocked() noexcept {
+    const usize maximum = limits_.maximum_bytes;
+    if (maximum == 0U) {
+        automatic_collection_threshold_ = 0U;
+        return;
+    }
+    if (live_bytes_ >= maximum) {
+        automatic_collection_threshold_ = maximum;
+        return;
+    }
+
+    // Start collecting at half the configured heap. After each collection,
+    // retain half of the remaining free space as headroom. This adapts upward
+    // for games with a genuinely large live set while keeping enough reserve
+    // that small native allocations (notably String payload attachment) cannot
+    // hit the hard limit between interpreter safepoints.
+    const usize initial = std::max<usize>(maximum / 2U, 1U);
+    const usize remaining = maximum - live_bytes_;
+    const usize growth = std::max<usize>(remaining / 2U, 1U);
+    const usize adaptive = live_bytes_ + growth;
+    automatic_collection_threshold_ = std::max(initial, adaptive);
+    automatic_collection_threshold_ =
+        std::min(automatic_collection_threshold_, maximum);
 }
 
 void Heap::mark_unlocked(ObjectRef root, std::vector<ObjectRef>& pending) {

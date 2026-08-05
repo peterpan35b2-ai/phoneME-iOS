@@ -300,6 +300,7 @@ static_assert(translated_outline_color(0xFFFFFFFFU) == 0xFF000000U);
         bound.context->clip.height,
         bound.context->translate_x,
         bound.context->translate_y);
+    if (planned.suppress) return {};
     return draw_translated_text(
         *bound.target,
         *bound.context,
@@ -1672,8 +1673,33 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!anchor) return std::unexpected(anchor.error());
+            // phoneME's Graphics.render rejects drawing an Image back into the
+            // same mutable Image that owns this Graphics object.
+            if (source_reference->bits == bound->context->target_key) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "drawImage source equals destination");
+            }
             auto source = image_payload(machine, *source_reference);
             if (!source) return std::unexpected(source.error());
+            machine.intercept_image_draw(ImageDrawEvent {
+                .kind = ImageDrawKind::image,
+                .graphics_id = bound->graphics_id,
+                .target_image_id = bound->context->target_key,
+                .source_image_id = source_reference->bits,
+                .source_width = (*source)->width(),
+                .source_height = (*source)->height(),
+                .transform = static_cast<i32>(graphics::Transform::none),
+                .destination_x = *x,
+                .destination_y = *y,
+                .anchor = *anchor,
+                .translate_x = bound->context->translate_x,
+                .translate_y = bound->context->translate_y,
+                .clip_x = bound->context->clip.x,
+                .clip_y = bound->context->clip.y,
+                .clip_width = bound->context->clip.width,
+                .clip_height = bound->context->clip.height,
+                .display_target = bound->context->display_target,
+            });
             return status_result(graphics::draw_image(
                 *bound->target, *bound->context, **source,
                 *x, *y, *anchor));
@@ -1702,14 +1728,42 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             for (const auto& value : values) {
                 if (!value) return std::unexpected(value.error());
             }
+            // Match phoneME Graphics.renderRegion validation order:
+            // transform, anchor, then same-source/source-region checks.
+            auto transform = graphics::transform_from_int(*values[4]);
+            if (!transform) return graphics_error(transform.error());
+            auto anchor_validation = graphics::anchored_rect(
+                0, 0, 0, 0, *values[7], false);
+            if (!anchor_validation) {
+                return graphics_error(anchor_validation.error());
+            }
             if (source_reference->bits == bound->context->target_key) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "drawRegion source equals destination");
             }
-            auto transform = graphics::transform_from_int(*values[4]);
-            if (!transform) return graphics_error(transform.error());
             auto source = image_payload(machine, *source_reference);
             if (!source) return std::unexpected(source.error());
+            machine.intercept_image_draw(ImageDrawEvent {
+                .kind = ImageDrawKind::region,
+                .graphics_id = bound->graphics_id,
+                .target_image_id = bound->context->target_key,
+                .source_image_id = source_reference->bits,
+                .source_x = *values[0],
+                .source_y = *values[1],
+                .source_width = *values[2],
+                .source_height = *values[3],
+                .transform = *values[4],
+                .destination_x = *values[5],
+                .destination_y = *values[6],
+                .anchor = *values[7],
+                .translate_x = bound->context->translate_x,
+                .translate_y = bound->context->translate_y,
+                .clip_x = bound->context->clip.x,
+                .clip_y = bound->context->clip.y,
+                .clip_width = bound->context->clip.width,
+                .clip_height = bound->context->clip.height,
+                .display_target = bound->context->display_target,
+            });
             return status_result(graphics::draw_region(
                 *bound->target, *bound->context, **source,
                 *values[0], *values[1], *values[2], *values[3],
@@ -2053,11 +2107,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = char_array_characters(machine, *data, *offset, *length,
                                               "Font.charsWidth");
             if (!text) return std::unexpected(text.error());
-            std::shared_ptr<const std::vector<char32_t>> translated;
-            const auto measured = translated_characters(
-                machine, *text, translated);
+            // MIDP Font metrics describe the Java characters supplied by the
+            // MIDlet. Auto-translation is presentation-only and must never
+            // change values used by game layout, clipping, or indexing.
             return std::optional<Value>(Value::from_int(
-                font->chars_width(measured)));
+                font->chars_width(*text)));
         });
 
     add(registry, font_owner, "stringWidth", "(Ljava/lang/String;)I",
@@ -2073,11 +2127,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = string_characters(machine, *string,
                                           "Font.stringWidth");
             if (!text) return std::unexpected(text.error());
-            std::shared_ptr<const std::vector<char32_t>> translated;
-            const auto measured = translated_characters(
-                machine, *text, translated);
+            // Keep Java-visible metrics stable when an asynchronous
+            // translation enters the cache. Only Graphics draw calls replace
+            // rendered text.
             return std::optional<Value>(Value::from_int(
-                font->chars_width(measured)));
+                font->chars_width(*text)));
         });
 
     add(registry, font_owner, "substringWidth",
@@ -2100,11 +2154,11 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto text = substring_characters(machine, *string, *offset, *length,
                                              "Font.substringWidth");
             if (!text) return std::unexpected(text.error());
-            std::shared_ptr<const std::vector<char32_t>> translated;
-            const auto measured = translated_characters(
-                machine, *text, translated);
+            // Preserve consistency with charWidth/charsWidth for the original
+            // substring; translated metrics can invalidate layout invariants
+            // in the middle of a frame.
             return std::optional<Value>(Value::from_int(
-                font->chars_width(measured)));
+                font->chars_width(*text)));
         });
 
     constexpr const char* direct_impl =

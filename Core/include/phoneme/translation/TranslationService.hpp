@@ -14,8 +14,14 @@
 
 namespace phoneme::translation {
 
+enum class TranslationProvider : i32 {
+    google = 0,
+    bing = 1,
+};
+
 struct TranslationConfiguration final {
     bool enabled {false};
+    TranslationProvider provider {TranslationProvider::google};
     std::string source_language {"auto"};
     std::string target_language {"vi"};
     std::string cache_path;
@@ -55,9 +61,17 @@ public:
         std::string_view text,
         Utf8Completion completion = {});
 
+    // Queues likely-future text at low priority. Prefetch requests never block
+    // or displace text that is already being rendered; a later foreground
+    // lookup promotes the same pending source instead of sending it twice.
+    void prefetch(std::span<const char32_t> text);
+    void prefetch_utf8(std::string_view text);
+
     [[nodiscard]] static bool contains_translatable_text(
         std::span<const char32_t> text) noexcept;
     [[nodiscard]] static Result<std::string> parse_google_response(
+        std::span<const u8> body);
+    [[nodiscard]] static Result<std::string> parse_bing_response(
         std::span<const u8> body);
 
 private:
@@ -65,10 +79,33 @@ private:
 
     static void schedule_pump(const std::shared_ptr<State>& state);
     static void pump_requests(const std::shared_ptr<State>& state);
-    static void complete_request(
+    static void complete_google_request(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
         Result<network::HttpResponse> response);
+    static void start_bing_request(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        bool force_token_refresh,
+        bool allow_retry);
+    static void complete_bing_home_request(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        bool allow_retry,
+        Result<network::HttpResponse> response);
+    static void perform_bing_translation(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        bool allow_retry);
+    static void complete_bing_request(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        bool allow_retry,
+        Result<network::HttpResponse> response);
+    static void finish_request(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        std::vector<std::string> translated_values);
 
     std::shared_ptr<State> state_;
 };

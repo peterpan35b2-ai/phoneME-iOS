@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "phoneme/classfile/ClassFile.hpp"
+#include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/RuntimeMetadata.hpp"
 
 namespace {
@@ -46,6 +47,20 @@ int main() {
             .bytecode = {0x04U, 0xACU},
         },
     });
+    methods.push_back(phoneme::classfile::Method {
+        .access_flags = 0x0009U,
+        .name = "linked",
+        .descriptor = "()V",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 1U,
+            .max_locals = 0U,
+            .bytecode = {
+                0xB2U, 0x00U, 0x01U,
+                0xB8U, 0x00U, 0x02U,
+                0xB1U,
+            },
+        },
+    });
 
     auto class_file = std::make_shared<const ClassFile>(ClassFile::builtin(
         "test/Metadata",
@@ -58,9 +73,11 @@ int main() {
     const auto* wide = class_file->find_method(
         "wide", "(IDLjava/lang/Object;)J");
     const auto* coded = class_file->find_method("coded", "()I");
+    const auto* linked = class_file->find_method("linked", "()V");
     require(sum != nullptr, "indexed method lookup finds sum");
     require(wide != nullptr, "indexed method lookup finds wide");
     require(coded != nullptr, "indexed method lookup finds coded method");
+    require(linked != nullptr, "indexed method lookup finds linked method");
     require(class_file->find_method("missing", "()V") == nullptr,
             "indexed method lookup rejects missing method");
 
@@ -85,9 +102,11 @@ int main() {
     auto sum_metadata = metadata.publish_method(class_file, *sum);
     auto wide_metadata = metadata.publish_method(class_file, *wide);
     auto coded_metadata = metadata.publish_method(class_file, *coded);
+    auto linked_metadata = metadata.publish_method(class_file, *linked);
     require(sum_metadata.has_value(), "publish sum method");
     require(wide_metadata.has_value(), "publish wide method");
     require(coded_metadata.has_value(), "publish coded method");
+    require(linked_metadata.has_value(), "publish linked method");
     require((*sum_metadata)->id.valid() && (*wide_metadata)->id.valid(),
             "runtime methods have valid IDs");
     require((*sum_metadata)->id != (*wide_metadata)->id,
@@ -98,6 +117,103 @@ int main() {
                 (*coded_metadata)->decoded->method_id == (*coded_metadata)->id &&
                 (*coded_metadata)->decoded->instructions.size() == 2U,
             "runtime method publishes immutable decoded bytecode");
+    require((*linked_metadata)->decoded != nullptr &&
+                (*linked_metadata)->operand_resolutions != nullptr &&
+                (*linked_metadata)->operand_resolutions->size() == 2U,
+            "runtime method owns a decoded operand side table");
+
+    auto field_entry = (*linked_metadata)->operand_resolutions->entry(0U, 0U);
+    require(field_entry.has_value(), "field operand side-table entry uses original BCI");
+    require(!(*linked_metadata)->operand_resolutions->entry(0U, 3U).has_value(),
+            "operand side table rejects a mismatched BCI");
+    require((*field_entry)->begin(phoneme::vm::OperandResolutionKind::field)
+                .has_value(),
+            "field operand enters resolving state");
+    auto field = std::make_shared<const phoneme::vm::FieldLocation>(
+        phoneme::vm::FieldLocation {
+            .id = phoneme::vm::FieldId {1U},
+            .declaring_class_id = (*runtime_class)->id,
+            .declaring_class = "test/Metadata",
+            .name = "value",
+            .descriptor = "I",
+            .index = 0U,
+            .value_kind = phoneme::vm::ValueKind::int32,
+            .is_static = true,
+        });
+    require((*field_entry)->resolve_field(field).has_value() &&
+                (*field_entry)->state ==
+                    phoneme::vm::OperandResolutionState::resolved &&
+                (*field_entry)->field == field,
+            "field operand publishes its resolved payload");
+    (*field_entry)->reset();
+    require((*field_entry)->begin(
+                phoneme::vm::OperandResolutionKind::class_reference).has_value(),
+            "class operand enters resolving state");
+    require((*field_entry)->resolve_class_reference(
+                "test/Metadata",
+                (*runtime_class)->id,
+                class_file,
+                "[Ltest/Metadata;").has_value() &&
+                (*field_entry)->target_class == (*runtime_class)->id &&
+                (*field_entry)->target_class_file == class_file &&
+                (*field_entry)->target_class_name == "test/Metadata" &&
+                (*field_entry)->target_array_name == "[Ltest/Metadata;",
+            "class operand publishes stable class and array metadata");
+    (*field_entry)->reset();
+    require((*field_entry)->begin_virtual_call((*runtime_class)->id)
+                .has_value(),
+            "virtual-call operand binds its receiver class");
+    require((*field_entry)->resolve_virtual_call(
+                (*sum_metadata)->id,
+                phoneme::vm::NativeMethodId {9U},
+                13U).has_value() &&
+                (*field_entry)->kind ==
+                    phoneme::vm::OperandResolutionKind::virtual_call &&
+                (*field_entry)->receiver_class == (*runtime_class)->id &&
+                (*field_entry)->target_method == (*sum_metadata)->id &&
+                (*field_entry)->target_native_method ==
+                    phoneme::vm::NativeMethodId {9U},
+            "virtual-call operand publishes a monomorphic method/native target");
+
+    auto call_entry = (*linked_metadata)->operand_resolutions->entry(1U, 3U);
+    require(call_entry.has_value(), "direct-call operand uses original BCI");
+    require((*call_entry)->begin(
+                phoneme::vm::OperandResolutionKind::direct_call).has_value(),
+            "direct-call operand enters resolving state");
+    require((*call_entry)->resolve_direct_call(
+                (*sum_metadata)->id,
+                phoneme::vm::NativeMethodId {7U},
+                11U).has_value() &&
+                (*call_entry)->target_method == (*sum_metadata)->id &&
+                (*call_entry)->target_native_method ==
+                    phoneme::vm::NativeMethodId {7U} &&
+                (*call_entry)->native_generation == 11U &&
+                (*call_entry)->native_binding_cached,
+            "direct-call operand publishes method and native target IDs");
+    require((*call_entry)->update_native_binding(
+                phoneme::vm::NativeMethodId {}, 12U).has_value() &&
+                !(*call_entry)->target_native_method.valid() &&
+                (*call_entry)->native_generation == 12U,
+            "direct-call operand caches a generation-scoped missing native");
+    (*call_entry)->reset();
+    require((*call_entry)->begin(
+                phoneme::vm::OperandResolutionKind::direct_call).has_value(),
+            "direct-call operand can be reset for a new linkage attempt");
+    const auto stable_failure = phoneme::Error::make_java(
+        "java/lang/NoSuchMethodError", "test/Metadata.missing()V");
+    require((*call_entry)->fail_resolution(stable_failure).has_value(),
+            "direct-call operand caches a linkage failure");
+    const auto* cached_failure =
+        (*linked_metadata)->operand_resolutions->entry_for_test(1U);
+    require(cached_failure != nullptr &&
+                cached_failure->state ==
+                    phoneme::vm::OperandResolutionState::failed &&
+                cached_failure->failure.has_value() &&
+                cached_failure->failure->java_exception_class ==
+                    "java/lang/NoSuchMethodError" &&
+                cached_failure->failure->message ==
+                    "test/Metadata.missing()V",
+            "cached linkage failure preserves throwable class and message");
     require(metadata.publish_method(class_file, *sum).value().get() ==
                 sum_metadata->get(),
             "publishing a method twice reuses metadata");

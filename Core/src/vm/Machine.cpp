@@ -19,6 +19,7 @@
 #include "phoneme/vm/ModifiedUtf8.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/SlotStorage.hpp"
+#include "phoneme/vm/VmTrace.hpp"
 
 #ifndef PHONEME_ENABLE_DECODED_EXECUTION
 #define PHONEME_ENABLE_DECODED_EXECUTION 0
@@ -42,6 +43,30 @@ namespace phoneme::vm
     static_assert((kMaintenancePollInterval &
                    (kMaintenancePollInterval - 1U)) == 0U);
 
+    [[nodiscard]] std::vector<char32_t> utf32_from_utf16(
+        std::u16string_view input)
+    {
+      std::vector<char32_t> output;
+      output.reserve(input.size());
+      for (usize index = 0U; index < input.size(); ++index)
+      {
+        u32 value = static_cast<u16>(input[index]);
+        if (value >= 0xD800U && value <= 0xDBFFU &&
+            index + 1U < input.size())
+        {
+          const u32 low = static_cast<u16>(input[index + 1U]);
+          if (low >= 0xDC00U && low <= 0xDFFFU)
+          {
+            value = 0x10000U + ((value - 0xD800U) << 10U) +
+                    (low - 0xDC00U);
+            ++index;
+          }
+        }
+        output.push_back(static_cast<char32_t>(value));
+      }
+      return output;
+    }
+
     [[nodiscard]] bool decoded_execution_requested() noexcept
     {
 #if PHONEME_ENABLE_DECODED_EXECUTION
@@ -50,6 +75,68 @@ namespace phoneme::vm
 #else
       return false;
 #endif
+    }
+
+    [[nodiscard]] bool specialized_intrinsics_requested() noexcept
+    {
+      const char* option = std::getenv("PHONEME_USE_SPECIALIZED_INTRINSICS");
+      return option == nullptr || std::string_view(option) != "0";
+    }
+
+    [[nodiscard]] bool should_trace_slow_native(
+        std::string_view owner,
+        std::string_view name) noexcept
+    {
+      // These natives intentionally wait or encompass a complete Java worker
+      // lifetime. Their durations are expected and are traced by the scheduler,
+      // monitor or framebuffer paths instead of being reported as slow I/O.
+      if (owner == "java/lang/Thread" &&
+          (name == "sleep" || name == "run" || name == "join"))
+      {
+        return false;
+      }
+      if (owner == "java/lang/Object" && name == "wait")
+        return false;
+      if (owner == "javax/microedition/lcdui/Canvas" &&
+          name == "serviceRepaints")
+      {
+        return false;
+      }
+      return true;
+    }
+
+    [[nodiscard]] Error stable_linkage_error(
+        Error error,
+        OperandResolutionKind kind)
+    {
+      if (error.code == ErrorCode::java_exception)
+        return error;
+      if (error.code == ErrorCode::class_not_found)
+      {
+        if (kind == OperandResolutionKind::field &&
+            error.message.starts_with("field was not found"))
+        {
+          return Error::make_java("java/lang/NoSuchFieldError",
+                                  std::move(error.message));
+        }
+        return Error::make_java("java/lang/NoClassDefFoundError",
+                                std::move(error.message));
+      }
+      if (error.code == ErrorCode::method_not_found)
+      {
+        return Error::make_java("java/lang/NoSuchMethodError",
+                                std::move(error.message));
+      }
+      if (error.code == ErrorCode::invalid_state &&
+          (kind == OperandResolutionKind::field ||
+           kind == OperandResolutionKind::direct_call ||
+           kind == OperandResolutionKind::virtual_call))
+      {
+        return Error::make_java(
+            "java/lang/IncompatibleClassChangeError",
+            std::move(error.message));
+      }
+      return error;
     }
 
     [[nodiscard]] bool translation_wrapping_space(
@@ -210,12 +297,14 @@ namespace phoneme::vm
           std::numeric_limits<i32>::max()));
     }
 
-    [[nodiscard]] constexpr usize heap_capacity_with_emergency_reserve(
-        usize requested) noexcept
+    [[nodiscard]] constexpr HeapLimits heap_limits_with_emergency_reserve(
+        HeapLimits requested) noexcept
     {
       const usize hard_limit =
           static_cast<usize>(std::numeric_limits<u32>::max()) - 1U;
-      return requested < hard_limit ? requested + 1U : hard_limit;
+      requested.maximum_objects = requested.maximum_objects < hard_limit
+          ? requested.maximum_objects + 1U : hard_limit;
+      return requested;
     }
 
     thread_local Machine* g_execution_machine = nullptr;
@@ -478,6 +567,73 @@ namespace phoneme::vm
 #else
         return kInvalidDecodedIndex;
 #endif
+      }
+
+      void append_upcoming_translation_candidates(
+          std::vector<std::vector<char32_t>>& output,
+          usize maximum_candidates = 6U,
+          usize maximum_instructions = 96U) const
+      {
+        if (maximum_candidates == 0U || maximum_instructions == 0U ||
+            resolved_.runtime == nullptr || !resolved_.runtime->decoded)
+        {
+          return;
+        }
+        const DecodedMethod& decoded = *resolved_.runtime->decoded;
+        if (current_instruction_pc_ > std::numeric_limits<u32>::max())
+          return;
+        const u32 current_index = decoded.instruction_index_for_bci(
+            static_cast<u32>(current_instruction_pc_));
+        if (current_index == kInvalidDecodedIndex ||
+            current_index >= decoded.instructions.size())
+        {
+          return;
+        }
+
+        u32 instruction_index = decoded.instructions[current_index].next_index;
+        usize scanned = 0U;
+        while (instruction_index < decoded.instructions.size() &&
+               scanned < maximum_instructions &&
+               output.size() < maximum_candidates)
+        {
+          const DecodedInstruction& instruction =
+              decoded.instructions[instruction_index];
+          const u8 opcode = raw_opcode(instruction.opcode);
+          if ((opcode == 0x12U || opcode == 0x13U) &&
+              instruction.operand_index != kInvalidDecodedIndex &&
+              instruction.operand_index < decoded.operands.size())
+          {
+            const DecodedOperand& operand =
+                decoded.operands[instruction.operand_index];
+            if (operand.kind == DecodedOperandKind::constant_pool_index)
+            {
+              auto constant = owner().constant(operand.constant_pool_index);
+              if (constant &&
+                  (*constant)->kind == classfile::ConstantKind::string_ref)
+              {
+                auto encoded = owner().string_constant(
+                    operand.constant_pool_index);
+                if (encoded)
+                {
+                  auto decoded_text = decode_modified_utf8(*encoded);
+                  if (decoded_text)
+                  {
+                    auto candidate = utf32_from_utf16(*decoded_text);
+                    if (translation::TranslationService::
+                            contains_translatable_text(candidate) &&
+                        std::find(output.begin(), output.end(), candidate) ==
+                            output.end())
+                    {
+                      output.push_back(std::move(candidate));
+                    }
+                  }
+                }
+              }
+            }
+          }
+          instruction_index = instruction.next_index;
+          ++scanned;
+        }
       }
 
       [[nodiscard]] bool has_receiver() const noexcept { return has_receiver_; }
@@ -1726,8 +1882,14 @@ namespace phoneme::vm
   } // namespace
 
   Machine::Machine(ClassRepository &classes, usize maximum_heap_objects)
+      : Machine(classes,
+                HeapLimits {.maximum_objects = maximum_heap_objects})
+  {
+  }
+
+  Machine::Machine(ClassRepository &classes, HeapLimits heap_limits)
       : classes_(classes), states_(classes),
-        heap_(heap_capacity_with_emergency_reserve(maximum_heap_objects)),
+        heap_(heap_limits_with_emergency_reserve(heap_limits)),
         permission_policy_(std::make_shared<security::PermissionPolicy>()),
         timers_(*this), media_events_(*this)
   {
@@ -1791,6 +1953,10 @@ namespace phoneme::vm
       return;
     media_events_.shutdown();
     timers_.shutdown();
+    // A worker may be waiting for another thread's class initializer. Wake it
+    // before Scheduler::shutdown joins workers so teardown cannot deadlock on
+    // the class-initialization condition.
+    class_initialization_condition_.notify_all();
     scheduler_.shutdown(&monitors_);
   }
 
@@ -1897,6 +2063,30 @@ namespace phoneme::vm
     return decision;
   }
 
+  void Machine::configure_image_draw_interceptor(ImageDrawSink sink)
+  {
+    const bool enabled = static_cast<bool>(sink);
+    {
+      std::scoped_lock lock(image_draw_sink_mutex_);
+      image_draw_sink_ = std::move(sink);
+    }
+    image_draw_interception_enabled_.store(enabled,
+                                           std::memory_order_release);
+  }
+
+  void Machine::intercept_image_draw(const ImageDrawEvent& event) const
+  {
+    if (!image_draw_interception_enabled_.load(std::memory_order_acquire))
+      return;
+
+    ImageDrawSink sink;
+    {
+      std::scoped_lock lock(image_draw_sink_mutex_);
+      sink = image_draw_sink_;
+    }
+    if (sink) sink(event);
+  }
+
   Machine::TextTranslationLayoutDecision Machine::plan_translated_text(
       u64 graphics_id,
       std::span<const char32_t> text,
@@ -1998,6 +2188,7 @@ namespace phoneme::vm
     }
 
     decision.planned = true;
+    decision.suppress = planned.suppress;
     decision.y = planned.y + (sample.y - expected.y);
     decision.height = planned.height;
     return decision;
@@ -2123,32 +2314,124 @@ namespace phoneme::vm
       });
     }
 
-    usize text_begin = 0U;
-    while (text_begin < translated_text_capture_.size())
+    // Many J2ME games build a text outline by drawing the exact same string
+    // several times at neighbouring coordinates with different colours. Once
+    // translated, rendering every pass creates several complete Vietnamese
+    // strings on top of each other. Collapse each small outline/shadow cluster
+    // to one central draw; draw_translated_text() supplies a readable outline.
+    constexpr i32 kDuplicateTextRadius = 4;
+    const auto resolved_anchor = [](i32 anchor) noexcept
     {
-      const TranslatedTextDrawSample &first =
-          translated_text_capture_[text_begin];
-      const i32 first_anchor = first.anchor == 0
+      return anchor == 0
           ? graphics::anchor_left | graphics::anchor_top
-          : first.anchor;
+          : anchor;
+    };
+    const auto same_text_layer = [&](const TranslatedTextDrawSample &left,
+                                     const TranslatedTextDrawSample &right)
+    {
+      const i32 left_anchor = resolved_anchor(left.anchor);
+      const i32 right_anchor = resolved_anchor(right.anchor);
+      return left.graphics_id == right.graphics_id &&
+             left.text == right.text &&
+             left.font_face == right.font_face &&
+             left.font_style == right.font_style &&
+             left.font_size == right.font_size &&
+             left.clip_x == right.clip_x &&
+             left.clip_y == right.clip_y &&
+             left.clip_width == right.clip_width &&
+             left.clip_height == right.clip_height &&
+             left.translate_x == right.translate_x &&
+             left.translate_y == right.translate_y &&
+             left_anchor == right_anchor &&
+             std::abs(left.x - right.x) <= kDuplicateTextRadius &&
+             std::abs(left.y - right.y) <= kDuplicateTextRadius;
+    };
+
+    std::vector<bool> duplicate_grouped(
+        translated_text_capture_.size(), false);
+    for (usize root = 0U; root < translated_text_capture_.size(); ++root)
+    {
+      if (duplicate_grouped[root])
+        continue;
+      std::vector<usize> group {root};
+      duplicate_grouped[root] = true;
+      for (usize candidate = root + 1U;
+           candidate < translated_text_capture_.size();
+           ++candidate)
+      {
+        if (!duplicate_grouped[candidate] &&
+            same_text_layer(translated_text_capture_[root],
+                            translated_text_capture_[candidate]))
+        {
+          duplicate_grouped[candidate] = true;
+          group.push_back(candidate);
+        }
+      }
+      if (group.size() <= 1U)
+        continue;
+
+      usize preferred = group.front();
+      i64 best_distance = std::numeric_limits<i64>::max();
+      for (const usize candidate : group)
+      {
+        i64 distance = 0;
+        for (const usize other : group)
+        {
+          distance += std::abs(
+              static_cast<i64>(translated_text_capture_[candidate].x) -
+              translated_text_capture_[other].x);
+          distance += std::abs(
+              static_cast<i64>(translated_text_capture_[candidate].y) -
+              translated_text_capture_[other].y);
+        }
+        // Prefer the last central pass on a tie. Games conventionally render
+        // shadows first and the foreground colour last.
+        if (distance < best_distance ||
+            (distance == best_distance && candidate > preferred))
+        {
+          best_distance = distance;
+          preferred = candidate;
+        }
+      }
+      for (const usize index : group)
+      {
+        if (index != preferred)
+          text_plan[index].suppress = true;
+      }
+    }
+
+    std::vector<usize> visible_text_indices;
+    visible_text_indices.reserve(translated_text_capture_.size());
+    for (usize index = 0U; index < translated_text_capture_.size(); ++index)
+    {
+      if (!text_plan[index].suppress)
+        visible_text_indices.push_back(index);
+    }
+
+    usize visible_begin = 0U;
+    while (visible_begin < visible_text_indices.size())
+    {
+      const usize first_index = visible_text_indices[visible_begin];
+      const TranslatedTextDrawSample &first =
+          translated_text_capture_[first_index];
+      const i32 first_anchor = resolved_anchor(first.anchor);
       const i32 first_horizontal = first_anchor &
           (graphics::anchor_left | graphics::anchor_right |
            graphics::anchor_hcenter);
       const i32 first_vertical = first_anchor &
           (graphics::anchor_top | graphics::anchor_bottom |
            graphics::anchor_baseline);
-      usize text_end = text_begin + 1U;
+      usize visible_end = visible_begin + 1U;
       i64 previous_y = static_cast<i64>(first.y) + first.translate_y;
       const i32 maximum_gap = 48;
       const i32 maximum_indent = std::max<i32>(
           64, std::max(first.clip_width, 1) / 2);
-      while (text_end < translated_text_capture_.size())
+      while (visible_end < visible_text_indices.size())
       {
+        const usize candidate_index = visible_text_indices[visible_end];
         const TranslatedTextDrawSample &candidate =
-            translated_text_capture_[text_end];
-        const i32 candidate_anchor = candidate.anchor == 0
-            ? graphics::anchor_left | graphics::anchor_top
-            : candidate.anchor;
+            translated_text_capture_[candidate_index];
+        const i32 candidate_anchor = resolved_anchor(candidate.anchor);
         const i32 candidate_horizontal = candidate_anchor &
             (graphics::anchor_left | graphics::anchor_right |
              graphics::anchor_hcenter);
@@ -2174,10 +2457,10 @@ namespace phoneme::vm
         if (!same_clip || !adjacent)
           break;
         previous_y = candidate_y;
-        ++text_end;
+        ++visible_end;
       }
 
-      const usize block_count = text_end - text_begin;
+      const usize block_count = visible_end - visible_begin;
       std::vector<graphics::Font> fonts;
       std::vector<i32> heights(block_count, 1);
       std::vector<i32> original_tops(block_count, 0);
@@ -2185,11 +2468,14 @@ namespace phoneme::vm
       std::vector<i32> gaps(block_count, 1);
       fonts.reserve(block_count);
 
-      for (usize index = text_begin; index < text_end; ++index)
+      for (usize visible_index = visible_begin;
+           visible_index < visible_end;
+           ++visible_index)
       {
+        const usize index = visible_text_indices[visible_index];
         const TranslatedTextDrawSample &sample =
             translated_text_capture_[index];
-        const usize local_index = index - text_begin;
+        const usize local_index = visible_index - visible_begin;
         auto created_font = graphics::Font::create(
             sample.font_face, sample.font_style, sample.font_size);
         const graphics::Font font = created_font
@@ -2268,9 +2554,12 @@ namespace phoneme::vm
         shift_all(shift_down);
       }
 
-      for (usize index = text_begin; index < text_end; ++index)
+      for (usize visible_index = visible_begin;
+           visible_index < visible_end;
+           ++visible_index)
       {
-        const usize local_index = index - text_begin;
+        const usize index = visible_text_indices[visible_index];
+        const usize local_index = visible_index - visible_begin;
         const TranslatedTextDrawSample &sample =
             translated_text_capture_[index];
         text_plan[index].y = translated_y_for_top(
@@ -2281,7 +2570,7 @@ namespace phoneme::vm
             sample.translate_y);
         text_plan[index].height = heights[local_index];
       }
-      text_begin = text_end;
+      visible_begin = visible_end;
     }
 
     character_translation_plan_samples_ = std::move(planned);
@@ -2315,6 +2604,51 @@ namespace phoneme::vm
     return scheduler_.start_thread(*this, thread);
   }
 
+  Result<ExecutionResult> Machine::run_java_thread_entry(ObjectRef thread)
+  {
+    auto runtime_class = heap_.class_name(thread);
+    if (!runtime_class)
+      return std::unexpected(runtime_class.error());
+    auto run_method = classes_.resolve_method(*runtime_class, "run", "()V");
+    if (!run_method)
+      return std::unexpected(run_method.error());
+
+    // The built-in java.lang.Thread.run native only forwards to the stored
+    // Runnable target. Enter that target directly from the scheduler so a
+    // normal Thread(Runnable) does not consume an extra host C++ execute frame.
+    // A subclass override must still run virtually and retains Java semantics.
+    if (run_method->owner != nullptr &&
+        run_method->owner->name() == "java/lang/Thread")
+    {
+      auto target = scheduler_.runnable_target(thread);
+      if (!target)
+        return std::unexpected(target.error());
+      if (target->is_null())
+      {
+        return ExecutionResult {
+            .return_value = std::nullopt,
+            .throwable = std::nullopt,
+            .executed_instructions = 0U,
+        };
+      }
+      return invoke_instance(
+          *target,
+          "java/lang/Runnable",
+          "run",
+          "()V",
+          {},
+          kLongLivedThreadInstructionBudget);
+    }
+
+    return invoke_instance(
+        thread,
+        "java/lang/Thread",
+        "run",
+        "()V",
+        {},
+        kLongLivedThreadInstructionBudget);
+  }
+
   Result<std::optional<Value>> Machine::run_java_thread_target(ObjectRef thread)
   {
     auto target = scheduler_.runnable_target(thread);
@@ -2336,10 +2670,59 @@ namespace phoneme::vm
       auto class_name = heap_.class_name(*result->throwable);
       if (!class_name)
         return std::unexpected(class_name.error());
-      return fail_java(*class_name,
-                       "uncaught throwable from Runnable.run");
+
+      std::string message;
+      auto detail_value = heap_.field(*result->throwable, 0U);
+      if (detail_value)
+      {
+        auto detail_reference = detail_value->as_reference();
+        if (detail_reference && !detail_reference->is_null())
+        {
+          auto detail = heap_.string_value(*detail_reference);
+          if (detail)
+          {
+            message.reserve(detail->size());
+            for (char16_t character : *detail)
+            {
+              message.push_back(character <= 0x7fU
+                  ? static_cast<char>(character)
+                  : '?');
+            }
+          }
+        }
+      }
+      if (message.empty())
+        message = "uncaught throwable from Runnable.run";
+      if (!result->exception_context.empty())
+      {
+        message += " at ";
+        message += result->exception_context;
+      }
+      return fail_java(*class_name, message);
     }
     return std::optional<Value>{};
+  }
+
+  void Machine::configure_frame_pacing(
+      i32 frames_per_second,
+      FramePacingMode mode) noexcept
+  {
+    scheduler_.configure_frame_pacing(frames_per_second, mode);
+  }
+
+  void Machine::pace_frame_publication()
+  {
+    scheduler_.pace_current_frame_publication(*this);
+  }
+
+  void Machine::note_frame_pacing_boundary() noexcept
+  {
+    scheduler_.note_current_frame_boundary();
+  }
+
+  void Machine::break_frame_pacing_sequence() noexcept
+  {
+    scheduler_.break_current_frame_pacing_sequence();
   }
 
   Result<SchedulerWaitResult> Machine::sleep_current_thread(i64 millis)
@@ -2347,14 +2730,17 @@ namespace phoneme::vm
     if (millis < 0)
       return fail_java("java/lang/IllegalArgumentException",
                        "Thread.sleep timeout must not be negative");
-    return scheduler_.sleep_current(*this,
-                                    std::chrono::milliseconds(millis));
+    return scheduler_.sleep_current(
+        *this,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::milliseconds(millis)));
   }
 
   Result<SchedulerWaitResult> Machine::join_java_thread(
       ObjectRef thread,
       std::optional<i64> millis)
   {
+    scheduler_.break_current_frame_pacing_sequence();
     if (millis.has_value() && *millis < 0)
       return fail_java("java/lang/IllegalArgumentException",
                        "Thread.join timeout must not be negative");
@@ -2376,6 +2762,7 @@ namespace phoneme::vm
       ObjectRef object,
       std::optional<i64> millis)
   {
+    scheduler_.break_current_frame_pacing_sequence();
     if (millis.has_value() && *millis < 0)
       return fail_java("java/lang/IllegalArgumentException",
                        "Object.wait timeout must not be negative");
@@ -2404,7 +2791,15 @@ namespace phoneme::vm
           resume_execution_after_blocking(released_depth);
           scheduler_.set_current_state(JavaThreadState::running);
         },
-        [this] { return scheduler_.current_is_interrupted(); });
+        [this] {
+          // Shutdown may race with a Java thread that consumes its interrupt
+          // and then enters Object.wait after MonitorTable::clear() has already
+          // notified the old monitors. The scheduler stop flag is persistent;
+          // include it in the wait predicate so no new indefinite wait can be
+          // created while workers are being joined.
+          return scheduler_.current_is_interrupted() ||
+                 scheduler_.current_stop_requested();
+        });
     if (blocking_pump_error.has_value())
       return std::unexpected(std::move(*blocking_pump_error));
     if (result && *result == MonitorWaitResult::interrupted)
@@ -3177,58 +3572,214 @@ namespace phoneme::vm
 
   void Machine::refresh_metadata_bindings_if_needed() noexcept
   {
+    // Interpreter metadata caches are only touched while the VM execution gate
+    // is held. Native bindings are also resolved by host/native callback
+    // threads before they enter execute(), so that cache has its own mutex and
+    // is refreshed in resolve_native_binding().
     const u64 metadata_generation = classes_.metadata().generation();
     if (metadata_binding_generation_ != metadata_generation)
     {
-      operand_resolution_tables_.clear();
       field_bindings_.clear();
       direct_call_bindings_.clear();
       virtual_call_bindings_.clear();
       metadata_binding_generation_ = metadata_generation;
     }
-
-    const u64 native_generation = natives_.generation();
-    if (native_binding_generation_ != native_generation)
-    {
-      native_bindings_.clear();
-      native_binding_generation_ = native_generation;
-    }
   }
 
-  Result<Machine::OperandResolutionEntry*>
+  Result<OperandResolutionEntry*>
   Machine::operand_resolution_entry(MethodId method_id,
-                                    u32 operand_index)
+                                    u32 operand_index,
+                                    usize bytecode_pc)
   {
-    if (!method_id.valid() || operand_index == kInvalidDecodedIndex)
+    if (!method_id.valid() || operand_index == kInvalidDecodedIndex ||
+        bytecode_pc > static_cast<usize>(std::numeric_limits<u32>::max()))
     {
       return fail(ErrorCode::invalid_argument,
-                  "decoded operand resolution requires valid IDs");
+                  "decoded operand resolution requires valid IDs and BCI");
     }
     auto runtime_method = classes_.metadata().find_method(method_id);
-    if (runtime_method == nullptr || runtime_method->decoded == nullptr)
+    if (runtime_method == nullptr || runtime_method->decoded == nullptr ||
+        runtime_method->operand_resolutions == nullptr)
     {
       return fail(ErrorCode::invalid_state,
-                  "decoded operand resolution has no runtime method");
+                  "decoded operand resolution has no runtime method table");
     }
-    if (operand_index >= runtime_method->decoded->operands.size())
+    return runtime_method->operand_resolutions->entry(
+        operand_index,
+        static_cast<u32>(bytecode_pc));
+  }
+
+  Result<std::shared_ptr<const classfile::ClassFile>>
+  Machine::load_linkage_class(std::string_view class_name)
+  {
+    auto loaded = classes_.load(class_name);
+    if (!loaded)
+      return std::unexpected(loaded.error());
+
+    std::string_view component = class_name;
+    while (!component.empty() && component.front() == '[')
+      component.remove_prefix(1U);
+    if (component.size() >= 3U && component.front() == 'L' &&
+        component.back() == ';')
     {
-      return fail(ErrorCode::out_of_range,
-                  "decoded operand resolution index is out of range");
+      component.remove_prefix(1U);
+      component.remove_suffix(1U);
+      auto loaded_component = classes_.load(component);
+      if (!loaded_component)
+        return std::unexpected(loaded_component.error());
+    }
+    return *loaded;
+  }
+
+  Result<OperandResolutionEntry*> Machine::resolve_class_operand(
+      MethodId method_id,
+      u32 operand_index,
+      usize bytecode_pc,
+      const classfile::ClassFile& owner,
+      u16 constant_pool_index,
+      bool load_target_class,
+      bool derive_reference_array_name)
+  {
+    if (!method_id.valid() || operand_index == kInvalidDecodedIndex)
+      return static_cast<OperandResolutionEntry*>(nullptr);
+
+    auto cached_entry = operand_resolution_entry(method_id,
+                                                 operand_index,
+                                                 bytecode_pc);
+    if (!cached_entry)
+      return std::unexpected(cached_entry.error());
+    OperandResolutionEntry& entry = **cached_entry;
+    if (entry.state == OperandResolutionState::resolved)
+    {
+      if (entry.kind != OperandResolutionKind::class_reference ||
+          entry.target_class_name.empty() ||
+          (load_target_class && entry.target_class_file == nullptr) ||
+          (derive_reference_array_name && entry.target_array_name.empty()))
+      {
+        return fail(ErrorCode::internal_error,
+                    "decoded class operand cache has wrong kind");
+      }
+      PerformanceCounters::record_operand_resolution(true);
+      return &entry;
+    }
+    if (entry.state == OperandResolutionState::failed)
+    {
+      if (entry.kind != OperandResolutionKind::class_reference ||
+          !entry.failure.has_value())
+      {
+        return fail(ErrorCode::internal_error,
+                    "decoded failed class operand has no error");
+      }
+      PerformanceCounters::record_operand_resolution(true);
+      PerformanceCounters::record_operand_resolution_failure();
+      return std::unexpected(*entry.failure);
+    }
+    if (entry.state == OperandResolutionState::resolving)
+    {
+      return fail(ErrorCode::invalid_state,
+                  "recursive decoded class operand resolution");
     }
 
-    auto [table, inserted] = operand_resolution_tables_.try_emplace(
-        method_id,
-        runtime_method->decoded->operands.size());
-    (void)inserted;
-    return &table->second[operand_index];
+    PerformanceCounters::record_operand_resolution(false);
+    auto began = entry.begin(OperandResolutionKind::class_reference);
+    if (!began)
+      return std::unexpected(began.error());
+
+    auto class_name = owner.class_name_constant(constant_pool_index);
+    if (!class_name)
+    {
+      auto cached = entry.fail_resolution(stable_linkage_error(
+          class_name.error(), OperandResolutionKind::class_reference));
+      if (!cached)
+        return std::unexpected(cached.error());
+      PerformanceCounters::record_operand_resolution_failure();
+      return std::unexpected(*entry.failure);
+    }
+
+    std::shared_ptr<const classfile::ClassFile> loaded_class;
+    ClassId class_id;
+    if (load_target_class)
+    {
+      auto loaded = load_linkage_class(*class_name);
+      if (!loaded)
+      {
+        auto cached = entry.fail_resolution(stable_linkage_error(
+            loaded.error(), OperandResolutionKind::class_reference));
+        if (!cached)
+          return std::unexpected(cached.error());
+        PerformanceCounters::record_operand_resolution_failure();
+        return std::unexpected(*entry.failure);
+      }
+      loaded_class = *loaded;
+      const auto runtime_class = classes_.metadata().find_class(*class_name);
+      if (runtime_class == nullptr)
+      {
+        auto cached = entry.fail_resolution(Error::make(
+            ErrorCode::internal_error,
+            "loaded decoded class operand has no runtime metadata"));
+        if (!cached)
+          return std::unexpected(cached.error());
+        PerformanceCounters::record_operand_resolution_failure();
+        return std::unexpected(*entry.failure);
+      }
+      class_id = runtime_class->id;
+    }
+
+    std::string array_name;
+    if (derive_reference_array_name)
+    {
+      if (class_name->starts_with('['))
+        array_name = '[' + *class_name;
+      else
+        array_name = "[L" + *class_name + ';';
+    }
+    auto completed = entry.resolve_class_reference(
+        std::move(*class_name),
+        class_id,
+        std::move(loaded_class),
+        std::move(array_name));
+    if (!completed)
+      return std::unexpected(completed.error());
+    return &entry;
+  }
+
+  NativeMethodBinding Machine::resolve_native_binding(
+      const classfile::ClassFile& owner,
+      const classfile::Method& method)
+  {
+    std::scoped_lock cache_lock(native_bindings_mutex_);
+    const u64 registry_generation = natives_.generation();
+    if (native_binding_generation_ != registry_generation)
+    {
+      native_bindings_.clear();
+      native_binding_generation_ = registry_generation;
+    }
+    if (const auto cached = native_bindings_.find(&method);
+        cached != native_bindings_.end())
+    {
+      return NativeMethodBinding {
+          .id = cached->second,
+          .generation = native_binding_generation_,
+      };
+    }
+
+    const NativeMethodBinding binding = natives_.resolve_binding(
+        owner.name(), method.name, method.descriptor);
+    if (native_binding_generation_ != binding.generation)
+    {
+      native_bindings_.clear();
+      native_binding_generation_ = binding.generation;
+    }
+    native_bindings_.insert_or_assign(&method, binding.id);
+    return binding;
   }
 
   Result<Machine::Invocation> Machine::prepare_invocation(
       ResolvedMethod method,
       std::span<const Value> arguments,
-      bool has_receiver)
+      bool has_receiver,
+      std::optional<NativeMethodId> prebound_native_method)
   {
-    refresh_metadata_bindings_if_needed();
     if (method.method == nullptr)
     {
       return fail(ErrorCode::method_not_found,
@@ -3276,24 +3827,14 @@ namespace phoneme::vm
     }
 
     NativeMethodId native_method;
-    if (method.owner != nullptr)
+    if (prebound_native_method.has_value())
     {
-      const auto cached_native = native_bindings_.find(method.method);
-      if (cached_native != native_bindings_.end() &&
-          cached_native->second.valid())
-      {
-        native_method = cached_native->second;
-      }
-      else
-      {
-        native_method = natives_.resolve(method.owner->name(),
-                                         method.method->name,
-                                         method.method->descriptor);
-        if (native_method.valid())
-        {
-          native_bindings_.insert_or_assign(method.method, native_method);
-        }
-      }
+      native_method = *prebound_native_method;
+    }
+    else if (method.owner != nullptr)
+    {
+      native_method = resolve_native_binding(
+          *method.owner, *method.method).id;
     }
 
     PerformanceCounters::record_method_invocation();
@@ -3971,26 +4512,110 @@ namespace phoneme::vm
       if (!streams)
         return std::unexpected(streams.error());
     }
-    if (erroneous_classes_.contains(canonical_name))
+    const JavaThreadId initialization_thread =
+        scheduler_.current_thread_id();
+    for (;;)
     {
-      auto throwable = create_throwable("java/lang/NoClassDefFoundError");
-      if (!throwable)
+      bool erroneous = false;
       {
-        return std::unexpected(throwable.error());
+        std::unique_lock initialization_lock(class_initialization_mutex_);
+        if (initialized_classes_.contains(canonical_name))
+          return std::optional<ObjectRef>{};
+        if (erroneous_classes_.contains(canonical_name))
+        {
+          erroneous = true;
+        }
+        else if (const auto owner =
+                     initializing_class_owners_.find(canonical_name);
+                 owner == initializing_class_owners_.end())
+        {
+          initializing_class_owners_.emplace(canonical_name,
+                                             initialization_thread);
+          vm_trace("class-init",
+                   "begin java=%u class=%s",
+                   static_cast<unsigned>(initialization_thread),
+                   canonical_name.c_str());
+          break;
+        }
+        else if (owner->second == initialization_thread)
+        {
+          // Recursive requests by the thread currently running <clinit> are
+          // allowed to observe the class's in-progress default values.
+          return std::optional<ObjectRef>{};
+        }
+        else
+        {
+          // phoneME keeps an initialization owner per class. A competing
+          // thread must wait rather than treating a partially initialized
+          // class as ready. Release the VM execution gate while waiting or the
+          // owner could never resume after a scheduler quantum.
+          vm_trace("class-init",
+                   "wait java=%u class=%s owner=%u",
+                   static_cast<unsigned>(initialization_thread),
+                   canonical_name.c_str(),
+                   static_cast<unsigned>(owner->second));
+          scheduler_.set_current_state(JavaThreadState::waiting);
+          const u32 released_depth = suspend_execution_for_blocking();
+          class_initialization_condition_.wait(
+              initialization_lock,
+              [this, &canonical_name]
+              {
+                return shutdown_started_.load(std::memory_order_acquire) ||
+                       initialized_classes_.contains(canonical_name) ||
+                       erroneous_classes_.contains(canonical_name) ||
+                       !initializing_class_owners_.contains(canonical_name);
+              });
+          // Never reacquire the execution gate while holding the class-state
+          // mutex: the owner finishes <clinit> under that gate and must lock
+          // class state to publish completion.
+          initialization_lock.unlock();
+          resume_execution_after_blocking(released_depth);
+          scheduler_.set_current_state(JavaThreadState::running);
+          vm_trace("class-init",
+                   "resume java=%u class=%s",
+                   static_cast<unsigned>(initialization_thread),
+                   canonical_name.c_str());
+          if (shutdown_started_.load(std::memory_order_acquire))
+          {
+            return fail(ErrorCode::invalid_state,
+                        "class initialization was cancelled by VM shutdown");
+          }
+          continue;
+        }
       }
-      return std::optional<ObjectRef>(*throwable);
-    }
-    if (initialized_classes_.contains(canonical_name) ||
-        initializing_classes_.contains(canonical_name))
-    {
-      return std::optional<ObjectRef>{};
+      if (erroneous)
+      {
+        auto throwable = create_throwable("java/lang/NoClassDefFoundError");
+        if (!throwable)
+          return std::unexpected(throwable.error());
+        return std::optional<ObjectRef>(*throwable);
+      }
     }
 
-    initializing_classes_.insert(canonical_name);
     PerformanceCounters::record_class_initialization();
-    const auto rollback = [this, &canonical_name]()
+    const auto finish_initialization =
+        [this, &canonical_name, initialization_thread](bool initialized,
+                                                       bool erroneous)
     {
-      initializing_classes_.erase(canonical_name);
+      {
+        std::scoped_lock initialization_lock(class_initialization_mutex_);
+        initializing_class_owners_.erase(canonical_name);
+        if (initialized)
+          initialized_classes_.insert(canonical_name);
+        if (erroneous)
+          erroneous_classes_.insert(canonical_name);
+      }
+      class_initialization_condition_.notify_all();
+      vm_trace("class-init",
+               "end java=%u class=%s result=%s",
+               static_cast<unsigned>(initialization_thread),
+               canonical_name.c_str(),
+               initialized ? "initialized"
+                           : (erroneous ? "erroneous" : "rolled-back"));
+    };
+    const auto rollback = [finish_initialization]()
+    {
+      finish_initialization(false, false);
     };
 
     const bool is_interface =
@@ -4006,8 +4631,7 @@ namespace phoneme::vm
       }
       if (parent->has_value())
       {
-        rollback();
-        erroneous_classes_.insert(canonical_name);
+        finish_initialization(false, true);
         return *parent;
       }
     }
@@ -4023,8 +4647,7 @@ namespace phoneme::vm
       }
       if (interfaces->has_value())
       {
-        rollback();
-        erroneous_classes_.insert(canonical_name);
+        finish_initialization(false, true);
         return *interfaces;
       }
     }
@@ -4065,8 +4688,7 @@ namespace phoneme::vm
           return std::unexpected(is_error.error());
         }
 
-        rollback();
-        erroneous_classes_.insert(canonical_name);
+        finish_initialization(false, true);
         if (*is_error)
         {
           return result->throwable;
@@ -4093,8 +4715,7 @@ namespace phoneme::vm
       }
     }
 
-    initializing_classes_.erase(canonical_name);
-    initialized_classes_.insert(canonical_name);
+    finish_initialization(true, false);
     return std::optional<ObjectRef>{};
   }
 
@@ -4866,7 +5487,24 @@ namespace phoneme::vm
     const bool has_native_override = invocation.native_method.valid();
     if (has_native_override || !invocation.method.method->code.has_value())
     {
+      const auto native_started = std::chrono::steady_clock::now();
       auto native_result = invoke_native(invocation);
+      const auto native_duration =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - native_started);
+      if (native_duration >= std::chrono::milliseconds(10) &&
+          should_trace_slow_native(invocation.method.owner->name(),
+                                   invocation.method.method->name))
+      {
+        vm_trace("native",
+                 "slow-call java=%u target=%s.%s%s duration_us=%lld ok=%d",
+                 static_cast<unsigned>(scheduler_.current_thread_id()),
+                 invocation.method.owner->name().c_str(),
+                 invocation.method.method->name.c_str(),
+                 invocation.method.method->descriptor.c_str(),
+                 static_cast<long long>(native_duration.count()),
+                 native_result.has_value() ? 1 : 0);
+      }
       auto released = release_synchronized_monitor(*root_monitor);
       if (!released)
         return std::unexpected(released.error());
@@ -4950,6 +5588,42 @@ namespace phoneme::vm
     u64 next_scheduler_quantum = kSchedulerQuantum;
     const classfile::ClassFile* heap_access_owner = nullptr;
     const classfile::Method* heap_access_method = nullptr;
+
+    const auto publish_active_execution_roots =
+        [this, &frames, invocation_depth](
+            std::span<const Value> extra_values = {})
+    {
+      std::vector<ObjectRef> roots;
+      roots.reserve(frames.size() * 8U + extra_values.size() + 8U);
+      for (const ExecutionFrame& active_frame : frames)
+        active_frame.append_reference_roots(roots);
+      for (const Value value : extra_values)
+      {
+        if (value.kind() != ValueKind::reference)
+          continue;
+        auto reference = value.as_reference();
+        if (reference && !reference->is_null())
+          roots.push_back(*reference);
+      }
+      publish_execution_roots(invocation_depth, roots);
+    };
+
+    const auto ensure_initialized_from_execution =
+        [this, &publish_active_execution_roots](
+            std::string_view class_name,
+            u64 remaining_budget,
+            std::span<const Value> extra_values = {})
+        -> Result<std::optional<ObjectRef>>
+    {
+      // Class initialization enters a recursive Machine::execute invocation.
+      // That nested invocation may hit a scheduler quantum or blocking native
+      // and release the VM gate. Publish the complete outer interpreter state
+      // first so a different Java thread cannot collect references that were
+      // created since the previous safepoint. Include operands already popped
+      // into C++ argument vectors, such as invokestatic parameters.
+      publish_active_execution_roots(extra_values);
+      return ensure_initialized(class_name, remaining_budget);
+    };
 
     const auto collect_active_garbage =
         [this, &frames, invocation_depth](
@@ -5208,6 +5882,8 @@ namespace phoneme::vm
          &resolve_range_decoder_intrinsic](const Invocation& candidate)
         -> Result<std::optional<Value>>
     {
+      if (!specialized_intrinsics_requested())
+        return std::optional<Value>{};
       if (candidate.method.method == nullptr || candidate.has_receiver ||
           candidate.arguments.size() != 1U ||
           !matches_range_decoder_bit_intrinsic(*candidate.method.method))
@@ -5325,6 +6001,7 @@ namespace phoneme::vm
     const auto try_vector_key_sort_intrinsic =
         [this](const Invocation& candidate) -> Result<bool>
     {
+      if (!specialized_intrinsics_requested()) return false;
       if (candidate.method.owner == nullptr ||
           candidate.method.method == nullptr || candidate.has_receiver ||
           !candidate.arguments.empty() ||
@@ -5557,6 +6234,8 @@ namespace phoneme::vm
         [this](const Invocation& candidate)
         -> Result<std::optional<Value>>
     {
+      if (!specialized_intrinsics_requested())
+        return std::optional<Value>{};
       if (candidate.method.owner == nullptr ||
           candidate.method.method == nullptr || candidate.has_receiver ||
           candidate.arguments.size() != 5U ||
@@ -5792,6 +6471,19 @@ namespace phoneme::vm
       }
       return dispatch_exception(*throwable, throw_pc);
     };
+    const auto raise_resolution_error =
+        [&raise_implicit](const Error& error, usize throw_pc)
+        -> Result<std::optional<ExecutionResult>>
+    {
+      if (error.code != ErrorCode::java_exception ||
+          error.java_exception_class.empty())
+      {
+        return std::unexpected(error);
+      }
+      return raise_implicit(error.java_exception_class,
+                            throw_pc,
+                            error.message);
+    };
 
     while (!frames.empty())
     {
@@ -5804,6 +6496,8 @@ namespace phoneme::vm
       }
 
       const bool quantum_boundary = executed == next_scheduler_quantum;
+      const bool automatic_collection =
+          quantum_boundary && heap_.automatic_collection_due();
       bool collect_requested = false;
       if (maintenance_boundary &&
           gc_requested_.load(std::memory_order_relaxed))
@@ -5811,14 +6505,14 @@ namespace phoneme::vm
         collect_requested =
             gc_requested_.exchange(false, std::memory_order_acq_rel);
       }
-      if (quantum_boundary || collect_requested)
+      if (quantum_boundary || collect_requested || automatic_collection)
       {
         std::vector<ObjectRef> published_roots;
         published_roots.reserve(frames.size() * 8U + 8U);
         for (const ExecutionFrame& active_frame : frames)
           active_frame.append_reference_roots(published_roots);
         publish_execution_roots(invocation_depth, published_roots);
-        if (collect_requested)
+        if (collect_requested || automatic_collection)
         {
           auto collected = collect_active_garbage();
           if (!collected)
@@ -5970,6 +6664,21 @@ namespace phoneme::vm
         auto value = load_constant(frame.owner(), *index, opcode == 0x14);
         if (!value)
           return std::unexpected(value.error());
+        if (opcode != 0x14)
+        {
+          auto constant = frame.owner().constant(*index);
+          const auto service = translation_service();
+          if (constant &&
+              (*constant)->kind == classfile::ConstantKind::string_ref &&
+              service && service->enabled())
+          {
+            std::vector<std::vector<char32_t>> candidates;
+            candidates.reserve(6U);
+            frame.append_upcoming_translation_candidates(candidates);
+            for (const auto& candidate : candidates)
+              service->prefetch(candidate);
+          }
+        }
         auto pushed = frame.push(*value);
         if (!pushed)
           return std::unexpected(pushed.error());
@@ -7264,7 +7973,8 @@ namespace phoneme::vm
         if (method_id.valid() && operand_index != kInvalidDecodedIndex)
         {
           auto cached_entry = operand_resolution_entry(method_id,
-                                                       operand_index);
+                                                       operand_index,
+                                                       opcode_pc);
           if (!cached_entry)
             return std::unexpected(cached_entry.error());
           OperandResolutionEntry& entry = **cached_entry;
@@ -7289,7 +7999,12 @@ namespace phoneme::vm
             }
             PerformanceCounters::record_operand_resolution(true);
             PerformanceCounters::record_operand_resolution_failure();
-            return std::unexpected(*entry.failure);
+            auto raised = raise_resolution_error(*entry.failure, opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
           }
           else if (entry.state == OperandResolutionState::resolving)
           {
@@ -7299,24 +8014,39 @@ namespace phoneme::vm
           else
           {
             PerformanceCounters::record_operand_resolution(false);
-            entry.state = OperandResolutionState::resolving;
-            entry.kind = OperandResolutionKind::field;
+            auto began = entry.begin(OperandResolutionKind::field);
+            if (!began)
+              return std::unexpected(began.error());
+            const auto cache_failure = [&](Error error)
+                -> Result<std::optional<ExecutionResult>>
+            {
+              auto cached = entry.fail_resolution(stable_linkage_error(
+                  std::move(error), OperandResolutionKind::field));
+              if (!cached)
+                return std::unexpected(cached.error());
+              PerformanceCounters::record_operand_resolution_failure();
+              return raise_resolution_error(*entry.failure, opcode_pc);
+            };
             auto reference = frame.owner().member_reference(*index);
             if (!reference)
             {
-              entry.failure = reference.error();
-              entry.state = OperandResolutionState::failed;
-              PerformanceCounters::record_operand_resolution_failure();
-              return std::unexpected(*entry.failure);
+              auto raised = cache_failure(reference.error());
+              if (!raised)
+                return std::unexpected(raised.error());
+              if (raised->has_value())
+                return std::move(**raised);
+              break;
             }
             if (reference->kind != classfile::ConstantKind::field_ref)
             {
-              entry.failure = Error::make(
+              auto raised = cache_failure(Error::make(
                   ErrorCode::malformed_class,
-                  "field opcode references a non-field constant");
-              entry.state = OperandResolutionState::failed;
-              PerformanceCounters::record_operand_resolution_failure();
-              return std::unexpected(*entry.failure);
+                  "field opcode references a non-field constant"));
+              if (!raised)
+                return std::unexpected(raised.error());
+              if (raised->has_value())
+                return std::move(**raised);
+              break;
             }
             auto resolved = states_.resolve_field(reference->owner,
                                                   reference->name,
@@ -7324,16 +8054,19 @@ namespace phoneme::vm
                                                   is_static);
             if (!resolved)
             {
-              entry.failure = resolved.error();
-              entry.state = OperandResolutionState::failed;
-              PerformanceCounters::record_operand_resolution_failure();
-              return std::unexpected(*entry.failure);
+              auto raised = cache_failure(resolved.error());
+              if (!raised)
+                return std::unexpected(raised.error());
+              if (raised->has_value())
+                return std::move(**raised);
+              break;
             }
-            entry.field = std::make_shared<const FieldLocation>(
+            auto resolved_field = std::make_shared<const FieldLocation>(
                 std::move(*resolved));
-            entry.failure.reset();
-            entry.state = OperandResolutionState::resolved;
-            field = entry.field;
+            auto completed = entry.resolve_field(resolved_field);
+            if (!completed)
+              return std::unexpected(completed.error());
+            field = std::move(resolved_field);
           }
         }
         else
@@ -7361,14 +8094,22 @@ namespace phoneme::vm
                                                   reference->descriptor,
                                                   is_static);
             if (!resolved)
-              return std::unexpected(resolved.error());
+            {
+              auto raised = raise_resolution_error(stable_linkage_error(
+                  resolved.error(), OperandResolutionKind::field), opcode_pc);
+              if (!raised)
+                return std::unexpected(raised.error());
+              if (raised->has_value())
+                return std::move(**raised);
+              break;
+            }
             field = std::make_shared<const FieldLocation>(std::move(*resolved));
             owner_bindings.emplace(binding_key, field);
           }
         }
         if (is_static)
         {
-          auto initialized = ensure_initialized(
+          auto initialized = ensure_initialized_from_execution(
               field->declaring_class,
               instruction_budget - executed);
           if (!initialized)
@@ -7557,9 +8298,10 @@ namespace phoneme::vm
 
         if (is_static)
         {
-          auto initialized = ensure_initialized(
+          auto initialized = ensure_initialized_from_execution(
               reference->owner,
-              instruction_budget - executed);
+              instruction_budget - executed,
+              *arguments);
           if (!initialized)
             return std::unexpected(initialized.error());
           if (initialized->has_value())
@@ -7690,8 +8432,10 @@ namespace phoneme::vm
               return std::move(**raised);
             break;
           }
-          auto initialized = ensure_initialized(
-              *class_name, instruction_budget - executed);
+          auto initialized = ensure_initialized_from_execution(
+              *class_name,
+              instruction_budget - executed,
+              *arguments);
           if (!initialized)
             return std::unexpected(initialized.error());
           if (initialized->has_value())
@@ -7862,9 +8606,11 @@ namespace phoneme::vm
             }
           }
           OperandResolutionEntry* direct_operand_entry = nullptr;
+          OperandResolutionEntry* virtual_operand_entry = nullptr;
           DirectCallCache* legacy_direct_cache = nullptr;
           VirtualCallCache* virtual_cache = nullptr;
           std::optional<ResolvedMethod> inline_target;
+          std::optional<NativeMethodId> prebound_native_method;
           const bool cacheable_direct_call = is_static || opcode == 0xB7;
           if (cacheable_direct_call)
           {
@@ -7876,7 +8622,8 @@ namespace phoneme::vm
             {
               auto cached_entry = operand_resolution_entry(
                   caller_method_id,
-                  caller_operand_index);
+                  caller_operand_index,
+                  opcode_pc);
               if (!cached_entry)
                 return std::unexpected(cached_entry.error());
               OperandResolutionEntry& entry = **cached_entry;
@@ -7893,14 +8640,30 @@ namespace phoneme::vm
                     entry.target_method);
                 if (runtime_target == nullptr)
                 {
-                  entry = {};
+                  entry.reset();
                   PerformanceCounters::record_direct_call_cache(false);
                   PerformanceCounters::record_operand_resolution(false);
-                  entry.state = OperandResolutionState::resolving;
-                  entry.kind = OperandResolutionKind::direct_call;
+                  auto began = entry.begin(
+                      OperandResolutionKind::direct_call);
+                  if (!began)
+                    return std::unexpected(began.error());
                 }
                 else
                 {
+                  const u64 current_native_generation = natives_.generation();
+                  if (!entry.native_binding_cached ||
+                      entry.native_generation != current_native_generation)
+                  {
+                    const NativeMethodBinding native_binding =
+                        resolve_native_binding(*runtime_target->owner,
+                                               *runtime_target->method);
+                    auto updated = entry.update_native_binding(
+                        native_binding.id,
+                        native_binding.generation);
+                    if (!updated)
+                      return std::unexpected(updated.error());
+                  }
+                  prebound_native_method = entry.target_native_method;
                   inline_target = ResolvedMethod {
                       .owner = runtime_target->owner,
                       .method = runtime_target->method,
@@ -7921,7 +8684,12 @@ namespace phoneme::vm
                 PerformanceCounters::record_direct_call_cache(true);
                 PerformanceCounters::record_operand_resolution(true);
                 PerformanceCounters::record_operand_resolution_failure();
-                return std::unexpected(*entry.failure);
+                auto raised = raise_resolution_error(*entry.failure, opcode_pc);
+                if (!raised)
+                  return std::unexpected(raised.error());
+                if (raised->has_value())
+                  return std::move(**raised);
+                break;
               }
               else if (entry.state == OperandResolutionState::resolving)
               {
@@ -7932,8 +8700,10 @@ namespace phoneme::vm
               {
                 PerformanceCounters::record_direct_call_cache(false);
                 PerformanceCounters::record_operand_resolution(false);
-                entry.state = OperandResolutionState::resolving;
-                entry.kind = OperandResolutionKind::direct_call;
+                auto began = entry.begin(
+                    OperandResolutionKind::direct_call);
+                if (!began)
+                  return std::unexpected(began.error());
               }
             }
             else
@@ -7971,32 +8741,150 @@ namespace phoneme::vm
               !is_static && opcode != 0xB7 && dispatch_metadata != nullptr;
           if (cacheable_virtual_call)
           {
-            auto &cache = virtual_call_bindings_[&frame.owner()][
-                static_cast<u32>(*index)];
-            virtual_cache = &cache;
-            if (cache.valid &&
-                cache.receiver_class == dispatch_metadata->id)
+            const MethodId caller_method_id = frame.runtime_method_id();
+            const u32 caller_operand_index =
+                frame.current_decoded_operand_index();
+            if (caller_method_id.valid() &&
+                caller_operand_index != kInvalidDecodedIndex)
             {
-              auto runtime_target = classes_.metadata().find_method(
-                  cache.target_method);
-              if (runtime_target != nullptr)
+              auto cached_entry = operand_resolution_entry(
+                  caller_method_id,
+                  caller_operand_index,
+                  opcode_pc);
+              if (!cached_entry)
+                return std::unexpected(cached_entry.error());
+              OperandResolutionEntry& entry = **cached_entry;
+              virtual_operand_entry = &entry;
+              const auto begin_for_receiver = [&]() -> Status
               {
-                inline_target = ResolvedMethod {
-                    .owner = runtime_target->owner,
-                    .method = runtime_target->method,
-                    .runtime = std::move(runtime_target),
-                };
-                PerformanceCounters::record_virtual_inline_cache(true);
+                entry.reset();
+                PerformanceCounters::record_virtual_inline_cache(false);
+                PerformanceCounters::record_operand_resolution(false);
+                return entry.begin_virtual_call(dispatch_metadata->id);
+              };
+              if (entry.state == OperandResolutionState::resolved)
+              {
+                if (entry.kind != OperandResolutionKind::virtual_call ||
+                    !entry.receiver_class.valid() ||
+                    !entry.target_method.valid())
+                {
+                  return fail(ErrorCode::internal_error,
+                              "decoded virtual call cache has wrong kind");
+                }
+                if (entry.receiver_class != dispatch_metadata->id)
+                {
+                  auto began = begin_for_receiver();
+                  if (!began)
+                    return std::unexpected(began.error());
+                }
+                else
+                {
+                  auto runtime_target = classes_.metadata().find_method(
+                      entry.target_method);
+                  if (runtime_target == nullptr)
+                  {
+                    auto began = begin_for_receiver();
+                    if (!began)
+                      return std::unexpected(began.error());
+                  }
+                  else
+                  {
+                    const u64 current_native_generation = natives_.generation();
+                    if (!entry.native_binding_cached ||
+                        entry.native_generation != current_native_generation)
+                    {
+                      const NativeMethodBinding native_binding =
+                          resolve_native_binding(*runtime_target->owner,
+                                                 *runtime_target->method);
+                      auto updated = entry.update_native_binding(
+                          native_binding.id,
+                          native_binding.generation);
+                      if (!updated)
+                        return std::unexpected(updated.error());
+                    }
+                    prebound_native_method = entry.target_native_method;
+                    inline_target = ResolvedMethod {
+                        .owner = runtime_target->owner,
+                        .method = runtime_target->method,
+                        .runtime = std::move(runtime_target),
+                    };
+                    PerformanceCounters::record_virtual_inline_cache(true);
+                    PerformanceCounters::record_operand_resolution(true);
+                  }
+                }
+              }
+              else if (entry.state == OperandResolutionState::failed)
+              {
+                if (entry.kind != OperandResolutionKind::virtual_call ||
+                    !entry.receiver_class.valid() ||
+                    !entry.failure.has_value())
+                {
+                  return fail(ErrorCode::internal_error,
+                              "decoded failed virtual call has no error");
+                }
+                if (entry.receiver_class != dispatch_metadata->id)
+                {
+                  auto began = begin_for_receiver();
+                  if (!began)
+                    return std::unexpected(began.error());
+                }
+                else
+                {
+                  PerformanceCounters::record_virtual_inline_cache(true);
+                  PerformanceCounters::record_operand_resolution(true);
+                  PerformanceCounters::record_operand_resolution_failure();
+                  auto raised = raise_resolution_error(
+                      *entry.failure, opcode_pc);
+                  if (!raised)
+                    return std::unexpected(raised.error());
+                  if (raised->has_value())
+                    return std::move(**raised);
+                  break;
+                }
+              }
+              else if (entry.state == OperandResolutionState::resolving)
+              {
+                return fail(ErrorCode::invalid_state,
+                            "recursive decoded virtual call resolution");
               }
               else
               {
-                cache.valid = false;
                 PerformanceCounters::record_virtual_inline_cache(false);
+                PerformanceCounters::record_operand_resolution(false);
+                auto began = entry.begin_virtual_call(dispatch_metadata->id);
+                if (!began)
+                  return std::unexpected(began.error());
               }
             }
             else
             {
-              PerformanceCounters::record_virtual_inline_cache(false);
+              auto &cache = virtual_call_bindings_[&frame.owner()][
+                  static_cast<u32>(*index)];
+              virtual_cache = &cache;
+              if (cache.valid &&
+                  cache.receiver_class == dispatch_metadata->id)
+              {
+                auto runtime_target = classes_.metadata().find_method(
+                    cache.target_method);
+                if (runtime_target != nullptr)
+                {
+                  inline_target = ResolvedMethod {
+                      .owner = runtime_target->owner,
+                      .method = runtime_target->method,
+                      .runtime = std::move(runtime_target),
+                  };
+                  PerformanceCounters::record_virtual_inline_cache(true);
+                }
+                else
+                {
+                  cache.valid = false;
+                  PerformanceCounters::record_virtual_inline_cache(false);
+                }
+              }
+              else
+              {
+                PerformanceCounters::record_virtual_inline_cache(false);
+              }
             }
           }
 
@@ -8018,29 +8906,70 @@ namespace phoneme::vm
           auto target = resolve_target();
           if (!target)
           {
-            if (direct_operand_entry != nullptr &&
-                direct_operand_entry->state ==
-                    OperandResolutionState::resolving)
+            const OperandResolutionKind resolution_kind =
+                virtual_operand_entry != nullptr
+                    ? OperandResolutionKind::virtual_call
+                    : OperandResolutionKind::direct_call;
+            Error linkage_error = stable_linkage_error(
+                target.error(), resolution_kind);
+            OperandResolutionEntry* failed_entry =
+                direct_operand_entry != nullptr
+                    ? direct_operand_entry
+                    : virtual_operand_entry;
+            if (failed_entry != nullptr &&
+                failed_entry->state == OperandResolutionState::resolving)
             {
-              direct_operand_entry->failure = target.error();
-              direct_operand_entry->state = OperandResolutionState::failed;
+              auto cached = failed_entry->fail_resolution(linkage_error);
+              if (!cached)
+                return std::unexpected(cached.error());
               PerformanceCounters::record_operand_resolution_failure();
-              return std::unexpected(*direct_operand_entry->failure);
+              linkage_error = *failed_entry->failure;
             }
-            return std::unexpected(target.error());
+            auto raised = raise_resolution_error(linkage_error, opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
           }
           if (direct_operand_entry != nullptr &&
               !inline_target.has_value())
           {
             if (target->runtime == nullptr)
             {
-              *direct_operand_entry = {};
+              direct_operand_entry->reset();
             }
             else
             {
-              direct_operand_entry->target_method = target->runtime->id;
-              direct_operand_entry->failure.reset();
-              direct_operand_entry->state = OperandResolutionState::resolved;
+              const NativeMethodBinding native_binding =
+                  resolve_native_binding(*target->owner, *target->method);
+              auto completed = direct_operand_entry->resolve_direct_call(
+                  target->runtime->id,
+                  native_binding.id,
+                  native_binding.generation);
+              if (!completed)
+                return std::unexpected(completed.error());
+              prebound_native_method = native_binding.id;
+            }
+          }
+          if (virtual_operand_entry != nullptr &&
+              !inline_target.has_value())
+          {
+            if (target->runtime == nullptr)
+            {
+              virtual_operand_entry->reset();
+            }
+            else
+            {
+              const NativeMethodBinding native_binding =
+                  resolve_native_binding(*target->owner, *target->method);
+              auto completed = virtual_operand_entry->resolve_virtual_call(
+                  target->runtime->id,
+                  native_binding.id,
+                  native_binding.generation);
+              if (!completed)
+                return std::unexpected(completed.error());
+              prebound_native_method = native_binding.id;
             }
           }
           if (legacy_direct_cache != nullptr &&
@@ -8081,7 +9010,10 @@ namespace phoneme::vm
             break;
           }
           auto prepared = prepare_invocation(
-              std::move(*target), *arguments, !is_static);
+              std::move(*target),
+              *arguments,
+              !is_static,
+              prebound_native_method);
           if (!prepared)
             return std::unexpected(prepared.error());
           nested = std::move(*prepared);
@@ -8181,7 +9113,48 @@ namespace phoneme::vm
         }
         if (nested_is_native)
         {
+          if (std::getenv("PHONEME_TRACE_NETWORK_CALLERS") != nullptr &&
+              nested->method.method != nullptr &&
+              (nested->method.method->name == "write" ||
+               nested->method.method->name == "flush") &&
+              nested->method.owner != nullptr)
+          {
+            const std::string_view native_owner =
+                nested->method.owner->name();
+            if (native_owner.find("java/io/") != std::string_view::npos ||
+                native_owner.find("javax/microedition/io/") !=
+                    std::string_view::npos)
+            {
+              std::fprintf(stderr,
+                           "[PhoneMENetworkCaller] caller=%s.%s%s bci=%zu "
+                           "target=%s.%s%s\n",
+                           frame.owner().name().c_str(),
+                           frame.method().name.c_str(),
+                           frame.method().descriptor.c_str(),
+                           opcode_pc,
+                           nested->method.owner->name().c_str(),
+                           nested->method.method->name.c_str(),
+                           nested->method.method->descriptor.c_str());
+            }
+          }
+          const auto native_started = std::chrono::steady_clock::now();
           auto native_result = invoke_native(*nested);
+          const auto native_duration =
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - native_started);
+          if (native_duration >= std::chrono::milliseconds(10) &&
+              should_trace_slow_native(nested->method.owner->name(),
+                                       nested->method.method->name))
+          {
+            vm_trace("native",
+                     "slow-call java=%u target=%s.%s%s duration_us=%lld ok=%d",
+                     static_cast<unsigned>(scheduler_.current_thread_id()),
+                     nested->method.owner->name().c_str(),
+                     nested->method.method->name.c_str(),
+                     nested->method.method->descriptor.c_str(),
+                     static_cast<long long>(native_duration.count()),
+                     native_result.has_value() ? 1 : 0);
+          }
           auto released = release_synchronized_monitor(*nested_monitor);
           if (!released)
             return std::unexpected(released.error());
@@ -8334,15 +9307,54 @@ namespace phoneme::vm
         auto index = frame.read_constant_pool_index();
         if (!index)
           return std::unexpected(index.error());
-        auto class_name = frame.owner().class_name_constant(*index);
-        if (!class_name)
-          return std::unexpected(class_name.error());
-        auto allocated_class = classes_.load(*class_name);
-        if (!allocated_class)
+        auto class_operand = resolve_class_operand(
+            frame.runtime_method_id(),
+            frame.current_decoded_operand_index(),
+            opcode_pc,
+            frame.owner(),
+            *index,
+            true,
+            false);
+        if (!class_operand)
         {
-          return std::unexpected(allocated_class.error());
+          auto raised = raise_resolution_error(class_operand.error(), opcode_pc);
+          if (!raised)
+            return std::unexpected(raised.error());
+          if (raised->has_value())
+            return std::move(**raised);
+          break;
         }
-        if (((*allocated_class)->access_flags() &
+
+        std::string legacy_class_name;
+        std::string_view class_name;
+        std::shared_ptr<const classfile::ClassFile> allocated_class;
+        if (*class_operand != nullptr)
+        {
+          class_name = (*class_operand)->target_class_name;
+          allocated_class = (*class_operand)->target_class_file;
+        }
+        else
+        {
+          auto resolved_name = frame.owner().class_name_constant(*index);
+          if (!resolved_name)
+            return std::unexpected(resolved_name.error());
+          legacy_class_name = std::move(*resolved_name);
+          class_name = legacy_class_name;
+          auto loaded = load_linkage_class(class_name);
+          if (!loaded)
+          {
+            auto raised = raise_resolution_error(stable_linkage_error(
+                loaded.error(), OperandResolutionKind::class_reference),
+                opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
+          }
+          allocated_class = std::move(*loaded);
+        }
+        if ((allocated_class->access_flags() &
              (kAccInterface | kAccAbstract)) != 0U)
         {
           auto raised = raise_implicit("java/lang/InstantiationError",
@@ -8353,8 +9365,9 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
-        auto initialized = ensure_initialized(*class_name,
-                                              instruction_budget - executed);
+        auto initialized = ensure_initialized_from_execution(
+            class_name,
+            instruction_budget - executed);
         if (!initialized)
           return std::unexpected(initialized.error());
         if (initialized->has_value())
@@ -8366,7 +9379,7 @@ namespace phoneme::vm
             return std::move(**dispatched);
           break;
         }
-        auto object = allocate_instance_with_gc(*class_name);
+        auto object = allocate_instance_with_gc(class_name);
         if (!object)
         {
           if (object.error().code == ErrorCode::overflow)
@@ -8449,17 +9462,51 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
-        auto component = frame.owner().class_name_constant(*index);
-        if (!component)
-          return std::unexpected(component.error());
-        std::string array_name;
-        if (component->starts_with('['))
+        auto class_operand = resolve_class_operand(
+            frame.runtime_method_id(),
+            frame.current_decoded_operand_index(),
+            opcode_pc,
+            frame.owner(),
+            *index,
+            true,
+            true);
+        if (!class_operand)
         {
-          array_name = '[' + *component;
+          auto raised = raise_resolution_error(class_operand.error(), opcode_pc);
+          if (!raised)
+            return std::unexpected(raised.error());
+          if (raised->has_value())
+            return std::move(**raised);
+          break;
+        }
+        std::string legacy_array_name;
+        std::string_view array_name;
+        if (*class_operand != nullptr)
+        {
+          array_name = (*class_operand)->target_array_name;
         }
         else
         {
-          array_name = "[L" + *component + ';';
+          auto component = frame.owner().class_name_constant(*index);
+          if (!component)
+            return std::unexpected(component.error());
+          auto loaded_component = load_linkage_class(*component);
+          if (!loaded_component)
+          {
+            auto raised = raise_resolution_error(stable_linkage_error(
+                loaded_component.error(),
+                OperandResolutionKind::class_reference), opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
+          }
+          if (component->starts_with('['))
+            legacy_array_name = '[' + *component;
+          else
+            legacy_array_name = "[L" + *component + ';';
+          array_name = legacy_array_name;
         }
         auto array = allocate_array_with_gc(array_name,
                                             static_cast<usize>(*count),
@@ -8544,9 +9591,49 @@ namespace phoneme::vm
           return fail(ErrorCode::malformed_class,
                       "invalid type-check operands");
         }
-        auto target_class = frame.owner().class_name_constant(*index);
-        if (!target_class)
-          return std::unexpected(target_class.error());
+        auto class_operand = resolve_class_operand(
+            frame.runtime_method_id(),
+            frame.current_decoded_operand_index(),
+            opcode_pc,
+            frame.owner(),
+            *index,
+            true,
+            false);
+        if (!class_operand)
+        {
+          auto raised = raise_resolution_error(class_operand.error(), opcode_pc);
+          if (!raised)
+            return std::unexpected(raised.error());
+          if (raised->has_value())
+            return std::move(**raised);
+          break;
+        }
+        std::string legacy_target_class;
+        std::string_view target_class;
+        if (*class_operand != nullptr)
+        {
+          target_class = (*class_operand)->target_class_name;
+        }
+        else
+        {
+          auto resolved_target = frame.owner().class_name_constant(*index);
+          if (!resolved_target)
+            return std::unexpected(resolved_target.error());
+          legacy_target_class = std::move(*resolved_target);
+          target_class = legacy_target_class;
+          auto loaded_target = load_linkage_class(target_class);
+          if (!loaded_target)
+          {
+            auto raised = raise_resolution_error(stable_linkage_error(
+                loaded_target.error(),
+                OperandResolutionKind::class_reference), opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
+          }
+        }
 
         if (reference->is_null())
         {
@@ -8562,7 +9649,7 @@ namespace phoneme::vm
         if (!source_class)
           return std::unexpected(source_class.error());
         auto assignable = classes_.is_assignable(*source_class,
-                                                 *target_class);
+                                                 target_class);
         if (!assignable)
           return std::unexpected(assignable.error());
         bool is_assignable = *assignable;
@@ -8574,7 +9661,7 @@ namespace phoneme::vm
             is_assignable = std::find(
                                 lambda->second.marker_interfaces.begin(),
                                 lambda->second.marker_interfaces.end(),
-                                *target_class) !=
+                                target_class) !=
                             lambda->second.marker_interfaces.end();
           }
         }
@@ -8735,13 +9822,53 @@ namespace phoneme::vm
         if (!operands)
           return std::unexpected(operands.error());
         const u8 dimensions = operands->dimensions;
-        auto array_class = frame.owner().class_name_constant(
-            operands->constant_pool_index);
-        if (!array_class)
-          return std::unexpected(array_class.error());
+        auto class_operand = resolve_class_operand(
+            frame.runtime_method_id(),
+            frame.current_decoded_operand_index(),
+            opcode_pc,
+            frame.owner(),
+            operands->constant_pool_index,
+            true,
+            false);
+        if (!class_operand)
+        {
+          auto raised = raise_resolution_error(class_operand.error(), opcode_pc);
+          if (!raised)
+            return std::unexpected(raised.error());
+          if (raised->has_value())
+            return std::move(**raised);
+          break;
+        }
+        std::string legacy_array_class;
+        std::string_view array_class;
+        if (*class_operand != nullptr)
+        {
+          array_class = (*class_operand)->target_class_name;
+        }
+        else
+        {
+          auto resolved_array_class = frame.owner().class_name_constant(
+              operands->constant_pool_index);
+          if (!resolved_array_class)
+            return std::unexpected(resolved_array_class.error());
+          legacy_array_class = std::move(*resolved_array_class);
+          array_class = legacy_array_class;
+          auto loaded_array_class = load_linkage_class(array_class);
+          if (!loaded_array_class)
+          {
+            auto raised = raise_resolution_error(stable_linkage_error(
+                loaded_array_class.error(),
+                OperandResolutionKind::class_reference), opcode_pc);
+            if (!raised)
+              return std::unexpected(raised.error());
+            if (raised->has_value())
+              return std::move(**raised);
+            break;
+          }
+        }
         usize declared_dimensions = 0;
-        while (declared_dimensions < array_class->size() &&
-               (*array_class)[declared_dimensions] == '[')
+        while (declared_dimensions < array_class.size() &&
+               array_class[declared_dimensions] == '[')
         {
           ++declared_dimensions;
         }
@@ -8817,11 +9944,11 @@ namespace phoneme::vm
           break;
         }
 
-        auto root_default = array_default_value(*array_class);
+        auto root_default = array_default_value(array_class);
         if (!root_default)
           return std::unexpected(root_default.error());
         auto root = allocate_array_with_gc(
-            *array_class,
+            array_class,
             static_cast<usize>(lengths.front()),
             *root_default);
         if (!root)
@@ -8856,8 +9983,8 @@ namespace phoneme::vm
           {
             continue;
           }
-          const std::string child_descriptor =
-              array_class->substr(child_level);
+          const std::string_view child_descriptor =
+              array_class.substr(child_level);
           const usize child_count =
               static_cast<usize>(lengths[child_level]);
           auto child_default = array_default_value(child_descriptor);

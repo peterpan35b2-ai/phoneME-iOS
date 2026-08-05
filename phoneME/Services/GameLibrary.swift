@@ -102,7 +102,8 @@ final class GameLibrary: ObservableObject {
             .deletingPathExtension()
             .lastPathComponent
             .replacingOccurrences(of: "/", with: "-")
-        let metadata = try? JarMetadataReader.read(from: sourceURL)
+        let metadata = try JarMetadataReader.read(from: sourceURL)
+        let importedTitle = uniqueImportedTitle(for: metadata.title ?? safeName)
         let retainedIndex = retainedData.firstIndex {
             matchesRetainedData($0, metadata: metadata, fallbackTitle: safeName)
         }
@@ -122,10 +123,10 @@ final class GameLibrary: ObservableObject {
 
         let game = Game(
             id: id,
-            title: metadata?.title ?? safeName,
-            vendor: metadata?.vendor ?? "",
-            version: metadata?.version ?? "",
-            mainClass: metadata?.mainClass ?? "",
+            title: importedTitle,
+            vendor: metadata.vendor ?? "",
+            version: metadata.version ?? "",
+            mainClass: metadata.mainClass ?? "",
             fileName: storedName,
             iconFileName: iconFileName
         )
@@ -162,7 +163,7 @@ final class GameLibrary: ObservableObject {
             throw LibraryError.unsupportedFile
         }
 
-        let metadata = try? JarMetadataReader.read(from: sourceURL)
+        let metadata = try JarMetadataReader.read(from: sourceURL)
         let destinationURL = fileURL(for: game)
         let replacementURL = destinationURL.deletingLastPathComponent()
             .appendingPathComponent("replacement-\(UUID().uuidString).jar")
@@ -178,9 +179,9 @@ final class GameLibrary: ObservableObject {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
         let previousIcon = games[index].iconFileName
         let replacementIcon = try storeIcon(from: metadata, gameID: game.id)
-        games[index].vendor = metadata?.vendor ?? ""
-        games[index].version = metadata?.version ?? ""
-        games[index].mainClass = metadata?.mainClass ?? ""
+        games[index].vendor = metadata.vendor ?? ""
+        games[index].version = metadata.version ?? ""
+        games[index].mainClass = metadata.mainClass ?? ""
         games[index].iconFileName = replacementIcon
         if let previousIcon, previousIcon != replacementIcon {
             try? fileManager.removeItem(at: iconsURL.appendingPathComponent(previousIcon))
@@ -389,6 +390,25 @@ final class GameLibrary: ObservableObject {
             && retainedTitle == currentTitle
             && (retainedVendor.isEmpty || currentVendor.isEmpty
                 || retainedVendor == currentVendor)
+    }
+
+    /// Assigns a unique display title only to newly imported apps. Existing
+    /// library entries are intentionally left untouched, including old
+    /// duplicates created before this behavior was introduced.
+    private func uniqueImportedTitle(for proposedTitle: String) -> String {
+        let trimmedTitle = proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseTitle = trimmedTitle.isEmpty ? proposedTitle : trimmedTitle
+        let existingTitles = Set(games.map { normalizedIdentity($0.title) })
+
+        guard existingTitles.contains(normalizedIdentity(baseTitle)) else {
+            return baseTitle
+        }
+
+        var suffix = 1
+        while existingTitles.contains(normalizedIdentity("\(baseTitle) (\(suffix))")) {
+            suffix += 1
+        }
+        return "\(baseTitle) (\(suffix))"
     }
 
     private func normalizedIdentity(_ value: String) -> String {

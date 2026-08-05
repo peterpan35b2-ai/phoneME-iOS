@@ -42,7 +42,45 @@ final class GameProfileStore: ObservableObject {
     }
 
     func profile(for game: Game) -> GameProfile {
-        profiles[game.id] ?? .default
+        Self.applyingCompatibilityDefaults(
+            to: profiles[game.id] ?? .default,
+            for: game
+        )
+    }
+
+    private static func applyingCompatibilityDefaults(
+        to storedProfile: GameProfile,
+        for game: Game
+    ) -> GameProfile {
+        var profile = storedProfile
+        guard game.mainClass.caseInsensitiveCompare("CCMIDlet") == .orderedSame else {
+            return profile
+        }
+
+        let normalizedTitle = game.title.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+        let normalizedFileName = game.fileName.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+        let isTankRaid = normalizedTitle.contains("tank raid")
+            || normalizedTitle.contains("xe tang 3d")
+            || normalizedFileName.contains("xe tang 3d")
+        guard isTankRaid else { return profile }
+
+        // Tank Raid advances its asset loader from a self-paced CCMIDlet loop
+        // and flushes the progress screen after each step. A synchronous 30 FPS
+        // publication cap therefore inserts about 33 ms between loading steps
+        // and makes this family several times slower. Migrate both fresh and
+        // previously auto-saved default profiles, while preserving a user-set
+        // non-default frame-rate cap.
+        if profile.effectiveFramePacingMode == .cap,
+           profile.frameRateLimit == GameProfile.defaultFrameRate {
+            profile.framePacingMode = .native
+        }
+        return profile
     }
 
     func save(_ profile: GameProfile, for game: Game) {
@@ -79,10 +117,19 @@ final class GameProfileStore: ObservableObject {
             return
         }
 
+        let hasUnsafeLegacyFrameOverride = stored.values.contains {
+            $0.framePacingMode == .overrideGameLoop
+        }
         profiles = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in
             guard let id = UUID(uuidString: key) else { return nil }
             return (id, value.normalized())
         })
+        if hasUnsafeLegacyFrameOverride {
+            // Persist the one-way migration immediately. Core also aliases the
+            // legacy numeric mode to a safe cap, but rewriting JSON prevents a
+            // later editor save from reintroducing accelerated Java sleeps.
+            persist()
+        }
 
         // Earlier phoneME-iOS builds incorrectly saved `.phone` while rendering
         // the Numbers & arrows layout for every selection. Preserve the visual
@@ -188,20 +235,11 @@ final class GameProfileStore: ObservableObject {
             }
         }
 
-        // The previous app-wide ceiling was also the default value stored in
-        // every profile. Promote those legacy defaults so existing games gain
-        // 60 FPS immediately; users can still explicitly select 30 afterward.
+        // V8 temporarily promoted every stored 30 FPS profile to 60 FPS.
+        // Do not repeat that migration: 30 FPS is the default again, while an
+        // existing explicit 60 FPS choice remains untouched.
         if !defaults.bool(forKey: frameRate60MigrationKey) {
-            var changed = false
-            for id in profiles.keys
-                where profiles[id]?.frameRateLimit == GameProfile.previousMaximumFrameRate {
-                profiles[id]?.frameRateLimit = GameProfile.maximumFrameRate
-                changed = true
-            }
             defaults.set(true, forKey: frameRate60MigrationKey)
-            if changed {
-                persist()
-            }
         }
     }
 

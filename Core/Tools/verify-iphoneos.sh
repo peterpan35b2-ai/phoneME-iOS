@@ -11,6 +11,14 @@ BUILD_ROOT="${PHONEME_CORE_BUILD_DIR:-${1:-}}"
 ARCHIVE="${PHONEME_CORE_OUTPUT:-${2:-$BUILD_ROOT/libphoneMECore.a}}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}"
 APPLE_SDK="${PHONEME_APPLE_SDK:-iphoneos}"
+EXPECTED_DECODED_EXECUTION="${PHONEME_ENABLE_DECODED_EXECUTION:-}"
+case "$EXPECTED_DECODED_EXECUTION" in
+  ""|0|1) ;;
+  *)
+    echo "PHONEME_ENABLE_DECODED_EXECUTION must be 0 or 1 when provided." >&2
+    exit 2
+    ;;
+esac
 case "$APPLE_SDK" in
   iphoneos) EXPECTED_PLATFORM_ID=2 ;;
   iphonesimulator) EXPECTED_PLATFORM_ID=7 ;;
@@ -138,6 +146,19 @@ rg -q '^builtin_boot_classes=true$' "$PROVENANCE" || {
   echo "Core provenance does not record built-in boot classes." >&2
   exit 1
 }
+DECODED_EXECUTION="$(awk -F= '$1 == "decoded_execution_compiled" {print $2}' "$PROVENANCE")"
+case "$DECODED_EXECUTION" in
+  0|1) ;;
+  *)
+    echo "Core provenance has no valid decoded execution setting." >&2
+    exit 1
+    ;;
+esac
+if [[ -n "$EXPECTED_DECODED_EXECUTION" &&
+      "$DECODED_EXECUTION" != "$EXPECTED_DECODED_EXECUTION" ]]; then
+  echo "Core provenance has the wrong decoded execution setting: $DECODED_EXECUTION" >&2
+  exit 1
+fi
 
 printf 'phoneME Core verification passed.\n'
 printf 'Archive: %s\n' "$ARCHIVE"
@@ -153,4 +174,5 @@ printf 'Forbidden vendor symbols: none\n'
 printf 'Imported source references: none\n'
 printf 'External phoneME runtime archive: not required\n'
 printf 'Built-in C++ boot classes: enabled\n'
+printf 'Decoded execution compiled: %s\n' "$DECODED_EXECUTION"
 printf 'Pointer-to-32-bit casts: none detected\n'

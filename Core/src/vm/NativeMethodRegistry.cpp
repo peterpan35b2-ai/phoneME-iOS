@@ -127,6 +127,9 @@ Status NativeMethodRegistry::register_method(
         .invocation_count = 0U,
     });
     ids_by_key_.emplace(method_key, method_id);
+    generation_ = generation_ == std::numeric_limits<u64>::max()
+        ? 1U
+        : generation_ + 1U;
     return {};
 }
 
@@ -134,11 +137,21 @@ NativeMethodId NativeMethodRegistry::resolve(
     std::string_view owner,
     std::string_view name,
     std::string_view descriptor) const noexcept {
+    return resolve_binding(owner, name, descriptor).id;
+}
+
+NativeMethodBinding NativeMethodRegistry::resolve_binding(
+    std::string_view owner,
+    std::string_view name,
+    std::string_view descriptor) const noexcept {
     PerformanceCounters::record_native_registry_lookup();
     PerformanceCounters::record_metadata_key_construction();
     std::scoped_lock lock(mutex_);
     const auto found = ids_by_key_.find(key(owner, name, descriptor));
-    return found == ids_by_key_.end() ? NativeMethodId {} : found->second;
+    return NativeMethodBinding {
+        .id = found == ids_by_key_.end() ? NativeMethodId {} : found->second,
+        .generation = generation_,
+    };
 }
 
 bool NativeMethodRegistry::contains(std::string_view owner,

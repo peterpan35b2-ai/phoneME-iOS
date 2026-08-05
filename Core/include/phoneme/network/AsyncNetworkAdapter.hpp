@@ -150,9 +150,24 @@ public:
     [[nodiscard]] virtual Status shutdown_output(NativeHandle handle) = 0;
     [[nodiscard]] virtual Status close(NativeHandle handle) = 0;
     [[nodiscard]] virtual Status cancel(OperationId operation) = 0;
+
+    // Test-only diagnostics have a neutral default so fake adapters and
+    // production callers remain decoupled from POSIX pool internals.
+    [[nodiscard]] virtual usize worker_count_for_tests() const noexcept {
+        return 0U;
+    }
 };
 
 [[nodiscard]] std::shared_ptr<AsyncNetworkAdapter>
 make_posix_network_adapter();
+
+namespace detail {
+
+// Exposes only bounded-pool diagnostics to the host regression suite. Runtime
+// code must not depend on the concrete POSIX adapter implementation.
+[[nodiscard]] usize posix_network_worker_count_for_tests(
+    const std::shared_ptr<AsyncNetworkAdapter>& adapter) noexcept;
+
+} // namespace detail
 
 } // namespace phoneme::network

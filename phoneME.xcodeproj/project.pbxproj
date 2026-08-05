@@ -38,6 +38,9 @@
 		A00000000000000000000030 /* AppLocalization.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000030 /* AppLocalization.swift */; };
 		A00000000000000000000031 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000033 /* Localizable.strings */; };
 		A00000000000000000000032 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000036 /* InfoPlist.strings */; };
+		A00000000000000000000033 /* EmulatorWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000037 /* EmulatorWorkspace.swift */; };
+		A00000000000000000000034 /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000038 /* WorkspaceStore.swift */; };
+		A00000000000000000000035 /* WorkspacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000039 /* WorkspacesView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -79,6 +82,9 @@
 		B00000000000000000000032 /* vi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = vi; path = vi.lproj/Localizable.strings; sourceTree = "<group>"; };
 		B00000000000000000000034 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		B00000000000000000000035 /* vi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = vi; path = vi.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		B00000000000000000000037 /* EmulatorWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorWorkspace.swift; sourceTree = "<group>"; };
+		B00000000000000000000038 /* WorkspaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
+		B00000000000000000000039 /* WorkspacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacesView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -133,6 +139,7 @@
 				B00000000000000000000002 /* Game.swift */,
 				B00000000000000000000003 /* J2MEKey.swift */,
 				B0000000000000000000000E /* GameProfile.swift */,
+				B00000000000000000000037 /* EmulatorWorkspace.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -146,6 +153,7 @@
 				B00000000000000000000015 /* ProfileTemplateStore.swift */,
 				B00000000000000000000026 /* BackgroundExecutionController.swift */,
 				B00000000000000000000028 /* PhoneMEStorageController.swift */,
+				B00000000000000000000038 /* WorkspaceStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -179,6 +187,7 @@
 				B00000000000000000000010 /* GameProfileEditorView.swift */,
 				B0000000000000000000001C /* NativeLCDUIView.swift */,
 				B00000000000000000000027 /* IOS15Compatibility.swift */,
+				B00000000000000000000039 /* WorkspacesView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -289,7 +298,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\ncase \"$PLATFORM_NAME\" in\n  iphoneos|iphonesimulator) ;;\n  *)\n    echo \"phoneME Core does not support platform: $PLATFORM_NAME\" >&2\n    exit 1\n    ;;\nesac\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ] && [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
+			shellScript = "set -eu\ncase \"$PLATFORM_NAME\" in\n  iphoneos|iphonesimulator) ;;\n  *)\n    echo \"phoneME Core does not support platform: $PLATFORM_NAME\" >&2\n    exit 1\n    ;;\nesac\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ] && [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n  PHONEME_ENABLE_DECODED_EXECUTION=1 \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n  PHONEME_ENABLE_DECODED_EXECUTION=1 \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -325,6 +334,9 @@
 				A00000000000000000000028 /* IOS15Compatibility.swift in Sources */,
 				A00000000000000000000029 /* PhoneMEStorageController.swift in Sources */,
 				A00000000000000000000030 /* AppLocalization.swift in Sources */,
+				A00000000000000000000033 /* EmulatorWorkspace.swift in Sources */,
+				A00000000000000000000034 /* WorkspaceStore.swift in Sources */,
+				A00000000000000000000035 /* WorkspacesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

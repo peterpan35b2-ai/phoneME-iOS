@@ -91,6 +91,7 @@ private:
 
     mutable std::mutex mutex_;
     std::unordered_map<u64, std::shared_ptr<Monitor>> monitors_;
+    bool cancelled_ {false};
 };
 
 } // namespace phoneme::vm

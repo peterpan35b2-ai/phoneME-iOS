@@ -15,6 +15,7 @@
 #include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/translation/TranslationService.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
+#include "phoneme/vm/Scheduler.hpp"
 
 namespace phoneme::runtime {
 
@@ -73,6 +74,15 @@ struct App final {
 
 struct UiTranslationReplayState;
 
+struct AppFramePacingConfig final {
+    i32 frames_per_second {30};
+    vm::FramePacingMode mode {vm::FramePacingMode::native};
+};
+
+struct AppHeapConfig final {
+    usize maximum_bytes {64U * 1024U * 1024U};
+};
+
 class Runtime final {
 public:
     Runtime();
@@ -84,17 +94,27 @@ public:
     [[nodiscard]] Status configure(std::string runtime_home,
                                    std::string optional_class_archive = {});
     [[nodiscard]] Status configure_keymap(std::array<i32, 7> keymap);
+    [[nodiscard]] Status configure_app_frame_pacing(
+        AppId app_id,
+        i32 frames_per_second,
+        vm::FramePacingMode mode);
+    [[nodiscard]] Status configure_app_heap(AppId app_id,
+                                            i32 heap_megabytes);
     [[nodiscard]] Status configure_input_capabilities(
         bool pointer_events,
         bool pointer_motion,
         bool repeat_events);
     [[nodiscard]] Status configure_translation(
         bool enabled,
+        translation::TranslationProvider provider =
+            translation::TranslationProvider::google,
         std::string source_language = "auto",
         std::string target_language = "vi");
     [[nodiscard]] Status configure_app_translation(
         AppId app_id,
         bool enabled,
+        translation::TranslationProvider provider =
+            translation::TranslationProvider::google,
         std::string source_language = "auto",
         std::string target_language = "vi");
     [[nodiscard]] Status configure_permission_prompt(
@@ -203,6 +223,12 @@ private:
     std::string runtime_home_;
     std::string optional_class_archive_;
     std::array<i32, 7> keymap_ {-1, -2, -3, -4, -5, -6, -7};
+    AppFramePacingConfig default_frame_pacing_ {
+        .frames_per_second = 30,
+        .mode = vm::FramePacingMode::native,
+    };
+    std::unordered_map<i32, AppFramePacingConfig> app_frame_pacing_;
+    std::unordered_map<i32, AppHeapConfig> app_heap_configs_;
     std::shared_ptr<translation::TranslationService> translation_service_;
     bool translation_enabled_by_default_ {false};
     bool pointer_events_supported_ {true};

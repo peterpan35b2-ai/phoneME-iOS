@@ -12,6 +12,11 @@ namespace {
 
 using namespace builtin;
 
+constexpr const char* kObject3D = "javax/microedition/m3g/Object3D";
+constexpr const char* kTransformable =
+    "javax/microedition/m3g/Transformable";
+constexpr const char* kNode = "javax/microedition/m3g/Node";
+
 [[nodiscard]] classfile::Method api_method(std::string name,
                                            std::string descriptor,
                                            u16 flags = kPublic) {
@@ -23,11 +28,10 @@ using namespace builtin;
     };
 }
 
-[[nodiscard]] ClassPtr m3g_class(std::string_view name) {
-    constexpr const char* kObject3D = "javax/microedition/m3g/Object3D";
-    constexpr const char* kTransformable = "javax/microedition/m3g/Transformable";
-    constexpr const char* kNode = "javax/microedition/m3g/Node";
-
+// Keep these builders split. Clang materializes the branch initializer
+// temporaries in the function stack frame, and one monolithic M3G factory
+// overflowed the smaller native Java-thread stack under ASan.
+[[nodiscard]] ClassPtr m3g_base_class(std::string_view name) {
     if (name == kObject3D) {
         return make_class(std::string(name), "java/lang/Object",
                           kOrdinary | kAbstract, {
@@ -55,6 +59,17 @@ using namespace builtin;
         return make_class(std::string(name), kObject3D,
                           kOrdinary | kAbstract, {
             field(kPrivate, "localTransform", "Ljavax/microedition/m3g/Transform;"),
+            field(kPrivate, "genericTransform", "Ljavax/microedition/m3g/Transform;"),
+            field(kPrivate, "translationX", "F"),
+            field(kPrivate, "translationY", "F"),
+            field(kPrivate, "translationZ", "F"),
+            field(kPrivate, "scaleX", "F"),
+            field(kPrivate, "scaleY", "F"),
+            field(kPrivate, "scaleZ", "F"),
+            field(kPrivate, "orientationX", "F"),
+            field(kPrivate, "orientationY", "F"),
+            field(kPrivate, "orientationZ", "F"),
+            field(kPrivate, "orientationW", "F"),
         }, {
             api_method("<init>", "()V", kProtected),
             api_method("setTransform", "(Ljavax/microedition/m3g/Transform;)V"),
@@ -97,8 +112,8 @@ using namespace builtin;
             api_method("getScope", "()I"),
             api_method("align", "(Ljavax/microedition/m3g/Node;)V"),
             api_method("setAlignment", "(Ljavax/microedition/m3g/Node;ILjavax/microedition/m3g/Node;I)V"),
-            api_method("getAlignmentTarget", "(I)Ljavax/microedition/m3g/Node;"),
-            api_method("getAlignmentReference", "(I)I"),
+            api_method("getAlignmentTarget", "(I)I"),
+            api_method("getAlignmentReference", "(I)Ljavax/microedition/m3g/Node;"),
             api_method("getTransformTo", "(Ljavax/microedition/m3g/Node;Ljavax/microedition/m3g/Transform;)Z"),
         });
     }
@@ -130,6 +145,10 @@ using namespace builtin;
             api_method("getBackground", "()Ljavax/microedition/m3g/Background;"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_transform_class(std::string_view name) {
     if (name == "javax/microedition/m3g/Camera") {
         return make_class(std::string(name), kNode, kOrdinary, {
             field(kPrivate, "projectionType", "I"),
@@ -190,6 +209,10 @@ using namespace builtin;
             api_method("transform", "(Ljavax/microedition/m3g/VertexArray;[FZ)V"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_graphics_class(std::string_view name) {
     if (name == "javax/microedition/m3g/Graphics3D") {
         return make_class(std::string(name), "java/lang/Object",
                           kOrdinary | kFinal, {
@@ -216,6 +239,8 @@ using namespace builtin;
             api_method("bindTarget", "(Ljava/lang/Object;ZI)V"),
             api_method("releaseTarget", "()V"),
             api_method("getTarget", "()Ljava/lang/Object;"),
+            api_method("getHints", "()I"),
+            api_method("isDepthBufferEnabled", "()Z"),
             api_method("clear", "(Ljavax/microedition/m3g/Background;)V"),
             api_method("render", "(Ljavax/microedition/m3g/World;)V"),
             api_method("render", "(Ljavax/microedition/m3g/Node;Ljavax/microedition/m3g/Transform;)V"),
@@ -234,9 +259,14 @@ using namespace builtin;
             api_method("addLight", "(Ljavax/microedition/m3g/Light;Ljavax/microedition/m3g/Transform;)I"),
             api_method("setLight", "(ILjavax/microedition/m3g/Light;Ljavax/microedition/m3g/Transform;)V"),
             api_method("getLight", "(ILjavax/microedition/m3g/Transform;)Ljavax/microedition/m3g/Light;"),
+            api_method("getLightCount", "()I"),
             api_method("resetLights", "()V"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_appearance_class(std::string_view name) {
     if (name == "javax/microedition/m3g/Background") {
         return make_class(std::string(name), kObject3D, kOrdinary, {
             field(kPrivate, "color", "I"),
@@ -360,6 +390,10 @@ using namespace builtin;
             api_method("getWrappingS", "()I"), api_method("getWrappingT", "()I"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_geometry_class(std::string_view name) {
     if (name == "javax/microedition/m3g/VertexArray") {
         return make_class(std::string(name), kObject3D, kOrdinary, {
             field(kPrivate, "vertexCount", "I"), field(kPrivate, "componentCount", "I"),
@@ -397,6 +431,7 @@ using namespace builtin;
     if (name == "javax/microedition/m3g/IndexBuffer") {
         return make_class(std::string(name), kObject3D, kOrdinary | kAbstract, {
             field(kPrivate, "indices", "[I"),
+            field(kPrivate, "stripLengths", "[I"),
         }, {
             api_method("<init>", "()V", kProtected),
             api_method("getIndexCount", "()I"), api_method("getIndices", "([I)V"),
@@ -428,6 +463,7 @@ using namespace builtin;
             field(kPrivate, "appearance", "Ljavax/microedition/m3g/Appearance;"),
             field(kPrivate, "cropX", "I"), field(kPrivate, "cropY", "I"),
             field(kPrivate, "cropWidth", "I"), field(kPrivate, "cropHeight", "I"),
+            field(kPrivate, "flipX", "Z"), field(kPrivate, "flipY", "Z"),
         }, {
             api_method("<init>", "(ZLjavax/microedition/m3g/Image2D;Ljavax/microedition/m3g/Appearance;)V"),
             api_method("isScaled", "()Z"), api_method("setImage", "(Ljavax/microedition/m3g/Image2D;)V"),
@@ -439,6 +475,10 @@ using namespace builtin;
             api_method("getCropHeight", "()I"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_material_class(std::string_view name) {
     if (name == "javax/microedition/m3g/Material") {
         return make_class(std::string(name), kObject3D, kOrdinary, {
             field(kPrivate, "ambient", "I"), field(kPrivate, "diffuse", "I"),
@@ -465,7 +505,15 @@ using namespace builtin;
         });
     }
     if (name == "javax/microedition/m3g/RayIntersection") {
-        return make_class(std::string(name), "java/lang/Object", kOrdinary, {}, {
+        return make_class(std::string(name), "java/lang/Object", kOrdinary, {
+            field(kPrivate, "intersected", "Ljavax/microedition/m3g/Node;"),
+            field(kPrivate, "distance", "F"),
+            field(kPrivate, "submeshIndex", "I"),
+            field(kPrivate, "textureS", "[F"),
+            field(kPrivate, "textureT", "[F"),
+            field(kPrivate, "normal", "[F"),
+            field(kPrivate, "ray", "[F"),
+        }, {
             api_method("<init>", "()V"),
             api_method("getIntersected", "()Ljavax/microedition/m3g/Node;"),
             api_method("getDistance", "()F"), api_method("getSubmeshIndex", "()I"),
@@ -474,6 +522,10 @@ using namespace builtin;
             api_method("getNormalZ", "()F"), api_method("getRay", "([F)V"),
         });
     }
+    return {};
+}
+
+[[nodiscard]] ClassPtr m3g_animation_class(std::string_view name) {
     if (name == "javax/microedition/m3g/Loader") {
         return make_class(std::string(name), "java/lang/Object", kOrdinary | kFinal, {}, {
             api_method("load", "(Ljava/lang/String;)[Ljavax/microedition/m3g/Object3D;", kPublic | kStatic),
@@ -481,7 +533,14 @@ using namespace builtin;
         });
     }
     if (name == "javax/microedition/m3g/AnimationController") {
-        return make_class(std::string(name), kObject3D, kOrdinary, {}, {
+        return make_class(std::string(name), kObject3D, kOrdinary, {
+            field(kPrivate, "activeStart", "I"),
+            field(kPrivate, "activeEnd", "I"),
+            field(kPrivate, "speed", "F"),
+            field(kPrivate, "weight", "F"),
+            field(kPrivate, "refSequenceTime", "F"),
+            field(kPrivate, "refWorldTime", "I"),
+        }, {
             api_method("<init>", "()V"), api_method("setActiveInterval", "(II)V"),
             api_method("getActiveIntervalStart", "()I"), api_method("getActiveIntervalEnd", "()I"),
             api_method("setSpeed", "(FI)V"), api_method("getSpeed", "()F"),
@@ -504,7 +563,17 @@ using namespace builtin;
         });
     }
     if (name == "javax/microedition/m3g/KeyframeSequence") {
-        return make_class(std::string(name), kObject3D, kOrdinary, {}, {
+        return make_class(std::string(name), kObject3D, kOrdinary, {
+            field(kPrivate, "keyframeCount", "I"),
+            field(kPrivate, "componentCount", "I"),
+            field(kPrivate, "interpolationType", "I"),
+            field(kPrivate, "validFirst", "I"),
+            field(kPrivate, "validLast", "I"),
+            field(kPrivate, "duration", "I"),
+            field(kPrivate, "repeatMode", "I"),
+            field(kPrivate, "times", "[I"),
+            field(kPrivate, "values", "[F"),
+        }, {
             api_method("<init>", "(III)V"), api_method("setKeyframe", "(II[F)V"),
             api_method("getKeyframe", "(I[F)I"), api_method("getKeyframeCount", "()I"),
             api_method("getComponentCount", "()I"), api_method("getInterpolationType", "()I"),
@@ -521,6 +590,7 @@ using namespace builtin;
             field(kPrivate, "boneFirstVertices", "[I"),
             field(kPrivate, "boneVertexCounts", "[I"),
             field(kPrivate, "boneWeights", "[I"),
+            field(kPrivate, "boneTransforms", "[[F"),
         }, {
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;Ljavax/microedition/m3g/IndexBuffer;Ljavax/microedition/m3g/Appearance;Ljavax/microedition/m3g/Group;)V"),
             api_method("<init>", "(Ljavax/microedition/m3g/VertexBuffer;[Ljavax/microedition/m3g/IndexBuffer;[Ljavax/microedition/m3g/Appearance;Ljavax/microedition/m3g/Group;)V"),
@@ -543,6 +613,16 @@ using namespace builtin;
         });
     }
     return {};
+}
+
+[[nodiscard]] ClassPtr m3g_class(std::string_view name) {
+    if (auto value = m3g_base_class(name)) return value;
+    if (auto value = m3g_transform_class(name)) return value;
+    if (auto value = m3g_graphics_class(name)) return value;
+    if (auto value = m3g_appearance_class(name)) return value;
+    if (auto value = m3g_geometry_class(name)) return value;
+    if (auto value = m3g_material_class(name)) return value;
+    return m3g_animation_class(name);
 }
 
 } // namespace

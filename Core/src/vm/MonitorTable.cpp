@@ -1,4 +1,5 @@
 #include "phoneme/vm/MonitorTable.hpp"
+#include "phoneme/vm/VmTrace.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -10,6 +11,7 @@ std::shared_ptr<MonitorTable::Monitor> MonitorTable::monitor_locked(
     auto& monitor = monitors_[object.bits];
     if (!monitor) {
         monitor = std::make_shared<Monitor>();
+        monitor->cancelled = cancelled_;
     }
     return monitor;
 }
@@ -106,6 +108,14 @@ Status MonitorTable::enter_blocking(ObjectRef object,
         return {};
     }
     enqueue_unique(monitor->entry_queue, thread_id);
+    const JavaThreadId blocking_owner = monitor->owner;
+    const auto blocking_started = std::chrono::steady_clock::now();
+    vm_trace("monitor",
+             "block-enter java=%u object=%llu owner=%u queue=%zu",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             static_cast<unsigned>(blocking_owner),
+             monitor->entry_queue.size());
     lock.unlock();
     before_block();
     lock.lock();
@@ -127,6 +137,14 @@ Status MonitorTable::enter_blocking(ObjectRef object,
     monitor->recursion = 1U;
     lock.unlock();
     after_block();
+    const auto blocked_for =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - blocking_started);
+    vm_trace("monitor",
+             "acquired java=%u object=%llu waited_us=%lld",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             static_cast<long long>(blocked_for.count()));
     return {};
 }
 
@@ -177,12 +195,22 @@ Result<MonitorWaitResult> MonitorTable::wait(
     }
     auto monitor = iterator->second;
     const u32 saved_recursion = monitor->recursion;
+    const auto wait_started = std::chrono::steady_clock::now();
     auto waiter = std::make_shared<WaitNode>();
     waiter->thread_id = thread_id;
     monitor->wait_set.push_back(waiter);
     monitor->owner = 0U;
     monitor->recursion = 0U;
     monitor->condition.notify_all();
+    vm_trace("monitor",
+             "wait java=%u object=%llu timeout_ms=%lld recursion=%u waiters=%zu",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             timeout.has_value()
+                 ? static_cast<long long>(timeout->count())
+                 : -1LL,
+             static_cast<unsigned>(saved_recursion),
+             monitor->wait_set.size());
 
     lock.unlock();
     before_block();
@@ -231,6 +259,18 @@ Result<MonitorWaitResult> MonitorTable::wait(
     monitor->recursion = saved_recursion;
     lock.unlock();
     after_block();
+    const auto waited_for =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - wait_started);
+    vm_trace("monitor",
+             "wait-end java=%u object=%llu result=%s waited_us=%lld",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             was_interrupted ? "interrupted"
+                             : (was_notified ? "notified"
+                                             : (awakened ? "awakened"
+                                                         : "timed-out")),
+             static_cast<long long>(waited_for.count()));
 
     if (was_interrupted) {
         return MonitorWaitResult::interrupted;
@@ -264,6 +304,12 @@ Status MonitorTable::notify_one(ObjectRef object,
         (*waiter)->notified = true;
         monitor.condition.notify_all();
     }
+    vm_trace("monitor",
+             "notify java=%u object=%llu selected=%d waiters=%zu",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             waiter != monitor.wait_set.end() ? 1 : 0,
+             monitor.wait_set.size());
     return {};
 }
 
@@ -284,6 +330,11 @@ Status MonitorTable::notify_all(ObjectRef object,
         waiter->notified = true;
     }
     monitor.condition.notify_all();
+    vm_trace("monitor",
+             "notify-all java=%u object=%llu waiters=%zu",
+             static_cast<unsigned>(thread_id),
+             static_cast<unsigned long long>(object.bits),
+             monitor.wait_set.size());
     return {};
 }
 
@@ -371,6 +422,7 @@ void MonitorTable::release_all(JavaThreadId thread_id) noexcept {
 
 void MonitorTable::clear() noexcept {
     std::scoped_lock lock(mutex_);
+    cancelled_ = true;
     for (const auto& [bits, monitor] : monitors_) {
         (void)bits;
         monitor->cancelled = true;

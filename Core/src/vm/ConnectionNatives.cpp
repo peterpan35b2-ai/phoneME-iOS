@@ -34,7 +34,6 @@ constexpr usize kStreamOwnsConnectionField = 3;
 constexpr usize kStreamBufferField = 4;
 constexpr usize kStreamBufferPositionField = 5;
 constexpr usize kStreamBufferCountField = 6;
-constexpr usize kStreamReadBufferSize = 4096;
 
 constexpr usize kDatagramDataField = 0;
 constexpr usize kDatagramOffsetField = 1;
@@ -952,62 +951,14 @@ try_open_wireless_connection(Machine& machine,
     auto open = require_open_stream(machine, stream);
     if (!open) return std::unexpected(open.error());
 
-    auto position = int_field(machine, stream, kStreamBufferPositionField);
-    auto count = int_field(machine, stream, kStreamBufferCountField);
-    if (!position) return std::unexpected(position.error());
-    if (!count) return std::unexpected(count.error());
-    if (*position < 0 || *count < *position) {
-        return fail(ErrorCode::invalid_state,
-                    "network input buffer state is invalid");
-    }
-    if (*position < *count) {
-        auto buffer = reference_field(machine, stream, kStreamBufferField);
-        if (!buffer) return std::unexpected(buffer.error());
-        if (buffer->is_null()) {
-            return fail(ErrorCode::invalid_state,
-                        "network input buffer is missing");
-        }
-        auto byte = byte_at(machine, *buffer,
-                            static_cast<usize>(*position));
-        if (!byte) return std::unexpected(byte.error());
-        auto advanced = set_int_field(machine, stream,
-                                      kStreamBufferPositionField,
-                                      *position + 1);
-        if (!advanced) return std::unexpected(advanced.error());
-        return std::optional<i32>(static_cast<i32>(*byte));
-    }
-
+    // phoneME leaves socket read-ahead disabled unless the internal
+    // com.sun.midp.io.j2me.socket.buffersize property explicitly enables it.
+    // Pass the exact Java-requested length to the native adapter by default.
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
-    auto bytes = java_network_result(machine.connections().read(
-        *token, kStreamReadBufferSize));
+    auto bytes = java_network_result(machine.connections().read(*token, 1U));
     if (!bytes) return std::unexpected(bytes.error());
-    if (bytes->empty()) {
-        (void)set_reference_field(machine, stream, kStreamBufferField, {});
-        (void)set_int_field(machine, stream, kStreamBufferPositionField, 0);
-        (void)set_int_field(machine, stream, kStreamBufferCountField, 0);
-        return std::optional<i32>(-1);
-    }
-
-    auto buffer = machine.heap().allocate_array(
-        "[B", bytes->size(), Value::from_int(0));
-    if (!buffer) return std::unexpected(buffer.error());
-    auto root = machine.pin_native_root(*buffer);
-    if (!root) return std::unexpected(root.error());
-    for (usize index = 0; index < bytes->size(); ++index) {
-        auto stored = set_byte(machine, *buffer, index, (*bytes)[index]);
-        if (!stored) return std::unexpected(stored.error());
-    }
-    auto linked = set_reference_field(machine, stream,
-                                      kStreamBufferField, *buffer);
-    auto stored_position = set_int_field(machine, stream,
-                                         kStreamBufferPositionField, 1);
-    auto stored_count = set_int_field(
-        machine, stream, kStreamBufferCountField,
-        static_cast<i32>(bytes->size()));
-    if (!linked) return std::unexpected(linked.error());
-    if (!stored_position) return std::unexpected(stored_position.error());
-    if (!stored_count) return std::unexpected(stored_count.error());
+    if (bytes->empty()) return std::optional<i32>(-1);
     return std::optional<i32>(static_cast<i32>(bytes->front()));
 }
 
@@ -1024,43 +975,13 @@ try_open_wireless_connection(Machine& machine,
     auto open = require_open_stream(machine, stream);
     if (!open) return std::unexpected(open.error());
 
-    auto position = int_field(machine, stream, kStreamBufferPositionField);
-    auto count = int_field(machine, stream, kStreamBufferCountField);
-    if (!position) return std::unexpected(position.error());
-    if (!count) return std::unexpected(count.error());
-    if (*position < 0 || *count < *position) {
-        return fail(ErrorCode::invalid_state,
-                    "network input buffer state is invalid");
-    }
-    if (*position < *count) {
-        auto buffer = reference_field(machine, stream, kStreamBufferField);
-        if (!buffer) return std::unexpected(buffer.error());
-        if (buffer->is_null()) {
-            return fail(ErrorCode::invalid_state,
-                        "network input buffer is missing");
-        }
-        const i32 copied = std::min(length, *count - *position);
-        for (i32 index = 0; index < copied; ++index) {
-            auto byte = byte_at(machine, *buffer,
-                                static_cast<usize>(*position + index));
-            if (!byte) return std::unexpected(byte.error());
-            auto stored = set_byte(machine, destination,
-                                   static_cast<usize>(offset + index), *byte);
-            if (!stored) return std::unexpected(stored.error());
-        }
-        auto advanced = set_int_field(machine, stream,
-                                      kStreamBufferPositionField,
-                                      *position + copied);
-        if (!advanced) return std::unexpected(advanced.error());
-        return copied;
-    }
-
     auto token = token_from_object(machine, stream);
     if (!token) return std::unexpected(token.error());
     auto bytes = java_network_result(machine.connections().read(
         *token, static_cast<usize>(length)));
     if (!bytes) return std::unexpected(bytes.error());
     if (bytes->empty()) return -1;
+
     for (usize index = 0; index < bytes->size(); ++index) {
         auto stored = set_byte(machine, destination,
                                static_cast<usize>(offset) + index,

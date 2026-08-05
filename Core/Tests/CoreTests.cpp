@@ -1,4 +1,5 @@
 #include <array>
+#include <bit>
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
@@ -9,7 +10,11 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
+#include <zlib.h>
+
+#include "../src/vm/M3gLoader.hpp"
 #include "phoneme/archive/ZipArchive.hpp"
 #include "phoneme/classfile/BytecodeVerifier.hpp"
 #include "phoneme/classfile/ClassFile.hpp"
@@ -676,6 +681,13 @@ void test_monitor_table() {
     require(snapshot.has_value() && snapshot->owner == 0U &&
                 snapshot->recursion == 0U,
             "monitor table clears owner after final exit");
+
+    monitors.clear();
+    const auto late_object = phoneme::vm::ObjectRef::make(2U, 1U);
+    auto late_entry = monitors.enter(late_object, 2U);
+    require(!late_entry.has_value() &&
+                late_entry.error().code == phoneme::ErrorCode::invalid_state,
+            "monitor cancellation remains terminal for late shutdown waiters");
 }
 
 void test_integer_interpreter() {
@@ -690,6 +702,57 @@ void test_integer_interpreter() {
             "execute integer bytecode");
     auto value = result->return_value->as_int();
     require(value.has_value() && *value == 5, "2 + 3 returns 5");
+}
+
+void test_machine_heap_memory_reporting() {
+    constexpr phoneme::usize heap_bytes = 12U * 1024U * 1024U;
+    phoneme::vm::ClassRepository classes;
+    phoneme::vm::Machine machine(
+        classes,
+        phoneme::vm::HeapLimits {
+            .maximum_objects = 1'000'000U,
+            .maximum_bytes = heap_bytes,
+        });
+
+    auto runtime_result = machine.invoke_static(
+        "java/lang/Runtime",
+        "getRuntime",
+        "()Ljava/lang/Runtime;");
+    require(runtime_result.has_value() &&
+                runtime_result->completed_normally() &&
+                runtime_result->return_value.has_value(),
+            "obtain Java Runtime for configured heap reporting");
+    auto runtime_reference = runtime_result->return_value->as_reference();
+    require(runtime_reference.has_value() && !runtime_reference->is_null(),
+            "Java Runtime singleton is non-null");
+
+    auto total_result = machine.invoke_instance(
+        *runtime_reference,
+        "java/lang/Runtime",
+        "totalMemory",
+        "()J");
+    require(total_result.has_value() &&
+                total_result->completed_normally() &&
+                total_result->return_value.has_value(),
+            "query configured Java heap capacity");
+    auto total_memory = total_result->return_value->as_long();
+    require(total_memory.has_value() &&
+                *total_memory == static_cast<phoneme::i64>(heap_bytes),
+            "Runtime.totalMemory reflects the configured heap limit");
+
+    auto free_result = machine.invoke_instance(
+        *runtime_reference,
+        "java/lang/Runtime",
+        "freeMemory",
+        "()J");
+    require(free_result.has_value() &&
+                free_result->completed_normally() &&
+                free_result->return_value.has_value(),
+            "query free Java heap capacity");
+    auto free_memory = free_result->return_value->as_long();
+    require(free_memory.has_value() &&
+                *free_memory > 0 && *free_memory <= *total_memory,
+            "Runtime.freeMemory uses the configured heap limit");
 }
 
 void test_machine_invocation(const std::string& fixture_jar) {
@@ -752,6 +815,132 @@ void test_machine_invocation(const std::string& fixture_jar) {
     auto array_integer = array_result->return_value->as_int();
     require(array_integer.has_value() && *array_integer == 12,
             "array operations return 12");
+
+    auto operand_effects = machine.invoke_static(
+        "corefixture/Arithmetic",
+        "resolvedOperandEffects",
+        "()Lcorefixture/Arithmetic;");
+    require(operand_effects.has_value() &&
+                operand_effects->completed_normally() &&
+                operand_effects->return_value.has_value(),
+            "decoded and legacy execution return the mutated heap object");
+    auto effects_reference = operand_effects->return_value->as_reference();
+    require(effects_reference.has_value() && !effects_reference->is_null(),
+            "resolved operand fixture returns a live object");
+    auto effects_field = machine.heap().field(*effects_reference, 0U);
+    require(effects_field.has_value() &&
+                effects_field->as_int().value_or(-1) == 21,
+            "resolved field and direct-call operands preserve heap-visible effects");
+
+    auto static_effect = machine.invoke_static(
+        "corefixture/Arithmetic",
+        "differentialStaticValue",
+        "()I");
+    require(static_effect.has_value() && static_effect->completed_normally() &&
+                static_effect->return_value.has_value() &&
+                static_effect->return_value->as_int().value_or(-1) == 10,
+            "resolved static operands preserve static-field effects");
+
+    auto stable_throwable = machine.invoke_static(
+        "corefixture/Arithmetic",
+        "stableThrowableMessage",
+        "()V");
+    require(stable_throwable.has_value() &&
+                !stable_throwable->completed_normally() &&
+                stable_throwable->throwable.has_value(),
+            "stable throwable fixture reaches the invocation boundary");
+    auto stable_throwable_class = machine.heap().class_name(
+        *stable_throwable->throwable);
+    require(stable_throwable_class.has_value() &&
+                *stable_throwable_class == "java/lang/NoSuchMethodError",
+            "decoded and legacy execution preserve throwable class");
+    auto stable_message_field = machine.heap().field(
+        *stable_throwable->throwable, 0U);
+    require(stable_message_field.has_value(),
+            "stable throwable exposes its detail message field");
+    auto stable_message_reference = stable_message_field->as_reference();
+    require(stable_message_reference.has_value() &&
+                !stable_message_reference->is_null(),
+            "stable throwable detail message is non-null");
+    auto stable_message = machine.heap().string_value(
+        *stable_message_reference);
+    require(stable_message.has_value() &&
+                *stable_message == u"decoded-linkage-stable",
+            "decoded and legacy execution preserve throwable message");
+
+    const auto require_linkage_trace = [&machine](
+        const char* method_name,
+        std::string_view expected_class,
+        const char* message) {
+        auto result = machine.invoke_static(
+            "corefixture/LinkageOps",
+            method_name,
+            "()Ljava/lang/String;");
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value(),
+                message);
+        auto reference = result->return_value->as_reference();
+        require(reference.has_value() && !reference->is_null(), message);
+        auto text = machine.heap().string_value(*reference);
+        require(text.has_value(), message);
+        std::string ascii;
+        ascii.reserve(text->size());
+        for (const char16_t unit : *text) {
+            require(unit <= 0x7FU, message);
+            ascii.push_back(static_cast<char>(unit));
+        }
+        const std::size_t separator = ascii.find('|');
+        require(separator != std::string::npos &&
+                    ascii.substr(0U, separator) == ascii.substr(separator + 1U),
+                "repeated linkage failure preserves its exact message");
+        require(ascii.starts_with(std::string(expected_class) + ':'), message);
+    };
+    require_linkage_trace("missingClassTrace",
+                          "java.lang.NoClassDefFoundError",
+                          "missing class resolves to stable NoClassDefFoundError");
+    require_linkage_trace("missingArrayTrace",
+                          "java.lang.NoClassDefFoundError",
+                          "anewarray resolves its component class at the instruction");
+    require_linkage_trace("missingTypeTrace",
+                          "java.lang.NoClassDefFoundError",
+                          "checkcast resolves its target even for a null receiver");
+    require_linkage_trace("missingInstanceofTrace",
+                          "java.lang.NoClassDefFoundError",
+                          "instanceof resolves its target even for a null receiver");
+    require_linkage_trace("missingMultiArrayTrace",
+                          "java.lang.NoClassDefFoundError",
+                          "multianewarray resolves its reference component class");
+    require_linkage_trace("missingMethodTrace",
+                          "java.lang.NoSuchMethodError",
+                          "missing method resolves to stable NoSuchMethodError");
+    require_linkage_trace("missingFieldTrace",
+                          "java.lang.NoSuchFieldError",
+                          "missing field resolves to stable NoSuchFieldError");
+}
+
+void test_machine_dispatch(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add dispatch fixture JAR to VM classpath");
+    phoneme::vm::Machine machine(classes);
+
+    auto interface_call = machine.invoke_static("corefixture/Dispatch",
+                                                "interfaceCall",
+                                                "()I");
+    require(interface_call.has_value() &&
+                interface_call->return_value.has_value() &&
+                interface_call->return_value->as_int().value_or(-1) == 10,
+            "invokeinterface dispatches to implementing class");
+
+    auto polymorphic_interface = machine.invoke_static(
+        "corefixture/Dispatch",
+        "polymorphicInterfaceCall",
+        "()I");
+    require(polymorphic_interface.has_value() &&
+                polymorphic_interface->return_value.has_value() &&
+                polymorphic_interface->return_value->as_int().value_or(-1) ==
+                    1012,
+            "polymorphic invokeinterface refreshes its monomorphic target");
 }
 
 void test_machine_exceptions(const std::string& fixture_jar) {
@@ -960,6 +1149,19 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
     auto interface_value = interface_call->return_value->as_int();
     require(interface_value.has_value() && *interface_value == 10,
             "invokeinterface dispatches to implementing class");
+
+    auto polymorphic_interface = machine.invoke_static(
+        "corefixture/Dispatch",
+        "polymorphicInterfaceCall",
+        "()I");
+    require(polymorphic_interface.has_value() &&
+                polymorphic_interface->return_value.has_value(),
+            "execute one invokeinterface call site with two receiver classes");
+    auto polymorphic_interface_value =
+        polymorphic_interface->return_value->as_int();
+    require(polymorphic_interface_value.has_value() &&
+                *polymorphic_interface_value == 1012,
+            "polymorphic invokeinterface refreshes its monomorphic target");
 
     const auto require_lambda_result = [&machine](const char* method_name,
                                                   phoneme::i32 expected,
@@ -1539,6 +1741,37 @@ void test_machine_network(const std::string& fixture_jar) {
     require(invoke_integer("socketRoundTrip",
                            "execute socket GCF fixture") == 4411,
             "socket fixture writes and reads through native streams");
+    const phoneme::usize bulk_write_count_before = adapter->write_count();
+    require(invoke_integer("nestedDataOutputBulkWrite",
+                           "execute nested DataOutputStream fixture") ==
+                0x12345678,
+            "nested DataOutputStream preserves bulk network writes");
+    require(adapter->write_count() == bulk_write_count_before + 1U,
+            "DataOutputStream through BufferedOutputStream uses one socket write");
+
+    const phoneme::usize exact_read_count_before = adapter->read_count();
+    require(invoke_integer("socketExactReadSemantics",
+                           "execute exact socket read fixture") == 2016,
+            "small socket reads preserve payload order and content");
+    require(adapter->read_count() == exact_read_count_before + 3U,
+            "unbuffered phoneME socket reads preserve each Java request");
+    require(adapter->last_read_maximum_bytes() == 56U,
+            "native socket read receives the exact Java-requested length");
+
+    const phoneme::usize large_read_count_before = adapter->read_count();
+    const phoneme::usize large_write_count_before = adapter->write_count();
+    adapter->set_maximum_read_chunk(16U * 1024U);
+    require(invoke_integer("socketLargePayload",
+                           "execute partial 64 KiB socket payload fixture") == 1,
+            "large Java socket payload round-trips across partial reads");
+    adapter->set_maximum_read_chunk(0U);
+    require(adapter->read_count() == large_read_count_before + 4U,
+            "DataInputStream.readFully continues across four 16 KiB reads");
+    require(adapter->last_read_maximum_bytes() == 16U * 1024U,
+            "final partial read requests the remaining 16 KiB");
+    require(adapter->write_count() == large_write_count_before + 1U,
+            "64 KiB Java write remains one bulk socket operation");
+
     require(invoke_integer("streamSurvivesConnectionClose",
                            "execute connection ownership fixture") == 0x33,
             "stream remains valid after Connection.close");
@@ -2143,6 +2376,77 @@ void test_machine_gc_roots(const std::string& fixture_jar) {
     const auto pressure_stats = machine.heap().stats();
     require(pressure_stats.collections > 0U,
             "heap pressure triggers at least one collection");
+
+    const phoneme::vm::HeapLimits string_pressure_limits {
+        .maximum_objects = 100'000U,
+        .maximum_bytes = 512U * 1024U,
+    };
+    phoneme::vm::Machine string_pressure_machine(
+        classes, string_pressure_limits);
+    auto string_pressure = string_pressure_machine.invoke_static(
+        "corefixture/GcOps", "temporaryStringPressure", "()I",
+        {}, 250'000'000U);
+    require(string_pressure.has_value() &&
+                string_pressure->completed_normally() &&
+                string_pressure->return_value.has_value() &&
+                string_pressure->return_value->as_int().has_value() &&
+                *string_pressure->return_value->as_int() == 97,
+            "temporary String.valueOf pressure completes without freezing");
+    const auto string_pressure_stats = string_pressure_machine.heap().stats();
+    require(string_pressure_stats.collections > 0U,
+            "native temporary strings trigger proactive collection");
+    require(string_pressure_stats.failed_allocations == 0U,
+            "proactive collection runs before the Java heap hard limit");
+
+    phoneme::vm::Machine constructor_machine(classes, 8U);
+    auto constructor_pressure = constructor_machine.invoke_static(
+        "corefixture/GcOps", "nestedConstructorPressure", "()I");
+    require(constructor_pressure.has_value() &&
+                constructor_pressure->completed_normally() &&
+                constructor_pressure->return_value.has_value() &&
+                constructor_pressure->return_value->as_int().has_value() &&
+                *constructor_pressure->return_value->as_int() == 83,
+            "GC preserves a pending constructor receiver across nested arguments");
+    require(constructor_machine.heap().stats().collections > 0U,
+            "nested constructor pressure triggers collection");
+
+    phoneme::vm::Machine constructor_race_machine(classes, 128U);
+    auto constructor_race = constructor_race_machine.invoke_static(
+        "corefixture/ThreadOps", "constructorRootRace", "()I",
+        {}, 250'000'000U);
+    require(constructor_race.has_value() &&
+                constructor_race->completed_normally() &&
+                constructor_race->return_value.has_value() &&
+                constructor_race->return_value->as_int().has_value() &&
+                *constructor_race->return_value->as_int() == 0,
+            "cross-thread GC preserves a pending constructor receiver");
+    require(constructor_race_machine.heap().stats().collections > 0U,
+            "constructor root race performs a collection");
+
+    phoneme::vm::Machine class_init_race_machine(classes, 128U);
+    auto class_init_race = class_init_race_machine.invoke_static(
+        "corefixture/ThreadOps", "constructorClassInitRootRace", "()I",
+        {}, 250'000'000U);
+    require(class_init_race.has_value() &&
+                class_init_race->completed_normally() &&
+                class_init_race->return_value.has_value() &&
+                class_init_race->return_value->as_int().has_value() &&
+                *class_init_race->return_value->as_int() == 0,
+            "cross-thread GC preserves an outer constructor receiver while "
+            "a nested argument class initializer is blocked");
+    require(class_init_race_machine.heap().stats().collections > 0U,
+            "constructor class-initialization race performs a collection");
+
+    phoneme::vm::Machine class_init_owner_machine(classes, 256U);
+    auto class_init_owner = class_init_owner_machine.invoke_static(
+        "corefixture/ThreadOps", "classInitializationWaitsForOwner", "()I",
+        {}, 250'000'000U);
+    require(class_init_owner.has_value() &&
+                class_init_owner->completed_normally() &&
+                class_init_owner->return_value.has_value() &&
+                class_init_owner->return_value->as_int().has_value() &&
+                *class_init_owner->return_value->as_int() == 0,
+            "a competing thread waits for the class-initialization owner");
 
     require(machine.collect_garbage().has_value(),
             "idle machine collection succeeds");
@@ -3137,6 +3441,21 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
                 phoneme::security::SuiteTrust::trusted).has_value(),
             "mark standalone fixture suite trusted");
     require(runtime.start_system().has_value(), "start standalone runtime");
+    const auto invalid_small_heap = runtime.configure_app_heap(
+        phoneme::AppId {1}, 0);
+    require(!invalid_small_heap.has_value() &&
+                invalid_small_heap.error().code ==
+                    phoneme::ErrorCode::invalid_argument,
+            "reject a per-app heap smaller than 1 MiB");
+    const auto invalid_large_heap = runtime.configure_app_heap(
+        phoneme::AppId {1}, 513);
+    require(!invalid_large_heap.has_value() &&
+                invalid_large_heap.error().code ==
+                    phoneme::ErrorCode::invalid_argument,
+            "reject a per-app heap larger than 512 MiB");
+    require(runtime.configure_app_heap(
+                phoneme::AppId {1}, 32).has_value(),
+            "configure the Java heap before MIDlet startup");
     require(runtime.start_midlet(*suite_id,
                                  "corefixture.LifecycleApp",
                                  phoneme::AppId {1},
@@ -3147,6 +3466,12 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
             "MIDlet enters active state");
     require(runtime.app_used_memory(phoneme::AppId {1}) > 0,
             "MIDlet reports heap memory");
+    const auto live_heap_change = runtime.configure_app_heap(
+        phoneme::AppId {1}, 64);
+    require(!live_heap_change.has_value() &&
+                live_heap_change.error().code ==
+                    phoneme::ErrorCode::invalid_state,
+            "changing a live MIDlet heap requires restart");
     require(runtime.set_suite_trust(
                 *suite_id,
                 phoneme::security::SuiteTrust::trusted).has_value(),
@@ -3166,6 +3491,9 @@ void test_runtime_lifecycle(const std::string& fixture_jar) {
     require(runtime.app_state(phoneme::AppId {1}) ==
                 phoneme::runtime::AppState::destroyed,
             "MIDlet enters destroyed state");
+    require(runtime.configure_app_heap(
+                phoneme::AppId {1}, 64).has_value(),
+            "heap may be reconfigured after MIDlet destruction");
 
     require(runtime.start_midlet(*suite_id,
                                  "corefixture.SelfDestroyApp",
@@ -3317,6 +3645,18 @@ void test_machine_m3g() {
                                  std::span<const phoneme::vm::Value> arguments = {}) {
         auto result = machine.invoke_instance(object, owner, name,
                                               descriptor, arguments);
+        if (!result.has_value() || !result->completed_normally()) {
+            std::cerr << "M3G invocation failed: " << owner << '.' << name
+                      << descriptor;
+            if (result.has_value() && result->throwable.has_value()) {
+                auto throwable_class = machine.heap().class_name(
+                    *result->throwable);
+                if (throwable_class.has_value()) {
+                    std::cerr << " threw " << *throwable_class;
+                }
+            }
+            std::cerr << '\n';
+        }
         require(result.has_value() && result->completed_normally(),
                 "invoke M3G method normally");
     };
@@ -3352,6 +3692,312 @@ void test_machine_m3g() {
     require_float(7U, -3.0F);
     require_float(11U, 2.0F);
 
+    const auto require_java_exception = [&](const auto& result,
+                                            std::string_view expected,
+                                            const char* message) {
+        require(result.has_value() && result->throwable.has_value(), message);
+        auto class_name = machine.heap().class_name(*result->throwable);
+        require(class_name.has_value() && *class_name == expected, message);
+    };
+    const auto int_array = [&](std::initializer_list<phoneme::i32> values) {
+        auto array = machine.heap().allocate_array(
+            "[I", values.size(), phoneme::vm::Value::from_int(0));
+        require(array.has_value(), "allocate M3G int array");
+        phoneme::usize index = 0U;
+        for (const phoneme::i32 value : values) {
+            require(machine.heap().set_element(
+                        *array, index++, phoneme::vm::Value::from_int(value))
+                        .has_value(),
+                    "populate M3G int array");
+        }
+        return *array;
+    };
+    const auto float_array = [&](std::initializer_list<float> values) {
+        auto array = machine.heap().allocate_array(
+            "[F", values.size(), phoneme::vm::Value::from_float(0.0F));
+        require(array.has_value(), "allocate M3G float array");
+        phoneme::usize index = 0U;
+        for (const float value : values) {
+            require(machine.heap().set_element(
+                        *array, index++, phoneme::vm::Value::from_float(value))
+                        .has_value(),
+                    "populate M3G float array");
+        }
+        return *array;
+    };
+    const auto vertex_array = [&](phoneme::i32 vertices,
+                                  phoneme::i32 components,
+                                  phoneme::i32 component_size) {
+        auto array = machine.class_states().allocate_instance(
+            machine.heap(), "javax/microedition/m3g/VertexArray");
+        require(array.has_value(), "allocate M3G VertexArray");
+        const std::array<phoneme::vm::Value, 3> arguments {
+            phoneme::vm::Value::from_int(vertices),
+            phoneme::vm::Value::from_int(components),
+            phoneme::vm::Value::from_int(component_size),
+        };
+        invoke_void(*array, "javax/microedition/m3g/VertexArray",
+                    "<init>", "(III)V", arguments);
+        return *array;
+    };
+
+    auto vertex_buffer = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexBuffer");
+    require(vertex_buffer.has_value(), "allocate M3G VertexBuffer");
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "<init>", "()V");
+    auto positions = vertex_array(4, 3, 2);
+    auto position_bias = float_array({1.0F, 2.0F, 3.0F});
+    const std::array<phoneme::vm::Value, 3> position_arguments {
+        phoneme::vm::Value::from_reference(positions),
+        phoneme::vm::Value::from_float(0.5F),
+        phoneme::vm::Value::from_reference(position_bias),
+    };
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setPositions",
+                "(Ljavax/microedition/m3g/VertexArray;F[F)V",
+                position_arguments);
+    auto vertex_count = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "getVertexCount", "()I");
+    require(vertex_count.has_value() && vertex_count->completed_normally() &&
+                vertex_count->return_value.has_value() &&
+                vertex_count->return_value->as_int().value_or(-1) == 4,
+            "VertexBuffer adopts the first VertexArray count");
+
+    auto tex_coords = vertex_array(4, 2, 1);
+    auto texture_bias = float_array({0.25F, -0.5F});
+    const std::array<phoneme::vm::Value, 4> texture_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(tex_coords),
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_reference(texture_bias),
+    };
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setTexCoords",
+                "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+                texture_arguments);
+    auto scale_bias = float_array({0.0F, 0.0F, 0.0F});
+    const std::array<phoneme::vm::Value, 2> texture_get_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(scale_bias),
+    };
+    auto texture_result = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "getTexCoords", "(I[F)Ljavax/microedition/m3g/VertexArray;",
+        texture_get_arguments);
+    require(texture_result.has_value() &&
+                texture_result->completed_normally() &&
+                texture_result->return_value.has_value() &&
+                texture_result->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == tex_coords,
+            "VertexBuffer returns the selected texture coordinate array");
+    const std::array<float, 3> expected_scale_bias {2.0F, 0.25F, -0.5F};
+    for (phoneme::usize index = 0U; index < expected_scale_bias.size(); ++index) {
+        auto value = machine.heap().element(scale_bias, index);
+        require(value.has_value() && value->as_float().has_value() &&
+                    std::abs(*value->as_float() - expected_scale_bias[index]) <
+                        0.0001F,
+                "VertexBuffer preserves texture scale and bias");
+    }
+
+    auto mismatched_tex_coords = vertex_array(5, 2, 1);
+    auto mismatch_arguments = texture_arguments;
+    mismatch_arguments[1] =
+        phoneme::vm::Value::from_reference(mismatched_tex_coords);
+    auto mismatch = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "setTexCoords",
+        "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+        mismatch_arguments);
+    require_java_exception(mismatch, "java/lang/IllegalArgumentException",
+                           "VertexBuffer rejects mismatched vertex counts");
+
+    auto four_component_tex_coords = vertex_array(4, 4, 1);
+    auto component_arguments = texture_arguments;
+    component_arguments[1] =
+        phoneme::vm::Value::from_reference(four_component_tex_coords);
+    auto bad_components = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "setTexCoords",
+        "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+        component_arguments);
+    require_java_exception(bad_components, "java/lang/IllegalArgumentException",
+                           "VertexBuffer rejects 4-component texture coordinates");
+
+    auto short_texture_bias = float_array({0.0F});
+    auto bias_arguments = texture_arguments;
+    bias_arguments[3] =
+        phoneme::vm::Value::from_reference(short_texture_bias);
+    auto bad_bias = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "setTexCoords",
+        "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+        bias_arguments);
+    require_java_exception(bad_bias, "java/lang/IllegalArgumentException",
+                           "VertexBuffer rejects a short texture bias");
+
+    auto short_scale_bias = float_array({0.0F, 0.0F});
+    const std::array<phoneme::vm::Value, 2> short_get_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(short_scale_bias),
+    };
+    auto bad_destination = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "getTexCoords", "(I[F)Ljavax/microedition/m3g/VertexArray;",
+        short_get_arguments);
+    require_java_exception(bad_destination,
+                           "java/lang/IllegalArgumentException",
+                           "VertexBuffer rejects a short scaleBias destination");
+
+    auto normals = vertex_array(4, 3, 1);
+    const phoneme::vm::Value normals_argument =
+        phoneme::vm::Value::from_reference(normals);
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setNormals", "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(&normals_argument, 1U));
+    auto colors = vertex_array(4, 4, 1);
+    const phoneme::vm::Value colors_argument =
+        phoneme::vm::Value::from_reference(colors);
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setColors", "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(&colors_argument, 1U));
+    auto short_component_colors = vertex_array(4, 4, 2);
+    const phoneme::vm::Value invalid_colors_argument =
+        phoneme::vm::Value::from_reference(short_component_colors);
+    auto bad_colors = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "setColors", "(Ljavax/microedition/m3g/VertexArray;)V",
+        std::span<const phoneme::vm::Value>(&invalid_colors_argument, 1U));
+    require_java_exception(bad_colors, "java/lang/IllegalArgumentException",
+                           "VertexBuffer colors require byte components");
+
+    const phoneme::vm::Value null_reference =
+        phoneme::vm::Value::from_reference({});
+    const std::array<phoneme::vm::Value, 3> clear_positions {
+        null_reference,
+        phoneme::vm::Value::from_float(1.0F),
+        null_reference,
+    };
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setPositions",
+                "(Ljavax/microedition/m3g/VertexArray;F[F)V",
+                clear_positions);
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setNormals", "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(&null_reference, 1U));
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setColors", "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(&null_reference, 1U));
+    const std::array<phoneme::vm::Value, 4> clear_texture {
+        phoneme::vm::Value::from_int(0),
+        null_reference,
+        phoneme::vm::Value::from_float(1.0F),
+        null_reference,
+    };
+    invoke_void(*vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+                "setTexCoords",
+                "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+                clear_texture);
+    vertex_count = machine.invoke_instance(
+        *vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "getVertexCount", "()I");
+    require(vertex_count.has_value() && vertex_count->return_value.has_value() &&
+                vertex_count->return_value->as_int().value_or(-1) == 0,
+            "VertexBuffer count returns to zero when the last array is cleared");
+
+    auto explicit_strip = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+    require(explicit_strip.has_value(), "allocate explicit TriangleStripArray");
+    auto explicit_indices = int_array({0, 1, 2, 3, 4});
+    auto one_strip = int_array({3});
+    const std::array<phoneme::vm::Value, 2> explicit_arguments {
+        phoneme::vm::Value::from_reference(explicit_indices),
+        phoneme::vm::Value::from_reference(one_strip),
+    };
+    invoke_void(*explicit_strip,
+                "javax/microedition/m3g/TriangleStripArray",
+                "<init>", "([I[I)V", explicit_arguments);
+    auto index_count = machine.invoke_instance(
+        *explicit_strip, "javax/microedition/m3g/IndexBuffer",
+        "getIndexCount", "()I");
+    require(index_count.has_value() && index_count->return_value.has_value() &&
+                index_count->return_value->as_int().value_or(-1) == 5,
+            "TriangleStripArray copies extra explicit indices");
+
+    const auto triangle_constructor = [&](phoneme::vm::ObjectRef object,
+                                          std::span<const phoneme::vm::Value> args,
+                                          const char* descriptor) {
+        return machine.invoke_instance(
+            object, "javax/microedition/m3g/TriangleStripArray",
+            "<init>", descriptor, args);
+    };
+    auto short_strip = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+    auto short_indices = int_array({0, 1});
+    const std::array<phoneme::vm::Value, 2> short_strip_arguments {
+        phoneme::vm::Value::from_reference(short_indices),
+        phoneme::vm::Value::from_reference(one_strip),
+    };
+    require_java_exception(
+        triangle_constructor(*short_strip, short_strip_arguments, "([I[I)V"),
+        "java/lang/IllegalArgumentException",
+        "TriangleStripArray rejects too few explicit indices");
+
+    for (const phoneme::i32 invalid_index : {-1, 65'536}) {
+        auto invalid_strip = machine.class_states().allocate_instance(
+            machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+        auto invalid_indices = int_array({0, 1, invalid_index});
+        const std::array<phoneme::vm::Value, 2> invalid_arguments {
+            phoneme::vm::Value::from_reference(invalid_indices),
+            phoneme::vm::Value::from_reference(one_strip),
+        };
+        require_java_exception(
+            triangle_constructor(*invalid_strip, invalid_arguments, "([I[I)V"),
+            "java/lang/IndexOutOfBoundsException",
+            "TriangleStripArray rejects indices outside 0..65535");
+    }
+
+    auto two_strips = int_array({3, 4});
+    auto implicit_strip = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+    const std::array<phoneme::vm::Value, 2> implicit_arguments {
+        phoneme::vm::Value::from_int(10),
+        phoneme::vm::Value::from_reference(two_strips),
+    };
+    invoke_void(*implicit_strip,
+                "javax/microedition/m3g/TriangleStripArray",
+                "<init>", "(I[I)V", implicit_arguments);
+    index_count = machine.invoke_instance(
+        *implicit_strip, "javax/microedition/m3g/IndexBuffer",
+        "getIndexCount", "()I");
+    require(index_count.has_value() && index_count->return_value.has_value() &&
+                index_count->return_value->as_int().value_or(-1) == 7,
+            "implicit TriangleStripArray expands all strip indices");
+
+    for (const phoneme::i32 invalid_first : {-1, 65'530}) {
+        auto invalid_strip = machine.class_states().allocate_instance(
+            machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+        const std::array<phoneme::vm::Value, 2> invalid_arguments {
+            phoneme::vm::Value::from_int(invalid_first),
+            phoneme::vm::Value::from_reference(two_strips),
+        };
+        require_java_exception(
+            triangle_constructor(*invalid_strip, invalid_arguments, "(I[I)V"),
+            "java/lang/IndexOutOfBoundsException",
+            "implicit TriangleStripArray validates the 16-bit index range");
+    }
+
+    auto boundary_strip = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+    const std::array<phoneme::vm::Value, 2> boundary_arguments {
+        phoneme::vm::Value::from_int(65'528),
+        phoneme::vm::Value::from_reference(two_strips),
+    };
+    invoke_void(*boundary_strip,
+                "javax/microedition/m3g/TriangleStripArray",
+                "<init>", "(I[I)V", boundary_arguments);
+
     auto group = machine.class_states().allocate_instance(
         machine.heap(), "javax/microedition/m3g/Group");
     auto camera = machine.class_states().allocate_instance(
@@ -3360,6 +4006,275 @@ void test_machine_m3g() {
             "allocate M3G scene nodes");
     invoke_void(*group, "javax/microedition/m3g/Group", "<init>", "()V");
     invoke_void(*camera, "javax/microedition/m3g/Camera", "<init>", "()V");
+
+    const std::array<phoneme::vm::Value, 3> component_translation {
+        phoneme::vm::Value::from_float(4.0F),
+        phoneme::vm::Value::from_float(5.0F),
+        phoneme::vm::Value::from_float(6.0F),
+    };
+    const std::array<phoneme::vm::Value, 3> component_scale {
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(3.0F),
+        phoneme::vm::Value::from_float(4.0F),
+    };
+    const std::array<phoneme::vm::Value, 4> component_orientation {
+        phoneme::vm::Value::from_float(90.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(1.0F),
+    };
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "setTranslation", "(FFF)V", component_translation);
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "setOrientation", "(FFFF)V", component_orientation);
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "setScale", "(FFF)V", component_scale);
+
+    const auto read_float_element = [&](phoneme::vm::ObjectRef array,
+                                        phoneme::usize index) {
+        auto value = machine.heap().element(array, index);
+        require(value.has_value() && value->as_float().has_value(),
+                "read M3G float array element");
+        return *value->as_float();
+    };
+    const auto require_component_array = [&](const char* method,
+                                             phoneme::vm::ObjectRef destination,
+                                             std::span<const float> expected,
+                                             const char* message) {
+        const phoneme::vm::Value argument =
+            phoneme::vm::Value::from_reference(destination);
+        invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                    method, "([F)V",
+                    std::span<const phoneme::vm::Value>(&argument, 1U));
+        for (phoneme::usize index = 0U; index < expected.size(); ++index) {
+            require(std::abs(read_float_element(destination, index) -
+                             expected[index]) < 0.001F,
+                    message);
+        }
+    };
+    auto translation_result = float_array({0.0F, 0.0F, 0.0F});
+    auto scale_result = float_array({0.0F, 0.0F, 0.0F});
+    auto orientation_result = float_array({0.0F, 0.0F, 0.0F, 0.0F});
+    const std::array<float, 3> expected_translation {4.0F, 5.0F, 6.0F};
+    const std::array<float, 3> expected_scale {2.0F, 3.0F, 4.0F};
+    const std::array<float, 4> expected_orientation {90.0F, 0.0F, 0.0F, 1.0F};
+    require_component_array("getTranslation", translation_result,
+                            expected_translation,
+                            "Transformable preserves component translation");
+    require_component_array("getScale", scale_result, expected_scale,
+                            "setScale preserves the existing orientation");
+    require_component_array("getOrientation", orientation_result,
+                            expected_orientation,
+                            "setScale does not destroy orientation");
+
+    auto generic_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(generic_transform.has_value(),
+            "allocate Transformable generic transform");
+    invoke_void(*generic_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> generic_translation {
+        phoneme::vm::Value::from_float(7.0F),
+        phoneme::vm::Value::from_float(8.0F),
+        phoneme::vm::Value::from_float(9.0F),
+    };
+    invoke_void(*generic_transform, "javax/microedition/m3g/Transform",
+                "postTranslate", "(FFF)V", generic_translation);
+    const phoneme::vm::Value generic_argument =
+        phoneme::vm::Value::from_reference(*generic_transform);
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "setTransform", "(Ljavax/microedition/m3g/Transform;)V",
+                std::span<const phoneme::vm::Value>(&generic_argument, 1U));
+
+    const auto transform_matrix_result = [&](const char* method) {
+        auto destination = machine.class_states().allocate_instance(
+            machine.heap(), "javax/microedition/m3g/Transform");
+        require(destination.has_value(), "allocate Transform destination");
+        invoke_void(*destination, "javax/microedition/m3g/Transform",
+                    "<init>", "()V");
+        const phoneme::vm::Value destination_argument =
+            phoneme::vm::Value::from_reference(*destination);
+        invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                    method, "(Ljavax/microedition/m3g/Transform;)V",
+                    std::span<const phoneme::vm::Value>(
+                        &destination_argument, 1U));
+        auto values = machine.heap().allocate_array(
+            "[F", 16U, phoneme::vm::Value::from_float(0.0F));
+        require(values.has_value(), "allocate Transform matrix result");
+        const phoneme::vm::Value values_argument =
+            phoneme::vm::Value::from_reference(*values);
+        invoke_void(*destination, "javax/microedition/m3g/Transform",
+                    "get", "([F)V",
+                    std::span<const phoneme::vm::Value>(&values_argument, 1U));
+        return *values;
+    };
+    const auto generic_matrix = transform_matrix_result("getTransform");
+    require(std::abs(read_float_element(generic_matrix, 3U) - 7.0F) < 0.001F &&
+                std::abs(read_float_element(generic_matrix, 7U) - 8.0F) < 0.001F &&
+                std::abs(read_float_element(generic_matrix, 11U) - 9.0F) < 0.001F,
+            "getTransform returns only the generic matrix");
+    const auto composite_transform =
+        transform_matrix_result("getCompositeTransform");
+    require(std::abs(read_float_element(composite_transform, 3U) + 20.0F) <
+                0.001F &&
+                std::abs(read_float_element(composite_transform, 7U) - 19.0F) <
+                0.001F &&
+                std::abs(read_float_element(composite_transform, 11U) - 42.0F) <
+                0.001F,
+            "getCompositeTransform composes T x R x S x generic transform");
+
+    const std::array<phoneme::vm::Value, 3> incremental_translation {
+        phoneme::vm::Value::from_float(1.0F),
+        phoneme::vm::Value::from_float(-2.0F),
+        phoneme::vm::Value::from_float(3.0F),
+    };
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "translate", "(FFF)V", incremental_translation);
+    const std::array<float, 3> translated_components {5.0F, 3.0F, 9.0F};
+    require_component_array("getTranslation", translation_result,
+                            translated_components,
+                            "translate adds component-space translation");
+
+    const std::array<phoneme::vm::Value, 3> incremental_scale {
+        phoneme::vm::Value::from_float(0.5F),
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(0.25F),
+    };
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "scale", "(FFF)V", incremental_scale);
+    const std::array<float, 3> scaled_components {1.0F, 6.0F, 1.0F};
+    require_component_array("getScale", scale_result, scaled_components,
+                            "scale multiplies component scale without losing rotation");
+    require_component_array("getOrientation", orientation_result,
+                            expected_orientation,
+                            "component scale operations preserve orientation");
+
+    const std::array<phoneme::vm::Value, 4> identity_orientation {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*camera, "javax/microedition/m3g/Transformable",
+                "setOrientation", "(FFFF)V", identity_orientation);
+    const std::array<float, 4> expected_identity_orientation {
+        0.0F, 0.0F, 0.0F, 1.0F};
+    require_component_array("getOrientation", orientation_result,
+                            expected_identity_orientation,
+                            "zero angle accepts a zero axis and produces identity");
+    require_component_array("getScale", scale_result, scaled_components,
+                            "setOrientation preserves component scale");
+
+    auto empty_transform_array = machine.heap().allocate_array(
+        "[F", 0U, phoneme::vm::Value::from_float(0.0F));
+    require(empty_transform_array.has_value(),
+            "allocate empty Transform input");
+    const phoneme::vm::Value empty_transform_argument =
+        phoneme::vm::Value::from_reference(*empty_transform_array);
+    invoke_void(*generic_transform, "javax/microedition/m3g/Transform",
+                "transform", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &empty_transform_argument, 1U));
+
+    auto alignment_root = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    auto aligned_node = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    auto alignment_target = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    require(alignment_root.has_value() && aligned_node.has_value() &&
+                alignment_target.has_value(),
+            "allocate M3G alignment graph");
+    invoke_void(*alignment_root, "javax/microedition/m3g/Group",
+                "<init>", "()V");
+    invoke_void(*aligned_node, "javax/microedition/m3g/Group",
+                "<init>", "()V");
+    invoke_void(*alignment_target, "javax/microedition/m3g/Group",
+                "<init>", "()V");
+    for (const phoneme::vm::ObjectRef child :
+         std::array<phoneme::vm::ObjectRef, 2> {
+             *aligned_node, *alignment_target}) {
+        const phoneme::vm::Value child_argument =
+            phoneme::vm::Value::from_reference(child);
+        invoke_void(*alignment_root, "javax/microedition/m3g/Group",
+                    "addChild", "(Ljavax/microedition/m3g/Node;)V",
+                    std::span<const phoneme::vm::Value>(
+                        &child_argument, 1U));
+    }
+    const std::array<phoneme::vm::Value, 3> alignment_translation {
+        phoneme::vm::Value::from_float(10.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*alignment_target,
+                "javax/microedition/m3g/Transformable",
+                "setTranslation", "(FFF)V", alignment_translation);
+    const std::array<phoneme::vm::Value, 4> alignment_arguments {
+        phoneme::vm::Value::from_reference(*alignment_target),
+        phoneme::vm::Value::from_int(145),
+        phoneme::vm::Value::from_reference({}),
+        phoneme::vm::Value::from_int(144),
+    };
+    invoke_void(*aligned_node, "javax/microedition/m3g/Node",
+                "setAlignment",
+                "(Ljavax/microedition/m3g/Node;I"
+                "Ljavax/microedition/m3g/Node;I)V",
+                alignment_arguments);
+    const phoneme::vm::Value z_axis =
+        phoneme::vm::Value::from_int(148);
+    auto alignment_target_result = machine.invoke_instance(
+        *aligned_node, "javax/microedition/m3g/Node",
+        "getAlignmentTarget", "(I)I",
+        std::span<const phoneme::vm::Value>(&z_axis, 1U));
+    require(alignment_target_result.has_value() &&
+                alignment_target_result->completed_normally() &&
+                alignment_target_result->return_value.has_value() &&
+                alignment_target_result->return_value->as_int().value_or(0) ==
+                    145,
+            "Node.getAlignmentTarget returns the target enum");
+    auto alignment_reference_result = machine.invoke_instance(
+        *aligned_node, "javax/microedition/m3g/Node",
+        "getAlignmentReference",
+        "(I)Ljavax/microedition/m3g/Node;",
+        std::span<const phoneme::vm::Value>(&z_axis, 1U));
+    require(alignment_reference_result.has_value() &&
+                alignment_reference_result->completed_normally() &&
+                alignment_reference_result->return_value.has_value() &&
+                alignment_reference_result->return_value->as_reference()
+                    .value_or(phoneme::vm::ObjectRef {}) == *alignment_target,
+            "Node.getAlignmentReference returns the configured Node");
+    const phoneme::vm::Value null_alignment_reference =
+        phoneme::vm::Value::from_reference({});
+    invoke_void(*aligned_node, "javax/microedition/m3g/Node",
+                "align", "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(
+                    &null_alignment_reference, 1U));
+    auto aligned_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(aligned_transform.has_value(),
+            "allocate aligned Transform destination");
+    invoke_void(*aligned_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const phoneme::vm::Value aligned_transform_argument =
+        phoneme::vm::Value::from_reference(*aligned_transform);
+    invoke_void(*aligned_node, "javax/microedition/m3g/Transformable",
+                "getCompositeTransform",
+                "(Ljavax/microedition/m3g/Transform;)V",
+                std::span<const phoneme::vm::Value>(
+                    &aligned_transform_argument, 1U));
+    auto aligned_axis = float_array({0.0F, 0.0F, 1.0F, 0.0F});
+    const phoneme::vm::Value aligned_axis_argument =
+        phoneme::vm::Value::from_reference(aligned_axis);
+    invoke_void(*aligned_transform, "javax/microedition/m3g/Transform",
+                "transform", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &aligned_axis_argument, 1U));
+    require(std::abs(read_float_element(aligned_axis, 0U) - 1.0F) <
+                0.001F &&
+                std::abs(read_float_element(aligned_axis, 1U)) < 0.001F &&
+                std::abs(read_float_element(aligned_axis, 2U)) < 0.001F,
+            "Node.align rotates local Z toward the target origin");
+
     const phoneme::vm::Value camera_argument =
         phoneme::vm::Value::from_reference(*camera);
     invoke_void(*group, "javax/microedition/m3g/Group", "addChild",
@@ -3445,6 +4360,1612 @@ void test_machine_m3g() {
     require(graphics3d_object.has_value() &&
                 !graphics3d_object->is_null(),
             "Graphics3D singleton is non-null");
+    auto graphics3d_properties = machine.invoke_static(
+        "javax/microedition/m3g/Graphics3D", "getProperties",
+        "()Ljava/util/Hashtable;");
+    require(graphics3d_properties.has_value() &&
+                graphics3d_properties->completed_normally() &&
+                graphics3d_properties->return_value.has_value(),
+            "Graphics3D.getProperties returns capability metadata");
+    auto graphics3d_property_table =
+        graphics3d_properties->return_value->as_reference();
+    require(graphics3d_property_table.has_value() &&
+                !graphics3d_property_table->is_null(),
+            "Graphics3D property table is non-null");
+    auto graphics3d_property_count = machine.invoke_instance(
+        *graphics3d_property_table, "java/util/Hashtable", "size", "()I");
+    require(graphics3d_property_count.has_value() &&
+                graphics3d_property_count->completed_normally() &&
+                graphics3d_property_count->return_value.has_value() &&
+                graphics3d_property_count->return_value->as_int()
+                    .value_or(0) == 15,
+            "Graphics3D.getProperties exposes JSR-184 capabilities and limits");
+
+    auto render_image_object = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/lcdui/Image");
+    auto render_graphics_object = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/lcdui/Graphics");
+    auto render_image = phoneme::graphics::Image::create_mutable(64, 64);
+    require(render_image_object.has_value() &&
+                render_graphics_object.has_value() && render_image.has_value(),
+            "allocate M3G render target");
+    require(machine.graphics().attach_image(
+                render_image_object->bits, std::move(*render_image)).has_value(),
+            "attach M3G render image");
+    require(machine.graphics().attach_context(
+                render_graphics_object->bits,
+                render_image_object->bits, true).has_value(),
+            "attach M3G Graphics target");
+    const std::array<phoneme::vm::Value, 3> bind_arguments {
+        phoneme::vm::Value::from_reference(*render_graphics_object),
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_int(0),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "bindTarget",
+                "(Ljava/lang/Object;ZI)V", bind_arguments);
+    auto initial_hints = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getHints", "()I");
+    auto initial_depth_enabled = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "isDepthBufferEnabled", "()Z");
+    require(initial_hints.has_value() && initial_hints->completed_normally() &&
+                initial_hints->return_value.has_value() &&
+                initial_hints->return_value->as_int().value_or(-1) == 0 &&
+                initial_depth_enabled.has_value() &&
+                initial_depth_enabled->completed_normally() &&
+                initial_depth_enabled->return_value.has_value() &&
+                initial_depth_enabled->return_value->as_int().value_or(0) == 1,
+            "Graphics3D M3G 1.1 target state getters reflect bindTarget");
+    const std::array<phoneme::vm::Value, 4> viewport_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(64),
+        phoneme::vm::Value::from_int(64),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "setViewport",
+                "(IIII)V", viewport_arguments);
+
+    auto render_background = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Background");
+    require(render_background.has_value(), "allocate M3G render background");
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "<init>", "()V");
+    const phoneme::vm::Value background_color =
+        phoneme::vm::Value::from_int(0x00112233);
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "setColor", "(I)V",
+                std::span<const phoneme::vm::Value>(&background_color, 1U));
+    const phoneme::vm::Value render_background_argument =
+        phoneme::vm::Value::from_reference(*render_background);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    auto render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value() &&
+                (*render_payload)->pixels().front() == 0xFF112233U,
+            "Graphics3D.clear writes the Background color");
+
+    auto checker_image = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Image2D");
+    auto checker_bytes = machine.heap().allocate_array(
+        "[B", 12U, phoneme::vm::Value::from_int(0));
+    require(checker_image.has_value() && checker_bytes.has_value(),
+            "allocate M3G background image");
+    const std::array<phoneme::u8, 12> checker_values {
+        255U, 0U, 0U, 0U, 255U, 0U,
+        0U, 0U, 255U, 255U, 255U, 255U,
+    };
+    for (phoneme::usize index = 0U; index < checker_values.size(); ++index) {
+        require(machine.heap().set_element(
+                    *checker_bytes, index,
+                    phoneme::vm::Value::from_int(checker_values[index])).has_value(),
+                "write M3G checker image byte");
+    }
+    const std::array<phoneme::vm::Value, 4> checker_arguments {
+        phoneme::vm::Value::from_int(99),
+        phoneme::vm::Value::from_int(2),
+        phoneme::vm::Value::from_int(2),
+        phoneme::vm::Value::from_reference(*checker_bytes),
+    };
+    invoke_void(*checker_image, "javax/microedition/m3g/Image2D",
+                "<init>", "(III[B)V", checker_arguments);
+    const phoneme::vm::Value checker_image_argument =
+        phoneme::vm::Value::from_reference(*checker_image);
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "setImage", "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &checker_image_argument, 1U));
+    const std::array<phoneme::vm::Value, 2> repeat_modes {
+        phoneme::vm::Value::from_int(33),
+        phoneme::vm::Value::from_int(33),
+    };
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "setImageMode", "(II)V", repeat_modes);
+    const std::array<phoneme::vm::Value, 4> repeated_crop {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(4),
+        phoneme::vm::Value::from_int(4),
+    };
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "setCrop", "(IIII)V", repeated_crop);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(), "read M3G background image result");
+    const auto rendered_pixel = [&](phoneme::i32 x, phoneme::i32 y) {
+        return (*render_payload)->pixels()[
+            static_cast<phoneme::usize>(y) * 64U +
+            static_cast<phoneme::usize>(x)];
+    };
+    require(rendered_pixel(8, 8) == 0xFFFF0000U &&
+                rendered_pixel(24, 8) == 0xFF00FF00U &&
+                rendered_pixel(8, 24) == 0xFF0000FFU &&
+                rendered_pixel(24, 24) == 0xFFFFFFFFU &&
+                rendered_pixel(40, 8) == 0xFFFF0000U,
+            "Graphics3D.clear stretches and repeats Background images");
+    const phoneme::vm::Value no_background_image =
+        phoneme::vm::Value::from_reference({});
+    invoke_void(*render_background, "javax/microedition/m3g/Background",
+                "setImage", "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &no_background_image, 1U));
+
+    auto render_camera = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Camera");
+    auto render_camera_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(render_camera.has_value() && render_camera_transform.has_value(),
+            "allocate M3G render camera");
+    invoke_void(*render_camera, "javax/microedition/m3g/Camera",
+                "<init>", "()V");
+    invoke_void(*render_camera_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 4> perspective_arguments {
+        phoneme::vm::Value::from_float(60.0F),
+        phoneme::vm::Value::from_float(1.0F),
+        phoneme::vm::Value::from_float(1.0F),
+        phoneme::vm::Value::from_float(100.0F),
+    };
+    invoke_void(*render_camera, "javax/microedition/m3g/Camera",
+                "setPerspective", "(FFFF)V", perspective_arguments);
+    const std::array<phoneme::vm::Value, 3> camera_translation {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(5.0F),
+    };
+    invoke_void(*render_camera_transform,
+                "javax/microedition/m3g/Transform", "postTranslate",
+                "(FFF)V", camera_translation);
+    const std::array<phoneme::vm::Value, 2> camera_arguments {
+        phoneme::vm::Value::from_reference(*render_camera),
+        phoneme::vm::Value::from_reference(*render_camera_transform),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "setCamera",
+                "(Ljavax/microedition/m3g/Camera;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                camera_arguments);
+
+    auto sprite_appearance = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Appearance");
+    auto render_sprite = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Sprite3D");
+    auto sprite_root_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(sprite_appearance.has_value() && render_sprite.has_value() &&
+                sprite_root_transform.has_value(),
+            "allocate M3G Sprite3D render state");
+    invoke_void(*sprite_appearance, "javax/microedition/m3g/Appearance",
+                "<init>", "()V");
+    invoke_void(*sprite_root_transform, "javax/microedition/m3g/Transform",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> sprite_arguments {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_reference(*checker_image),
+        phoneme::vm::Value::from_reference(*sprite_appearance),
+    };
+    invoke_void(*render_sprite, "javax/microedition/m3g/Sprite3D",
+                "<init>",
+                "(ZLjavax/microedition/m3g/Image2D;"
+                "Ljavax/microedition/m3g/Appearance;)V",
+                sprite_arguments);
+    const std::array<phoneme::vm::Value, 3> sprite_scale {
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(1.0F),
+    };
+    invoke_void(*render_sprite, "javax/microedition/m3g/Transformable",
+                "setScale", "(FFF)V", sprite_scale);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    const std::array<phoneme::vm::Value, 2> sprite_render_arguments {
+        phoneme::vm::Value::from_reference(*render_sprite),
+        phoneme::vm::Value::from_reference(*sprite_root_transform),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/Node;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                sprite_render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(), "read rendered M3G Sprite3D image");
+    require(rendered_pixel(27, 27) == 0xFFFF0000U &&
+                rendered_pixel(37, 27) == 0xFF00FF00U &&
+                rendered_pixel(27, 37) == 0xFF0000FFU &&
+                rendered_pixel(37, 37) == 0xFFFFFFFFU,
+            "Graphics3D.render draws scaled Sprite3D billboards");
+
+    const std::array<phoneme::vm::Value, 4> flipped_sprite_crop {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(-2),
+        phoneme::vm::Value::from_int(2),
+    };
+    invoke_void(*render_sprite, "javax/microedition/m3g/Sprite3D",
+                "setCrop", "(IIII)V", flipped_sprite_crop);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/Node;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                sprite_render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(),
+            "read horizontally flipped Sprite3D image");
+    require(rendered_pixel(27, 27) == 0xFF00FF00U &&
+                rendered_pixel(37, 27) == 0xFFFF0000U,
+            "Sprite3D negative crop width flips the image horizontally");
+
+    auto render_vertices = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexArray");
+    require(render_vertices.has_value(), "allocate M3G render vertices");
+    const std::array<phoneme::vm::Value, 3> vertex_constructor_arguments {
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(2),
+    };
+    invoke_void(*render_vertices, "javax/microedition/m3g/VertexArray",
+                "<init>", "(III)V", vertex_constructor_arguments);
+    auto render_vertex_values = machine.heap().allocate_array(
+        "[S", 9U, phoneme::vm::Value::from_int(0));
+    require(render_vertex_values.has_value(),
+            "allocate M3G render vertex values");
+    const std::array<phoneme::i32, 9> triangle_values {
+        -1, -1, 0, 1, -1, 0, 0, 1, 0,
+    };
+    for (phoneme::usize index = 0U; index < triangle_values.size(); ++index) {
+        require(machine.heap().set_element(
+                    *render_vertex_values, index,
+                    phoneme::vm::Value::from_int(
+                        triangle_values[index])).has_value(),
+                "write M3G render vertex value");
+    }
+    const std::array<phoneme::vm::Value, 3> vertex_set_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_reference(*render_vertex_values),
+    };
+    invoke_void(*render_vertices, "javax/microedition/m3g/VertexArray",
+                "set", "(II[S)V", vertex_set_arguments);
+
+    auto render_vertex_buffer = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexBuffer");
+    require(render_vertex_buffer.has_value(),
+            "allocate M3G render VertexBuffer");
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> render_position_arguments {
+        phoneme::vm::Value::from_reference(*render_vertices),
+        phoneme::vm::Value::from_float(1.0F),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setPositions",
+                "(Ljavax/microedition/m3g/VertexArray;F[F)V",
+                render_position_arguments);
+
+    auto strip_lengths = machine.heap().allocate_array(
+        "[I", 1U, phoneme::vm::Value::from_int(3));
+    auto render_indices = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/TriangleStripArray");
+    require(strip_lengths.has_value() && render_indices.has_value(),
+            "allocate M3G triangle strip");
+    const std::array<phoneme::vm::Value, 2> strip_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*strip_lengths),
+    };
+    invoke_void(*render_indices,
+                "javax/microedition/m3g/TriangleStripArray",
+                "<init>", "(I[I)V", strip_arguments);
+
+    auto render_appearance = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Appearance");
+    auto render_model_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(render_appearance.has_value() &&
+                render_model_transform.has_value(),
+            "allocate M3G render state");
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "<init>", "()V");
+    invoke_void(*render_model_transform,
+                "javax/microedition/m3g/Transform", "<init>", "()V");
+    const std::array<phoneme::vm::Value, 4> render_arguments {
+        phoneme::vm::Value::from_reference(*render_vertex_buffer),
+        phoneme::vm::Value::from_reference(*render_indices),
+        phoneme::vm::Value::from_reference(*render_appearance),
+        phoneme::vm::Value::from_reference(*render_model_transform),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(), "read rendered M3G image");
+    const auto changed_pixels = std::count_if(
+        (*render_payload)->pixels().begin(),
+        (*render_payload)->pixels().end(),
+        [](phoneme::graphics::Pixel pixel) {
+            return pixel != 0xFF112233U;
+        });
+    require(changed_pixels > 100,
+            "Graphics3D.render rasterizes visible geometry");
+
+    auto texture_coordinates_zero = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexArray");
+    auto texture_values_zero = machine.heap().allocate_array(
+        "[S", 6U, phoneme::vm::Value::from_int(1));
+    auto texture_coordinates_one = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexArray");
+    auto texture_values_one = machine.heap().allocate_array(
+        "[S", 6U, phoneme::vm::Value::from_int(3));
+    require(texture_coordinates_zero.has_value() &&
+                texture_values_zero.has_value() &&
+                texture_coordinates_one.has_value() &&
+                texture_values_one.has_value(),
+            "allocate M3G multi-texture coordinates");
+    for (phoneme::usize vertex = 0U; vertex < 3U; ++vertex) {
+        require(machine.heap().set_element(
+                    *texture_values_zero, vertex * 2U + 1U,
+                    phoneme::vm::Value::from_int(3)).has_value(),
+                "write M3G texture V coordinate");
+    }
+    const std::array<phoneme::vm::Value, 3> texture_array_arguments {
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(2),
+        phoneme::vm::Value::from_int(2),
+    };
+    invoke_void(*texture_coordinates_zero,
+                "javax/microedition/m3g/VertexArray", "<init>", "(III)V",
+                texture_array_arguments);
+    invoke_void(*texture_coordinates_one,
+                "javax/microedition/m3g/VertexArray", "<init>", "(III)V",
+                texture_array_arguments);
+    const std::array<phoneme::vm::Value, 3> texture_zero_set_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_reference(*texture_values_zero),
+    };
+    const std::array<phoneme::vm::Value, 3> texture_one_set_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_reference(*texture_values_one),
+    };
+    invoke_void(*texture_coordinates_zero,
+                "javax/microedition/m3g/VertexArray", "set", "(II[S)V",
+                texture_zero_set_arguments);
+    invoke_void(*texture_coordinates_one,
+                "javax/microedition/m3g/VertexArray", "set", "(II[S)V",
+                texture_one_set_arguments);
+    const std::array<phoneme::vm::Value, 4> texture_zero_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*texture_coordinates_zero),
+        phoneme::vm::Value::from_float(0.25F),
+        phoneme::vm::Value::from_reference({}),
+    };
+    const std::array<phoneme::vm::Value, 4> texture_one_arguments {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_reference(*texture_coordinates_one),
+        phoneme::vm::Value::from_float(0.25F),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setTexCoords",
+                "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+                texture_zero_arguments);
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setTexCoords",
+                "(ILjavax/microedition/m3g/VertexArray;F[F)V",
+                texture_one_arguments);
+
+    auto texture_zero = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Texture2D");
+    auto texture_one = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Texture2D");
+    require(texture_zero.has_value() && texture_one.has_value(),
+            "allocate M3G Texture2D units");
+    const phoneme::vm::Value checker_texture_argument =
+        phoneme::vm::Value::from_reference(*checker_image);
+    invoke_void(*texture_zero, "javax/microedition/m3g/Texture2D",
+                "<init>", "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &checker_texture_argument, 1U));
+    invoke_void(*texture_one, "javax/microedition/m3g/Texture2D",
+                "<init>", "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &checker_texture_argument, 1U));
+    const std::array<phoneme::vm::Value, 2> texture_unit_zero_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*texture_zero),
+    };
+    const std::array<phoneme::vm::Value, 2> texture_unit_one_arguments {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_reference(*texture_one),
+    };
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                texture_unit_zero_arguments);
+    const auto render_textured = [&]() {
+        invoke_void(*graphics3d_object,
+                    "javax/microedition/m3g/Graphics3D", "clear",
+                    "(Ljavax/microedition/m3g/Background;)V",
+                    std::span<const phoneme::vm::Value>(
+                        &render_background_argument, 1U));
+        invoke_void(*graphics3d_object,
+                    "javax/microedition/m3g/Graphics3D", "render",
+                    "(Ljavax/microedition/m3g/VertexBuffer;"
+                    "Ljavax/microedition/m3g/IndexBuffer;"
+                    "Ljavax/microedition/m3g/Appearance;"
+                    "Ljavax/microedition/m3g/Transform;)V",
+                    render_arguments);
+        render_payload = machine.graphics().image(render_image_object->bits);
+        require(render_payload.has_value(),
+                "read textured M3G framebuffer");
+        return rendered_pixel(32, 32);
+    };
+    require(render_textured() == 0xFFFF0000U,
+            "Texture2D FUNC_REPLACE samples texture unit zero");
+
+    const phoneme::vm::Value add_texture_function =
+        phoneme::vm::Value::from_int(224);
+    invoke_void(*texture_one, "javax/microedition/m3g/Texture2D",
+                "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &add_texture_function, 1U));
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                texture_unit_one_arguments);
+    require(render_textured() == 0xFFFFFF00U,
+            "Graphics3D combines multiple Texture2D units in order");
+
+    const std::array<phoneme::vm::Value, 2> remove_texture_one_arguments {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                remove_texture_one_arguments);
+    const std::array<phoneme::vm::Value, 3> translated_texture {
+        phoneme::vm::Value::from_float(0.5F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*texture_zero,
+                "javax/microedition/m3g/Transformable", "setTranslation",
+                "(FFF)V", translated_texture);
+    require(render_textured() == 0xFF00FF00U,
+            "Texture2D transform modifies sampled coordinates");
+    const std::array<phoneme::vm::Value, 3> reset_texture_translation {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*texture_zero,
+                "javax/microedition/m3g/Transformable", "setTranslation",
+                "(FFF)V", reset_texture_translation);
+
+    for (phoneme::usize vertex = 0U; vertex < 3U; ++vertex) {
+        require(machine.heap().set_element(
+                    *texture_values_zero, vertex * 2U,
+                    phoneme::vm::Value::from_int(5)).has_value(),
+                "write out-of-range texture coordinate");
+    }
+    invoke_void(*texture_coordinates_zero,
+                "javax/microedition/m3g/VertexArray", "set", "(II[S)V",
+                texture_zero_set_arguments);
+    require(render_textured() == 0xFF00FF00U,
+            "Texture2D WRAP_CLAMP clamps out-of-range coordinates");
+    const std::array<phoneme::vm::Value, 2> repeat_texture_arguments {
+        phoneme::vm::Value::from_int(241),
+        phoneme::vm::Value::from_int(240),
+    };
+    invoke_void(*texture_zero, "javax/microedition/m3g/Texture2D",
+                "setWrapping", "(II)V", repeat_texture_arguments);
+    require(render_textured() == 0xFFFF0000U,
+            "Texture2D WRAP_REPEAT repeats out-of-range coordinates");
+
+    for (phoneme::usize vertex = 0U; vertex < 3U; ++vertex) {
+        require(machine.heap().set_element(
+                    *texture_values_zero, vertex * 2U,
+                    phoneme::vm::Value::from_int(2)).has_value(),
+                "write centered texture coordinate");
+    }
+    invoke_void(*texture_coordinates_zero,
+                "javax/microedition/m3g/VertexArray", "set", "(II[S)V",
+                texture_zero_set_arguments);
+    const std::array<phoneme::vm::Value, 2> linear_filter_arguments {
+        phoneme::vm::Value::from_int(208),
+        phoneme::vm::Value::from_int(209),
+    };
+    invoke_void(*texture_zero, "javax/microedition/m3g/Texture2D",
+                "setFiltering", "(II)V", linear_filter_arguments);
+    const auto linearly_filtered = render_textured();
+    require(phoneme::graphics::red(linearly_filtered) > 110U &&
+                phoneme::graphics::red(linearly_filtered) < 145U &&
+                phoneme::graphics::green(linearly_filtered) > 110U &&
+                phoneme::graphics::green(linearly_filtered) < 145U &&
+                phoneme::graphics::blue(linearly_filtered) < 15U,
+            "Texture2D FILTER_LINEAR bilinearly samples texels");
+
+    const std::array<phoneme::vm::Value, 2> remove_texture_zero_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                remove_texture_zero_arguments);
+    auto polygon_mode = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/PolygonMode");
+    require(polygon_mode.has_value(), "allocate M3G PolygonMode");
+    invoke_void(*polygon_mode, "javax/microedition/m3g/PolygonMode",
+                "<init>", "()V");
+    const phoneme::vm::Value polygon_argument =
+        phoneme::vm::Value::from_reference(*polygon_mode);
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setPolygonMode", "(Ljavax/microedition/m3g/PolygonMode;)V",
+                std::span<const phoneme::vm::Value>(&polygon_argument, 1U));
+    const phoneme::vm::Value clockwise_winding =
+        phoneme::vm::Value::from_int(169);
+    invoke_void(*polygon_mode, "javax/microedition/m3g/PolygonMode",
+                "setWinding", "(I)V",
+                std::span<const phoneme::vm::Value>(&clockwise_winding, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value() && std::all_of(
+                (*render_payload)->pixels().begin(),
+                (*render_payload)->pixels().end(),
+                [](phoneme::graphics::Pixel pixel) {
+                    return pixel == 0xFF112233U;
+                }),
+            "PolygonMode winding and back-face culling reject reversed faces");
+    const phoneme::vm::Value no_culling =
+        phoneme::vm::Value::from_int(162);
+    invoke_void(*polygon_mode, "javax/microedition/m3g/PolygonMode",
+                "setCulling", "(I)V",
+                std::span<const phoneme::vm::Value>(&no_culling, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value() && std::any_of(
+                (*render_payload)->pixels().begin(),
+                (*render_payload)->pixels().end(),
+                [](phoneme::graphics::Pixel pixel) {
+                    return pixel != 0xFF112233U;
+                }),
+            "PolygonMode CULL_NONE renders both winding directions");
+
+    auto compositing_mode = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/CompositingMode");
+    require(compositing_mode.has_value(), "allocate M3G CompositingMode");
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode", "<init>", "()V");
+    const phoneme::vm::Value compositing_argument =
+        phoneme::vm::Value::from_reference(*compositing_mode);
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setCompositingMode",
+                "(Ljavax/microedition/m3g/CompositingMode;)V",
+                std::span<const phoneme::vm::Value>(
+                    &compositing_argument, 1U));
+    const phoneme::vm::Value color_write_disabled =
+        phoneme::vm::Value::from_int(0);
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setColorWriteEnable", "(Z)V",
+                std::span<const phoneme::vm::Value>(
+                    &color_write_disabled, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value() && std::all_of(
+                (*render_payload)->pixels().begin(),
+                (*render_payload)->pixels().end(),
+                [](phoneme::graphics::Pixel pixel) {
+                    return pixel == 0xFF112233U;
+                }),
+            "CompositingMode color-write disable preserves the framebuffer");
+
+    const phoneme::vm::Value color_write_enabled =
+        phoneme::vm::Value::from_int(1);
+    const phoneme::vm::Value alpha_blending =
+        phoneme::vm::Value::from_int(64);
+    const phoneme::vm::Value translucent_red =
+        phoneme::vm::Value::from_int(static_cast<phoneme::i32>(0x80FF0000U));
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setColorWriteEnable", "(Z)V",
+                std::span<const phoneme::vm::Value>(
+                    &color_write_enabled, 1U));
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(&alpha_blending, 1U));
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer",
+                "setDefaultColor", "(I)V",
+                std::span<const phoneme::vm::Value>(&translucent_red, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(), "read alpha-blended M3G geometry");
+    const auto blended_center = rendered_pixel(32, 32);
+    require(phoneme::graphics::red(blended_center) > 120U &&
+                phoneme::graphics::red(blended_center) < 150U &&
+                phoneme::graphics::green(blended_center) > 10U &&
+                phoneme::graphics::green(blended_center) < 25U &&
+                phoneme::graphics::blue(blended_center) > 15U &&
+                phoneme::graphics::blue(blended_center) < 35U,
+            "CompositingMode ALPHA blends mesh color over the framebuffer");
+
+    const phoneme::vm::Value counter_clockwise_winding =
+        phoneme::vm::Value::from_int(168);
+    const phoneme::vm::Value back_culling =
+        phoneme::vm::Value::from_int(160);
+    const phoneme::vm::Value replace_blending =
+        phoneme::vm::Value::from_int(68);
+    const phoneme::vm::Value opaque_white =
+        phoneme::vm::Value::from_int(static_cast<phoneme::i32>(0xFFFFFFFFU));
+    invoke_void(*polygon_mode, "javax/microedition/m3g/PolygonMode",
+                "setWinding", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &counter_clockwise_winding, 1U));
+    invoke_void(*polygon_mode, "javax/microedition/m3g/PolygonMode",
+                "setCulling", "(I)V",
+                std::span<const phoneme::vm::Value>(&back_culling, 1U));
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(&replace_blending, 1U));
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer",
+                "setDefaultColor", "(I)V",
+                std::span<const phoneme::vm::Value>(&opaque_white, 1U));
+
+    auto render_mesh = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Mesh");
+    auto render_world = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/World");
+    require(render_mesh.has_value() && render_world.has_value(),
+            "allocate M3G World render graph");
+    const std::array<phoneme::vm::Value, 3> mesh_arguments {
+        phoneme::vm::Value::from_reference(*render_vertex_buffer),
+        phoneme::vm::Value::from_reference(*render_indices),
+        phoneme::vm::Value::from_reference(*render_appearance),
+    };
+    invoke_void(*render_mesh, "javax/microedition/m3g/Mesh",
+                "<init>",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;)V",
+                mesh_arguments);
+    invoke_void(*render_world, "javax/microedition/m3g/World",
+                "<init>", "()V");
+    invoke_void(*render_camera, "javax/microedition/m3g/Transformable",
+                "setTranslation", "(FFF)V", camera_translation);
+    for (const phoneme::vm::ObjectRef child :
+         std::array<phoneme::vm::ObjectRef, 2> {
+             *render_camera, *render_mesh}) {
+        const phoneme::vm::Value child_argument =
+            phoneme::vm::Value::from_reference(child);
+        invoke_void(*render_world, "javax/microedition/m3g/Group",
+                    "addChild", "(Ljavax/microedition/m3g/Node;)V",
+                    std::span<const phoneme::vm::Value>(
+                        &child_argument, 1U));
+    }
+    const phoneme::vm::Value active_camera_argument =
+        phoneme::vm::Value::from_reference(*render_camera);
+    invoke_void(*render_world, "javax/microedition/m3g/World",
+                "setActiveCamera", "(Ljavax/microedition/m3g/Camera;)V",
+                std::span<const phoneme::vm::Value>(
+                    &active_camera_argument, 1U));
+
+    auto ray_intersection = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/RayIntersection");
+    require(ray_intersection.has_value(),
+            "allocate M3G RayIntersection");
+    invoke_void(*ray_intersection,
+                "javax/microedition/m3g/RayIntersection",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 8> ray_pick_arguments {
+        phoneme::vm::Value::from_int(-1),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(3.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(-1.0F),
+        phoneme::vm::Value::from_reference(*ray_intersection),
+    };
+    auto ray_pick = machine.invoke_instance(
+        *render_world, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        ray_pick_arguments);
+    require(ray_pick.has_value() && ray_pick->completed_normally() &&
+                ray_pick->return_value.has_value() &&
+                ray_pick->return_value->as_int().value_or(0) == 1,
+            "Group.pick intersects Mesh triangles with a 3D ray");
+    auto picked_node = machine.invoke_instance(
+        *ray_intersection, "javax/microedition/m3g/RayIntersection",
+        "getIntersected", "()Ljavax/microedition/m3g/Node;");
+    require(picked_node.has_value() && picked_node->completed_normally() &&
+                picked_node->return_value.has_value() &&
+                picked_node->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}) == *render_mesh,
+            "RayIntersection returns the nearest intersected Mesh");
+    auto picked_distance = machine.invoke_instance(
+        *ray_intersection, "javax/microedition/m3g/RayIntersection",
+        "getDistance", "()F");
+    require(picked_distance.has_value() &&
+                picked_distance->completed_normally() &&
+                picked_distance->return_value.has_value() &&
+                std::abs(picked_distance->return_value->as_float()
+                    .value_or(0.0F) - 3.0F) < 0.001F,
+            "RayIntersection reports the nearest ray distance");
+    auto picked_normal_z = machine.invoke_instance(
+        *ray_intersection, "javax/microedition/m3g/RayIntersection",
+        "getNormalZ", "()F");
+    require(picked_normal_z.has_value() &&
+                picked_normal_z->return_value.has_value() &&
+                std::abs(picked_normal_z->return_value->as_float()
+                    .value_or(0.0F) - 1.0F) < 0.001F,
+            "RayIntersection reports the triangle normal");
+    const phoneme::vm::Value second_texture_unit =
+        phoneme::vm::Value::from_int(1);
+    auto picked_texture_s = machine.invoke_instance(
+        *ray_intersection, "javax/microedition/m3g/RayIntersection",
+        "getTextureS", "(I)F",
+        std::span<const phoneme::vm::Value>(&second_texture_unit, 1U));
+    auto picked_texture_t = machine.invoke_instance(
+        *ray_intersection, "javax/microedition/m3g/RayIntersection",
+        "getTextureT", "(I)F",
+        std::span<const phoneme::vm::Value>(&second_texture_unit, 1U));
+    require(picked_texture_s.has_value() &&
+                picked_texture_s->completed_normally() &&
+                picked_texture_s->return_value.has_value() &&
+                std::abs(picked_texture_s->return_value->as_float()
+                    .value_or(0.0F) - 0.75F) < 0.001F &&
+                picked_texture_t.has_value() &&
+                picked_texture_t->completed_normally() &&
+                picked_texture_t->return_value.has_value() &&
+                std::abs(picked_texture_t->return_value->as_float()
+                    .value_or(0.0F) - 0.75F) < 0.001F,
+            "RayIntersection reports all texture coordinate units");
+    auto picked_ray = float_array(
+        {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F});
+    const phoneme::vm::Value picked_ray_argument =
+        phoneme::vm::Value::from_reference(picked_ray);
+    invoke_void(*ray_intersection,
+                "javax/microedition/m3g/RayIntersection",
+                "getRay", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &picked_ray_argument, 1U));
+    require(std::abs(read_float_element(picked_ray, 2U) - 3.0F) <
+                0.001F &&
+                std::abs(read_float_element(picked_ray, 5U) + 1.0F) <
+                0.001F,
+            "RayIntersection preserves the normalized pick ray");
+
+    auto screen_intersection = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/RayIntersection");
+    require(screen_intersection.has_value(),
+            "allocate screen-space RayIntersection");
+    invoke_void(*screen_intersection,
+                "javax/microedition/m3g/RayIntersection",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 5> screen_pick_arguments {
+        phoneme::vm::Value::from_int(-1),
+        phoneme::vm::Value::from_float(0.5F),
+        phoneme::vm::Value::from_float(0.5F),
+        phoneme::vm::Value::from_reference({}),
+        phoneme::vm::Value::from_reference(*screen_intersection),
+    };
+    auto screen_pick = machine.invoke_instance(
+        *render_world, "javax/microedition/m3g/Group", "pick",
+        "(IFFLjavax/microedition/m3g/Camera;"
+        "Ljavax/microedition/m3g/RayIntersection;)Z",
+        screen_pick_arguments);
+    require(screen_pick.has_value() && screen_pick->completed_normally() &&
+                screen_pick->return_value.has_value() &&
+                screen_pick->return_value->as_int().value_or(0) == 1,
+            "Group.pick unprojects screen coordinates through the active Camera");
+
+    const phoneme::vm::Value mesh_scope =
+        phoneme::vm::Value::from_int(1);
+    invoke_void(*render_mesh, "javax/microedition/m3g/Node",
+                "setScope", "(I)V",
+                std::span<const phoneme::vm::Value>(&mesh_scope, 1U));
+    auto masked_arguments = ray_pick_arguments;
+    masked_arguments[0U] = phoneme::vm::Value::from_int(2);
+    auto masked_pick = machine.invoke_instance(
+        *render_world, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        masked_arguments);
+    require(masked_pick.has_value() && masked_pick->completed_normally() &&
+                masked_pick->return_value.has_value() &&
+                masked_pick->return_value->as_int().value_or(1) == 0,
+            "Group.pick respects Node scope masks");
+    const phoneme::vm::Value all_scope =
+        phoneme::vm::Value::from_int(-1);
+    invoke_void(*render_mesh, "javax/microedition/m3g/Node",
+                "setScope", "(I)V",
+                std::span<const phoneme::vm::Value>(&all_scope, 1U));
+
+    auto render_normals = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexArray");
+    auto render_normal_values = machine.heap().allocate_array(
+        "[B", 9U, phoneme::vm::Value::from_int(0));
+    require(render_normals.has_value() && render_normal_values.has_value(),
+            "allocate M3G lighting normals");
+    const std::array<phoneme::vm::Value, 3> normal_constructor_arguments {
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(1),
+    };
+    invoke_void(*render_normals, "javax/microedition/m3g/VertexArray",
+                "<init>", "(III)V", normal_constructor_arguments);
+    for (phoneme::usize vertex = 0U; vertex < 3U; ++vertex) {
+        require(machine.heap().set_element(
+                    *render_normal_values, vertex * 3U + 2U,
+                    phoneme::vm::Value::from_int(127)).has_value(),
+                "write M3G lighting normal");
+    }
+    const std::array<phoneme::vm::Value, 3> normal_set_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_reference(*render_normal_values),
+    };
+    invoke_void(*render_normals, "javax/microedition/m3g/VertexArray",
+                "set", "(II[B)V", normal_set_arguments);
+    const phoneme::vm::Value lighting_normals_argument =
+        phoneme::vm::Value::from_reference(*render_normals);
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setNormals",
+                "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lighting_normals_argument, 1U));
+
+    auto render_material = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Material");
+    auto world_light = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Light");
+    require(render_material.has_value() && world_light.has_value(),
+            "allocate M3G Material and World light");
+    invoke_void(*render_material, "javax/microedition/m3g/Material",
+                "<init>", "()V");
+    invoke_void(*world_light, "javax/microedition/m3g/Light",
+                "<init>", "()V");
+    const std::array<phoneme::vm::Value, 2> red_diffuse_arguments {
+        phoneme::vm::Value::from_int(2048),
+        phoneme::vm::Value::from_int(
+            static_cast<phoneme::i32>(0xFFFF0000U)),
+    };
+    invoke_void(*render_material, "javax/microedition/m3g/Material",
+                "setColor", "(II)V", red_diffuse_arguments);
+    const phoneme::vm::Value material_argument =
+        phoneme::vm::Value::from_reference(*render_material);
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setMaterial", "(Ljavax/microedition/m3g/Material;)V",
+                std::span<const phoneme::vm::Value>(&material_argument, 1U));
+    const phoneme::vm::Value world_light_argument =
+        phoneme::vm::Value::from_reference(*world_light);
+    invoke_void(*render_world, "javax/microedition/m3g/Group",
+                "addChild", "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(
+                    &world_light_argument, 1U));
+
+    invoke_void(*render_world, "javax/microedition/m3g/World",
+                "setBackground", "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    const phoneme::vm::Value lit_world_argument =
+        phoneme::vm::Value::from_reference(*render_world);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/World;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lit_world_argument, 1U));
+    const auto lit_center = rendered_pixel(32, 32);
+    require(phoneme::graphics::red(lit_center) > 220U &&
+                phoneme::graphics::green(lit_center) < 20U &&
+                phoneme::graphics::blue(lit_center) < 20U,
+            "World Light nodes illuminate Material geometry using normals");
+
+    auto render_fog = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Fog");
+    require(render_fog.has_value(), "allocate M3G Fog");
+    invoke_void(*render_fog, "javax/microedition/m3g/Fog",
+                "<init>", "()V");
+    const phoneme::vm::Value blue_fog =
+        phoneme::vm::Value::from_int(0x000000FF);
+    invoke_void(*render_fog, "javax/microedition/m3g/Fog",
+                "setColor", "(I)V",
+                std::span<const phoneme::vm::Value>(&blue_fog, 1U));
+    const std::array<phoneme::vm::Value, 2> linear_fog_arguments {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(1.0F),
+    };
+    invoke_void(*render_fog, "javax/microedition/m3g/Fog",
+                "setLinear", "(FF)V", linear_fog_arguments);
+    const phoneme::vm::Value fog_argument =
+        phoneme::vm::Value::from_reference(*render_fog);
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setFog", "(Ljavax/microedition/m3g/Fog;)V",
+                std::span<const phoneme::vm::Value>(&fog_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/World;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lit_world_argument, 1U));
+    const auto linear_fog_center = rendered_pixel(32, 32);
+    require(phoneme::graphics::red(linear_fog_center) < 20U &&
+                phoneme::graphics::green(linear_fog_center) < 20U &&
+                phoneme::graphics::blue(linear_fog_center) > 220U,
+            "Fog LINEAR blends distant geometry to the fog color");
+
+    const phoneme::vm::Value exponential_fog =
+        phoneme::vm::Value::from_int(80);
+    const phoneme::vm::Value zero_density =
+        phoneme::vm::Value::from_float(0.0F);
+    invoke_void(*render_fog, "javax/microedition/m3g/Fog",
+                "setMode", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &exponential_fog, 1U));
+    invoke_void(*render_fog, "javax/microedition/m3g/Fog",
+                "setDensity", "(F)V",
+                std::span<const phoneme::vm::Value>(&zero_density, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/World;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lit_world_argument, 1U));
+    const auto exponential_fog_center = rendered_pixel(32, 32);
+    require(phoneme::graphics::red(exponential_fog_center) > 220U &&
+                phoneme::graphics::blue(exponential_fog_center) < 20U,
+            "Fog EXPONENTIAL honors zero density");
+
+    const phoneme::vm::Value lighting_null_reference =
+        phoneme::vm::Value::from_reference({});
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setFog", "(Ljavax/microedition/m3g/Fog;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lighting_null_reference, 1U));
+    invoke_void(*render_appearance, "javax/microedition/m3g/Appearance",
+                "setMaterial", "(Ljavax/microedition/m3g/Material;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lighting_null_reference, 1U));
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setNormals",
+                "(Ljavax/microedition/m3g/VertexArray;)V",
+                std::span<const phoneme::vm::Value>(
+                    &lighting_null_reference, 1U));
+    invoke_void(*render_world, "javax/microedition/m3g/Group",
+                "removeChild", "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(
+                    &world_light_argument, 1U));
+
+    invoke_void(*render_world, "javax/microedition/m3g/World",
+                "setBackground", "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    const phoneme::vm::Value world_argument =
+        phoneme::vm::Value::from_reference(*render_world);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/World;)V",
+                std::span<const phoneme::vm::Value>(&world_argument, 1U));
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(), "read World-rendered M3G image");
+    const auto world_changed_pixels = std::count_if(
+        (*render_payload)->pixels().begin(),
+        (*render_payload)->pixels().end(),
+        [](phoneme::graphics::Pixel pixel) {
+            return pixel != 0xFF112233U;
+        });
+    require(world_changed_pixels > 100,
+            "Graphics3D.render(World) traverses and rasterizes Mesh nodes");
+
+    auto morph_target_vertices = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexArray");
+    auto morph_target_values = machine.heap().allocate_array(
+        "[S", 9U, phoneme::vm::Value::from_int(0));
+    auto morph_target_buffer = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/VertexBuffer");
+    require(morph_target_vertices.has_value() &&
+                morph_target_values.has_value() &&
+                morph_target_buffer.has_value(),
+            "allocate MorphingMesh target geometry");
+    const std::array<phoneme::i32, 9> shifted_triangle {
+        1, -1, 0,
+        3, -1, 0,
+        2, 1, 0,
+    };
+    for (phoneme::usize index = 0U; index < shifted_triangle.size(); ++index) {
+        require(machine.heap().set_element(
+                    *morph_target_values, index,
+                    phoneme::vm::Value::from_int(
+                        shifted_triangle[index])).has_value(),
+                "write MorphingMesh target vertex");
+    }
+    const std::array<phoneme::vm::Value, 3> morph_vertex_arguments {
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(2),
+    };
+    invoke_void(*morph_target_vertices,
+                "javax/microedition/m3g/VertexArray", "<init>", "(III)V",
+                morph_vertex_arguments);
+    const std::array<phoneme::vm::Value, 3> morph_vertex_data_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_reference(*morph_target_values),
+    };
+    invoke_void(*morph_target_vertices,
+                "javax/microedition/m3g/VertexArray", "set", "(II[S)V",
+                morph_vertex_data_arguments);
+    invoke_void(*morph_target_buffer,
+                "javax/microedition/m3g/VertexBuffer", "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> morph_positions_arguments {
+        phoneme::vm::Value::from_reference(*morph_target_vertices),
+        phoneme::vm::Value::from_float(1.0F),
+        phoneme::vm::Value::from_reference({}),
+    };
+    invoke_void(*morph_target_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setPositions",
+                "(Ljavax/microedition/m3g/VertexArray;F[F)V",
+                morph_positions_arguments);
+    auto morph_target_array = machine.heap().allocate_array(
+        "[Ljavax/microedition/m3g/VertexBuffer;", 1U,
+        phoneme::vm::Value::from_reference({}));
+    require(morph_target_array.has_value(),
+            "allocate MorphingMesh target array");
+    require(machine.heap().set_element(
+                *morph_target_array, 0U,
+                phoneme::vm::Value::from_reference(
+                    *morph_target_buffer)).has_value(),
+            "store MorphingMesh target");
+    auto morphing_mesh = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/MorphingMesh");
+    require(morphing_mesh.has_value(), "allocate MorphingMesh");
+    const std::array<phoneme::vm::Value, 4> morph_constructor_arguments {
+        phoneme::vm::Value::from_reference(*render_vertex_buffer),
+        phoneme::vm::Value::from_reference(*morph_target_array),
+        phoneme::vm::Value::from_reference(*render_indices),
+        phoneme::vm::Value::from_reference(*render_appearance),
+    };
+    invoke_void(*morphing_mesh,
+                "javax/microedition/m3g/MorphingMesh", "<init>",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "[Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;)V",
+                morph_constructor_arguments);
+    auto full_morph_weight = float_array({1.0F});
+    const phoneme::vm::Value full_morph_weight_argument =
+        phoneme::vm::Value::from_reference(full_morph_weight);
+    invoke_void(*morphing_mesh,
+                "javax/microedition/m3g/MorphingMesh", "setWeights",
+                "([F)V", std::span<const phoneme::vm::Value>(
+                    &full_morph_weight_argument, 1U));
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    const std::array<phoneme::vm::Value, 2> morph_render_arguments {
+        phoneme::vm::Value::from_reference(*morphing_mesh),
+        phoneme::vm::Value::from_reference(*render_model_transform),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/Node;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                morph_render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(),
+            "read MorphingMesh-rendered framebuffer");
+    require(rendered_pixel(32, 32) == 0xFF112233U &&
+                rendered_pixel(53, 32) == 0xFFFFFFFFU,
+            "MorphingMesh weights deform rendered vertex positions");
+
+    auto deformation_pick_group = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    auto deformation_intersection = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/RayIntersection");
+    require(deformation_pick_group.has_value() &&
+                deformation_intersection.has_value(),
+            "allocate deformed geometry picking state");
+    invoke_void(*deformation_pick_group,
+                "javax/microedition/m3g/Group", "<init>", "()V");
+    invoke_void(*deformation_intersection,
+                "javax/microedition/m3g/RayIntersection", "<init>", "()V");
+    const phoneme::vm::Value morph_pick_child =
+        phoneme::vm::Value::from_reference(*morphing_mesh);
+    invoke_void(*deformation_pick_group,
+                "javax/microedition/m3g/Group", "addChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&morph_pick_child, 1U));
+    const std::array<phoneme::vm::Value, 8> moved_geometry_ray {
+        phoneme::vm::Value::from_int(-1),
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(3.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(-1.0F),
+        phoneme::vm::Value::from_reference(*deformation_intersection),
+    };
+    auto morph_pick = machine.invoke_instance(
+        *deformation_pick_group, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        moved_geometry_ray);
+    require(morph_pick.has_value() && morph_pick->completed_normally() &&
+                morph_pick->return_value.has_value() &&
+                morph_pick->return_value->as_int().value_or(0) == 1,
+            "Group.pick intersects the current MorphingMesh pose");
+    auto stale_morph_ray = moved_geometry_ray;
+    stale_morph_ray[1U] = phoneme::vm::Value::from_float(0.0F);
+    auto stale_morph_pick = machine.invoke_instance(
+        *deformation_pick_group, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        stale_morph_ray);
+    require(stale_morph_pick.has_value() &&
+                stale_morph_pick->completed_normally() &&
+                stale_morph_pick->return_value.has_value() &&
+                stale_morph_pick->return_value->as_int().value_or(1) == 0,
+            "Group.pick does not intersect the stale MorphingMesh base pose");
+    invoke_void(*deformation_pick_group,
+                "javax/microedition/m3g/Group", "removeChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&morph_pick_child, 1U));
+
+    auto skeleton = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    auto bone = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Group");
+    require(skeleton.has_value() && bone.has_value(),
+            "allocate SkinnedMesh skeleton");
+    invoke_void(*skeleton, "javax/microedition/m3g/Group",
+                "<init>", "()V");
+    invoke_void(*bone, "javax/microedition/m3g/Group",
+                "<init>", "()V");
+    const phoneme::vm::Value bone_argument =
+        phoneme::vm::Value::from_reference(*bone);
+    invoke_void(*skeleton, "javax/microedition/m3g/Group", "addChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&bone_argument, 1U));
+    auto skinned_mesh = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/SkinnedMesh");
+    require(skinned_mesh.has_value(), "allocate SkinnedMesh");
+    const std::array<phoneme::vm::Value, 4> skinned_constructor_arguments {
+        phoneme::vm::Value::from_reference(*render_vertex_buffer),
+        phoneme::vm::Value::from_reference(*render_indices),
+        phoneme::vm::Value::from_reference(*render_appearance),
+        phoneme::vm::Value::from_reference(*skeleton),
+    };
+    invoke_void(*skinned_mesh,
+                "javax/microedition/m3g/SkinnedMesh", "<init>",
+                "(Ljavax/microedition/m3g/VertexBuffer;"
+                "Ljavax/microedition/m3g/IndexBuffer;"
+                "Ljavax/microedition/m3g/Appearance;"
+                "Ljavax/microedition/m3g/Group;)V",
+                skinned_constructor_arguments);
+    const std::array<phoneme::vm::Value, 4> bone_transform_arguments {
+        phoneme::vm::Value::from_reference(*bone),
+        phoneme::vm::Value::from_int(255),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(3),
+    };
+    invoke_void(*skinned_mesh,
+                "javax/microedition/m3g/SkinnedMesh", "addTransform",
+                "(Ljavax/microedition/m3g/Node;III)V",
+                bone_transform_arguments);
+    auto rest_bone_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(rest_bone_transform.has_value(),
+            "allocate SkinnedMesh rest transform destination");
+    invoke_void(*rest_bone_transform,
+                "javax/microedition/m3g/Transform", "<init>", "()V");
+    const std::array<phoneme::vm::Value, 2> get_bone_transform_arguments {
+        phoneme::vm::Value::from_reference(*bone),
+        phoneme::vm::Value::from_reference(*rest_bone_transform),
+    };
+    invoke_void(*skinned_mesh,
+                "javax/microedition/m3g/SkinnedMesh", "getBoneTransform",
+                "(Ljavax/microedition/m3g/Node;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                get_bone_transform_arguments);
+    auto rest_bone_matrix = float_array({
+        0.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F,
+    });
+    const phoneme::vm::Value rest_bone_matrix_argument =
+        phoneme::vm::Value::from_reference(rest_bone_matrix);
+    invoke_void(*rest_bone_transform,
+                "javax/microedition/m3g/Transform", "get", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &rest_bone_matrix_argument, 1U));
+    require(std::abs(read_float_element(rest_bone_matrix, 0U) - 1.0F) <
+                0.001F &&
+                std::abs(read_float_element(rest_bone_matrix, 5U) - 1.0F) <
+                0.001F &&
+                std::abs(read_float_element(rest_bone_matrix, 10U) - 1.0F) <
+                0.001F &&
+                std::abs(read_float_element(rest_bone_matrix, 15U) - 1.0F) <
+                0.001F,
+            "SkinnedMesh.getBoneTransform returns the stored rest pose");
+    const std::array<phoneme::vm::Value, 3> moved_bone_translation {
+        phoneme::vm::Value::from_float(2.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*bone, "javax/microedition/m3g/Transformable",
+                "setTranslation", "(FFF)V", moved_bone_translation);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    const std::array<phoneme::vm::Value, 2> skinned_render_arguments {
+        phoneme::vm::Value::from_reference(*skinned_mesh),
+        phoneme::vm::Value::from_reference(*render_model_transform),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "render",
+                "(Ljavax/microedition/m3g/Node;"
+                "Ljavax/microedition/m3g/Transform;)V",
+                skinned_render_arguments);
+    render_payload = machine.graphics().image(render_image_object->bits);
+    require(render_payload.has_value(),
+            "read SkinnedMesh-rendered framebuffer");
+    require(rendered_pixel(32, 32) == 0xFF112233U &&
+                rendered_pixel(53, 32) == 0xFFFFFFFFU,
+            "SkinnedMesh bone transforms deform rendered vertex positions");
+    const phoneme::vm::Value skinned_pick_child =
+        phoneme::vm::Value::from_reference(*skinned_mesh);
+    invoke_void(*deformation_pick_group,
+                "javax/microedition/m3g/Group", "addChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&skinned_pick_child, 1U));
+    auto skinned_pick = machine.invoke_instance(
+        *deformation_pick_group, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        moved_geometry_ray);
+    require(skinned_pick.has_value() && skinned_pick->completed_normally() &&
+                skinned_pick->return_value.has_value() &&
+                skinned_pick->return_value->as_int().value_or(0) == 1,
+            "Group.pick intersects the current SkinnedMesh pose");
+    auto stale_skinned_pick = machine.invoke_instance(
+        *deformation_pick_group, "javax/microedition/m3g/Group", "pick",
+        "(IFFFFFFLjavax/microedition/m3g/RayIntersection;)Z",
+        stale_morph_ray);
+    require(stale_skinned_pick.has_value() &&
+                stale_skinned_pick->completed_normally() &&
+                stale_skinned_pick->return_value.has_value() &&
+                stale_skinned_pick->return_value->as_int().value_or(1) == 0,
+            "Group.pick does not intersect the stale SkinnedMesh base pose");
+    invoke_void(*deformation_pick_group,
+                "javax/microedition/m3g/Group", "removeChild",
+                "(Ljavax/microedition/m3g/Node;)V",
+                std::span<const phoneme::vm::Value>(&skinned_pick_child, 1U));
+
+    auto animation_sequence = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/KeyframeSequence");
+    auto animation_controller = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/AnimationController");
+    auto animation_track = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/AnimationTrack");
+    require(animation_sequence.has_value() &&
+                animation_controller.has_value() && animation_track.has_value(),
+            "allocate M3G animation state");
+    const std::array<phoneme::vm::Value, 3> sequence_arguments {
+        phoneme::vm::Value::from_int(2),
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(176),
+    };
+    invoke_void(*animation_sequence,
+                "javax/microedition/m3g/KeyframeSequence", "<init>",
+                "(III)V", sequence_arguments);
+    auto first_animation_values = machine.heap().allocate_array(
+        "[F", 3U, phoneme::vm::Value::from_float(0.0F));
+    auto second_animation_values = machine.heap().allocate_array(
+        "[F", 3U, phoneme::vm::Value::from_float(0.0F));
+    require(first_animation_values.has_value() &&
+                second_animation_values.has_value(),
+            "allocate M3G keyframe values");
+    const std::array<float, 3> second_keyframe {10.0F, 20.0F, 30.0F};
+    for (phoneme::usize index = 0U; index < second_keyframe.size(); ++index) {
+        require(machine.heap().set_element(
+                    *second_animation_values, index,
+                    phoneme::vm::Value::from_float(
+                        second_keyframe[index])).has_value(),
+                "write M3G keyframe value");
+    }
+    const std::array<phoneme::vm::Value, 3> first_keyframe_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*first_animation_values),
+    };
+    const std::array<phoneme::vm::Value, 3> second_keyframe_arguments {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_int(100),
+        phoneme::vm::Value::from_reference(*second_animation_values),
+    };
+    invoke_void(*animation_sequence,
+                "javax/microedition/m3g/KeyframeSequence", "setKeyframe",
+                "(II[F)V", first_keyframe_arguments);
+    invoke_void(*animation_sequence,
+                "javax/microedition/m3g/KeyframeSequence", "setKeyframe",
+                "(II[F)V", second_keyframe_arguments);
+    const phoneme::vm::Value animation_duration =
+        phoneme::vm::Value::from_int(100);
+    invoke_void(*animation_sequence,
+                "javax/microedition/m3g/KeyframeSequence", "setDuration",
+                "(I)V", std::span<const phoneme::vm::Value>(
+                    &animation_duration, 1U));
+    invoke_void(*animation_controller,
+                "javax/microedition/m3g/AnimationController", "<init>",
+                "()V");
+    const std::array<phoneme::vm::Value, 2> track_arguments {
+        phoneme::vm::Value::from_reference(*animation_sequence),
+        phoneme::vm::Value::from_int(275),
+    };
+    invoke_void(*animation_track,
+                "javax/microedition/m3g/AnimationTrack", "<init>",
+                "(Ljavax/microedition/m3g/KeyframeSequence;I)V",
+                track_arguments);
+    const phoneme::vm::Value controller_argument =
+        phoneme::vm::Value::from_reference(*animation_controller);
+    invoke_void(*animation_track,
+                "javax/microedition/m3g/AnimationTrack", "setController",
+                "(Ljavax/microedition/m3g/AnimationController;)V",
+                std::span<const phoneme::vm::Value>(
+                    &controller_argument, 1U));
+    const phoneme::vm::Value animation_track_argument =
+        phoneme::vm::Value::from_reference(*animation_track);
+    invoke_void(*render_mesh, "javax/microedition/m3g/Object3D",
+                "addAnimationTrack",
+                "(Ljavax/microedition/m3g/AnimationTrack;)V",
+                std::span<const phoneme::vm::Value>(
+                    &animation_track_argument, 1U));
+    const phoneme::vm::Value animation_time =
+        phoneme::vm::Value::from_int(50);
+    auto animated = machine.invoke_instance(
+        *render_mesh, "javax/microedition/m3g/Object3D", "animate", "(I)I",
+        std::span<const phoneme::vm::Value>(&animation_time, 1U));
+    require(animated.has_value() && animated->completed_normally(),
+            "Object3D.animate evaluates active tracks");
+    auto animated_translation = machine.heap().allocate_array(
+        "[F", 3U, phoneme::vm::Value::from_float(0.0F));
+    require(animated_translation.has_value(),
+            "allocate M3G animated translation destination");
+    const phoneme::vm::Value animated_translation_argument =
+        phoneme::vm::Value::from_reference(*animated_translation);
+    invoke_void(*render_mesh, "javax/microedition/m3g/Transformable",
+                "getTranslation", "([F)V",
+                std::span<const phoneme::vm::Value>(
+                    &animated_translation_argument, 1U));
+    for (phoneme::usize index = 0U; index < 3U; ++index) {
+        auto value = machine.heap().element(*animated_translation, index);
+        require(value.has_value(), "read M3G animated translation");
+        auto number = value->as_float();
+        require(number.has_value() &&
+                    std::abs(*number - second_keyframe[index] * 0.5F) < 0.01F,
+                "Object3D.animate linearly applies translation keyframes");
+    }
+
+    auto far_geometry_transform = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Transform");
+    require(far_geometry_transform.has_value(),
+            "allocate M3G depth-test transform");
+    invoke_void(*far_geometry_transform,
+                "javax/microedition/m3g/Transform", "<init>", "()V");
+    const std::array<phoneme::vm::Value, 3> far_translation {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(-1.0F),
+    };
+    invoke_void(*far_geometry_transform,
+                "javax/microedition/m3g/Transform", "postTranslate",
+                "(FFF)V", far_translation);
+    const auto draw_depth_geometry = [&](phoneme::vm::ObjectRef transform) {
+        const std::array<phoneme::vm::Value, 4> arguments {
+            phoneme::vm::Value::from_reference(*render_vertex_buffer),
+            phoneme::vm::Value::from_reference(*render_indices),
+            phoneme::vm::Value::from_reference(*render_appearance),
+            phoneme::vm::Value::from_reference(transform),
+        };
+        invoke_void(*graphics3d_object,
+                    "javax/microedition/m3g/Graphics3D", "render",
+                    "(Ljavax/microedition/m3g/VertexBuffer;"
+                    "Ljavax/microedition/m3g/IndexBuffer;"
+                    "Ljavax/microedition/m3g/Appearance;"
+                    "Ljavax/microedition/m3g/Transform;)V",
+                    arguments);
+    };
+    const phoneme::vm::Value depth_white =
+        phoneme::vm::Value::from_int(
+            static_cast<phoneme::i32>(0xFFFFFFFFU));
+    const phoneme::vm::Value depth_red =
+        phoneme::vm::Value::from_int(
+            static_cast<phoneme::i32>(0xFFFF0000U));
+    const auto set_depth_color = [&](const phoneme::vm::Value& color) {
+        invoke_void(*render_vertex_buffer,
+                    "javax/microedition/m3g/VertexBuffer",
+                    "setDefaultColor", "(I)V",
+                    std::span<const phoneme::vm::Value>(&color, 1U));
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    set_depth_color(depth_white);
+    draw_depth_geometry(*render_model_transform);
+    const std::array<phoneme::vm::Value, 2> negative_depth_offset {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(-1.0F),
+    };
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setDepthOffset", "(FF)V", negative_depth_offset);
+    set_depth_color(depth_red);
+    draw_depth_geometry(*render_model_transform);
+    require(rendered_pixel(32, 32) == 0xFFFF0000U,
+            "CompositingMode depth offset resolves coplanar geometry");
+    const std::array<phoneme::vm::Value, 2> zero_depth_offset {
+        phoneme::vm::Value::from_float(0.0F),
+        phoneme::vm::Value::from_float(0.0F),
+    };
+    invoke_void(*compositing_mode,
+                "javax/microedition/m3g/CompositingMode",
+                "setDepthOffset", "(FF)V", zero_depth_offset);
+
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    set_depth_color(depth_white);
+    draw_depth_geometry(*render_model_transform);
+    set_depth_color(depth_red);
+    draw_depth_geometry(*far_geometry_transform);
+    require(rendered_pixel(32, 32) == 0xFFFFFFFFU,
+            "Graphics3D depth buffer rejects farther geometry");
+
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "releaseTarget", "()V");
+    const std::array<phoneme::vm::Value, 3> no_depth_bind_arguments {
+        phoneme::vm::Value::from_reference(*render_graphics_object),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(16),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "bindTarget",
+                "(Ljava/lang/Object;ZI)V", no_depth_bind_arguments);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    set_depth_color(depth_white);
+    draw_depth_geometry(*render_model_transform);
+    set_depth_color(depth_red);
+    draw_depth_geometry(*far_geometry_transform);
+    auto disabled_depth = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "isDepthBufferEnabled", "()Z");
+    auto overwrite_hints = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getHints", "()I");
+    require(rendered_pixel(32, 32) == 0xFFFF0000U &&
+                disabled_depth.has_value() &&
+                disabled_depth->return_value.has_value() &&
+                disabled_depth->return_value->as_int().value_or(1) == 0 &&
+                overwrite_hints.has_value() &&
+                overwrite_hints->return_value.has_value() &&
+                overwrite_hints->return_value->as_int().value_or(0) == 16,
+            "bindTarget depth=false disables depth testing and preserves hints");
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "releaseTarget", "()V");
+    const phoneme::vm::Value simple_bind_target =
+        phoneme::vm::Value::from_reference(*render_graphics_object);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "bindTarget",
+                "(Ljava/lang/Object;)V",
+                std::span<const phoneme::vm::Value>(
+                    &simple_bind_target, 1U));
+    auto default_depth = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "isDepthBufferEnabled", "()Z");
+    auto default_hints = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getHints", "()I");
+    require(default_depth.has_value() && default_depth->return_value.has_value() &&
+                default_depth->return_value->as_int().value_or(0) == 1 &&
+                default_hints.has_value() && default_hints->return_value.has_value() &&
+                default_hints->return_value->as_int().value_or(-1) == 0,
+            "bindTarget(target) restores the JSR-184 default depth and hints");
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "releaseTarget", "()V");
 
     auto light = machine.class_states().allocate_instance(
         machine.heap(), "javax/microedition/m3g/Light");
@@ -3471,6 +5992,13 @@ void test_machine_m3g() {
                 light_index->return_value.has_value() &&
                 light_index->return_value->as_int().value_or(-1) == 0,
             "Graphics3D.addLight stores the first light");
+    auto light_count = machine.invoke_instance(
+        *graphics3d_object, "javax/microedition/m3g/Graphics3D",
+        "getLightCount", "()I");
+    require(light_count.has_value() && light_count->completed_normally() &&
+                light_count->return_value.has_value() &&
+                light_count->return_value->as_int().value_or(0) == 1,
+            "Graphics3D.getLightCount reports active lights");
 
     auto returned_transform = machine.class_states().allocate_instance(
         machine.heap(), "javax/microedition/m3g/Transform");
@@ -3551,6 +6079,139 @@ void test_machine_m3g() {
                 !returned_light->completed_normally() &&
                 returned_light->throwable.has_value(),
             "Graphics3D.resetLights removes indexed light state");
+
+    const auto append_u8 = [](std::vector<phoneme::u8>& bytes,
+                              phoneme::u8 value) {
+        bytes.push_back(value);
+    };
+    const auto append_u16 = [](std::vector<phoneme::u8>& bytes,
+                               phoneme::u16 value) {
+        bytes.push_back(static_cast<phoneme::u8>(value & 0xFFU));
+        bytes.push_back(static_cast<phoneme::u8>((value >> 8U) & 0xFFU));
+    };
+    const auto append_u32 = [](std::vector<phoneme::u8>& bytes,
+                               phoneme::u32 value) {
+        for (phoneme::usize shift = 0U; shift < 32U; shift += 8U) {
+            bytes.push_back(static_cast<phoneme::u8>(
+                (value >> shift) & 0xFFU));
+        }
+    };
+    const auto append_float = [&](std::vector<phoneme::u8>& bytes,
+                                  float value) {
+        append_u32(bytes, std::bit_cast<phoneme::u32>(value));
+    };
+    const auto append_object3d = [&](std::vector<phoneme::u8>& payload,
+                                     phoneme::u32 user_id = 0U) {
+        append_u32(payload, user_id);
+        append_u32(payload, 0U);
+        append_u32(payload, 0U);
+    };
+    const auto append_object = [&](std::vector<phoneme::u8>& section,
+                                   phoneme::u8 type,
+                                   const std::vector<phoneme::u8>& payload) {
+        append_u8(section, type);
+        append_u32(section, static_cast<phoneme::u32>(payload.size()));
+        section.insert(section.end(), payload.begin(), payload.end());
+    };
+
+    std::vector<phoneme::u8> serialized_objects;
+    append_object(serialized_objects, 0U, {});
+    std::vector<phoneme::u8> serialized_vertices;
+    append_object3d(serialized_vertices, 77U);
+    append_u8(serialized_vertices, 2U);
+    append_u8(serialized_vertices, 3U);
+    append_u8(serialized_vertices, 0U);
+    append_u16(serialized_vertices, 3U);
+    for (const phoneme::i32 value :
+         std::array<phoneme::i32, 9> {
+             -1, -1, 0, 1, -1, 0, 0, 1, 0}) {
+        append_u16(serialized_vertices,
+                   static_cast<phoneme::u16>(value));
+    }
+    append_object(serialized_objects, 20U, serialized_vertices);
+
+    std::vector<phoneme::u8> serialized_strip;
+    append_object3d(serialized_strip);
+    append_u8(serialized_strip, 0U);
+    append_u32(serialized_strip, 0U);
+    append_u32(serialized_strip, 1U);
+    append_u32(serialized_strip, 3U);
+    append_object(serialized_objects, 11U, serialized_strip);
+
+    std::vector<phoneme::u8> serialized_vertex_buffer;
+    append_object3d(serialized_vertex_buffer);
+    append_u8(serialized_vertex_buffer, 255U);
+    append_u8(serialized_vertex_buffer, 255U);
+    append_u8(serialized_vertex_buffer, 255U);
+    append_u8(serialized_vertex_buffer, 255U);
+    append_u32(serialized_vertex_buffer, 2U);
+    append_float(serialized_vertex_buffer, 0.0F);
+    append_float(serialized_vertex_buffer, 0.0F);
+    append_float(serialized_vertex_buffer, 0.0F);
+    append_float(serialized_vertex_buffer, 1.0F);
+    append_u32(serialized_vertex_buffer, 0U);
+    append_u32(serialized_vertex_buffer, 0U);
+    append_u32(serialized_vertex_buffer, 0U);
+    append_object(serialized_objects, 21U, serialized_vertex_buffer);
+
+    std::vector<phoneme::u8> serialized_m3g {
+        0xABU, 0x4AU, 0x53U, 0x52U, 0x31U, 0x38U,
+        0x34U, 0xBBU, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
+    };
+    std::vector<phoneme::u8> section;
+    append_u8(section, 0U);
+    const phoneme::u32 section_length = static_cast<phoneme::u32>(
+        13U + serialized_objects.size());
+    append_u32(section, section_length);
+    append_u32(section,
+               static_cast<phoneme::u32>(serialized_objects.size()));
+    section.insert(section.end(), serialized_objects.begin(),
+                   serialized_objects.end());
+    uLong checksum = ::adler32(0L, Z_NULL, 0);
+    checksum = ::adler32(checksum,
+        reinterpret_cast<const Bytef*>(section.data()),
+        static_cast<uInt>(section.size()));
+    append_u32(section, static_cast<phoneme::u32>(checksum));
+    serialized_m3g.insert(serialized_m3g.end(), section.begin(), section.end());
+
+    auto loaded_m3g = phoneme::vm::m3g::load_m3g(
+        machine, serialized_m3g, {});
+    require(loaded_m3g.has_value(), "load a serialized M3G geometry graph");
+    auto root_count = machine.heap().array_length(*loaded_m3g);
+    require(root_count.has_value() && *root_count == 2U,
+            "M3G loader returns only unreferenced root objects");
+    phoneme::vm::ObjectRef loaded_strip {};
+    phoneme::vm::ObjectRef loaded_vertex_buffer {};
+    for (phoneme::usize index = 0U; index < *root_count; ++index) {
+        auto value = machine.heap().element(*loaded_m3g, index);
+        require(value.has_value(), "read M3G loaded root");
+        auto reference = value->as_reference();
+        require(reference.has_value() && !reference->is_null(),
+                "M3G loaded root is non-null");
+        auto class_name = machine.heap().class_name(*reference);
+        require(class_name.has_value(), "read M3G loaded root class");
+        if (*class_name == "javax/microedition/m3g/TriangleStripArray") {
+            loaded_strip = *reference;
+        } else if (*class_name == "javax/microedition/m3g/VertexBuffer") {
+            loaded_vertex_buffer = *reference;
+        }
+    }
+    require(!loaded_strip.is_null() && !loaded_vertex_buffer.is_null(),
+            "M3G loader preserves geometry root types");
+    auto loaded_index_count = machine.invoke_instance(
+        loaded_strip, "javax/microedition/m3g/IndexBuffer",
+        "getIndexCount", "()I");
+    auto loaded_vertex_count = machine.invoke_instance(
+        loaded_vertex_buffer, "javax/microedition/m3g/VertexBuffer",
+        "getVertexCount", "()I");
+    require(loaded_index_count.has_value() &&
+                loaded_index_count->return_value.has_value() &&
+                loaded_index_count->return_value->as_int().value_or(-1) == 3,
+            "M3G loader decodes TriangleStripArray indices");
+    require(loaded_vertex_count.has_value() &&
+                loaded_vertex_count->return_value.has_value() &&
+                loaded_vertex_count->return_value->as_int().value_or(-1) == 3,
+            "M3G loader links VertexBuffer positions");
 }
 
 void test_framebuffer_sizes() {
@@ -3577,6 +6238,19 @@ int main(int argc, char** argv) {
         std::string_view(filter) == "vm-invocation") {
         test_machine_invocation(fixture_jar);
         std::cout << "Standalone VM invocation tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr &&
+        std::string_view(filter) == "vm-dispatch") {
+        test_machine_dispatch(fixture_jar);
+        std::cout << "Standalone VM dispatch tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr &&
+        std::string_view(filter) == "monitor-shutdown") {
+        test_monitor_table();
+        test_machine_shutdown_waiter(fixture_jar);
+        std::cout << "Standalone monitor shutdown tests passed\n";
         return 0;
     }
     if (filter != nullptr &&
@@ -3669,6 +6343,7 @@ int main(int argc, char** argv) {
     test_type_state_verifier();
     test_monitor_table();
     test_integer_interpreter();
+    test_machine_heap_memory_reporting();
     test_machine_invocation(fixture_jar);
     test_machine_exceptions(fixture_jar);
     test_machine_extended_opcodes(fixture_jar);

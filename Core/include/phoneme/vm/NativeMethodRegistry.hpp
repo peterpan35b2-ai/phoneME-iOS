@@ -32,6 +32,11 @@ struct NativeMethodInvocationCount final {
     std::size_t count {0};
 };
 
+struct NativeMethodBinding final {
+    NativeMethodId id;
+    u64 generation {0U};
+};
+
 class NativeMethodRegistry final {
 public:
     [[nodiscard]] Status register_method(std::string owner,
@@ -41,6 +46,10 @@ public:
     [[nodiscard]] NativeMethodId resolve(std::string_view owner,
                                          std::string_view name,
                                          std::string_view descriptor) const noexcept;
+    [[nodiscard]] NativeMethodBinding resolve_binding(
+        std::string_view owner,
+        std::string_view name,
+        std::string_view descriptor) const noexcept;
     [[nodiscard]] bool contains(std::string_view owner,
                                 std::string_view name,
                                 std::string_view descriptor) const noexcept;

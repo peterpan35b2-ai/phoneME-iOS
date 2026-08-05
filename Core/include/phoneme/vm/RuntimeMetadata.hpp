@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -13,6 +14,78 @@
 #include "phoneme/vm/MetadataId.hpp"
 
 namespace phoneme::vm {
+
+struct FieldLocation;
+
+enum class OperandResolutionState : u8 {
+    unresolved,
+    resolving,
+    resolved,
+    failed,
+};
+
+enum class OperandResolutionKind : u8 {
+    none,
+    field,
+    direct_call,
+    virtual_call,
+    class_reference,
+};
+
+struct OperandResolutionEntry final {
+    u32 bytecode_pc {kInvalidDecodedIndex};
+    OperandResolutionState state {OperandResolutionState::unresolved};
+    OperandResolutionKind kind {OperandResolutionKind::none};
+    std::shared_ptr<const FieldLocation> field;
+    MethodId target_method;
+    ClassId receiver_class;
+    NativeMethodId target_native_method;
+    u64 native_generation {0U};
+    bool native_binding_cached {false};
+    ClassId target_class;
+    std::shared_ptr<const classfile::ClassFile> target_class_file;
+    std::string target_class_name;
+    std::string target_array_name;
+    std::optional<Error> failure;
+
+    [[nodiscard]] Status begin(OperandResolutionKind expected_kind);
+    [[nodiscard]] Status resolve_field(
+        std::shared_ptr<const FieldLocation> resolved_field);
+    [[nodiscard]] Status resolve_direct_call(
+        MethodId resolved_method,
+        NativeMethodId resolved_native_method,
+        u64 resolved_native_generation);
+    [[nodiscard]] Status begin_virtual_call(ClassId resolved_receiver_class);
+    [[nodiscard]] Status resolve_virtual_call(
+        MethodId resolved_method,
+        NativeMethodId resolved_native_method,
+        u64 resolved_native_generation);
+    [[nodiscard]] Status update_native_binding(
+        NativeMethodId resolved_native_method,
+        u64 resolved_native_generation);
+    [[nodiscard]] Status resolve_class_reference(
+        std::string resolved_class_name,
+        ClassId resolved_class,
+        std::shared_ptr<const classfile::ClassFile> resolved_class_file,
+        std::string resolved_array_name = {});
+    [[nodiscard]] Status fail_resolution(Error error);
+    void reset() noexcept;
+};
+
+class OperandResolutionTable final {
+public:
+    explicit OperandResolutionTable(const DecodedMethod& decoded);
+
+    [[nodiscard]] Result<OperandResolutionEntry*> entry(
+        u32 operand_index,
+        u32 bytecode_pc) noexcept;
+    [[nodiscard]] const OperandResolutionEntry* entry_for_test(
+        u32 operand_index) const noexcept;
+    [[nodiscard]] usize size() const noexcept { return entries_.size(); }
+
+private:
+    std::vector<OperandResolutionEntry> entries_;
+};
 
 struct CachedMethodDescriptor final {
     MethodDescriptor descriptor;
@@ -44,6 +117,7 @@ struct RuntimeMethod final {
     const classfile::Method* method {nullptr};
     std::shared_ptr<const CachedMethodDescriptor> descriptor;
     std::shared_ptr<const DecodedMethod> decoded;
+    std::shared_ptr<OperandResolutionTable> operand_resolutions;
 };
 
 class RuntimeMetadata final {

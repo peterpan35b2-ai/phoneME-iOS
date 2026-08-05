@@ -44,6 +44,7 @@ constexpr usize kPrintWriterOutputField = 1;
 constexpr usize kPrintWriterTroubleField = 2;
 constexpr usize kPrintWriterAutoFlushField = 3;
 constexpr usize kPrintWriterClosedField = 4;
+constexpr usize kCharsetNameField = 0;
 constexpr usize kMaximumStreamDepth = 64;
 
 enum class StreamCharset : i32 {
@@ -841,6 +842,53 @@ void add(NativeMethodRegistry& registry,
                      "output stream implementation is not connected");
 }
 
+[[nodiscard]] Result<bool> write_native_filter_chain(
+    Machine& machine,
+    ObjectRef stream,
+    std::span<const u8> bytes,
+    usize depth) {
+    if (stream.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "output stream is null");
+    }
+    if (depth >= kMaximumStreamDepth) {
+        return fail_java("java/io/IOException",
+                         "output stream filter chain is too deep");
+    }
+
+    auto native = connection_stream_write_bytes(machine, stream, bytes);
+    if (!native) return std::unexpected(native.error());
+    if (native->has_value()) return true;
+
+    auto data_output = is_instance(machine, stream,
+                                   "java/io/DataOutputStream");
+    if (!data_output) return std::unexpected(data_output.error());
+    if (*data_output) {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        auto written = write_native_filter_chain(
+            machine, *output, bytes, depth + 1U);
+        if (!written) return std::unexpected(written.error());
+        if (*written) {
+            auto counted = increment_data_written(
+                machine, stream, static_cast<i32>(bytes.size()));
+            if (!counted) return std::unexpected(counted.error());
+        }
+        return *written;
+    }
+
+    auto runtime_class = machine.heap().class_name(stream);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    if (*runtime_class == "java/io/FilterOutputStream" ||
+        *runtime_class == "java/io/BufferedOutputStream") {
+        auto output = reference_field(machine, stream, kFilterStreamField);
+        if (!output) return std::unexpected(output.error());
+        return write_native_filter_chain(
+            machine, *output, bytes, depth + 1U);
+    }
+    return false;
+}
+
 [[nodiscard]] Status stream_write_bytes(Machine& machine,
                                         ObjectRef stream,
                                         ObjectRef source,
@@ -856,26 +904,13 @@ void add(NativeMethodRegistry& registry,
         source, static_cast<usize>(offset), static_cast<usize>(length));
     if (!bytes) return std::unexpected(bytes.error());
 
-    // Native network streams must keep OutputStream.write(byte[], off, len)
-    // as one transport operation. Falling back to write(int) for every byte
-    // turns a small Opera Mini handshake into hundreds of scheduler waits and
-    // makes a healthy socket look disconnected at the splash screen.
-    auto native = connection_stream_write_bytes(machine, stream, *bytes);
+    // Keep a Java bulk write as one transport operation through the standard
+    // filter chain. Old J2ME clients commonly wrap SocketConnection streams in
+    // DataOutputStream and BufferedOutputStream; degrading that chain to
+    // write(int) creates hundreds of worker waits and tiny TCP packets.
+    auto native = write_native_filter_chain(machine, stream, *bytes, 0U);
     if (!native) return std::unexpected(native.error());
-    if (native->has_value()) return {};
-
-    auto data_output = is_instance(machine, stream,
-                                   "java/io/DataOutputStream");
-    if (!data_output) return std::unexpected(data_output.error());
-    if (*data_output) {
-        auto output = reference_field(machine, stream, kFilterStreamField);
-        if (!output) return std::unexpected(output.error());
-        native = connection_stream_write_bytes(machine, *output, *bytes);
-        if (!native) return std::unexpected(native.error());
-        if (native->has_value()) {
-            return increment_data_written(machine, stream, length);
-        }
-    }
+    if (*native) return {};
 
     for (const u8 byte : *bytes) {
         auto written = stream_write_one(machine, stream, byte, 0U);
@@ -1013,9 +1048,9 @@ void add(NativeMethodRegistry& registry,
 [[nodiscard]] Status write_bytes(Machine& machine,
                                  ObjectRef output,
                                  std::span<const u8> bytes) {
-    auto native = connection_stream_write_bytes(machine, output, bytes);
+    auto native = write_native_filter_chain(machine, output, bytes, 0U);
     if (!native) return std::unexpected(native.error());
-    if (native->has_value()) return {};
+    if (*native) return {};
     for (const u8 byte : bytes) {
         auto written = stream_write_one(machine, output, byte, 0U);
         if (!written) return written;
@@ -2382,7 +2417,9 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "InputStreamReader input is null");
         }
-        StreamCharset charset = StreamCharset::utf8;
+        // phoneME resolves the no-name constructor through the
+        // microedition.encoding property. This profile publishes ISO8859_1.
+        StreamCharset charset = StreamCharset::latin1;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());
@@ -2422,6 +2459,23 @@ void register_reader_writer(NativeMethodRegistry& registry) {
         "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V",
         [initialize_reader](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "InputStreamReader Charset argument is missing");
+            }
+            auto charset = arguments[2].as_reference();
+            if (!charset) return std::unexpected(charset.error());
+            if (charset->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "InputStreamReader Charset is null");
+            }
+            auto is_charset = machine.object_is_instance(
+                *charset, "java/nio/charset/Charset");
+            if (!is_charset) return std::unexpected(is_charset.error());
+            if (!*is_charset) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "InputStreamReader expects Charset");
+            }
             auto initialized = initialize_reader(machine, arguments, false);
             if (!initialized) return std::unexpected(initialized.error());
             auto object = receiver(arguments);
@@ -2869,7 +2923,9 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             return fail_java("java/lang/NullPointerException",
                              "OutputStreamWriter output is null");
         }
-        StreamCharset charset = StreamCharset::utf8;
+        // Match InputStreamReader and String(byte[])/getBytes(): phoneME's
+        // profile default is ISO8859_1, not desktop-Java UTF-8.
+        StreamCharset charset = StreamCharset::latin1;
         if (named) {
             auto name = arguments[2].as_reference();
             if (!name) return std::unexpected(name.error());
@@ -2909,6 +2965,23 @@ void register_reader_writer(NativeMethodRegistry& registry) {
         "(Ljava/io/OutputStream;Ljava/nio/charset/Charset;)V",
         [initialize_writer](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "OutputStreamWriter Charset argument is missing");
+            }
+            auto charset = arguments[2].as_reference();
+            if (!charset) return std::unexpected(charset.error());
+            if (charset->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "OutputStreamWriter Charset is null");
+            }
+            auto is_charset = machine.object_is_instance(
+                *charset, "java/nio/charset/Charset");
+            if (!is_charset) return std::unexpected(is_charset.error());
+            if (!*is_charset) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "OutputStreamWriter expects Charset");
+            }
             auto initialized = initialize_writer(machine, arguments, false);
             if (!initialized) return std::unexpected(initialized.error());
             auto object = receiver(arguments);
@@ -3532,7 +3605,72 @@ Result<std::vector<u8>> read_input_stream_all(Machine& machine,
     return bytes;
 }
 
+void register_charset_natives(NativeMethodRegistry& registry) {
+    add(registry, "java/nio/charset/Charset", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Charset constructor is missing its name");
+            }
+            auto name = arguments[1].as_reference();
+            if (!name) return std::unexpected(name.error());
+            if (name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Charset name is null");
+            }
+            auto class_name = machine.heap().class_name(*name);
+            if (!class_name || *class_name != "java/lang/String") {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Charset name must be a String");
+            }
+            auto stored = set_reference_field(
+                machine, *object, kCharsetNameField, *name);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    for (const std::string_view method_name : {"name", "toString"}) {
+        add(registry, "java/nio/charset/Charset", std::string(method_name),
+            "()Ljava/lang/String;",
+            [](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto name = reference_field(
+                    machine, *object, kCharsetNameField);
+                if (!name) return std::unexpected(name.error());
+                return std::optional<Value>(Value::from_reference(*name));
+            });
+    }
+
+    add(registry, "java/nio/charset/StandardCharsets", "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto charset = machine.class_states().allocate_instance(
+                machine.heap(), "java/nio/charset/Charset");
+            if (!charset) return std::unexpected(charset.error());
+            auto name = create_string(machine, u"UTF-8");
+            if (!name) return std::unexpected(name.error());
+            auto named = set_reference_field(
+                machine, *charset, kCharsetNameField, *name);
+            if (!named) return std::unexpected(named.error());
+            auto field = machine.class_states().resolve_field(
+                "java/nio/charset/StandardCharsets", "UTF_8",
+                "Ljava/nio/charset/Charset;", true);
+            if (!field) return std::unexpected(field.error());
+            auto stored = machine.class_states().set_static_field(
+                *field, Value::from_reference(*charset));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+}
+
 void register_io_natives(NativeMethodRegistry& registry) {
+    register_charset_natives(registry);
     register_base_streams(registry);
     register_byte_array_streams(registry);
     register_filter_streams(registry);

@@ -429,9 +429,14 @@ final class EmulatorSession: ObservableObject {
             screenWidth: profile.screenWidth,
             screenHeight: profile.screenHeight,
             frameRateLimit: profile.frameRateLimit,
+            framePacingMode: profile.effectiveFramePacingMode,
+            heapSizeMegabytes: profile.effectiveHeapSizeMegabytes,
             immediateProcessing: profile.immediateProcessing,
             parallelScreenRedrawing: profile.parallelScreenRedrawing,
             autoTranslateToVietnamese: profile.isAutoTranslationEnabled,
+            translationProvider: TranslationProvider.selected,
+            translationSourceLanguage:
+                profile.effectiveAutoTranslationSourceLanguage,
             keyUp: profile.keyCode(for: .up),
             keyDown: profile.keyCode(for: .down),
             keyLeft: profile.keyCode(for: .left),
@@ -442,14 +447,32 @@ final class EmulatorSession: ObservableObject {
         )
     }
 
-    func setAutoTranslationEnabled(
-        _ enabled: Bool,
+    func setAutoTranslationConfiguration(
+        enabled: Bool,
+        sourceLanguage: TranslationSourceLanguage,
+        provider: TranslationProvider = .selected,
         for game: Game,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         engine.setApplicationTranslation(
             gameID: game.id,
             enabled: enabled,
+            provider: provider,
+            sourceLanguage: sourceLanguage,
+            completion: completion
+        )
+    }
+
+    func setFramePacing(
+        framesPerSecond: Int,
+        mode: GameProfile.FramePacingMode,
+        for game: Game,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        engine.setApplicationFramePacing(
+            gameID: game.id,
+            framesPerSecond: framesPerSecond,
+            mode: mode,
             completion: completion
         )
     }
@@ -506,6 +529,16 @@ final class EmulatorSession: ObservableObject {
 
     func stop() {
         terminateCurrent()
+    }
+
+    func shutdown(
+        completion: (@MainActor @Sendable () -> Void)? = nil
+    ) {
+        engine.stop(completion: completion)
+        presentationSnapshots.removeAll(keepingCapacity: false)
+        runningApplications.removeAll(keepingCapacity: false)
+        resetSessionResources(clearCurrentGame: true)
+        state = .stopped
     }
 
     func resetRuntimeForStorageChange() {

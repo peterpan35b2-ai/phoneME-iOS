@@ -1259,7 +1259,7 @@ private struct NativeLCDUIPopupChoice: View {
                 )
             ) {
                 ForEach(item.orderedChoices) { choice in
-                    Text(choice.text)
+                    Label(choice.text, systemImage: "list.bullet")
                         .tag(choice.index)
                 }
             }

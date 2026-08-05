@@ -25,6 +25,12 @@ enum class SchedulerWaitResult : u8 {
     interrupted,
 };
 
+enum class FramePacingMode : i32 {
+    native = 0,
+    cap = 1,
+    override_game_loop = 2,
+};
+
 struct SchedulerSnapshot final {
     std::vector<JavaThreadSnapshot> threads;
     std::vector<JavaThreadId> runnable;
@@ -62,11 +68,16 @@ public:
     void begin_unpaced_execution() noexcept;
     void end_unpaced_execution() noexcept;
     void set_host_foreground(bool foreground) noexcept;
+    void configure_frame_pacing(i32 frames_per_second,
+                                FramePacingMode mode) noexcept;
+    void pace_current_frame_publication(Machine& machine);
+    void note_current_frame_boundary() noexcept;
+    void break_current_frame_pacing_sequence() noexcept;
     void cooperative_quantum(Machine& machine);
     void cooperative_yield(Machine& machine);
     [[nodiscard]] Result<SchedulerWaitResult> sleep_current(
         Machine& machine,
-        std::chrono::milliseconds duration);
+        std::chrono::nanoseconds duration);
     [[nodiscard]] Result<SchedulerWaitResult> join_current(
         Machine& machine,
         ObjectRef target,
@@ -105,6 +116,8 @@ private:
                        std::optional<ObjectRef> throwable,
                        std::optional<Error> failure) noexcept;
     void prune_terminated_native_threads();
+    void reset_current_frame_pacing_state() noexcept;
+    void synchronize_current_frame_pacing_state() noexcept;
     void update_queue_membership_locked(JavaThreadId id,
                                         JavaThreadState state);
     static void erase_id(std::deque<JavaThreadId>& queue,
@@ -122,6 +135,11 @@ private:
     bool host_foreground_ {true};
     std::chrono::steady_clock::time_point background_resume_deadline_ {};
     std::atomic_bool shutting_down_ {false};
+    std::atomic<i64> frame_interval_nanoseconds_ {33'333'333};
+    std::atomic<i32> frame_pacing_mode_ {
+        static_cast<i32>(FramePacingMode::native)
+    };
+    std::atomic<u64> frame_pacing_generation_ {1U};
 
     static thread_local Scheduler* tls_scheduler_;
     static thread_local JavaThreadId tls_thread_id_;
@@ -130,6 +148,18 @@ private:
         tls_quantum_resume_time_;
     static thread_local bool tls_quantum_timing_valid_;
     static thread_local u32 tls_unpaced_execution_depth_;
+    static thread_local bool tls_frame_boundary_pending_;
+    static thread_local u32 tls_frame_pacing_streak_;
+    static thread_local i64 tls_frame_interval_sample_nanoseconds_;
+    static thread_local bool tls_frame_loop_wake_valid_;
+    static thread_local bool tls_frame_cap_deadline_valid_;
+    static thread_local u64 tls_frame_pacing_generation_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_frame_loop_wake_time_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_frame_cap_deadline_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_frame_boundary_time_;
 };
 
 } // namespace phoneme::vm

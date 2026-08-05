@@ -100,12 +100,12 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         locationManager.distanceFilter = 3_000
 
         // Automatic pauses can end the background execution window until the
-        // app is launched again. Keep them disabled for connection stability;
-        // energy is instead saved by coarse accuracy and by running this
-        // manager only during the inactive/background scene phases.
+        // app is launched again. Keep them disabled for connection stability.
+        // Battery usage is limited with coarse accuracy, a large distance
+        // filter, and by running Location only while entering/backgrounded.
         locationManager.pausesLocationUpdatesAutomatically = false
         locationManager.allowsBackgroundLocationUpdates = false
-        locationManager.showsBackgroundLocationIndicator = false
+        locationManager.showsBackgroundLocationIndicator = true
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -170,10 +170,9 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
                 return
             }
 
-            // Start while the scene is still inactive, before iOS completes
-            // the foreground-to-background transition. Starting standard
-            // location services only after entering background is unreliable
-            // and may be rejected by the system.
+            // Do not consume Location while the app is visible. Arm the
+            // low-accuracy session only when iOS starts minimizing the app;
+            // .inactive arrives before .background during Home/lock transitions.
             guard applicationPhase != .active else {
                 stopLocationUpdates(status: .readyForBackground)
                 return
@@ -250,7 +249,7 @@ final class BackgroundExecutionController: NSObject, ObservableObject {
         }
 
         locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.showsBackgroundLocationIndicator = false
+        locationManager.showsBackgroundLocationIndicator = true
         locationManager.startUpdatingLocation()
         isKeepingAlive = true
         status = .active

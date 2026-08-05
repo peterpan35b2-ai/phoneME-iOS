@@ -6,6 +6,11 @@ import Photos
 import AppKit
 #endif
 
+private struct KeyboardAdjustmentSnapshot {
+    let profile: GameProfile
+    let showKeypad: Bool
+}
+
 struct EmulatorView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: GameLibrary
@@ -24,6 +29,7 @@ struct EmulatorView: View {
     @State private var persistedProfile: GameProfile
     @State private var showKeypad: Bool
     @State private var keyboardAdjustmentMode: KeyboardAdjustmentMode = .none
+    @State private var keyboardAdjustmentSnapshot: KeyboardAdjustmentSnapshot?
     @State private var keyboardObscuresDisplay = false
     @State private var activeVirtualKeyCount = 0
     @State private var keyboardHideTask: Task<Void, Never>?
@@ -35,6 +41,7 @@ struct EmulatorView: View {
     @State private var showExitConfirmation = false
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var frameRateChangeIdentifier = UUID()
     @State private var hasStarted = false
     @State private var isClosing = false
 
@@ -93,10 +100,19 @@ struct EmulatorView: View {
                         keyboardAdjustmentMode: keyboardAdjustmentMode,
                         isRotationLocked: runtimeProfile.lockedOrientation != nil,
                         translationEnabled: runtimeProfile.isAutoTranslationEnabled,
+                        translationSourceLanguage:
+                            runtimeProfile.effectiveAutoTranslationSourceLanguage,
+                        frameRateOverrideEnabled:
+                            runtimeProfile.isFrameRateOverrideEnabled,
+                        frameRateLimit: GameProfile.resolvedFrameRate(
+                            runtimeProfile.frameRateLimit
+                        ),
                         hideAction: hideApplication,
                         exitAction: { showExitConfirmation = true },
                         toggleRotationLockAction: toggleRotationLock,
-                        setTranslationEnabledAction: setAutoTranslationEnabled,
+                        setTranslationConfigurationAction:
+                            setAutoTranslationConfiguration,
+                        setFrameRateAction: setQuickFrameRate,
                         toggleKeyboardAction: toggleKeyboard,
                         screenshotAction: saveScreenshot,
                         beginKeyboardPositionAction: {
@@ -106,6 +122,7 @@ struct EmulatorView: View {
                             beginKeyboardAdjustment(.size)
                         },
                         finishKeyboardAdjustmentAction: finishKeyboardAdjustment,
+                        discardKeyboardAdjustmentAction: discardKeyboardAdjustment,
                         switchKeyboardLayoutAction: {
                             showKeyboardLayoutPicker = true
                         },
@@ -180,47 +197,6 @@ struct EmulatorView: View {
                         }
                     }
 
-                    if keyboardAdjustmentMode != .none,
-                       !session.isPresentingNativeLCDUI {
-                        VStack(spacing: 0) {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Label(
-                                        keyboardAdjustmentMode == .position
-                                            ? L10n.string("Move Virtual Keys")
-                                            : L10n.string("Resize Key Groups"),
-                                        systemImage: keyboardAdjustmentMode == .position
-                                            ? "arrow.up.and.down.and.arrow.left.and.right"
-                                            : "arrow.up.left.and.arrow.down.right"
-                                    )
-                                    .font(.headline)
-
-                                    Text(
-                                        keyboardAdjustmentMode == .position
-                                            ? L10n.string("Keys snap to a 4-point grid.")
-                                            : L10n.string(
-                                                "Drag horizontally or vertically in 5% steps."
-                                            )
-                                    )
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                }
-
-                                Spacer()
-
-                                Button("Done", action: finishKeyboardAdjustment)
-                                    .buttonStyle(.borderedProminent)
-                            }
-                            .padding()
-                            .background(.regularMaterial)
-                            .overlay(alignment: .bottom) {
-                                Divider()
-                            }
-
-                            Spacer()
-                        }
-                    }
-
                     if runtimeProfile.showFPS,
                        session.state == .running,
                        !session.isPresentingNativeLCDUI {
@@ -235,10 +211,6 @@ struct EmulatorView: View {
                 }
                 .coordinateSpace(name: "emulatorSurface")
                 .contentShape(Rectangle())
-                .simultaneousGesture(
-                    backGesture,
-                    including: keyboardAdjustmentMode == .none ? .all : .none
-                )
             }
             .onPreferenceChange(NativeLCDUICaptureRectPreferenceKey.self) { rect in
                 nativeLCDUICaptureRect = rect
@@ -251,7 +223,9 @@ struct EmulatorView: View {
             .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
             .phoneMENavigationBarBackgroundVisible()
-            .phoneMENavigationBarVisible(enableActionBar)
+            .phoneMENavigationBarVisible(
+                enableActionBar || keyboardAdjustmentMode != .none
+            )
 #else
             .navigationTitle(navigationTitle)
 #endif
@@ -276,6 +250,12 @@ struct EmulatorView: View {
         }
         .onDisappear {
             keyboardHideTask?.cancel()
+            if let snapshot = keyboardAdjustmentSnapshot {
+                runtimeProfile = snapshot.profile
+                showKeypad = snapshot.showKeypad
+                keyboardAdjustmentSnapshot = nil
+                keyboardAdjustmentMode = .none
+            }
             persistRuntimeProfile()
             configureScreenAwake(false)
             resetPreferredOrientation()
@@ -347,16 +327,6 @@ struct EmulatorView: View {
         }
     }
 
-    private var backGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                guard value.startLocation.x < 32,
-                      value.translation.width > 100,
-                      abs(value.translation.height) < 80 else { return }
-                showExitConfirmation = true
-            }
-    }
-
     private func controlsMaxWidth(for size: CGSize) -> CGFloat {
         max(size.width - 12, 0)
     }
@@ -383,15 +353,71 @@ struct EmulatorView: View {
         }
     }
 
-    private func setAutoTranslationEnabled(_ enabled: Bool) {
-        let previous = runtimeProfile.isAutoTranslationEnabled
-        guard previous != enabled else { return }
+    private func setAutoTranslationConfiguration(
+        _ enabled: Bool,
+        _ sourceLanguage: TranslationSourceLanguage
+    ) {
+        let previousEnabled = runtimeProfile.isAutoTranslationEnabled
+        let previousSourceLanguage =
+            runtimeProfile.effectiveAutoTranslationSourceLanguage
+        guard previousEnabled != enabled ||
+                previousSourceLanguage != sourceLanguage else {
+            return
+        }
 
         runtimeProfile.setAutoTranslationEnabled(enabled)
+        if enabled {
+            runtimeProfile.effectiveAutoTranslationSourceLanguage =
+                sourceLanguage
+        }
         persistRuntimeProfile()
-        session.setAutoTranslationEnabled(enabled, for: game) { result in
+        session.setAutoTranslationConfiguration(
+            enabled: enabled,
+            sourceLanguage: sourceLanguage,
+            for: game
+        ) { result in
             guard case let .failure(error) = result else { return }
-            runtimeProfile.setAutoTranslationEnabled(previous)
+            runtimeProfile.setAutoTranslationEnabled(previousEnabled)
+            runtimeProfile.effectiveAutoTranslationSourceLanguage =
+                previousSourceLanguage
+            persistRuntimeProfile()
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    private func setQuickFrameRate(_ framesPerSecond: Int?) {
+        let previousProfile = runtimeProfile
+        var updatedProfile = runtimeProfile
+        if let framesPerSecond {
+            updatedProfile.frameRateLimit = framesPerSecond
+            updatedProfile.isFrameRateOverrideEnabled = true
+        } else {
+            updatedProfile.frameRateLimit = GameProfile.defaultFrameRate
+            updatedProfile.isFrameRateOverrideEnabled = false
+        }
+        updatedProfile.normalize()
+
+        guard updatedProfile.frameRateLimit != previousProfile.frameRateLimit ||
+                updatedProfile.effectiveFramePacingMode !=
+                    previousProfile.effectiveFramePacingMode else {
+            return
+        }
+
+        let changeIdentifier = UUID()
+        frameRateChangeIdentifier = changeIdentifier
+        runtimeProfile = updatedProfile
+        persistRuntimeProfile()
+        session.setFramePacing(
+            framesPerSecond: updatedProfile.frameRateLimit,
+            mode: updatedProfile.effectiveFramePacingMode,
+            for: game
+        ) { result in
+            guard frameRateChangeIdentifier == changeIdentifier,
+                  case let .failure(error) = result else {
+                return
+            }
+            runtimeProfile = previousProfile
             persistRuntimeProfile()
             errorMessage = error.localizedDescription
             showError = true
@@ -454,6 +480,12 @@ struct EmulatorView: View {
 
     private func beginKeyboardAdjustment(_ mode: KeyboardAdjustmentMode) {
         keyboardHideTask?.cancel()
+        if keyboardAdjustmentMode == .none {
+            keyboardAdjustmentSnapshot = KeyboardAdjustmentSnapshot(
+                profile: runtimeProfile,
+                showKeypad: showKeypad
+            )
+        }
         prepareKeyboardForEditing()
         keyboardAdjustmentMode = mode
         runtimeProfile.showVirtualKeyboard = true
@@ -465,8 +497,22 @@ struct EmulatorView: View {
     private func finishKeyboardAdjustment() {
         guard keyboardAdjustmentMode != .none else { return }
         keyboardAdjustmentMode = .none
+        keyboardAdjustmentSnapshot = nil
         runtimeProfile.makeKeyboardLayoutCustom()
         persistRuntimeProfile()
+        scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
+    }
+
+    private func discardKeyboardAdjustment() {
+        guard let snapshot = keyboardAdjustmentSnapshot else { return }
+        keyboardHideTask?.cancel()
+        keyboardAdjustmentMode = .none
+        runtimeProfile = snapshot.profile
+        keyboardAdjustmentSnapshot = nil
+        activeVirtualKeyCount = 0
+        withAnimation(.easeInOut(duration: 0.15)) {
+            showKeypad = snapshot.showKeypad
+        }
         scheduleKeyboardAutoHide(obscuresDisplay: keyboardObscuresDisplay)
     }
 
@@ -826,15 +872,21 @@ private struct EmulatorToolbarAnchor: View, Equatable {
     let keyboardAdjustmentMode: KeyboardAdjustmentMode
     let isRotationLocked: Bool
     let translationEnabled: Bool
+    let translationSourceLanguage: TranslationSourceLanguage
+    let frameRateOverrideEnabled: Bool
+    let frameRateLimit: Int
     let hideAction: () -> Void
     let exitAction: () -> Void
     let toggleRotationLockAction: () -> Void
-    let setTranslationEnabledAction: (Bool) -> Void
+    let setTranslationConfigurationAction:
+        (Bool, TranslationSourceLanguage) -> Void
+    let setFrameRateAction: (Int?) -> Void
     let toggleKeyboardAction: () -> Void
     let screenshotAction: () -> Void
     let beginKeyboardPositionAction: () -> Void
     let beginKeyboardResizeAction: () -> Void
     let finishKeyboardAdjustmentAction: () -> Void
+    let discardKeyboardAdjustmentAction: () -> Void
     let switchKeyboardLayoutAction: () -> Void
     let hideKeyboardButtonsAction: () -> Void
     let resetKeyboardLayoutAction: () -> Void
@@ -844,14 +896,76 @@ private struct EmulatorToolbarAnchor: View, Equatable {
             && lhs.keyboardAdjustmentMode == rhs.keyboardAdjustmentMode
             && lhs.isRotationLocked == rhs.isRotationLocked
             && lhs.translationEnabled == rhs.translationEnabled
+            && lhs.translationSourceLanguage == rhs.translationSourceLanguage
+            && lhs.frameRateOverrideEnabled == rhs.frameRateOverrideEnabled
+            && lhs.frameRateLimit == rhs.frameRateLimit
     }
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Group {
+                        if keyboardAdjustmentMode != .none {
+                            Menu {
+                            Button(action: beginKeyboardPositionAction) {
+                                Label(
+                                    "Move keys",
+                                    systemImage: keyboardAdjustmentMode == .position
+                                        ? "checkmark.circle.fill"
+                                        : "arrow.up.and.down.and.arrow.left.and.right"
+                                )
+                            }
+                            Button(action: beginKeyboardResizeAction) {
+                                Label(
+                                    "Resize key groups",
+                                    systemImage: keyboardAdjustmentMode == .size
+                                        ? "checkmark.circle.fill"
+                                        : "arrow.up.left.and.arrow.down.right"
+                                )
+                            }
+                        } label: {
+                            Label(
+                                keyboardAdjustmentMode == .position
+                                    ? L10n.string("Move Virtual Keys")
+                                    : L10n.string("Resize Key Groups"),
+                                systemImage: keyboardAdjustmentMode == .position
+                                    ? "arrow.up.and.down.and.arrow.left.and.right"
+                                    : "arrow.up.left.and.arrow.down.right"
+                            )
+                                .font(.subheadline.weight(.semibold))
+                            }
+                            .accessibilityLabel("Keyboard edit mode")
+                        }
+                    }
+                }
+
+                ToolbarItem(placement: .cancellationAction) {
+                    Group {
+                        if keyboardAdjustmentMode != .none {
+                            Button(
+                                "Discard",
+                                role: .cancel,
+                                action: discardKeyboardAdjustmentAction
+                            )
+                        }
+                    }
+                }
+
+                ToolbarItem(placement: .primaryAction) {
+                    Group {
+                        if keyboardAdjustmentMode != .none {
+                            Button("Done", action: finishKeyboardAdjustmentAction)
+                                .font(.body.weight(.semibold))
+                        }
+                    }
+                }
+
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: toggleKeyboardAction) {
+                    Group {
+                        if keyboardAdjustmentMode == .none {
+                            Button(action: toggleKeyboardAction) {
                         Image(systemName: "keyboard")
                     }
                     .accessibilityLabel("Keyboard (IME)")
@@ -863,12 +977,46 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                     .accessibilityLabel("Take screenshot")
 
                     Menu {
-                        Button(action: hideAction) {
-                            Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
+                        Menu {
+                            Button(action: beginKeyboardPositionAction) {
+                                Label(
+                                    "Move keys",
+                                    systemImage: "arrow.up.and.down.and.arrow.left.and.right"
+                                )
+                            }
+                            Button(action: beginKeyboardResizeAction) {
+                                Label(
+                                    "Resize key groups",
+                                    systemImage: "arrow.up.left.and.arrow.down.right"
+                                )
+                            }
+                            if keyboardAdjustmentMode != .none {
+                                Button(action: finishKeyboardAdjustmentAction) {
+                                    Label("Finish editing", systemImage: "checkmark")
+                                }
+                            }
+                            Divider()
+                            Button(action: switchKeyboardLayoutAction) {
+                                Label("Choose layout", systemImage: "keyboard")
+                            }
+                            .disabled(keyboardAdjustmentMode != .none)
+                            Button(action: hideKeyboardButtonsAction) {
+                                Label("Visible buttons", systemImage: "eye")
+                            }
+                            .disabled(keyboardAdjustmentMode != .none)
+                            Button(
+                                role: .destructive,
+                                action: resetKeyboardLayoutAction
+                            ) {
+                                Label(
+                                    "Reset keyboard layout",
+                                    systemImage: "arrow.counterclockwise"
+                                )
+                            }
+                        } label: {
+                            Label("Virtual keyboard", systemImage: "keyboard")
                         }
-                        Button(role: .destructive, action: exitAction) {
-                            Label("Exit", systemImage: "power")
-                        }
+                        Divider()
                         Button(action: toggleRotationLockAction) {
                             Label(
                                 isRotationLocked
@@ -879,54 +1027,84 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                     : "lock.rotation"
                             )
                         }
-                        Toggle(
-                            isOn: Binding(
-                                get: { translationEnabled },
-                                set: setTranslationEnabledAction
-                            )
-                        ) {
+                        Menu {
+                            Button {
+                                setTranslationConfigurationAction(
+                                    false,
+                                    translationSourceLanguage
+                                )
+                            } label: {
+                                Label(
+                                    "Off",
+                                    systemImage: !translationEnabled
+                                        ? "checkmark.circle.fill"
+                                        : "nosign"
+                                )
+                            }
+                            Divider()
+                            ForEach(TranslationSourceLanguage.allCases) { language in
+                                Button {
+                                    setTranslationConfigurationAction(
+                                        true,
+                                        language
+                                    )
+                                } label: {
+                                    Label(
+                                        language.title,
+                                        systemImage: translationEnabled &&
+                                            translationSourceLanguage == language
+                                            ? "checkmark.circle.fill"
+                                            : language.systemImage
+                                    )
+                                }
+                            }
+                        } label: {
                             Label(
                                 "Auto translate",
                                 systemImage: "character.book.closed.fill"
                             )
                         }
-                        Divider()
-                        Menu("Virtual keyboard") {
-                            Button(
-                                "Move keys",
-                                action: beginKeyboardPositionAction
-                            )
-                            Button(
-                                "Resize key groups",
-                                action: beginKeyboardResizeAction
-                            )
-                            if keyboardAdjustmentMode != .none {
-                                Button(
-                                    "Finish editing",
-                                    action: finishKeyboardAdjustmentAction
+                        Menu {
+                            Button {
+                                setFrameRateAction(nil)
+                            } label: {
+                                Label(
+                                    "Default",
+                                    systemImage: !frameRateOverrideEnabled
+                                        ? "checkmark.circle.fill"
+                                        : "clock"
                                 )
                             }
                             Divider()
-                            Button(
-                                "Choose layout",
-                                action: switchKeyboardLayoutAction
-                            )
-                            .disabled(keyboardAdjustmentMode != .none)
-                            Button(
-                                "Visible buttons",
-                                action: hideKeyboardButtonsAction
-                            )
-                            .disabled(keyboardAdjustmentMode != .none)
-                            Button(
-                                "Reset keyboard layout",
-                                role: .destructive,
-                                action: resetKeyboardLayoutAction
-                            )
+                            ForEach([30, 60], id: \.self) { fps in
+                                Button {
+                                    setFrameRateAction(fps)
+                                } label: {
+                                    Label(
+                                        "\(fps) FPS",
+                                        systemImage: frameRateOverrideEnabled &&
+                                            frameRateLimit == fps
+                                            ? "checkmark.circle.fill"
+                                            : "speedometer"
+                                    )
+                                }
+                            }
+                        } label: {
+                            Label("FPS", systemImage: "speedometer")
+                        }
+                        Divider()
+                        Button(action: hideAction) {
+                            Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                        Button(role: .destructive, action: exitAction) {
+                            Label("Exit", systemImage: "power")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("More")
+                            .accessibilityLabel("More")
+                        }
+                    }
                 }
             }
     }
@@ -985,11 +1163,14 @@ private struct KeyboardVisibilityEditor: View {
     }
 }
 
-private struct FrameSurface: View {
+struct FrameSurface: View {
     @EnvironmentObject private var session: EmulatorSession
     @ObservedObject var frameStore: EmulatorFrameStore
 
     let profile: GameProfile
+    var capturesHardwareKeyboard = true
+    var fitsEntireFrame = false
+    var forcesNearestNeighborFit = false
 
     @State private var pointerIsDown = false
 
@@ -999,7 +1180,9 @@ private struct FrameSurface: View {
                 let rect = FrameLayout.renderedFrameRect(
                     frame: frame,
                     availableSize: geometry.size,
-                    profile: profile
+                    profile: profile,
+                    strictFit: fitsEntireFrame,
+                    forceFit: forcesNearestNeighborFit
                 )
 
                 ZStack(alignment: .topLeading) {
@@ -1011,13 +1194,15 @@ private struct FrameSurface: View {
                         .offset(x: rect.minX, y: rect.minY)
 
 #if canImport(UIKit)
-                    PhoneMEHardwareKeyboardView { key, pressed in
-                        session.send(key, pressed: pressed)
+                    if capturesHardwareKeyboard {
+                        PhoneMEHardwareKeyboardView { key, pressed in
+                            session.send(key, pressed: pressed)
+                        }
+                        .frame(
+                            width: geometry.size.width,
+                            height: geometry.size.height
+                        )
                     }
-                    .frame(
-                        width: geometry.size.width,
-                        height: geometry.size.height
-                    )
 #endif
                 }
                 .frame(
@@ -1041,7 +1226,7 @@ private struct FrameSurface: View {
 #if canImport(UIKit)
         PhoneMEFrameLayerView(
             image: frame,
-            filtering: profile.filtering
+            filtering: forcesNearestNeighborFit ? false : profile.filtering
         )
 #else
         Image(decorative: frame, scale: 1, orientation: .up)
@@ -1096,7 +1281,9 @@ private struct FrameSurface: View {
         let rect = FrameLayout.renderedFrameRect(
             frame: frame,
             availableSize: availableSize,
-            profile: profile
+            profile: profile,
+            strictFit: fitsEntireFrame,
+            forceFit: forcesNearestNeighborFit
         )
         guard rect.width > 0, rect.height > 0 else { return nil }
         guard clampOutside || rect.contains(location) else { return nil }
@@ -1116,7 +1303,9 @@ private enum FrameLayout {
     static func renderedFrameRect(
         frame: CGImage?,
         availableSize: CGSize,
-        profile: GameProfile
+        profile: GameProfile,
+        strictFit: Bool = false,
+        forceFit: Bool = false
     ) -> CGRect {
         let frameSize = frame.map {
             CGSize(width: $0.width, height: $0.height)
@@ -1127,70 +1316,94 @@ private enum FrameLayout {
         return renderedFrameRect(
             frameSize: frameSize,
             availableSize: availableSize,
-            profile: profile
+            profile: profile,
+            strictFit: strictFit,
+            forceFit: forceFit
         )
     }
 
     static func renderedFrameRect(
         frame: CGImage,
         availableSize: CGSize,
-        profile: GameProfile
+        profile: GameProfile,
+        strictFit: Bool = false,
+        forceFit: Bool = false
     ) -> CGRect {
         renderedFrameRect(
             frameSize: CGSize(width: frame.width, height: frame.height),
             availableSize: availableSize,
-            profile: profile
+            profile: profile,
+            strictFit: strictFit,
+            forceFit: forceFit
         )
     }
 
     private static func renderedFrameRect(
         frameSize: CGSize,
         availableSize: CGSize,
-        profile: GameProfile
+        profile: GameProfile,
+        strictFit: Bool,
+        forceFit: Bool
     ) -> CGRect {
         let renderedSize: CGSize
 
-        switch profile.scaleType {
-        case .asIs:
-            let scale = CGFloat(profile.scalePercent) / 100
-            renderedSize = CGSize(
-                width: frameSize.width * scale,
-                height: frameSize.height * scale
-            )
-        case .fit:
-            let requestedScale = max(CGFloat(profile.scalePercent) / 100, 0.01)
+        if forceFit {
             if profile.preserveAspectRatio {
-                let widthScale = availableSize.width / max(frameSize.width, 1)
-                let heightScale = availableSize.height / max(frameSize.height, 1)
-                let shouldFitWidth = profile.screenGravity == .top
-                    && frameSize.height >= frameSize.width
-                    && availableSize.height >= availableSize.width
-                let fitScale = shouldFitWidth
-                    ? widthScale
-                    : min(widthScale, heightScale)
-                let scale = fitScale * requestedScale
-                renderedSize = CGSize(
-                    width: frameSize.width * scale,
-                    height: frameSize.height * scale
-                )
-            } else {
-                renderedSize = CGSize(
-                    width: availableSize.width * requestedScale,
-                    height: availableSize.height * requestedScale
-                )
-            }
-        case .fill:
-            if profile.preserveAspectRatio {
-                let fillScale = max(
+                let fitScale = min(
                     availableSize.width / max(frameSize.width, 1),
                     availableSize.height / max(frameSize.height, 1)
                 )
                 renderedSize = CGSize(
-                    width: frameSize.width * fillScale,
-                    height: frameSize.height * fillScale
+                    width: frameSize.width * fitScale,
+                    height: frameSize.height * fitScale
                 )
             } else {
                 renderedSize = availableSize
+            }
+        } else {
+            switch profile.scaleType {
+            case .asIs:
+                let scale = CGFloat(profile.scalePercent) / 100
+                renderedSize = CGSize(
+                    width: frameSize.width * scale,
+                    height: frameSize.height * scale
+                )
+            case .fit:
+                let requestedScale = max(CGFloat(profile.scalePercent) / 100, 0.01)
+                if profile.preserveAspectRatio {
+                    let widthScale = availableSize.width / max(frameSize.width, 1)
+                    let heightScale = availableSize.height / max(frameSize.height, 1)
+                    let shouldFitWidth = !strictFit
+                        && profile.screenGravity == .top
+                        && frameSize.height >= frameSize.width
+                        && availableSize.height >= availableSize.width
+                    let fitScale = shouldFitWidth
+                        ? widthScale
+                        : min(widthScale, heightScale)
+                    let scale = fitScale * requestedScale
+                    renderedSize = CGSize(
+                        width: frameSize.width * scale,
+                        height: frameSize.height * scale
+                    )
+                } else {
+                    renderedSize = CGSize(
+                        width: availableSize.width * requestedScale,
+                        height: availableSize.height * requestedScale
+                    )
+                }
+            case .fill:
+                if profile.preserveAspectRatio {
+                    let fillScale = max(
+                        availableSize.width / max(frameSize.width, 1),
+                        availableSize.height / max(frameSize.height, 1)
+                    )
+                    renderedSize = CGSize(
+                        width: frameSize.width * fillScale,
+                        height: frameSize.height * fillScale
+                    )
+                } else {
+                    renderedSize = availableSize
+                }
             }
         }
 

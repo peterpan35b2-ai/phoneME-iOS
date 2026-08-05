@@ -28,6 +28,8 @@ struct PhoneMEApp: App {
     @StateObject private var library: GameLibrary
     @StateObject private var profiles: GameProfileStore
     @StateObject private var profileTemplates: ProfileTemplateStore
+    @StateObject private var workspaceStore: WorkspaceStore
+    @StateObject private var workspaceRuntime: WorkspaceRuntimeStore
     @StateObject private var session: EmulatorSession
     @StateObject private var backgroundExecution: BackgroundExecutionController
 
@@ -39,6 +41,12 @@ struct PhoneMEApp: App {
         _profiles = StateObject(wrappedValue: GameProfileStore(storage: storage))
         _profileTemplates = StateObject(
             wrappedValue: ProfileTemplateStore(storage: storage)
+        )
+        _workspaceStore = StateObject(
+            wrappedValue: WorkspaceStore(storage: storage)
+        )
+        _workspaceRuntime = StateObject(
+            wrappedValue: WorkspaceRuntimeStore()
         )
         _session = StateObject(wrappedValue: EmulatorSession())
         _backgroundExecution = StateObject(
@@ -53,6 +61,8 @@ struct PhoneMEApp: App {
                 .environmentObject(library)
                 .environmentObject(profiles)
                 .environmentObject(profileTemplates)
+                .environmentObject(workspaceStore)
+                .environmentObject(workspaceRuntime)
                 .environmentObject(session)
                 .environmentObject(backgroundExecution)
                 .environment(
@@ -61,16 +71,17 @@ struct PhoneMEApp: App {
                         ?? AppLanguage.defaultLanguage.locale
                 )
                 .onAppear {
-                    backgroundExecution.setRunningApplicationCount(
-                        session.runningApplications.count
-                    )
+                    updateRunningApplicationCount()
                     updateLifecycle(for: scenePhase)
 #if DEBUG
                     debugLaunchIfRequested()
 #endif
                 }
-                .onChange(of: session.runningApplications.count) { count in
-                    backgroundExecution.setRunningApplicationCount(count)
+                .onChange(of: session.runningApplications.count) { _ in
+                    updateRunningApplicationCount()
+                }
+                .onChange(of: workspaceRuntime.runningApplicationCount) { _ in
+                    updateRunningApplicationCount()
                 }
                 .onChange(of: scenePhase) { newPhase in
                     updateLifecycle(for: newPhase)
@@ -107,6 +118,64 @@ struct PhoneMEApp: App {
         let environment = ProcessInfo.processInfo.environment
         let reopenCount = Int(environment["PHONEME_DEBUG_REOPEN_COUNT"] ?? "")
             ?? (environment["PHONEME_DEBUG_REOPEN"] == "1" ? 1 : 0)
+        let debugKeys = (environment["PHONEME_DEBUG_KEYS"] ?? "")
+            .split(separator: ",")
+            .compactMap { token -> J2MEKey? in
+                switch token.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() {
+                case "up": return .up
+                case "down": return .down
+                case "left": return .left
+                case "right": return .right
+                case "fire", "ok": return .fire
+                case "softleft", "soft1": return .softLeft
+                case "softright", "soft2": return .softRight
+                case "0": return .zero
+                case "1": return .one
+                case "2": return .two
+                case "3": return .three
+                case "4": return .four
+                case "5": return .five
+                case "6": return .six
+                case "7": return .seven
+                case "8": return .eight
+                case "9": return .nine
+                case "*", "star": return .star
+                case "#", "pound": return .pound
+                default: return nil
+                }
+            }
+        let keyStartDelayMilliseconds = max(
+            Int(environment["PHONEME_DEBUG_KEY_START_DELAY_MS"] ?? "") ?? 0,
+            0
+        )
+        let keyDelayMilliseconds = max(
+            Int(environment["PHONEME_DEBUG_KEY_DELAY_MS"] ?? "") ?? 350,
+            50
+        )
+        let observeMilliseconds = max(
+            Int(environment["PHONEME_DEBUG_OBSERVE_MS"] ?? "") ?? 8_000,
+            500
+        )
+        let listSelectionIndex = Int(
+            environment["PHONEME_DEBUG_LIST_INDEX"] ?? ""
+        )
+        let debugTaps: [(x: Int32, y: Int32)] =
+            (environment["PHONEME_DEBUG_TAPS"] ?? "")
+                .split(separator: ";")
+                .compactMap { token in
+                    let parts = token.split(separator: ",")
+                    guard parts.count == 2,
+                          let x = Int32(parts[0].trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                          )),
+                          let y = Int32(parts[1].trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                          )) else {
+                        return nil
+                    }
+                    return (x, y)
+                }
         Task { @MainActor in
             let reportURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("phoneme-debug-report.txt")
@@ -120,11 +189,12 @@ struct PhoneMEApp: App {
                     profile: .default
                 )
 
+                for _ in 0..<400 where session.state != .running {
+                    if case .failed = session.state { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+
                 for _ in 0..<max(reopenCount, 0) {
-                    for _ in 0..<400 where session.state != .running {
-                        if case .failed = session.state { break }
-                        try? await Task.sleep(nanoseconds: 50_000_000)
-                    }
                     guard session.state == .running else { break }
 
                     session.hideCurrent()
@@ -137,19 +207,86 @@ struct PhoneMEApp: App {
                     )
                 }
 
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                if session.state == .running,
+                   let listSelectionIndex {
+                    for _ in 0..<100 {
+                        guard session.lcdUI.screenKind != .list else { break }
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                    }
+                    if let item = session.lcdUI.visibleItems.first(where: {
+                        !$0.choices.isEmpty
+                    }),
+                       item.choices.indices.contains(listSelectionIndex) {
+                        session.focusLCDUIItem(item.id)
+                        session.setLCDUIChoice(
+                            componentID: item.id,
+                            index: item.choices[listSelectionIndex].index,
+                            selected: true
+                        )
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                }
+
+                if session.state == .running,
+                   !debugTaps.isEmpty || !debugKeys.isEmpty {
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(keyStartDelayMilliseconds) * 1_000_000
+                    )
+                }
+
+                if session.state == .running {
+                    for tap in debugTaps {
+                        session.sendPointer(x: tap.x, y: tap.y, action: 1)
+                        try? await Task.sleep(nanoseconds: 80_000_000)
+                        session.sendPointer(x: tap.x, y: tap.y, action: 2)
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(keyDelayMilliseconds) * 1_000_000
+                        )
+                    }
+                    for key in debugKeys {
+                        session.send(key, pressed: true)
+                        try? await Task.sleep(nanoseconds: 80_000_000)
+                        session.send(key, pressed: false)
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(keyDelayMilliseconds) * 1_000_000
+                        )
+                    }
+                }
+
+                try? await Task.sleep(
+                    nanoseconds: UInt64(observeMilliseconds) * 1_000_000
+                )
                 let appState = session.runningApplications[game.id]
                     .map { String(describing: $0.state) } ?? "missing"
+#if os(iOS)
+                if let frame = session.frame,
+                   let data = UIImage(cgImage: frame).pngData() {
+                    let frameURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("phoneme-debug-frame.png")
+                    try? data.write(to: frameURL, options: .atomic)
+                }
+#endif
+                let visibleChoices = session.lcdUI.visibleItems
+                    .flatMap(\.orderedChoices)
+                    .map(\.text)
+                    .joined(separator: " | ")
                 let report = [
                     "source=\(sourceURL.lastPathComponent)",
                     "mainClass=\(game.mainClass)",
                     "reopenCount=\(reopenCount)",
+                    "debugKeys=\(debugKeys.map(\.mappingID).joined(separator: ","))",
+                    "debugTaps=\(debugTaps.map { "\($0.x),\($0.y)" }.joined(separator: ";"))",
+                    "keyStartDelayMilliseconds=\(keyStartDelayMilliseconds)",
+                    "listSelectionIndex=\(listSelectionIndex.map(String.init) ?? "")",
+                    "observeMilliseconds=\(observeMilliseconds)",
                     "state=\(String(describing: session.state))",
                     "application=\(appState)",
                     "frame=\(session.frame != nil)",
                     "fps=\(session.fpsStore.value)",
                     "presentation=\(String(describing: session.presentationMode))",
-                    "nativeLCDUI=\(session.isPresentingNativeLCDUI)"
+                    "nativeLCDUI=\(session.isPresentingNativeLCDUI)",
+                    "screenTitle=\(session.lcdUI.screen?.title ?? "")",
+                    "visibleChoices=\(visibleChoices)"
                 ].joined(separator: "\n")
                 try report.write(to: reportURL, atomically: true, encoding: .utf8)
                 print("[PhoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
@@ -162,20 +299,27 @@ struct PhoneMEApp: App {
     }
 #endif
 
+    private func updateRunningApplicationCount() {
+        backgroundExecution.setRunningApplicationCount(
+            session.runningApplications.count
+                + workspaceRuntime.runningApplicationCount
+        )
+    }
+
     private func updateLifecycle(for phase: ScenePhase) {
         switch phase {
         case .active:
             backgroundExecution.setApplicationPhase(.active)
             session.resume()
+            workspaceRuntime.resumeVisibleWorkspaces()
         case .inactive:
-            // Arm coarse Location while iOS is still completing the transition
-            // out of the foreground. This is intentionally stopped again as
-            // soon as the scene becomes active, so transient overlays cost only
-            // a very short low-accuracy location session.
+            // Arm low-accuracy Location while iOS is beginning the transition
+            // out of the foreground. It remains stopped while the app is active.
             backgroundExecution.setApplicationPhase(.inactive)
         case .background:
             backgroundExecution.setApplicationPhase(.background)
             session.suspend()
+            workspaceRuntime.suspendAll()
         @unknown default:
             break
         }

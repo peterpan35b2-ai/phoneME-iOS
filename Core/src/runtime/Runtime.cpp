@@ -140,6 +140,8 @@ public:
     ApplicationVM(
         Dimensions dimensions,
         std::array<i32, 7> keymap,
+        AppFramePacingConfig frame_pacing,
+        AppHeapConfig heap_config,
         Framebuffer& framebuffer,
         std::shared_ptr<translation::TranslationService> translation_service);
     ~ApplicationVM();
@@ -240,66 +242,12 @@ struct PendingUiTranslation final {
            (event.component_type >= 12 && event.component_type <= 14);
 }
 
-[[nodiscard]] bool capability_separator(char16_t character) noexcept {
-    return character == u' ' || character == u'\t' ||
-           character == u'\r' || character == u'\n';
-}
-
-[[nodiscard]] bool contains_capability_token(
-    std::u16string_view declared,
-    std::u16string_view expected) noexcept {
-    usize offset = 0U;
-    while (offset < declared.size()) {
-        while (offset < declared.size() &&
-               capability_separator(declared[offset])) {
-            ++offset;
-        }
-        if (offset >= declared.size()) break;
-        usize end = offset;
-        while (end < declared.size() &&
-               !capability_separator(declared[end])) {
-            ++end;
-        }
-        if (declared.substr(offset, end - offset) == expected) return true;
-        offset = end;
-    }
-    return false;
-}
-
-template <usize Size>
-[[nodiscard]] std::optional<std::u16string> selected_capability(
-    const std::unordered_map<std::u16string, std::u16string>& properties,
-    std::u16string_view key,
-    const std::array<std::u16string_view, Size>& preference_order) {
-    const auto found = properties.find(std::u16string(key));
-    if (found == properties.end()) return std::nullopt;
-    for (const std::u16string_view candidate : preference_order) {
-        if (contains_capability_token(found->second, candidate)) {
-            return std::u16string(candidate);
-        }
-    }
-    return std::nullopt;
-}
-
-void configure_suite_capabilities(vm::Machine& machine, const Suite& suite) {
-    static constexpr std::array<std::u16string_view, 3> profiles {{
-        u"MIDP-2.1", u"MIDP-2.0", u"MIDP-1.0",
-    }};
-    static constexpr std::array<std::u16string_view, 3> configurations {{
-        u"CLDC-1.1.1", u"CLDC-1.1", u"CLDC-1.0",
-    }};
-    if (auto profile = selected_capability(
-            suite.properties, u"MicroEdition-Profile", profiles)) {
-        machine.set_system_property(u"microedition.profiles",
-                                    std::move(*profile));
-    }
-    if (auto configuration = selected_capability(
-            suite.properties,
-            u"MicroEdition-Configuration",
-            configurations)) {
-        machine.set_system_property(u"microedition.configuration",
-                                    std::move(*configuration));
-    }
+void configure_suite_capabilities(vm::Machine&, const Suite&) {
+    // MicroEdition-Profile and MicroEdition-Configuration in a suite
+    // descriptor are minimum requirements of that suite. They must not
+    // replace the capabilities reported by the running phoneME platform via
+    // System.getProperty(). The original phoneME runtime keeps reporting its
+    // own MIDP/CLDC versions even when a legacy JAR declares older versions.
 }
 
 struct LCDUIImageSource final {
@@ -788,10 +736,17 @@ void append_utf8(std::string& output, std::u16string_view text) {
 ApplicationVM::ApplicationVM(
     Dimensions dimensions,
     std::array<i32, 7> keymap,
+    AppFramePacingConfig frame_pacing,
+    AppHeapConfig heap_config,
     Framebuffer& framebuffer,
     std::shared_ptr<translation::TranslationService> translation_service)
-    : machine(classes), canvas(machine, dimensions, keymap) {
+    : machine(classes,
+              vm::HeapLimits {.maximum_bytes = heap_config.maximum_bytes}),
+      canvas(machine, dimensions, keymap) {
     machine.configure_canvas_bridge(&canvas);
+    machine.configure_frame_pacing(
+        frame_pacing.frames_per_second,
+        frame_pacing.mode);
     machine.configure_translation_service(std::move(translation_service));
     CanvasRenderHooks hooks;
     hooks.acquire_paint_graphics = [this, &framebuffer](
@@ -811,9 +766,12 @@ ApplicationVM::ApplicationVM(
         vm::ObjectRef,
         vm::ObjectRef graphics,
         vm::CanvasRect) {
-        return publish_canvas_graphics(target_machine,
-                                       framebuffer,
-                                       graphics);
+        target_machine.pace_frame_publication();
+        auto published = publish_canvas_graphics(target_machine,
+                                                 framebuffer,
+                                                 graphics);
+        if (published) target_machine.note_frame_pacing_boundary();
+        return published;
     };
     hooks.acquire_game_graphics = [&framebuffer](
         vm::Machine& target_machine,
@@ -833,9 +791,12 @@ ApplicationVM::ApplicationVM(
         vm::ObjectRef,
         vm::ObjectRef graphics,
         vm::CanvasRect) {
-        return publish_canvas_graphics(target_machine,
-                                       framebuffer,
-                                       graphics);
+        target_machine.pace_frame_publication();
+        auto published = publish_canvas_graphics(target_machine,
+                                                 framebuffer,
+                                                 graphics);
+        if (published) target_machine.note_frame_pacing_boundary();
+        return published;
     };
     canvas.configure_render_hooks(std::move(hooks));
 }
@@ -885,6 +846,12 @@ Status Runtime::configure(std::string runtime_home,
     runtime_home_.clear();
     optional_class_archive_.clear();
     permission_policies_.clear();
+    default_frame_pacing_ = AppFramePacingConfig {
+        .frames_per_second = 30,
+        .mode = vm::FramePacingMode::native,
+    };
+    app_frame_pacing_.clear();
+    app_heap_configs_.clear();
     suite_store_.clear();
     auto suite_store_status = suite_store_.configure(SuiteStoreConfig {
         .root_path = runtime_home,
@@ -920,6 +887,76 @@ Status Runtime::configure_keymap(std::array<i32, 7> keymap) {
     return {};
 }
 
+Status Runtime::configure_app_frame_pacing(
+    AppId app_id,
+    i32 frames_per_second,
+    vm::FramePacingMode mode) {
+    if (!app_id.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "frame pacing requires a valid application ID");
+    }
+    if (frames_per_second < 1 || frames_per_second > 240) {
+        return fail(ErrorCode::invalid_argument,
+                    "frame rate must be between 1 and 240 FPS");
+    }
+    switch (mode) {
+    case vm::FramePacingMode::native:
+    case vm::FramePacingMode::cap:
+    case vm::FramePacingMode::override_game_loop:
+        break;
+    default:
+        return fail(ErrorCode::invalid_argument,
+                    "unknown frame pacing mode");
+    }
+
+    std::shared_ptr<ApplicationVM> application_vm;
+    {
+        std::scoped_lock lock(mutex_);
+        app_frame_pacing_.insert_or_assign(
+            app_id.value,
+            AppFramePacingConfig {
+                .frames_per_second = frames_per_second,
+                .mode = mode,
+            });
+        if (const auto found = apps_.find(app_id.value);
+            found != apps_.end()) {
+            application_vm = found->second.vm;
+        }
+    }
+    if (application_vm != nullptr) {
+        std::scoped_lock vm_operation(application_vm->operation_mutex);
+        application_vm->machine.configure_frame_pacing(
+            frames_per_second,
+            mode);
+    }
+    return {};
+}
+
+Status Runtime::configure_app_heap(AppId app_id, i32 heap_megabytes) {
+    if (!app_id.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "heap configuration requires a valid application ID");
+    }
+    if (heap_megabytes < 1 || heap_megabytes > 512) {
+        return fail(ErrorCode::invalid_argument,
+                    "heap size must be between 1 and 512 MiB");
+    }
+
+    const usize maximum_bytes = static_cast<usize>(heap_megabytes) *
+        1024U * 1024U;
+    std::scoped_lock lock(mutex_);
+    if (const auto found = apps_.find(app_id.value);
+        found != apps_.end() &&
+        (found->second.vm != nullptr || found->second.lifecycle_busy)) {
+        return fail(ErrorCode::invalid_state,
+                    "heap size changes require restarting the application");
+    }
+    app_heap_configs_.insert_or_assign(
+        app_id.value,
+        AppHeapConfig {.maximum_bytes = maximum_bytes});
+    return {};
+}
+
 Status Runtime::configure_input_capabilities(bool pointer_events,
                                              bool pointer_motion,
                                              bool repeat_events) {
@@ -944,9 +981,11 @@ Status Runtime::configure_input_capabilities(bool pointer_events,
     return {};
 }
 
-Status Runtime::configure_translation(bool enabled,
-                                      std::string source_language,
-                                      std::string target_language) {
+Status Runtime::configure_translation(
+    bool enabled,
+    translation::TranslationProvider provider,
+    std::string source_language,
+    std::string target_language) {
     std::string runtime_home;
     {
         std::scoped_lock lock(mutex_);
@@ -955,7 +994,7 @@ Status Runtime::configure_translation(bool enabled,
                         "translation requires a configured runtime");
         }
         translation_enabled_by_default_ = enabled;
-        if (!enabled || translation_service_) return {};
+        if (!enabled) return {};
         runtime_home = runtime_home_;
     }
 
@@ -966,36 +1005,41 @@ Status Runtime::configure_translation(bool enabled,
         }
         return value;
     };
+    const std::string provider_name =
+        provider == translation::TranslationProvider::bing
+            ? "bing" : "google";
     translation::TranslationConfiguration configuration {
         .enabled = true,
+        .provider = provider,
         .source_language = std::move(source_language),
         .target_language = std::move(target_language),
         .maximum_pending_requests = 512U,
-        .maximum_concurrent_requests = 2U,
+        .maximum_concurrent_requests = 4U,
         .maximum_source_bytes = 2'048U,
-        .maximum_batch_items = 64U,
+        .maximum_batch_items = 32U,
         .maximum_batch_source_bytes = 8U * 1'024U,
-        .batch_coalescing_delay_ms = 12,
-        .maximum_batch_wait_ms = 32,
+        .batch_coalescing_delay_ms = 4,
+        .maximum_batch_wait_ms = 12,
     };
-    configuration.cache_path = runtime_home +
-        "/translation-gtx-" + sanitize(configuration.source_language) +
-        "-" + sanitize(configuration.target_language) + "-v1.bin";
+    configuration.cache_path = runtime_home + "/translation-" +
+        provider_name + "-" + sanitize(configuration.source_language) +
+        "-" + sanitize(configuration.target_language) + "-v2.bin";
     auto service = std::make_shared<translation::TranslationService>(
         std::move(configuration));
     if (!service->enabled()) {
         return fail(ErrorCode::invalid_argument,
-                    "translation language configuration is invalid");
+                    "translation configuration is invalid");
     }
 
     std::scoped_lock lock(mutex_);
-    if (!translation_service_) translation_service_ = std::move(service);
+    translation_service_ = std::move(service);
     return {};
 }
 
 Status Runtime::configure_app_translation(
     AppId app_id,
     bool enabled,
+    translation::TranslationProvider provider,
     std::string source_language,
     std::string target_language) {
     if (!app_id.valid()) {
@@ -1004,7 +1048,6 @@ Status Runtime::configure_app_translation(
     }
 
     std::shared_ptr<ApplicationVM> application_vm;
-    std::shared_ptr<translation::TranslationService> service;
     std::string runtime_home;
     {
         std::scoped_lock lock(mutex_);
@@ -1019,7 +1062,6 @@ Status Runtime::configure_app_translation(
                         "application translation target is unavailable");
         }
         application_vm = app->vm;
-        service = translation_service_;
         runtime_home = runtime_home_;
     }
 
@@ -1030,41 +1072,37 @@ Status Runtime::configure_app_translation(
         return {};
     }
 
-    if (!service) {
-        const auto sanitize = [](std::string value) {
-            for (char& character : value) {
-                const auto byte = static_cast<unsigned char>(character);
-                if (std::isalnum(byte) == 0 && character != '-') {
-                    character = '_';
-                }
-            }
-            return value;
-        };
-        translation::TranslationConfiguration configuration {
-            .enabled = true,
-            .source_language = std::move(source_language),
-            .target_language = std::move(target_language),
-            .maximum_pending_requests = 512U,
-            .maximum_concurrent_requests = 2U,
-            .maximum_source_bytes = 2'048U,
-            .maximum_batch_items = 64U,
-            .maximum_batch_source_bytes = 8U * 1'024U,
-            .batch_coalescing_delay_ms = 12,
-            .maximum_batch_wait_ms = 32,
-        };
-        configuration.cache_path = runtime_home +
-            "/translation-gtx-" + sanitize(configuration.source_language) +
-            "-" + sanitize(configuration.target_language) + "-v1.bin";
-        service = std::make_shared<translation::TranslationService>(
-            std::move(configuration));
-        if (!service->enabled()) {
-            return fail(ErrorCode::invalid_argument,
-                        "translation language configuration is invalid");
+    const auto sanitize = [](std::string value) {
+        for (char& character : value) {
+            const auto byte = static_cast<unsigned char>(character);
+            if (std::isalnum(byte) == 0 && character != '-') character = '_';
         }
-
-        std::scoped_lock lock(mutex_);
-        if (!translation_service_) translation_service_ = service;
-        else service = translation_service_;
+        return value;
+    };
+    const std::string provider_name =
+        provider == translation::TranslationProvider::bing
+            ? "bing" : "google";
+    translation::TranslationConfiguration configuration {
+        .enabled = true,
+        .provider = provider,
+        .source_language = std::move(source_language),
+        .target_language = std::move(target_language),
+        .maximum_pending_requests = 512U,
+        .maximum_concurrent_requests = 4U,
+        .maximum_source_bytes = 2'048U,
+        .maximum_batch_items = 32U,
+        .maximum_batch_source_bytes = 8U * 1'024U,
+        .batch_coalescing_delay_ms = 4,
+        .maximum_batch_wait_ms = 12,
+    };
+    configuration.cache_path = runtime_home + "/translation-" +
+        provider_name + "-" + sanitize(configuration.source_language) +
+        "-" + sanitize(configuration.target_language) + "-v2.bin";
+    auto service = std::make_shared<translation::TranslationService>(
+        std::move(configuration));
+    if (!service->enabled()) {
+        return fail(ErrorCode::invalid_argument,
+                    "translation configuration is invalid");
     }
 
     {
@@ -1208,6 +1246,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
     std::string runtime_home;
     std::string optional_class_archive;
     std::array<i32, 7> keymap {};
+    AppFramePacingConfig frame_pacing;
+    AppHeapConfig heap_config;
     bool pointer_events_supported = true;
     bool pointer_motion_supported = true;
     bool repeat_events_supported = true;
@@ -1237,6 +1277,15 @@ Status Runtime::start_midlet(SuiteId suite_id,
         runtime_home = runtime_home_;
         optional_class_archive = optional_class_archive_;
         keymap = keymap_;
+        frame_pacing = default_frame_pacing_;
+        if (const auto pacing = app_frame_pacing_.find(app_id.value);
+            pacing != app_frame_pacing_.end()) {
+            frame_pacing = pacing->second;
+        }
+        if (const auto heap = app_heap_configs_.find(app_id.value);
+            heap != app_heap_configs_.end()) {
+            heap_config = heap->second;
+        }
         pointer_events_supported = pointer_events_supported_;
         pointer_motion_supported = pointer_motion_supported_;
         repeat_events_supported = repeat_events_supported_;
@@ -1320,7 +1369,12 @@ Status Runtime::start_midlet(SuiteId suite_id,
     }
 
     application_vm = std::make_shared<ApplicationVM>(
-        dimensions, keymap, framebuffer_, std::move(translation_service));
+        dimensions,
+        keymap,
+        frame_pacing,
+        heap_config,
+        framebuffer_,
+        std::move(translation_service));
     application_vm->canvas.set_input_capabilities(
         pointer_events_supported,
         pointer_motion_supported,
@@ -1630,6 +1684,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
             app->console_output = std::move(launch_console);
             app->native_invocation_counts = std::move(launch_native_counts);
             app->vm.reset();
+            app_frame_pacing_.erase(app_id.value);
+            app_heap_configs_.erase(app_id.value);
         } else if (launch_signal == vm::MidletSignal::paused) {
             app->state = AppState::paused;
             foreground_app_id_ = app_id;
@@ -1931,6 +1987,8 @@ Status Runtime::pause_midlet(AppId app_id) {
     if (signal == vm::MidletSignal::destroyed) {
         app->state = AppState::destroyed;
         app->vm.reset();
+        app_frame_pacing_.erase(app_id.value);
+        app_heap_configs_.erase(app_id.value);
         if (foreground_app_id_ == app_id) {
             foreground_app_id_ = {};
             framebuffer_.clear();
@@ -2024,6 +2082,8 @@ Status Runtime::resume_midlet(AppId app_id) {
     if (signal == vm::MidletSignal::destroyed) {
         app->state = AppState::destroyed;
         app->vm.reset();
+        app_frame_pacing_.erase(app_id.value);
+        app_heap_configs_.erase(app_id.value);
         if (foreground_app_id_ == app_id) {
             foreground_app_id_ = {};
             framebuffer_.clear();
@@ -2050,6 +2110,8 @@ Status Runtime::destroy_midlet(AppId app_id) {
                         "application does not exist");
         }
         if (app->state == AppState::destroyed || app->vm == nullptr) {
+            app_frame_pacing_.erase(app_id.value);
+            app_heap_configs_.erase(app_id.value);
             return {};
         }
         if (app->lifecycle_busy) {
@@ -2141,6 +2203,8 @@ Status Runtime::destroy_midlet(AppId app_id) {
     app->generation = ++sequence_;
     app->console_output = std::move(console_output);
     app->vm.reset();
+    app_frame_pacing_.erase(app_id.value);
+    app_heap_configs_.erase(app_id.value);
     if (foreground_app_id_ == app_id) {
         foreground_app_id_ = {};
         framebuffer_.clear();
@@ -2411,6 +2475,8 @@ void Runtime::stop() noexcept {
             stopping_apps.push_back(app);
         }
         apps_.clear();
+        app_frame_pacing_.clear();
+        app_heap_configs_.clear();
         permission_policies_.clear();
         input_queue_.clear();
         ui_queue_.clear();
@@ -2909,6 +2975,8 @@ void Runtime::finalize_deferred_start(
         app->console_output = std::move(console_output);
         app->native_invocation_counts = std::move(native_counts);
         app->vm.reset();
+        app_frame_pacing_.erase(app_id.value);
+        app_heap_configs_.erase(app_id.value);
         if (foreground_app_id_ == app_id) {
             foreground_app_id_ = {};
             framebuffer_.clear();
@@ -2983,6 +3051,8 @@ void Runtime::finalize_pending_destruction(
     app->console_output = std::move(console_output);
     app->native_invocation_counts = std::move(native_counts);
     app->vm.reset();
+    app_frame_pacing_.erase(app_id.value);
+    app_heap_configs_.erase(app_id.value);
     if (foreground_app_id_ == app_id) {
         foreground_app_id_ = {};
         framebuffer_.clear();

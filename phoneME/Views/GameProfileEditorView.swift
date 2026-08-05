@@ -12,6 +12,7 @@ struct GameProfileEditorView: View {
 
     @State private var profile: GameProfile
     @State private var showScreenPresets = false
+    @State private var showHeapPresets = false
     @State private var showFontPresets = false
     @State private var showKeyMappings = false
 
@@ -40,6 +41,7 @@ struct GameProfileEditorView: View {
     var body: some View {
         Form {
             displaySection
+            memorySection
             fontSection
             inputSection
         }
@@ -97,6 +99,17 @@ struct GameProfileEditorView: View {
                 Button("\(preset.width) × \(preset.height)") {
                     profile.screenWidth = preset.width
                     profile.screenHeight = preset.height
+                }
+            }
+        }
+        .confirmationDialog(
+            "Heap size",
+            isPresented: $showHeapPresets,
+            titleVisibility: .visible
+        ) {
+            ForEach(GameProfile.heapSizePresets, id: \.self) { megabytes in
+                Button("\(megabytes) MiB") {
+                    profile.effectiveHeapSizeMegabytes = megabytes
                 }
             }
         }
@@ -171,20 +184,59 @@ struct GameProfileEditorView: View {
             Toggle("Force Canvas fullscreen", isOn: $profile.forceFullscreen)
             Toggle("Show FPS", isOn: $profile.showFPS)
 
-            HStack {
-                Text("Frame rate limit")
-                Spacer()
-                IntegerTextField(
-                    value: $profile.frameRateLimit,
-                    placeholder: "Auto (60)",
-                    width: 108
+            Toggle(
+                "Limit FPS",
+                isOn: Binding(
+                    get: { profile.isFrameRateOverrideEnabled },
+                    set: { profile.isFrameRateOverrideEnabled = $0 }
                 )
+            )
+
+            if profile.isFrameRateOverrideEnabled {
+                HStack {
+                    Text("FPS")
+                    Spacer()
+                    IntegerTextField(
+                        value: $profile.frameRateLimit,
+                        placeholder: "30",
+                        width: 108
+                    )
+                }
             }
 
         } header: {
             Text("Display")
         } footer: {
-            Text("Configure Canvas size, scaling and rendering. Frame rate supports up to 60 FPS; enter 0 to use the default.")
+            Text("FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated.")
+        }
+    }
+
+    private var memorySection: some View {
+        Section {
+            HStack {
+                Text("Java heap")
+                Spacer()
+                IntegerTextField(
+                    value: Binding(
+                        get: { profile.effectiveHeapSizeMegabytes },
+                        set: { profile.effectiveHeapSizeMegabytes = $0 }
+                    ),
+                    placeholder: "64",
+                    width: 108
+                )
+                Text("MiB")
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                showHeapPresets = true
+            } label: {
+                Label("Heap size presets", systemImage: "memorychip")
+            }
+        } header: {
+            Text("Memory")
+        } footer: {
+            Text("The heap limit is applied separately to this game the next time it starts. Very low values can cause OutOfMemoryError; high values increase memory pressure when several games run together.")
         }
     }
 
@@ -307,7 +359,11 @@ private struct NativeProfilePicker<Value>: View where
     var body: some View {
         Picker(title, selection: $selection) {
             ForEach(Array(Value.allCases)) { value in
-                Text(displayTitle(value)).tag(value)
+                Label(
+                    displayTitle(value),
+                    systemImage: displaySystemImage(value)
+                )
+                .tag(value)
             }
         }
     }
@@ -317,10 +373,24 @@ private struct NativeProfilePicker<Value>: View where
         case let value as GameProfile.Orientation: return value.title
         case let value as GameProfile.ScreenGravity: return value.title
         case let value as GameProfile.ScaleType: return value.title
+        case let value as GameProfile.FramePacingMode: return value.title
         case let value as GameProfile.KeyLayout: return value.title
         case let value as GameProfile.VirtualKeyboardType: return value.title
         case let value as GameProfile.ButtonShape: return value.title
         default: return value.rawValue
+        }
+    }
+
+    private func displaySystemImage(_ value: Value) -> String {
+        switch value {
+        case let value as GameProfile.Orientation: return value.systemImage
+        case let value as GameProfile.ScreenGravity: return value.systemImage
+        case let value as GameProfile.ScaleType: return value.systemImage
+        case let value as GameProfile.FramePacingMode: return value.systemImage
+        case let value as GameProfile.KeyLayout: return value.systemImage
+        case let value as GameProfile.VirtualKeyboardType: return value.systemImage
+        case let value as GameProfile.ButtonShape: return value.systemImage
+        default: return "slider.horizontal.3"
         }
     }
 }
@@ -350,7 +420,8 @@ private struct KeyMappingsView: View {
             Section {
                 Picker("Layout", selection: $profile.keyLayout) {
                     ForEach(GameProfile.KeyLayout.allCases) { layout in
-                        Text(layout.title).tag(layout)
+                        Label(layout.title, systemImage: layout.systemImage)
+                            .tag(layout)
                     }
                 }
             } header: {

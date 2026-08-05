@@ -40,12 +40,12 @@ public final class CldcLibraryOps {
         OutputStreamWriter writer = new OutputStreamWriter(bytes, "UTF_8");
         writer.write(expected, 0, 5);
         writer.write(expected.substring(5));
-        if (!"UTF-8".equals(writer.getEncoding())) return 101;
+        if (!"UTF8".equals(writer.getEncoding())) return 101;
         writer.flush();
 
         InputStreamReader reader = new InputStreamReader(
                 new ByteArrayInputStream(bytes.toByteArray()), "utf-8");
-        if (!"UTF-8".equals(reader.getEncoding())) return 102;
+        if (!"UTF8".equals(reader.getEncoding())) return 102;
         char[] buffer = new char[64];
         int count = reader.read(buffer, 0, buffer.length);
         if (count != expected.length()) return 103;
@@ -86,12 +86,12 @@ public final class CldcLibraryOps {
 
         InputStreamReader defaultReader = new InputStreamReader(
                 new ByteArrayInputStream(new byte[] {(byte) 0xE9}));
-        if (!"ISO-8859-1".equals(defaultReader.getEncoding()) ||
-                defaultReader.read() != 0x00E9 ||
-                defaultReader.read() != -1) return 114;
+        if (!"ISO8859_1".equals(defaultReader.getEncoding())) return 114;
+        if (defaultReader.read() != 0x00E9) return 1141;
+        if (defaultReader.read() != -1) return 1142;
         ByteArrayOutputStream defaultBytes = new ByteArrayOutputStream();
         OutputStreamWriter defaultWriter = new OutputStreamWriter(defaultBytes);
-        if (!"ISO-8859-1".equals(defaultWriter.getEncoding())) return 115;
+        if (!"ISO8859_1".equals(defaultWriter.getEncoding())) return 115;
         defaultWriter.write('\u00E9');
         defaultWriter.close();
         if (defaultBytes.toByteArray().length != 1 ||
@@ -266,6 +266,37 @@ public final class CldcLibraryOps {
         return 0;
     }
 
+    private static int standardCharsetsCompatibility() throws Exception {
+        java.nio.charset.Charset utf8 = java.nio.charset.StandardCharsets.UTF_8;
+        if (utf8 == null) return 210;
+        if (!"UTF-8".equals(utf8.name())) return 211;
+        if (!"UTF-8".equals(utf8.toString())) return 212;
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        OutputStreamWriter writer = new OutputStreamWriter(bytes, utf8);
+        writer.write("Tiếng Việt");
+        writer.close();
+        InputStreamReader reader = new InputStreamReader(
+                new ByteArrayInputStream(bytes.toByteArray()), utf8);
+        char[] decoded = new char[32];
+        int count = reader.read(decoded, 0, decoded.length);
+        if (!"Tiếng Việt".equals(new String(decoded, 0, count))) return 213;
+
+        try {
+            new InputStreamReader(new ByteArrayInputStream(new byte[0]),
+                    (java.nio.charset.Charset)null);
+            return 214;
+        } catch (NullPointerException expected) {
+        }
+        try {
+            new OutputStreamWriter(new ByteArrayOutputStream(),
+                    (java.nio.charset.Charset)null);
+            return 215;
+        } catch (NullPointerException expected) {
+        }
+        return 0;
+    }
+
     private static int cldcHierarchyAndTimeZone() throws Exception {
         Object integer = Integer.valueOf(7);
         if (integer instanceof Number) return 181;
@@ -316,6 +347,8 @@ public final class CldcLibraryOps {
             result = permissionCompatibility();
             if (result != 0) return result;
             result = throwableSemantics();
+            if (result != 0) return result;
+            result = standardCharsetsCompatibility();
             if (result != 0) return result;
             return cldcHierarchyAndTimeZone();
         } catch (Throwable failure) {

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <limits>
 
+#include "phoneme/graphics/TextRasterizer.hpp"
+
 namespace phoneme::graphics {
 
 Result<Font> Font::create(i32 face, i32 style, i32 size) {
@@ -30,8 +32,8 @@ Font Font::default_font() noexcept {
 }
 
 i32 Font::height() const noexcept {
-    // phoneME's reference gx_putpixel font exposes a fixed 9x14 logical cell.
-    // Face/style/size are metadata only and must not change LCDUI layout.
+    // Keep the 14-pixel LCDUI line box while glyph advances remain
+    // proportional to the bundled phoneME bitmap font.
     return 14;
 }
 
@@ -40,12 +42,18 @@ i32 Font::baseline() const noexcept {
 }
 
 i32 Font::char_width(char32_t character) const noexcept {
-    // MIDP measures UTF-16 code units; supplementary characters occupy two
-    // fixed cells in the reference implementation.
+    const std::span<const char32_t> glyph(&character, 1U);
+    if (auto width = platform_text_width(*this, glyph)) {
+        return *width;
+    }
     return character > 0xFFFF ? 18 : 9;
 }
 
 i32 Font::chars_width(std::span<const char32_t> characters) const noexcept {
+    if (auto width = platform_text_width(*this, characters)) {
+        return *width;
+    }
+
     i64 code_units = 0;
     for (const char32_t character : characters) {
         code_units += character > 0xFFFF ? 2 : 1;

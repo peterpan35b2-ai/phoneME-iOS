@@ -1,5 +1,88 @@
 import Foundation
 
+enum TranslationProvider: String, CaseIterable, Identifiable {
+    case google
+    case bing
+
+    static let preferenceKey = "translationProvider"
+    static let defaultProvider = TranslationProvider.bing
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .google: return "Google Translate"
+        case .bing: return "Bing Translator"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .google: return "g.circle"
+        case .bing: return "b.circle"
+        }
+    }
+
+    var coreValue: Int32 {
+        switch self {
+        case .google: return 0
+        case .bing: return 1
+        }
+    }
+
+    static var selected: TranslationProvider {
+        let stored = UserDefaults.standard.string(forKey: preferenceKey)
+        return stored.flatMap(TranslationProvider.init(rawValue:)) ?? defaultProvider
+    }
+}
+
+enum TranslationSourceLanguage: String, Codable, CaseIterable, Identifiable {
+    case auto
+    case simplifiedChinese = "zh-CN"
+    case traditionalChinese = "zh-TW"
+    case japanese = "ja"
+    case korean = "ko"
+    case english = "en"
+    case russian = "ru"
+    case thai = "th"
+    case indonesian = "id"
+    case spanish = "es"
+    case portuguese = "pt"
+    case french = "fr"
+    case german = "de"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .auto: return L10n.string("Auto detect")
+        case .simplifiedChinese: return L10n.string("Chinese (Simplified)")
+        case .traditionalChinese: return L10n.string("Chinese (Traditional)")
+        case .japanese: return L10n.string("Japanese")
+        case .korean: return L10n.string("Korean")
+        case .english: return L10n.string("English")
+        case .russian: return L10n.string("Russian")
+        case .thai: return L10n.string("Thai")
+        case .indonesian: return L10n.string("Indonesian")
+        case .spanish: return L10n.string("Spanish")
+        case .portuguese: return L10n.string("Portuguese")
+        case .french: return L10n.string("French")
+        case .german: return L10n.string("German")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .auto: return "wand.and.stars"
+        case .simplifiedChinese, .traditionalChinese, .japanese, .korean:
+            return "character"
+        case .english, .russian, .thai, .indonesian, .spanish,
+             .portuguese, .french, .german:
+            return "textformat.abc"
+        }
+    }
+}
+
 struct GameProfile: Codable, Equatable {
     enum Orientation: String, Codable, CaseIterable, Identifiable {
         case defaultValue
@@ -14,6 +97,14 @@ struct GameProfile: Codable, Equatable {
             case .auto: return L10n.string("Auto")
             case .portrait: return L10n.string("Portrait")
             case .landscape: return L10n.string("Landscape")
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .defaultValue: return "rectangle"
+            case .auto: return "arrow.triangle.2.circlepath"
+            case .portrait: return "rectangle.portrait"
+            case .landscape: return "rectangle"
             }
         }
     }
@@ -35,6 +126,15 @@ struct GameProfile: Codable, Equatable {
             case .bottom: return L10n.string("Bottom")
             }
         }
+        var systemImage: String {
+            switch self {
+            case .left: return "arrow.left"
+            case .top: return "arrow.up"
+            case .center: return "scope"
+            case .right: return "arrow.right"
+            case .bottom: return "arrow.down"
+            }
+        }
     }
 
     enum ScaleType: String, Codable, CaseIterable, Identifiable {
@@ -48,6 +148,45 @@ struct GameProfile: Codable, Equatable {
             case .asIs: return L10n.string("As is")
             case .fit: return L10n.string("Fit to window")
             case .fill: return L10n.string("Fill window (ignore aspect ratio)")
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .asIs: return "square"
+            case .fit: return "arrow.down.right.and.arrow.up.left"
+            case .fill: return "arrow.up.left.and.arrow.down.right"
+            }
+        }
+    }
+
+    enum FramePacingMode: String, Codable, CaseIterable, Identifiable {
+        case native
+        case cap
+        case overrideGameLoop
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .native: return L10n.string("Native game timing")
+            case .cap: return L10n.string("Limit only")
+            case .overrideGameLoop:
+                return L10n.string("Override game loop")
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .native: return "clock"
+            case .cap: return "speedometer"
+            case .overrideGameLoop: return "timer"
+            }
+        }
+
+        var coreValue: Int32 {
+            switch self {
+            case .native: return 0
+            case .cap: return 1
+            case .overrideGameLoop: return 2
             }
         }
     }
@@ -65,6 +204,12 @@ struct GameProfile: Codable, Equatable {
             case .siemens: return "Siemens"
             case .motorola: return "Motorola"
             case .custom: return L10n.string("Custom")
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .nokiaSE, .siemens, .motorola: return "phone"
+            case .custom: return "slider.horizontal.3"
             }
         }
     }
@@ -90,6 +235,15 @@ struct GameProfile: Codable, Equatable {
             case .arrows: return L10n.string("Arrows")
             }
         }
+        var systemImage: String {
+            switch self {
+            case .custom: return "slider.horizontal.3"
+            case .phone, .phoneArrows: return "phone"
+            case .numbersArrows, .numbers: return "number"
+            case .arrowsNumbers, .arrows:
+                return "arrow.up.and.down.and.arrow.left.and.right"
+            }
+        }
     }
 
     enum ButtonShape: String, Codable, CaseIterable, Identifiable {
@@ -103,6 +257,13 @@ struct GameProfile: Codable, Equatable {
             case .oval: return L10n.string("Oval")
             case .rectangle: return L10n.string("Rectangle")
             case .roundedRectangle: return L10n.string("Rounded rectangle")
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .oval: return "capsule"
+            case .rectangle: return "rectangle"
+            case .roundedRectangle: return "rectangle.fill"
             }
         }
     }
@@ -166,9 +327,18 @@ struct GameProfile: Codable, Equatable {
     var parallelScreenRedrawing = true
     var forceFullscreen = false
     var showFPS = false
-    var frameRateLimit = Self.maximumFrameRate
+    var frameRateLimit = Self.defaultFrameRate
+    // Optional keeps older profile JSON decodable. Missing/nil uses the safe
+    // 30 FPS publication cap. The legacy loop override is migrated to the same
+    // cap so a saved profile can never shorten Java sleeps or speed game logic.
+    var framePacingMode: FramePacingMode? = .cap
+    // Optional keeps older profile JSON decodable. Missing/nil uses the
+    // runtime's 64 MiB default heap limit.
+    var heapSizeMegabytes: Int?
     // Optional keeps older profile JSON decodable. Missing/nil means off.
     var autoTranslateToVietnamese: Bool?
+    // Missing/nil preserves the legacy automatic source-language behavior.
+    var autoTranslationSourceLanguage: TranslationSourceLanguage?
 
     var fontSmall = 18
     var fontMedium = 22
@@ -195,9 +365,74 @@ struct GameProfile: Codable, Equatable {
     var keyboardCustomBaseType: VirtualKeyboardType?
     var keyboardLayoutCustomization: KeyboardLayoutCustomization?
 
-    static let previousMaximumFrameRate = 30
+    static let defaultFrameRate = 30
     static let maximumFrameRate = 60
+    static let defaultHeapSizeMegabytes = 64
+    static let minimumHeapSizeMegabytes = 1
+    static let maximumHeapSizeMegabytes = 512
     static let `default` = GameProfile()
+
+    static func resolvedFrameRate(_ configuredValue: Int) -> Int {
+        guard configuredValue > 0 else { return defaultFrameRate }
+        return min(max(configuredValue, 1), maximumFrameRate)
+    }
+
+    static func resolvedFrameRate(
+        _ configuredValue: Int,
+        mode: FramePacingMode
+    ) -> Int {
+        mode == .native
+            ? defaultFrameRate
+            : resolvedFrameRate(configuredValue)
+    }
+
+    var effectiveFramePacingMode: FramePacingMode {
+        get {
+            switch framePacingMode {
+            case .native:
+                return .native
+            case .cap, .overrideGameLoop, nil:
+                return .cap
+            }
+        }
+        set {
+            framePacingMode = newValue == .native ? .native : .cap
+        }
+    }
+
+    var isFrameRateOverrideEnabled: Bool {
+        get { effectiveFramePacingMode == .cap }
+        set {
+            effectiveFramePacingMode = newValue ? .cap : .native
+            if newValue, frameRateLimit <= 0 {
+                frameRateLimit = Self.defaultFrameRate
+            }
+        }
+    }
+
+    var effectiveHeapSizeMegabytes: Int {
+        get {
+            Self.resolvedHeapSizeMegabytes(heapSizeMegabytes)
+        }
+        set {
+            let resolved = Self.resolvedHeapSizeMegabytes(newValue)
+            heapSizeMegabytes = resolved == Self.defaultHeapSizeMegabytes
+                ? nil
+                : resolved
+        }
+    }
+
+    static func resolvedHeapSizeMegabytes(_ configuredValue: Int?) -> Int {
+        let value = configuredValue ?? defaultHeapSizeMegabytes
+        return min(
+            max(value, minimumHeapSizeMegabytes),
+            maximumHeapSizeMegabytes
+        )
+    }
+
+    static func resolvedHeapSizeMegabytes(_ configuredValue: Int) -> Int {
+        resolvedHeapSizeMegabytes(Optional(configuredValue))
+    }
 
     var isAutoTranslationEnabled: Bool {
         autoTranslateToVietnamese ?? false
@@ -205,6 +440,11 @@ struct GameProfile: Codable, Equatable {
 
     mutating func setAutoTranslationEnabled(_ enabled: Bool) {
         autoTranslateToVietnamese = enabled ? true : nil
+    }
+
+    var effectiveAutoTranslationSourceLanguage: TranslationSourceLanguage {
+        get { autoTranslationSourceLanguage ?? .auto }
+        set { autoTranslationSourceLanguage = newValue == .auto ? nil : newValue }
     }
 
     mutating func normalize() {
@@ -215,6 +455,15 @@ struct GameProfile: Codable, Equatable {
             max(frameRateLimit, 0),
             Self.maximumFrameRate
         )
+        if framePacingMode == .overrideGameLoop {
+            framePacingMode = .cap
+        }
+        if let heapSizeMegabytes {
+            let resolved = Self.resolvedHeapSizeMegabytes(heapSizeMegabytes)
+            self.heapSizeMegabytes = resolved == Self.defaultHeapSizeMegabytes
+                ? nil
+                : resolved
+        }
         fontSmall = min(max(fontSmall, 1), 128)
         fontMedium = min(max(fontMedium, 1), 128)
         fontLarge = min(max(fontLarge, 1), 128)
@@ -406,6 +655,8 @@ struct GameProfile: Codable, Equatable {
 
         return changed
     }
+
+    static let heapSizePresets = [8, 16, 32, 64, 128, 256, 512]
 
     static let screenPresets: [(width: Int, height: Int)] = [
         (128, 128),

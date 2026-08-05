@@ -25,7 +25,6 @@ namespace {
 constexpr usize kMaximumTextCodePoints = 262'144U;
 constexpr usize kMaximumFontGlyphs = 256U;
 constexpr usize kAsciiGlyphCount = 128U;
-constexpr i32 kPhoneMEFontCellWidth = 9;
 constexpr i32 kPhoneMEFontAscent = 11;
 constexpr i32 kPhoneMEFontDescent = 3;
 constexpr i32 kPhoneMEFontHeight =
@@ -195,15 +194,27 @@ struct PhoneMEFontBin final {
     return kInvalidGlyphIndex;
 }
 
-[[nodiscard]] i32 glyph_advance(char32_t character) noexcept {
-    return character > 0xFFFF ? kPhoneMEFontCellWidth * 2
-                              : kPhoneMEFontCellWidth;
+[[nodiscard]] i32 style_horizontal_padding(const Font& font) noexcept {
+    i32 padding = 0;
+    if (font.is_bold()) {
+        ++padding;
+    }
+    if (font.is_italic()) {
+        padding += 2;
+    }
+    return padding;
+}
+
+[[nodiscard]] i32 glyph_advance(const PhoneMEFontBin& font,
+                                i32 glyph_index,
+                                const Font& logical_font) noexcept {
+    return static_cast<i32>(font.widths[static_cast<usize>(glyph_index)]) +
+           style_horizontal_padding(logical_font);
 }
 
 [[nodiscard]] std::optional<i32> bitmap_text_width(
     const Font& logical_font,
     std::span<const char32_t> text) noexcept {
-    static_cast<void>(logical_font);
     if (text.empty()) {
         return 0;
     }
@@ -218,7 +229,7 @@ struct PhoneMEFontBin final {
         if (glyph_index == kInvalidGlyphIndex) {
             return std::nullopt;
         }
-        const i32 advance = glyph_advance(character);
+        const i32 advance = glyph_advance(font, glyph_index, logical_font);
         if (width > std::numeric_limits<i32>::max() - advance) {
             return std::nullopt;
         }
@@ -246,7 +257,6 @@ struct PhoneMEFontBin final {
                                       i32 top,
                                       Pixel color,
                                       const Rect& clip) {
-    static_cast<void>(logical_font);
     const PhoneMEFontBin& font = phone_me_font();
     if (!font.valid) {
         return fail(ErrorCode::unsupported_feature,
@@ -277,7 +287,9 @@ struct PhoneMEFontBin final {
                 destination_y >= clip_bottom) {
                 continue;
             }
-            const i32 italic_shift = 0;
+            const i32 italic_shift = logical_font.is_italic()
+                ? (font.height - 1 - glyph_y) / 6
+                : 0;
             for (i32 glyph_x = 0; glyph_x < glyph_width; ++glyph_x) {
                 if (!bitmap_pixel_is_set(font,
                                          glyph_index,
@@ -297,9 +309,20 @@ struct PhoneMEFontBin final {
                 if (!stored) {
                     return stored;
                 }
+                if (logical_font.is_bold() &&
+                    destination_x + 1 < clip_right) {
+                    stored = target.set_pixel(
+                        static_cast<i32>(destination_x + 1),
+                        static_cast<i32>(destination_y),
+                        color,
+                        true);
+                    if (!stored) {
+                        return stored;
+                    }
+                }
             }
         }
-        pen_x += glyph_advance(character);
+        pen_x += glyph_advance(font, glyph_index, logical_font);
     }
     return {};
 }

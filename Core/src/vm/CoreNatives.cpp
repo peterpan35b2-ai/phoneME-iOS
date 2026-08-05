@@ -2921,13 +2921,15 @@ void register_core_natives(NativeMethodRegistry& registry) {
         "java/lang/Runtime",
         "totalMemory",
         "()J",
-        [](Machine&, std::span<const Value> arguments)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto receiver = require_receiver(arguments);
             if (!receiver) {
                 return std::unexpected(receiver.error());
             }
-            return std::optional<Value>(Value::from_long(64LL * 1024LL * 1024LL));
+            const usize capacity = machine.heap().stats().maximum_bytes;
+            return std::optional<Value>(
+                Value::from_long(static_cast<i64>(capacity)));
         });
 
     add(registry,
@@ -2940,8 +2942,9 @@ void register_core_natives(NativeMethodRegistry& registry) {
             if (!receiver) {
                 return std::unexpected(receiver.error());
             }
-            constexpr usize capacity = 64U * 1024U * 1024U;
-            const usize used = machine.heap().stats().estimated_bytes;
+            const auto stats = machine.heap().stats();
+            const usize capacity = stats.maximum_bytes;
+            const usize used = stats.estimated_bytes;
             const usize free = used >= capacity ? 0 : capacity - used;
             return std::optional<Value>(
                 Value::from_long(static_cast<i64>(free)));

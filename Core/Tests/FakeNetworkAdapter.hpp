@@ -75,8 +75,13 @@ public:
                     });
                 return operation;
             }
-            const usize count = std::min(maximum_bytes,
-                                         found->second.read_buffer.size());
+            ++read_count_;
+            last_read_maximum_bytes_ = maximum_bytes;
+            usize count = std::min(maximum_bytes,
+                                   found->second.read_buffer.size());
+            if (maximum_read_chunk_ != 0U) {
+                count = std::min(count, maximum_read_chunk_);
+            }
             result.insert(result.end(), found->second.read_buffer.begin(),
                           found->second.read_buffer.begin() +
                               static_cast<isize>(count));
@@ -107,6 +112,7 @@ public:
                                          bytes.begin(), bytes.end());
             found->second.read_buffer.insert(found->second.read_buffer.end(),
                                              bytes.begin(), bytes.end());
+            ++write_count_;
         }
         return complete(std::move(completion), count);
     }
@@ -294,6 +300,26 @@ public:
         return cancel_count_;
     }
 
+    [[nodiscard]] usize write_count() const {
+        std::scoped_lock lock(mutex_);
+        return write_count_;
+    }
+
+    [[nodiscard]] usize read_count() const {
+        std::scoped_lock lock(mutex_);
+        return read_count_;
+    }
+
+    [[nodiscard]] usize last_read_maximum_bytes() const {
+        std::scoped_lock lock(mutex_);
+        return last_read_maximum_bytes_;
+    }
+
+    void set_maximum_read_chunk(usize maximum_bytes) {
+        std::scoped_lock lock(mutex_);
+        maximum_read_chunk_ = maximum_bytes;
+    }
+
     [[nodiscard]] std::optional<network::HttpRequest>
     last_http_request() const {
         std::scoped_lock lock(mutex_);
@@ -353,6 +379,10 @@ private:
     usize close_count_ {0};
     usize shutdown_output_count_ {0};
     usize cancel_count_ {0};
+    usize write_count_ {0};
+    usize read_count_ {0};
+    usize last_read_maximum_bytes_ {0};
+    usize maximum_read_chunk_ {0};
     bool defer_reads_ {false};
 };
 

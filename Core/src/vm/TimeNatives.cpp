@@ -398,6 +398,59 @@ struct LocalTimeFields final {
     return *zone;
 }
 
+[[nodiscard]] Result<std::pair<std::string, i32>> local_timezone() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local {};
+    if (localtime_r(&now, &local) == nullptr) {
+        return fail(ErrorCode::internal_error,
+                    "cannot resolve the default local timezone");
+    }
+
+#if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
+    const i64 offset_seconds = static_cast<i64>(local.tm_gmtoff);
+#else
+    std::tm utc {};
+    if (gmtime_r(&now, &utc) == nullptr) {
+        return fail(ErrorCode::internal_error,
+                    "cannot resolve UTC for the default timezone");
+    }
+    utc.tm_isdst = local.tm_isdst;
+    const std::time_t local_epoch = std::mktime(&local);
+    const std::time_t utc_as_local_epoch = std::mktime(&utc);
+    const i64 offset_seconds = static_cast<i64>(std::difftime(
+        local_epoch, utc_as_local_epoch));
+#endif
+
+    const i64 offset_millis = offset_seconds * kMillisPerSecond;
+    if (offset_millis < std::numeric_limits<i32>::min() ||
+        offset_millis > std::numeric_limits<i32>::max()) {
+        return fail(ErrorCode::overflow,
+                    "default timezone offset exceeds int range");
+    }
+
+    const i64 signed_minutes = offset_millis / kMillisPerMinute;
+    if (signed_minutes == 0) {
+        return std::pair<std::string, i32>("GMT", 0);
+    }
+    const bool negative = signed_minutes < 0;
+    const i64 absolute_minutes = negative ? -signed_minutes : signed_minutes;
+    const i64 hours = absolute_minutes / 60;
+    const i64 minutes = absolute_minutes % 60;
+    if (hours > 99) {
+        return fail(ErrorCode::overflow,
+                    "default timezone hour offset is invalid");
+    }
+    std::string id = "GMT";
+    id.push_back(negative ? '-' : '+');
+    id.push_back(static_cast<char>('0' + (hours / 10)));
+    id.push_back(static_cast<char>('0' + (hours % 10)));
+    id.push_back(':');
+    id.push_back(static_cast<char>('0' + (minutes / 10)));
+    id.push_back(static_cast<char>('0' + (minutes % 10)));
+    return std::pair<std::string, i32>(
+        std::move(id), static_cast<i32>(offset_millis));
+}
+
 [[nodiscard]] Result<ObjectRef> default_timezone(Machine& machine) {
     auto field = machine.class_states().resolve_field(
         "java/util/TimeZone", "defaultZone", "Ljava/util/TimeZone;", true);
@@ -407,7 +460,9 @@ struct LocalTimeFields final {
     auto current = value->as_reference();
     if (!current) return std::unexpected(current.error());
     if (!current->is_null()) return *current;
-    auto created = create_timezone(machine, "GMT", 0);
+    auto local = local_timezone();
+    if (!local) return std::unexpected(local.error());
+    auto created = create_timezone(machine, local->first, local->second);
     if (!created) return std::unexpected(created.error());
     auto stored = machine.class_states().set_static_field(
         *field, Value::from_reference(*created));

@@ -175,6 +175,25 @@ extension View {
 #endif
     }
 
+    /// Hides the tab bar while a pushed game/multitasking screen is active.
+    /// iOS 15 uses a small UIKit bridge because SwiftUI did not yet expose
+    /// tab-bar visibility through the toolbar API.
+    @ViewBuilder
+    func phoneMETabBarHidden(_ isHidden: Bool = true) -> some View {
+#if os(iOS)
+        if #available(iOS 16.0, *) {
+            toolbar(isHidden ? .hidden : .visible, for: .tabBar)
+        } else {
+            background(
+                PhoneMETabBarVisibilityBridge(isHidden: isHidden)
+                    .frame(width: 0, height: 0)
+            )
+        }
+#else
+        self
+#endif
+    }
+
     /// Hides the underlying List/TextEditor scroll background where supported.
     /// iOS 15 keeps its native UIKit-backed background.
     @ViewBuilder
@@ -205,3 +224,72 @@ extension View {
 #endif
     }
 }
+
+#if os(iOS)
+private struct PhoneMETabBarVisibilityBridge: UIViewControllerRepresentable {
+    let isHidden: Bool
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.setTabBarHidden(isHidden)
+        return controller
+    }
+
+    func updateUIViewController(
+        _ uiViewController: Controller,
+        context: Context
+    ) {
+        uiViewController.setTabBarHidden(isHidden)
+    }
+
+    static func dismantleUIViewController(
+        _ uiViewController: Controller,
+        coordinator: ()
+    ) {
+        uiViewController.setTabBarHidden(false)
+    }
+
+    final class Controller: UIViewController {
+        private var requestedHidden = false
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            applyTabBarVisibility()
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            applyTabBarVisibility()
+        }
+
+        func setTabBarHidden(_ hidden: Bool) {
+            requestedHidden = hidden
+            applyTabBarVisibility()
+        }
+
+        private func applyTabBarVisibility() {
+            let hidden = requestedHidden
+            if let tabBarController {
+                update(tabBarController, hidden: hidden)
+                return
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let tabBarController = self.tabBarController else {
+                    return
+                }
+                self.update(tabBarController, hidden: self.requestedHidden)
+            }
+        }
+
+        private func update(
+            _ tabBarController: UITabBarController,
+            hidden: Bool
+        ) {
+            tabBarController.tabBar.isHidden = hidden
+            tabBarController.view.setNeedsLayout()
+            tabBarController.view.layoutIfNeeded()
+        }
+    }
+}
+#endif

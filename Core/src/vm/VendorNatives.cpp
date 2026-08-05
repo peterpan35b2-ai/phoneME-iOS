@@ -42,6 +42,8 @@ constexpr std::string_view kSprintPlayer = "com/sprintpcs/media/Player";
 constexpr std::string_view kSiemensSms = "com/siemens/mp/gsm/SMS";
 constexpr std::string_view kVodafoneImageEncoder = "com/vodafone/util/ImageEncoder";
 constexpr std::string_view kMidpScheduler = "com/sun/midp/midlet/Scheduler";
+constexpr std::string_view kCurrentMidletSuite =
+    "com/sun/midp/midlet/CurrentMIDletSuite";
 constexpr std::string_view kSiemensLight = "com/siemens/mp/game/Light";
 constexpr std::string_view kSiemensVibrator =
     "com/siemens/mp/game/Vibrator";
@@ -77,6 +79,42 @@ void add(NativeMethodRegistry& registry,
                          "vendor argument must not be null");
     }
     return *value;
+}
+
+[[nodiscard]] Result<std::u16string> string_argument(
+    Machine& machine,
+    std::span<const Value> arguments,
+    usize index,
+    std::string_view operation,
+    bool allow_null = false) {
+    auto reference = reference_argument(arguments, index, allow_null);
+    if (!reference) return std::unexpected(reference.error());
+    if (reference->is_null()) return std::u16string {};
+    auto class_name = machine.heap().class_name(*reference);
+    if (!class_name || *class_name != "java/lang/String") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         std::string(operation) + " expects String");
+    }
+    return machine.heap().string_value(*reference);
+}
+
+[[nodiscard]] Result<std::string> ascii_argument(
+    Machine& machine,
+    std::span<const Value> arguments,
+    usize index,
+    std::string_view operation) {
+    auto text = string_argument(machine, arguments, index, operation);
+    if (!text) return std::unexpected(text.error());
+    std::string output;
+    output.reserve(text->size());
+    for (const char16_t character : *text) {
+        if (character > 0x7FU) {
+            return fail_java("java/lang/IllegalArgumentException",
+                             std::string(operation) + " expects ASCII text");
+        }
+        output.push_back(static_cast<char>(character));
+    }
+    return output;
 }
 
 [[nodiscard]] Result<i32> int_argument(
@@ -924,13 +962,47 @@ void register_vendor_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*bytes));
         });
 
+    register_noop_constructor(registry, kCurrentMidletSuite);
+
     add(registry, std::string(kMidpScheduler), "getScheduler",
         "()Lcom/sun/midp/midlet/Scheduler;",
         [](Machine& machine, std::span<const Value>)
             -> Result<std::optional<Value>> {
+            auto current = vendor_static_reference_field(
+                machine, kMidpScheduler, "scheduler",
+                "Lcom/sun/midp/midlet/Scheduler;");
+            if (!current) return std::unexpected(current.error());
+            if (!current->is_null()) {
+                return std::optional<Value>(Value::from_reference(*current));
+            }
             auto scheduler = allocate_instance(machine, kMidpScheduler);
             if (!scheduler) return std::unexpected(scheduler.error());
+            auto stored = set_vendor_static_reference_field(
+                machine, kMidpScheduler, "scheduler",
+                "Lcom/sun/midp/midlet/Scheduler;", *scheduler);
+            if (!stored) return std::unexpected(stored.error());
             return std::optional<Value>(Value::from_reference(*scheduler));
+        });
+    add(registry, std::string(kMidpScheduler), "getMIDletSuite",
+        "()Lcom/sun/midp/midlet/MIDletSuite;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto scheduler = reference_argument(arguments, 0U, false);
+            if (!scheduler) return std::unexpected(scheduler.error());
+            auto current = vendor_static_reference_field(
+                machine, kMidpScheduler, "currentSuite",
+                "Lcom/sun/midp/midlet/CurrentMIDletSuite;");
+            if (!current) return std::unexpected(current.error());
+            if (current->is_null()) {
+                auto suite = allocate_instance(machine, kCurrentMidletSuite);
+                if (!suite) return std::unexpected(suite.error());
+                auto stored = set_vendor_static_reference_field(
+                    machine, kMidpScheduler, "currentSuite",
+                    "Lcom/sun/midp/midlet/CurrentMIDletSuite;", *suite);
+                if (!stored) return std::unexpected(stored.error());
+                current = *suite;
+            }
+            return std::optional<Value>(Value::from_reference(*current));
         });
     add(registry, std::string(kMidpScheduler), "getActiveMIDlet",
         "()Ljavax/microedition/midlet/MIDlet;",
@@ -943,6 +1015,245 @@ void register_vendor_natives(NativeMethodRegistry& registry) {
                 "Ljavax/microedition/midlet/MIDlet;");
             if (!owner) return std::unexpected(owner.error());
             return std::optional<Value>(Value::from_reference(*owner));
+        });
+
+    add(registry, std::string(kCurrentMidletSuite), "getProperty",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            auto key = reference_argument(arguments, 1U, false);
+            if (!suite) return std::unexpected(suite.error());
+            if (!key) return std::unexpected(key.error());
+            auto property = machine.app_property(*key);
+            if (!property) return std::unexpected(property.error());
+            if (!property->has_value()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto value = make_string(machine, std::move(**property));
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_reference(*value));
+        });
+    add(registry, std::string(kCurrentMidletSuite),
+        "getPushInterruptSetting", "()B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            const auto decision = machine.permission_policy().check(
+                security::permissions::push_registry);
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(to_underlying(decision))));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "getPushOptions", "()I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            return std::optional<Value>(Value::from_int(0));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "getPermissions", "()[B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            auto permissions = machine.heap().allocate_array(
+                "[B", 0U, Value::from_int(0));
+            if (!permissions) return std::unexpected(permissions.error());
+            return std::optional<Value>(Value::from_reference(*permissions));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "setTempProperty",
+        "(Lcom/sun/midp/security/SecurityToken;Ljava/lang/String;Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            auto key = string_argument(machine, arguments, 2U,
+                                       "MIDletSuite.setTempProperty");
+            auto value = string_argument(machine, arguments, 3U,
+                                         "MIDletSuite.setTempProperty");
+            if (!key) return std::unexpected(key.error());
+            if (!value) return std::unexpected(value.error());
+            machine.set_app_property(std::move(*key), std::move(*value));
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kCurrentMidletSuite), "getMIDletName",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            auto class_name = reference_argument(arguments, 1U, false);
+            if (!suite) return std::unexpected(suite.error());
+            if (!class_name) return std::unexpected(class_name.error());
+            auto key = make_string(machine, std::u16string(u"MIDlet-Name"));
+            if (!key) return std::unexpected(key.error());
+            auto property = machine.app_property(*key);
+            if (!property) return std::unexpected(property.error());
+            if (property->has_value()) {
+                auto name = make_string(machine, std::move(**property));
+                if (!name) return std::unexpected(name.error());
+                return std::optional<Value>(Value::from_reference(*name));
+            }
+            return std::optional<Value>(Value::from_reference(*class_name));
+        });
+
+    const auto check_permission = [](Machine& machine,
+                                     std::span<const Value> arguments,
+                                     bool interactive)
+        -> Result<std::optional<Value>> {
+        auto suite = reference_argument(arguments, 0U, false);
+        if (!suite) return std::unexpected(suite.error());
+        auto permission = ascii_argument(
+            machine, arguments, 1U, "MIDletSuite permission");
+        if (!permission) return std::unexpected(permission.error());
+        if (!interactive) {
+            const auto decision = machine.permission_policy().check(*permission);
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(to_underlying(decision))));
+        }
+        std::string resource;
+        if (arguments.size() > 2U) {
+            auto reference = arguments[2].as_reference();
+            if (!reference) return std::unexpected(reference.error());
+            if (!reference->is_null()) {
+                auto text = ascii_argument(
+                    machine, arguments, 2U, "MIDletSuite resource");
+                if (!text) return std::unexpected(text.error());
+                resource = std::move(*text);
+            }
+        }
+        auto allowed = machine.permission_policy().require(
+            *permission, std::move(resource), true);
+        if (!allowed) return std::unexpected(allowed.error());
+        return std::optional<Value> {};
+    };
+    add(registry, std::string(kCurrentMidletSuite),
+        "checkIfPermissionAllowed", "(Ljava/lang/String;)V",
+        [check_permission](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto result = check_permission(machine, arguments, false);
+            if (!result) return std::unexpected(result.error());
+            auto decision = result->has_value()
+                ? (*result)->as_int()
+                : Result<i32>(0);
+            if (!decision) return std::unexpected(decision.error());
+            if (*decision != static_cast<i32>(
+                    to_underlying(security::PermissionDecision::allowed))) {
+                return fail_java("java/lang/SecurityException",
+                                 "MIDlet suite permission is not allowed");
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kCurrentMidletSuite), "checkForPermission",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        [check_permission](Machine& machine, std::span<const Value> arguments) {
+            return check_permission(machine, arguments, true);
+        });
+    add(registry, std::string(kCurrentMidletSuite), "checkForPermission",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        [check_permission](Machine& machine, std::span<const Value> arguments) {
+            return check_permission(machine, arguments, true);
+        });
+    add(registry, std::string(kCurrentMidletSuite), "checkPermission",
+        "(Ljava/lang/String;)I",
+        [check_permission](Machine& machine, std::span<const Value> arguments) {
+            return check_permission(machine, arguments, false);
+        });
+    add(registry, std::string(kCurrentMidletSuite), "getID", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            return std::optional<Value>(Value::from_int(
+                machine.push_registry().owner_suite().value));
+        });
+
+    const auto midlet_number = [](Machine& machine,
+                                  std::span<const Value> arguments)
+        -> Result<i32> {
+        auto suite = reference_argument(arguments, 0U, false);
+        if (!suite) return std::unexpected(suite.error());
+        auto requested = string_argument(
+            machine, arguments, 1U, "MIDletSuite MIDlet class");
+        if (!requested) return std::unexpected(requested.error());
+        auto owner = vendor_static_reference_field(
+            machine, "javax/microedition/lcdui/Display", "ownerMidlet",
+            "Ljavax/microedition/midlet/MIDlet;");
+        if (!owner) return std::unexpected(owner.error());
+        if (owner->is_null()) return 0;
+        auto runtime_name = machine.heap().class_name(*owner);
+        if (!runtime_name) return std::unexpected(runtime_name.error());
+        std::u16string normalized;
+        normalized.reserve(runtime_name->size());
+        for (const char character : *runtime_name) {
+            normalized.push_back(static_cast<char16_t>(
+                character == '/' ? '.' : character));
+        }
+        return normalized == *requested ? 1 : 0;
+    };
+    add(registry, std::string(kCurrentMidletSuite), "getMIDletNumber",
+        "(Ljava/lang/String;)I",
+        [midlet_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto number = midlet_number(machine, arguments);
+            if (!number) return std::unexpected(number.error());
+            return std::optional<Value>(Value::from_int(*number));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "isRegistered",
+        "(Ljava/lang/String;)Z",
+        [midlet_number](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto number = midlet_number(machine, arguments);
+            if (!number) return std::unexpected(number.error());
+            return std::optional<Value>(Value::from_int(*number != 0 ? 1 : 0));
+        });
+    add(registry, std::string(kCurrentMidletSuite),
+        "permissionToInterrupt", "(Ljava/lang/String;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            const auto decision = machine.permission_policy().check(
+                security::permissions::push_registry);
+            return std::optional<Value>(Value::from_int(
+                decision == security::PermissionDecision::denied ? 0 : 1));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "isTrusted", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            return std::optional<Value>(Value::from_int(
+                machine.permission_policy().trust() ==
+                        security::SuiteTrust::trusted
+                    ? 1 : 0));
+        });
+    for (const std::string_view method_name : {"isVerified", "isEnabled"}) {
+        add(registry, std::string(kCurrentMidletSuite),
+            std::string(method_name), "()Z",
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto suite = reference_argument(arguments, 0U, false);
+                if (!suite) return std::unexpected(suite.error());
+                return std::optional<Value>(Value::from_int(1));
+            });
+    }
+    add(registry, std::string(kCurrentMidletSuite),
+        "getSecureFilenameBase", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            auto value = make_string(machine, {});
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_reference(*value));
+        });
+    add(registry, std::string(kCurrentMidletSuite), "close", "()V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto suite = reference_argument(arguments, 0U, false);
+            if (!suite) return std::unexpected(suite.error());
+            return std::optional<Value> {};
         });
 
     register_noop_constructor(registry, kSiemensLight);

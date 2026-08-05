@@ -12,6 +12,7 @@
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MonitorTable.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
+#include "phoneme/vm/VmTrace.hpp"
 
 namespace phoneme::vm {
 
@@ -22,6 +23,18 @@ thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_quantum_resume_time_ {};
 thread_local bool Scheduler::tls_quantum_timing_valid_ = false;
 thread_local u32 Scheduler::tls_unpaced_execution_depth_ = 0U;
+thread_local bool Scheduler::tls_frame_boundary_pending_ = false;
+thread_local u32 Scheduler::tls_frame_pacing_streak_ = 0U;
+thread_local i64 Scheduler::tls_frame_interval_sample_nanoseconds_ = 0;
+thread_local bool Scheduler::tls_frame_loop_wake_valid_ = false;
+thread_local bool Scheduler::tls_frame_cap_deadline_valid_ = false;
+thread_local u64 Scheduler::tls_frame_pacing_generation_ = 0U;
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_frame_loop_wake_time_ {};
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_frame_cap_deadline_ {};
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_frame_boundary_time_ {};
 
 namespace {
 
@@ -44,6 +57,42 @@ constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(4);
 // runs immediately until it reaches the next 10K-bytecode scheduler quantum.
 constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(50);
 constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(500);
+// Only a short, stable sleep immediately following an actual framebuffer
+// publication may be treated as game-loop pacing. Override mode deliberately
+// requires several matching frames before it may shorten a Java sleep.
+constexpr auto kMaximumFrameBoundaryToSleepDelay =
+    std::chrono::milliseconds(20);
+constexpr auto kMaximumFramePacingRequest =
+    std::chrono::milliseconds(100);
+constexpr auto kMinimumFramePacingRequest =
+    std::chrono::milliseconds(1);
+constexpr auto kMinimumSleepStabilityTolerance =
+    std::chrono::milliseconds(2);
+constexpr u32 kOverrideActivationStreak = 6U;
+
+[[nodiscard]] const char* thread_state_name(JavaThreadState state) noexcept {
+    switch (state) {
+    case JavaThreadState::new_thread: return "new";
+    case JavaThreadState::runnable: return "runnable";
+    case JavaThreadState::running: return "running";
+    case JavaThreadState::blocked_monitor: return "blocked-monitor";
+    case JavaThreadState::blocked_io: return "blocked-io";
+    case JavaThreadState::waiting: return "waiting";
+    case JavaThreadState::sleeping: return "sleeping";
+    case JavaThreadState::joining: return "joining";
+    case JavaThreadState::terminated: return "terminated";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] bool is_traceworthy_thread_state(
+    JavaThreadState state) noexcept {
+    return state == JavaThreadState::blocked_monitor ||
+           state == JavaThreadState::blocked_io ||
+           state == JavaThreadState::waiting ||
+           state == JavaThreadState::joining ||
+           state == JavaThreadState::terminated;
+}
 
 [[nodiscard]] std::chrono::steady_clock::duration background_interval(
     std::chrono::microseconds active_cpu_time) noexcept {
@@ -95,7 +144,8 @@ void report_thread_failure(
     Machine& machine,
     JavaThreadId thread_id,
     const std::optional<ObjectRef>& throwable,
-    const std::optional<Error>& failure) noexcept {
+    const std::optional<Error>& failure,
+    std::string_view exception_context) noexcept {
     if (failure.has_value()) {
         char message[1024] {};
         std::snprintf(
@@ -115,13 +165,33 @@ void report_thread_failure(
     }
     if (throwable.has_value() && !throwable->is_null()) {
         auto class_name = machine.heap().class_name(*throwable);
-        char message[512] {};
+        std::string detail;
+        auto detail_value = machine.heap().field(*throwable, 0U);
+        if (detail_value) {
+            auto detail_reference = detail_value->as_reference();
+            if (detail_reference && !detail_reference->is_null()) {
+                auto text = machine.heap().string_value(*detail_reference);
+                if (text) {
+                    detail.reserve(text->size());
+                    for (char16_t character : *text) {
+                        detail.push_back(character <= 0x7fU
+                            ? static_cast<char>(character)
+                            : '?');
+                    }
+                }
+            }
+        }
+        char message[1024] {};
         std::snprintf(
             message,
             sizeof(message),
-            "phoneME Java thread %u terminated with uncaught %s",
+            "phoneME Java thread %u terminated with uncaught %s%s%s%s%s",
             static_cast<unsigned>(thread_id),
-            class_name.has_value() ? class_name->c_str() : "Throwable");
+            class_name.has_value() ? class_name->c_str() : "Throwable",
+            detail.empty() ? "" : ": ",
+            detail.c_str(),
+            exception_context.empty() ? "" : " at ",
+            exception_context.data());
         std::fprintf(stderr, "%s\n", message);
 #if defined(__APPLE__)
         os_log_error(OS_LOG_DEFAULT, "%{public}s", message);
@@ -279,25 +349,25 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
                                        JavaThreadState::runnable);
     }
 
-    thread->worker_ = std::jthread(
+    vm_trace("thread",
+             "start java=%u native=0 object=%llu",
+             static_cast<unsigned>(thread->id_),
+             static_cast<unsigned long long>(thread_object.bits));
+    auto worker_started = thread->worker_.start(
         [this, &machine, thread](std::stop_token stop_token) {
             tls_scheduler_ = this;
             tls_thread_id_ = thread->id_;
 
             std::optional<ObjectRef> throwable;
             std::optional<Error> failure;
+            std::string exception_context;
             if (!stop_token.stop_requested()) {
-                auto result = machine.invoke_instance(
-                    thread->object_,
-                    "java/lang/Thread",
-                    "run",
-                    "()V",
-                    {},
-                    Machine::kLongLivedThreadInstructionBudget);
+                auto result = machine.run_java_thread_entry(thread->object_);
                 if (!result) {
                     failure = result.error();
                 } else if (result->throwable.has_value()) {
                     throwable = result->throwable;
+                    exception_context = result->exception_context;
                 }
             }
             // Forced MIDlet teardown cancels blocked workers internally. That
@@ -309,12 +379,23 @@ Status Scheduler::start_thread(Machine& machine, ObjectRef thread_object) {
             }
 
             report_thread_failure(
-                machine, thread->id_, throwable, failure);
+                machine, thread->id_, throwable, failure, exception_context);
             machine.monitors().release_all(thread->id_);
             finish_thread(thread, throwable, failure);
             tls_scheduler_ = nullptr;
             tls_thread_id_ = 0;
         });
+    if (!worker_started) {
+        {
+            std::scoped_lock thread_lock(thread->mutex_);
+            thread->started_ = false;
+            thread->state_ = JavaThreadState::new_thread;
+        }
+        std::scoped_lock lock(mutex_);
+        update_queue_membership_locked(thread->id_,
+                                       JavaThreadState::new_thread);
+        return std::unexpected(worker_started.error());
+    }
     return {};
 }
 
@@ -361,7 +442,11 @@ Status Scheduler::start_native_thread(
                                        JavaThreadState::runnable);
     }
 
-    thread->worker_ = std::jthread(
+    vm_trace("thread",
+             "start java=%u native=1 object=%llu",
+             static_cast<unsigned>(thread->id_),
+             static_cast<unsigned long long>(thread_object.bits));
+    auto worker_started = thread->worker_.start(
         [this, &machine, thread, task = std::move(task)](
             std::stop_token stop_token) mutable {
             tls_scheduler_ = this;
@@ -384,12 +469,24 @@ Status Scheduler::start_native_thread(
             }
 
             report_thread_failure(
-                machine, thread->id_, throwable, failure);
+                machine, thread->id_, throwable, failure, {});
             machine.monitors().release_all(thread->id_);
             finish_thread(thread, throwable, failure);
             tls_scheduler_ = nullptr;
             tls_thread_id_ = 0;
         });
+    if (!worker_started) {
+        {
+            std::scoped_lock thread_lock(thread->mutex_);
+            thread->started_ = false;
+            thread->native_task_ = false;
+            thread->state_ = JavaThreadState::new_thread;
+        }
+        std::scoped_lock lock(mutex_);
+        update_queue_membership_locked(thread->id_,
+                                       JavaThreadState::new_thread);
+        return std::unexpected(worker_started.error());
+    }
     return {};
 }
 
@@ -439,10 +536,147 @@ void Scheduler::set_host_foreground(bool foreground) noexcept {
         if (host_foreground_ == foreground) return;
         host_foreground_ = foreground;
         background_resume_deadline_ = {};
+        frame_pacing_generation_.fetch_add(1U, std::memory_order_acq_rel);
     }
     // Foregrounding must release every Java thread waiting on the shared
     // background gate immediately instead of adding up to 25 ms input latency.
     background_condition_.notify_all();
+}
+
+void Scheduler::configure_frame_pacing(
+    i32 frames_per_second,
+    FramePacingMode mode) noexcept {
+    // Mode 2 shipped briefly as an experimental loop override that shortened
+    // a MIDlet's own Thread.sleep calls. That advances frame-count-based game
+    // logic (KPAH's native 40 ms loop became 16 ms at 60 FPS), desynchronizing
+    // online games and eventually leaving their renderer/network state stuck.
+    // Keep the numeric value ABI-compatible, but treat every legacy override as
+    // a publication-only cap so Java timers and sleeps are never accelerated.
+    const FramePacingMode safe_mode =
+        mode == FramePacingMode::override_game_loop
+            ? FramePacingMode::cap : mode;
+    const i64 normalized = std::clamp<i64>(frames_per_second, 1, 240);
+    const i64 interval =
+        (1'000'000'000LL + normalized / 2LL) / normalized;
+    frame_interval_nanoseconds_.store(
+        std::max<i64>(interval, 1),
+        std::memory_order_release);
+    frame_pacing_mode_.store(
+        static_cast<i32>(safe_mode),
+        std::memory_order_release);
+    frame_pacing_generation_.fetch_add(1U, std::memory_order_acq_rel);
+    background_condition_.notify_all();
+}
+
+void Scheduler::reset_current_frame_pacing_state() noexcept {
+    tls_frame_boundary_pending_ = false;
+    tls_frame_pacing_streak_ = 0U;
+    tls_frame_interval_sample_nanoseconds_ = 0;
+    tls_frame_loop_wake_valid_ = false;
+    tls_frame_cap_deadline_valid_ = false;
+}
+
+void Scheduler::synchronize_current_frame_pacing_state() noexcept {
+    const u64 generation =
+        frame_pacing_generation_.load(std::memory_order_acquire);
+    if (tls_frame_pacing_generation_ == generation) return;
+    reset_current_frame_pacing_state();
+    tls_frame_pacing_generation_ = generation;
+}
+
+void Scheduler::pace_current_frame_publication(Machine& machine) {
+    if (tls_scheduler_ != this || tls_thread_id_ == 0U) return;
+    synchronize_current_frame_pacing_state();
+
+    const auto mode = static_cast<FramePacingMode>(
+        frame_pacing_mode_.load(std::memory_order_acquire));
+    bool host_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        host_foreground = host_foreground_;
+    }
+    if (mode != FramePacingMode::cap || !host_foreground) {
+        tls_frame_cap_deadline_valid_ = false;
+        return;
+    }
+    if (!tls_frame_cap_deadline_valid_) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= tls_frame_cap_deadline_) return;
+
+    // This is a presentation gate, not Java Thread.sleep. Keep the interrupt
+    // flag untouched and release the VM execution gate while waiting so input,
+    // networking and other Java workers continue to make progress. A pacing
+    // generation change wakes the gate immediately when FPS, mode or foreground
+    // ownership changes.
+    const u64 pacing_generation = tls_frame_pacing_generation_;
+    PerformanceCounters::record_scheduler_sleep();
+    set_current_state(JavaThreadState::runnable);
+    const u32 depth = machine.suspend_execution_for_blocking();
+    {
+        std::unique_lock lock(mutex_);
+        background_condition_.wait_until(
+            lock,
+            tls_frame_cap_deadline_,
+            [this, pacing_generation] {
+                return shutting_down_.load(std::memory_order_acquire) ||
+                       !host_foreground_ ||
+                       frame_pacing_generation_.load(
+                           std::memory_order_acquire) != pacing_generation;
+            });
+    }
+    machine.resume_execution_after_blocking(depth);
+    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    tls_quantum_timing_valid_ = true;
+    set_current_state(JavaThreadState::running);
+}
+
+void Scheduler::note_current_frame_boundary() noexcept {
+    if (tls_scheduler_ != this || tls_thread_id_ == 0U) return;
+    synchronize_current_frame_pacing_state();
+
+    const auto mode = static_cast<FramePacingMode>(
+        frame_pacing_mode_.load(std::memory_order_acquire));
+    bool host_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        host_foreground = host_foreground_;
+    }
+    if (!host_foreground || mode == FramePacingMode::native) {
+        reset_current_frame_pacing_state();
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    // A published framebuffer is a real cooperative progress boundary. Do not
+    // carry the sustained-busy quantum streak across frames; otherwise a
+    // healthy foreground game gradually receives the same heavy backoff as a
+    // non-rendering spin loop after it has run for a while.
+    tls_unblocked_quantum_count_ = 0U;
+    tls_quantum_resume_time_ = now;
+    tls_quantum_timing_valid_ = true;
+
+    if (mode == FramePacingMode::cap) {
+        tls_frame_boundary_pending_ = false;
+        tls_frame_pacing_streak_ = 0U;
+        tls_frame_interval_sample_nanoseconds_ = 0;
+        tls_frame_loop_wake_valid_ = false;
+        tls_frame_cap_deadline_ = now + std::chrono::nanoseconds(
+            frame_interval_nanoseconds_.load(std::memory_order_acquire));
+        tls_frame_cap_deadline_valid_ = true;
+        return;
+    }
+
+    tls_frame_cap_deadline_valid_ = false;
+    tls_frame_boundary_pending_ = true;
+    tls_frame_boundary_time_ = now;
+}
+
+void Scheduler::break_current_frame_pacing_sequence() noexcept {
+    if (tls_scheduler_ != this || tls_thread_id_ == 0U) return;
+    synchronize_current_frame_pacing_state();
+    reset_current_frame_pacing_state();
 }
 
 void Scheduler::cooperative_quantum(Machine& machine) {
@@ -553,32 +787,125 @@ void Scheduler::cooperative_yield(Machine& machine) {
 
 Result<SchedulerWaitResult> Scheduler::sleep_current(
     Machine& machine,
-    std::chrono::milliseconds duration) {
+    std::chrono::nanoseconds duration) {
     auto current = current_thread_record();
     if (!current) {
         return fail(ErrorCode::invalid_state,
                     "current Java thread is not registered");
     }
-    if (duration.count() == 0) {
-        cooperative_yield(machine);
-        return SchedulerWaitResult::completed;
+
+    synchronize_current_frame_pacing_state();
+    const auto now = std::chrono::steady_clock::now();
+    auto effective_duration = duration;
+    bool frame_loop_sleep = false;
+    const i64 frame_interval_nanoseconds =
+        frame_interval_nanoseconds_.load(std::memory_order_acquire);
+    const auto pacing_mode = static_cast<FramePacingMode>(
+        frame_pacing_mode_.load(std::memory_order_acquire));
+    bool host_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        host_foreground = host_foreground_;
     }
 
-    PerformanceCounters::record_scheduler_sleep();
+    if (tls_frame_boundary_pending_) {
+        tls_frame_boundary_pending_ = false;
+        const auto boundary_to_sleep = now - tls_frame_boundary_time_;
+        const bool eligible =
+            pacing_mode == FramePacingMode::override_game_loop &&
+            host_foreground &&
+            duration >= kMinimumFramePacingRequest &&
+            duration <= kMaximumFramePacingRequest &&
+            boundary_to_sleep >= std::chrono::steady_clock::duration::zero() &&
+            boundary_to_sleep <= kMaximumFrameBoundaryToSleepDelay;
+        if (eligible) {
+            frame_loop_sleep = true;
+            const i64 requested = duration.count();
+            std::chrono::nanoseconds active_time {};
+            if (tls_frame_loop_wake_valid_ &&
+                now >= tls_frame_loop_wake_time_) {
+                active_time =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        now - tls_frame_loop_wake_time_);
+            }
+
+            // Fixed-step games commonly request "target frame time minus work
+            // already spent". Compare the reconstructed total frame interval,
+            // not the remaining sleep alone, so variable render cost does not
+            // prevent a valid loop from reaching the override confidence gate.
+            const i64 observed_interval = requested + active_time.count();
+            const i64 previous = tls_frame_interval_sample_nanoseconds_;
+            bool stable_interval = previous > 0;
+            if (stable_interval) {
+                const i64 difference = observed_interval >= previous
+                    ? observed_interval - previous
+                    : previous - observed_interval;
+                const i64 tolerance = std::max<i64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        kMinimumSleepStabilityTolerance).count(),
+                    std::max(observed_interval, previous) / 5);
+                stable_interval = difference <= tolerance;
+            }
+            tls_frame_interval_sample_nanoseconds_ = observed_interval;
+            if (stable_interval) {
+                if (tls_frame_pacing_streak_ !=
+                    std::numeric_limits<u32>::max()) {
+                    ++tls_frame_pacing_streak_;
+                }
+            } else {
+                tls_frame_pacing_streak_ = 1U;
+            }
+
+            if (tls_frame_loop_wake_valid_) {
+                const auto target_interval = std::chrono::nanoseconds(
+                    frame_interval_nanoseconds);
+                const auto target_sleep = active_time < target_interval
+                    ? target_interval - active_time
+                    : std::chrono::nanoseconds::zero();
+                if (tls_frame_pacing_streak_ >= kOverrideActivationStreak) {
+                    effective_duration = target_sleep;
+                }
+            }
+        } else {
+            tls_frame_pacing_streak_ = 0U;
+            tls_frame_interval_sample_nanoseconds_ = 0;
+            tls_frame_loop_wake_valid_ = false;
+        }
+    } else {
+        // Any unrelated sleep breaks the render-loop pattern. Its original
+        // timeout remains untouched for timers, loading and I/O code.
+        tls_frame_pacing_streak_ = 0U;
+        tls_frame_interval_sample_nanoseconds_ = 0;
+        tls_frame_loop_wake_valid_ = false;
+    }
+
     {
         std::scoped_lock lock(current->mutex_);
         if (current->interrupted_) {
             current->interrupted_ = false;
+            tls_frame_pacing_streak_ = 0U;
+            tls_frame_interval_sample_nanoseconds_ = 0;
+            tls_frame_loop_wake_valid_ = false;
             return SchedulerWaitResult::interrupted;
         }
     }
 
+    if (effective_duration <= std::chrono::nanoseconds::zero()) {
+        cooperative_yield(machine);
+        if (frame_loop_sleep) {
+            tls_frame_loop_wake_time_ = std::chrono::steady_clock::now();
+            tls_frame_loop_wake_valid_ = true;
+        }
+        return SchedulerWaitResult::completed;
+    }
+
+    PerformanceCounters::record_scheduler_sleep();
     set_current_state(JavaThreadState::sleeping);
     const u32 depth = machine.suspend_execution_for_blocking();
     bool interrupted = false;
     {
         std::unique_lock lock(current->mutex_);
-        current->condition_.wait_for(lock, duration, [&current] {
+        current->condition_.wait_for(lock, effective_duration, [&current] {
             return current->interrupted_ || current->stop_requested_;
         });
         interrupted = current->interrupted_;
@@ -588,6 +915,15 @@ Result<SchedulerWaitResult> Scheduler::sleep_current(
     }
     machine.resume_execution_after_blocking(depth);
     set_current_state(JavaThreadState::running);
+
+    if (frame_loop_sleep && !interrupted) {
+        tls_frame_loop_wake_time_ = std::chrono::steady_clock::now();
+        tls_frame_loop_wake_valid_ = true;
+    } else if (interrupted) {
+        tls_frame_pacing_streak_ = 0U;
+        tls_frame_interval_sample_nanoseconds_ = 0;
+        tls_frame_loop_wake_valid_ = false;
+    }
     return interrupted ? SchedulerWaitResult::interrupted
                        : SchedulerWaitResult::completed;
 }
@@ -832,12 +1168,25 @@ void Scheduler::set_current_state(JavaThreadState state) noexcept {
     if (!current) {
         return;
     }
+    JavaThreadState previous = JavaThreadState::new_thread;
     {
         std::scoped_lock lock(current->mutex_);
+        previous = current->state_;
         current->state_ = state;
     }
-    std::scoped_lock lock(mutex_);
-    update_queue_membership_locked(current->id_, state);
+    {
+        std::scoped_lock lock(mutex_);
+        update_queue_membership_locked(current->id_, state);
+    }
+    if (previous != state &&
+        (is_traceworthy_thread_state(previous) ||
+         is_traceworthy_thread_state(state))) {
+        vm_trace("thread",
+                 "state java=%u %s->%s",
+                 static_cast<unsigned>(current->id_),
+                 thread_state_name(previous),
+                 thread_state_name(state));
+    }
 }
 
 void Scheduler::publish_current_roots(
@@ -959,9 +1308,16 @@ void Scheduler::finish_thread(const std::shared_ptr<JavaThread>& thread,
     }
     thread->context_->set_pending_exception(throwable);
     thread->condition_.notify_all();
-    std::scoped_lock lock(mutex_);
-    update_queue_membership_locked(thread->id_,
-                                   JavaThreadState::terminated);
+    {
+        std::scoped_lock lock(mutex_);
+        update_queue_membership_locked(thread->id_,
+                                       JavaThreadState::terminated);
+    }
+    vm_trace("thread",
+             "finish java=%u throwable=%d failure=%d",
+             static_cast<unsigned>(thread->id_),
+             throwable.has_value() ? 1 : 0,
+             thread->native_failure_.has_value() ? 1 : 0);
 }
 
 void Scheduler::prune_terminated_native_threads() {
@@ -993,7 +1349,7 @@ void Scheduler::prune_terminated_native_threads() {
         by_id_.erase(found);
         retired.push_back(thread);
     }
-    // Destroy/join completed std::jthreads only after releasing scheduler locks.
+    // Destroy/join completed workers only after releasing scheduler locks.
     retired.clear();
 }
 
@@ -1031,7 +1387,7 @@ void Scheduler::shutdown(MonitorTable* monitors) noexcept {
     }
     for (const auto& thread : threads) {
         if (thread->worker_.joinable() &&
-            thread->worker_.get_id() != std::this_thread::get_id()) {
+            !thread->worker_.is_current_thread()) {
             thread->worker_.join();
         }
     }

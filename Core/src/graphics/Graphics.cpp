@@ -916,7 +916,7 @@ Status draw_region(Image& target,
                    i32 x,
                    i32 y,
                    i32 anchor) {
-    if (source_x < 0 || source_y < 0 || width <= 0 || height <= 0 ||
+    if (source_x < 0 || source_y < 0 || width < 0 || height < 0 ||
         static_cast<i64>(source_x) + width > source.width() ||
         static_cast<i64>(source_y) + height > source.height()) {
         return fail(ErrorCode::out_of_range,
@@ -924,19 +924,33 @@ Status draw_region(Image& target,
     }
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
+
+    // phoneME normalizes the destination anchor against the untransformed
+    // source-region dimensions before applying the Sprite transform. This is
+    // observable for non-square regions rotated by 90/270 degrees.
+    auto anchor_placement = anchored_rect(
+        saturated_add(x, context.translate_x),
+        saturated_add(y, context.translate_y),
+        width,
+        height,
+        anchor,
+        false);
+    if (!anchor_placement) {
+        return std::unexpected(anchor_placement.error());
+    }
     if (!context.rendering_enabled) return {};
+
     const Size output_size = transformed_size(width,
                                               height,
                                               transform_value);
-    auto placement = anchored_rect(saturated_add(x, context.translate_x),
-                                   saturated_add(y, context.translate_y),
-                                   output_size.width,
-                                   output_size.height,
-                                   anchor,
-                                   false);
-    if (!placement) return std::unexpected(placement.error());
+    const Rect placement {
+        .x = anchor_placement->x,
+        .y = anchor_placement->y,
+        .width = output_size.width,
+        .height = output_size.height,
+    };
     const Rect visible = intersect(
-        intersect(*placement, context.clip),
+        intersect(placement, context.clip),
         target_bounds(target));
     if (empty(visible)) {
         return {};
@@ -980,14 +994,14 @@ Status draw_region(Image& target,
          destination_y < visible.y + visible.height;
          ++destination_y) {
         const i32 transformed_y = static_cast<i32>(
-            static_cast<i64>(destination_y) - placement->y);
+            static_cast<i64>(destination_y) - placement.y);
         const usize destination_row =
             static_cast<usize>(destination_y) * target_stride;
         for (i32 destination_x = visible.x;
              destination_x < visible.x + visible.width;
              ++destination_x) {
             const i32 transformed_x = static_cast<i32>(
-                static_cast<i64>(destination_x) - placement->x);
+                static_cast<i64>(destination_x) - placement.x);
             const auto [local_source_x, local_source_y] =
                 transformed_source_coordinate(transformed_x,
                                               transformed_y,
@@ -1056,24 +1070,30 @@ Status draw_rgb(Image& target,
                 bool process_alpha) {
     auto mutable_target = require_mutable(target);
     if (!mutable_target) return mutable_target;
-    if (width < 0 || height < 0) {
-        return fail(ErrorCode::invalid_argument,
-                    "drawRGB dimensions cannot be negative");
-    }
-    if (width == 0 || height == 0) return {};
-    if (scan_length == 0) {
-        return fail(ErrorCode::invalid_argument,
-                    "drawRGB scanlength cannot be zero");
-    }
-    const i64 first = offset;
-    const i64 last_row = static_cast<i64>(offset) +
-                         static_cast<i64>(height - 1) * scan_length;
-    const i64 minimum = std::min(first, last_row);
-    const i64 maximum = std::max(first, last_row) + width - 1;
-    if (minimum < 0 || maximum < 0 ||
-        static_cast<u64>(maximum) >= pixels.size()) {
+
+    // Keep the exact validation order and index formula used by phoneME's
+    // javax_microedition_lcdui_Graphics_drawRGB KNI implementation. In
+    // particular, zero dimensions and zero scanlength are validated against
+    // the source array first, then accepted as no-ops; negative dimensions are
+    // also left to the low-level renderer, which treats an empty rectangle as
+    // a no-op rather than throwing IllegalArgumentException.
+    const i64 row_delta = height == 0
+        ? 0
+        : (static_cast<i64>(height) - 1) * scan_length;
+    const i64 maximum = static_cast<i64>(offset) +
+        (width == 0 ? 0 : static_cast<i64>(width) - 1) +
+        (scan_length < 0 ? 0 : row_delta);
+    const i64 minimum = static_cast<i64>(offset) +
+        (scan_length < 0 ? row_delta : 0);
+    const i64 pixel_count = static_cast<i64>(pixels.size());
+    if (maximum >= pixel_count || minimum < 0 ||
+        maximum < 0 || minimum >= pixel_count) {
         return fail(ErrorCode::out_of_range,
                     "drawRGB source slice exceeds int[]");
+    }
+    if (scan_length == 0 || width == 0 || height == 0 ||
+        width < 0 || height < 0) {
+        return {};
     }
     if (!context.rendering_enabled) return {};
     const i32 absolute_x = saturated_add(x, context.translate_x);

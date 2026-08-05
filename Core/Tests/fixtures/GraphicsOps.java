@@ -40,7 +40,20 @@ public final class GraphicsOps {
         int[] sentinel = new int[] {0x12345678};
         source.getRGB(sentinel, 0, 0, 0, 0, 0, 2);
         source.getRGB(sentinel, 0, 0, 1, 0, -1, 1);
-        return sentinel[0] == 0x12345678;
+        if (sentinel[0] != 0x12345678) {
+            return false;
+        }
+
+        // phoneME checks negative dimensions before dereferencing rgbData.
+        source.getRGB(null, 0, 0, 1, 0, -1, 1);
+
+        boolean zeroWidthNullRejected = false;
+        try {
+            source.getRGB(null, 0, 0, 0, 0, 0, 1);
+        } catch (NullPointerException expected) {
+            zeroWidthNullRejected = true;
+        }
+        return zeroWidthNullRejected;
     }
 
     private static boolean testGraphicsRules(Image canvas,
@@ -53,6 +66,39 @@ public final class GraphicsOps {
             selfRegionRejected = true;
         }
         if (!selfRegionRejected) {
+            return false;
+        }
+
+        boolean selfImageRejected = false;
+        try {
+            graphics.drawImage(canvas, 0, 0,
+                               Graphics.LEFT | Graphics.TOP);
+        } catch (IllegalArgumentException expected) {
+            selfImageRejected = true;
+        }
+        if (!selfImageRejected) {
+            return false;
+        }
+
+        Image source = Image.createRGBImage(
+                new int[] {0xFFFF0000}, 1, 1, true);
+        graphics.drawRegion(source, 1, 1, 0, 0, TRANS_NONE,
+                            0, 0, Graphics.LEFT | Graphics.TOP);
+        graphics.drawRGB(new int[] {0xFFFF0000, 0xFF00FF00},
+                         0, 0, 0, 0, 2, 2, true);
+        graphics.drawRGB(new int[] {
+                             0xFFFF0000, 0xFF00FF00, 0xFF0000FF
+                         },
+                         2, 1, 0, 0, -1, 1, true);
+
+        boolean zeroSizeBoundsChecked = false;
+        try {
+            graphics.drawRGB(new int[0], 0, 0,
+                             0, 0, 0, 0, true);
+        } catch (ArrayIndexOutOfBoundsException expected) {
+            zeroSizeBoundsChecked = true;
+        }
+        if (!zeroSizeBoundsChecked) {
             return false;
         }
 

@@ -19,6 +19,14 @@ enum LibrarySort: String, CaseIterable, Identifiable {
         case .vendor: return L10n.string("Vendor")
         }
     }
+
+    var systemImage: String {
+        switch self {
+        case .name: return "textformat"
+        case .date: return "calendar"
+        case .vendor: return "building.2"
+        }
+    }
 }
 
 private struct LibrarySection: Identifiable {
@@ -27,6 +35,21 @@ private struct LibrarySection: Identifiable {
 
     var id: String { title }
 }
+
+#if DEBUG
+@MainActor
+private final class LibraryDebugAutolaunchGate {
+    static let shared = LibraryDebugAutolaunchGate()
+
+    private var hasHandledRequest = false
+
+    func claimRequest() -> Bool {
+        guard !hasHandledRequest else { return false }
+        hasHandledRequest = true
+        return true
+    }
+}
+#endif
 
 struct LibraryView: View {
     @EnvironmentObject private var library: GameLibrary
@@ -217,8 +240,13 @@ struct LibraryView: View {
 #if DEBUG
         .task {
             let environment = ProcessInfo.processInfo.environment
+            // SwiftUI may restart this task whenever the Library tab reappears.
+            // Debug autolaunch must remain a one-shot action for this app process.
             guard environment["PHONEME_AUTOLAUNCH"] == "1",
-                  activeGame == nil else { return }
+                  activeGame == nil,
+                  LibraryDebugAutolaunchGate.shared.claimRequest() else {
+                return
+            }
 
             let requestedID = environment["PHONEME_AUTOLAUNCH_GAME_ID"]
             let requestedTitle = environment["PHONEME_AUTOLAUNCH_GAME_TITLE"]
@@ -439,7 +467,7 @@ struct LibraryView: View {
         Menu {
             Picker("Sort by", selection: $sortRawValue) {
                 ForEach(LibrarySort.allCases) { item in
-                    Text(item.title)
+                    Label(item.title, systemImage: item.systemImage)
                         .tag(item.rawValue)
                 }
             }
@@ -473,8 +501,10 @@ struct LibraryView: View {
     @ViewBuilder
     private func contextMenu(for game: Game) -> some View {
         if session.isRunning(game.id) {
-            Button("Stop", role: .destructive) {
+            Button(role: .destructive) {
                 session.terminate(gameID: game.id)
+            } label: {
+                Label("Stop", systemImage: "stop.circle")
             }
         }
 
@@ -495,9 +525,21 @@ struct LibraryView: View {
 
         Divider()
 
-        Button("Rename") { beginRename(game) }
-        Button("Settings") { configuringGame = game }
-        Button("Uninstall", role: .destructive) { deleteGame = game }
+        Button {
+            beginRename(game)
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+        Button {
+            configuringGame = game
+        } label: {
+            Label("Settings", systemImage: "gearshape")
+        }
+        Button(role: .destructive) {
+            deleteGame = game
+        } label: {
+            Label("Uninstall", systemImage: "trash")
+        }
     }
 
     private func open(_ game: Game) {
@@ -535,26 +577,20 @@ struct LibraryView: View {
         _ game: Game,
         dataPolicy: GameRemovalDataPolicy
     ) {
-        do {
-            let jarURL = try library.prepareJarForLaunch(game)
-            session.terminate(gameID: game.id)
-            session.uninstallApplication(
-                game,
-                jarURL: jarURL,
-                removeData: dataPolicy == .deleteData
-            ) { result in
-                switch result {
-                case .success:
-                    if dataPolicy == .deleteData {
-                        profiles.removeProfile(for: game)
-                    }
-                    library.remove(game, dataPolicy: dataPolicy)
-                case .failure(let error):
-                    errorMessage = error.localizedDescription
-                }
+        let jarURL = library.fileURL(for: game)
+        session.terminate(gameID: game.id)
+        session.uninstallApplication(
+            game,
+            jarURL: jarURL,
+            removeData: dataPolicy == .deleteData
+        ) { _ in
+            // Removing an app from the library must never depend on reinstalling
+            // its JAR into the Core first. Broken legacy entries, missing JARs
+            // and invalid manifests still need to remain uninstallable.
+            if dataPolicy == .deleteData {
+                profiles.removeProfile(for: game)
             }
-        } catch {
-            errorMessage = error.localizedDescription
+            library.remove(game, dataPolicy: dataPolicy)
         }
     }
 

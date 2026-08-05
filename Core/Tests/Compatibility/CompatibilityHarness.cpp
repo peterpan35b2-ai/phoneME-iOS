@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -32,6 +34,13 @@ struct Options final {
     phoneme::i32 width {320};
     phoneme::i32 height {240};
     phoneme::i32 observe_ms {0};
+    phoneme::i32 confirm_interval_ms {0};
+    phoneme::i32 confirm_count {0};
+    bool autoplay {false};
+    phoneme::i32 input_start_delay_ms {400};
+    phoneme::i32 input_interval_ms {220};
+    phoneme::i32 stall_ms {0};
+    phoneme::i32 heartbeat_ms {1'000};
 };
 
 struct HarnessResult final {
@@ -45,16 +54,59 @@ struct HarnessResult final {
     phoneme::i32 exit_code {1};
     phoneme::i64 startup_ms {0};
     phoneme::usize frames_produced {0};
+    phoneme::usize frame_changes {0};
+    phoneme::usize unique_frames {0};
     phoneme::usize nonzero_frame_bytes {0};
     phoneme::usize ui_event_count {0};
     phoneme::usize canvas_event_count {0};
     phoneme::usize lcdui_event_count {0};
+    phoneme::usize screens_shown {0};
+    phoneme::usize key_presses {0};
+    phoneme::usize key_events_sent {0};
+    phoneme::usize lcdui_actions_sent {0};
+    phoneme::usize heartbeat_count {0};
+    phoneme::i64 last_progress_ms {0};
+    phoneme::i64 longest_idle_ms {0};
+    bool visual_output_observed {false};
+    bool stall_suspected {false};
     phoneme::i32 error_code {0};
     std::string error_message;
     std::string java_exception_class;
+    std::string final_frame_hash;
+    std::string last_input_action;
     std::vector<std::string> milestones;
+    std::vector<std::string> input_actions;
+    std::vector<std::string> frame_hashes;
     std::vector<std::string> network_actions;
     std::vector<std::string> media_actions;
+};
+
+struct CommandCandidate final {
+    phoneme::i32 id {0};
+    phoneme::i32 type {0};
+    phoneme::i32 priority {0};
+    std::string label;
+};
+
+struct ChoiceCandidate final {
+    phoneme::i32 component_id {0};
+    phoneme::i32 component_type {0};
+    phoneme::i32 index {0};
+    std::string label;
+};
+
+struct AutoplayState final {
+    std::vector<CommandCandidate> commands;
+    std::vector<phoneme::i32> selected_command_ids;
+    std::vector<ChoiceCandidate> choices;
+    std::vector<std::pair<phoneme::i32, phoneme::i32>> selected_choices;
+    std::vector<phoneme::i32> activatable_items;
+    std::vector<phoneme::i32> activated_items;
+    phoneme::usize key_index {0};
+    phoneme::i32 active_key {0};
+    bool key_down {false};
+    Clock::time_point release_at {};
+    Clock::time_point next_action_at {};
 };
 
 [[nodiscard]] std::optional<phoneme::i32> parse_i32(std::string_view value) {
@@ -78,7 +130,10 @@ struct HarnessResult final {
             error = "usage: CompatibilityHarness --jar FILE --main CLASS "
                     "--runtime-home DIR --result FILE --frame FILE "
                     "[--native-coverage FILE --width N --height N "
-                    "--observe-ms N]";
+                    "--observe-ms N --confirm-interval-ms N "
+                    "--confirm-count N --autoplay 0|1 "
+                    "--input-start-delay-ms N --input-interval-ms N "
+                    "--stall-ms N --heartbeat-ms N]";
             return false;
         }
         if (index + 1 >= argc) {
@@ -119,6 +174,55 @@ struct HarnessResult final {
                 return false;
             }
             options.observe_ms = *parsed;
+        } else if (argument == "--confirm-interval-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 0 || *parsed > 60'000) {
+                error = "invalid confirm interval: " + value;
+                return false;
+            }
+            options.confirm_interval_ms = *parsed;
+        } else if (argument == "--confirm-count") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 0 || *parsed > 100) {
+                error = "invalid confirm count: " + value;
+                return false;
+            }
+            options.confirm_count = *parsed;
+        } else if (argument == "--autoplay") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || (*parsed != 0 && *parsed != 1)) {
+                error = "invalid autoplay value: " + value;
+                return false;
+            }
+            options.autoplay = *parsed != 0;
+        } else if (argument == "--input-start-delay-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 0 || *parsed > 60'000) {
+                error = "invalid input start delay: " + value;
+                return false;
+            }
+            options.input_start_delay_ms = *parsed;
+        } else if (argument == "--input-interval-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 40 || *parsed > 60'000) {
+                error = "invalid input interval: " + value;
+                return false;
+            }
+            options.input_interval_ms = *parsed;
+        } else if (argument == "--stall-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 0 || *parsed > 120'000) {
+                error = "invalid stall duration: " + value;
+                return false;
+            }
+            options.stall_ms = *parsed;
+        } else if (argument == "--heartbeat-ms") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || *parsed < 100 || *parsed > 60'000) {
+                error = "invalid heartbeat interval: " + value;
+                return false;
+            }
+            options.heartbeat_ms = *parsed;
         } else {
             error = "unknown argument: " + std::string(argument);
             return false;
@@ -231,15 +335,34 @@ void emit_string_array(std::ostream& output,
            << "  \"exit_code\": " << result.exit_code << ",\n"
            << "  \"startup_ms\": " << result.startup_ms << ",\n"
            << "  \"frames_produced\": " << result.frames_produced << ",\n"
+           << "  \"frame_changes\": " << result.frame_changes << ",\n"
+           << "  \"unique_frames\": " << result.unique_frames << ",\n"
            << "  \"nonzero_frame_bytes\": " << result.nonzero_frame_bytes << ",\n"
            << "  \"ui_event_count\": " << result.ui_event_count << ",\n"
            << "  \"canvas_event_count\": " << result.canvas_event_count << ",\n"
            << "  \"lcdui_event_count\": " << result.lcdui_event_count << ",\n"
+           << "  \"screens_shown\": " << result.screens_shown << ",\n"
+           << "  \"key_presses\": " << result.key_presses << ",\n"
+           << "  \"key_events_sent\": " << result.key_events_sent << ",\n"
+           << "  \"lcdui_actions_sent\": " << result.lcdui_actions_sent << ",\n"
+           << "  \"heartbeat_count\": " << result.heartbeat_count << ",\n"
+           << "  \"last_progress_ms\": " << result.last_progress_ms << ",\n"
+           << "  \"longest_idle_ms\": " << result.longest_idle_ms << ",\n"
+           << "  \"visual_output_observed\": "
+           << (result.visual_output_observed ? "true" : "false") << ",\n"
+           << "  \"stall_suspected\": "
+           << (result.stall_suspected ? "true" : "false") << ",\n"
+           << "  \"final_frame_hash\": \""
+           << json_escape(result.final_frame_hash) << "\",\n"
+           << "  \"last_input_action\": \""
+           << json_escape(result.last_input_action) << "\",\n"
            << "  \"error_code\": " << result.error_code << ",\n"
            << "  \"error_message\": \"" << json_escape(result.error_message) << "\",\n"
            << "  \"java_exception_class\": \""
            << json_escape(result.java_exception_class) << "\",\n";
     emit_string_array(output, "milestones", result.milestones, true);
+    emit_string_array(output, "input_actions", result.input_actions, true);
+    emit_string_array(output, "frame_hashes", result.frame_hashes, true);
     emit_string_array(output, "network_actions", result.network_actions, true);
     emit_string_array(output, "media_actions", result.media_actions, false);
     output << "}\n";
@@ -314,12 +437,14 @@ void emit_string_array(std::ostream& output,
     if (!output) return false;
     result.frames_produced = std::max<phoneme::usize>(
         result.frames_produced, 1U);
-    result.nonzero_frame_bytes = static_cast<phoneme::usize>(std::count_if(
+    const auto nonzero = static_cast<phoneme::usize>(std::count_if(
         frame.rgba.begin(), frame.rgba.end(), [](phoneme::u8 value) {
             return value != 0U;
         }));
+    result.nonzero_frame_bytes = std::max(result.nonzero_frame_bytes, nonzero);
     add_milestone(result, "frame-produced");
-    if (result.nonzero_frame_bytes != 0U) {
+    if (nonzero != 0U) {
+        result.visual_output_observed = true;
         add_milestone(result, "frame-nonblank");
     }
     return true;
@@ -343,9 +468,244 @@ void emit_string_array(std::ostream& output,
     return component;
 }
 
-void collect_ui_events(phoneme::runtime::Runtime& runtime,
-                       HarnessResult& result) {
+[[nodiscard]] std::string hex_u64(phoneme::u64 value) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string output(16U, '0');
+    for (phoneme::usize index = 0; index < output.size(); ++index) {
+        const auto shift = static_cast<unsigned>((output.size() - index - 1U) * 4U);
+        output[index] = kHex[(value >> shift) & 0x0FU];
+    }
+    return output;
+}
+
+[[nodiscard]] phoneme::u64 frame_fingerprint(
+    const phoneme::runtime::FrameSnapshot& frame) {
+    phoneme::u64 hash = 1469598103934665603ULL;
+    const auto mix = [&hash](phoneme::u8 value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    for (const auto value : frame.rgba) mix(value);
+    for (unsigned shift = 0; shift < 32U; shift += 8U) {
+        mix(static_cast<phoneme::u8>(
+            (static_cast<phoneme::u32>(frame.dimensions.width) >> shift) & 0xFFU));
+        mix(static_cast<phoneme::u8>(
+            (static_cast<phoneme::u32>(frame.dimensions.height) >> shift) & 0xFFU));
+    }
+    return hash;
+}
+
+[[nodiscard]] bool observe_frame(
+    const phoneme::runtime::FrameSnapshot& frame,
+    HarnessResult& result,
+    phoneme::u64& last_hash,
+    bool& have_hash) {
+    if (frame.dimensions.width <= 0 || frame.dimensions.height <= 0 ||
+        frame.rgba.empty()) {
+        return false;
+    }
+    const auto hash = frame_fingerprint(frame);
+    const auto encoded = hex_u64(hash);
+    result.final_frame_hash = encoded;
+    if (std::find(result.frame_hashes.begin(), result.frame_hashes.end(), encoded) ==
+        result.frame_hashes.end()) {
+        ++result.unique_frames;
+        if (result.frame_hashes.size() < 64U) result.frame_hashes.push_back(encoded);
+    }
+    const bool changed = have_hash && hash != last_hash;
+    if (changed) ++result.frame_changes;
+    last_hash = hash;
+    have_hash = true;
+    const auto nonzero = static_cast<phoneme::usize>(std::count_if(
+        frame.rgba.begin(), frame.rgba.end(), [](phoneme::u8 value) {
+            return value != 0U;
+        }));
+    result.nonzero_frame_bytes = std::max(result.nonzero_frame_bytes, nonzero);
+    if (nonzero != 0U) {
+        result.visual_output_observed = true;
+        add_milestone(result, "frame-nonblank");
+    }
+    return changed;
+}
+
+void record_input_action(HarnessResult& result, std::string action) {
+    result.last_input_action = action;
+    if (result.input_actions.size() < 128U) {
+        result.input_actions.push_back(std::move(action));
+    }
+}
+
+[[nodiscard]] bool contains_id(std::span<const phoneme::i32> values,
+                               phoneme::i32 value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+[[nodiscard]] std::string lower_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](char character) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    });
+    return value;
+}
+
+[[nodiscard]] phoneme::i32 command_score(const CommandCandidate& candidate) {
+    phoneme::i32 score = -candidate.priority;
+    switch (candidate.type) {
+    case 4: score += 140; break; // OK
+    case 8: score += 130; break; // ITEM
+    case 1: score += 110; break; // SCREEN
+    case 5: score += 20; break;  // HELP
+    case 2: // BACK
+    case 3: // CANCEL
+    case 6: // STOP
+    case 7: // EXIT
+        score -= 240;
+        break;
+    default: break;
+    }
+    const auto label = lower_ascii(candidate.label);
+    static constexpr std::array<std::string_view, 20> kPositive {
+        "start", "play", "continue", "next", "select", "enter",
+        "login", "new game", "ok", "yes", "resume", "begin",
+        "chơi", "bắt đầu", "tiếp tục", "vào game",
+        "chạy ứng dụng", "đồng ý", "chọn", "mở",
+    };
+    static constexpr std::array<std::string_view, 26> kNegative {
+        "exit", "quit", "back", "cancel", "stop",
+        "no", "close", "about", "help", "options",
+        "thoát", "dừng", "quay lại", "hủy", "xóa",
+        "sao lưu", "cài đặt", "trợ giúp", "giới thiệu",
+        "nhập khẩu", "khôi phục", "phục hồi", "tùy chọn",
+        "thu nhỏ", "độ sáng", "lưu",
+    };
+    for (const auto token : kPositive) {
+        if (label.find(token) != std::string::npos) score += 80;
+    }
+    for (const auto token : kNegative) {
+        if (label.find(token) != std::string::npos) score -= 120;
+    }
+    return score;
+}
+
+[[nodiscard]] const char* key_name(phoneme::i32 key) noexcept {
+    switch (key) {
+    case -1: return "up";
+    case -2: return "down";
+    case -3: return "left";
+    case -4: return "right";
+    case -5: return "fire";
+    case -6: return "soft-left";
+    case -7: return "soft-right";
+    default: return "numeric";
+    }
+}
+
+[[nodiscard]] bool run_lcdui_action(phoneme::runtime::Runtime& runtime,
+                                    AutoplayState& state,
+                                    HarnessResult& result) {
+    for (const auto& choice : state.choices) {
+        // Only an IMPLICIT List (bridge type 2) represents a menu row whose
+        // selection dispatches SELECT_COMMAND. Do not mutate ChoiceGroups in
+        // forms because those are usually settings rather than navigation.
+        if (choice.component_type != 2) continue;
+        const auto key = std::pair {choice.component_id, choice.index};
+        if (std::find(state.selected_choices.begin(),
+                      state.selected_choices.end(), key) !=
+            state.selected_choices.end()) {
+            continue;
+        }
+        state.selected_choices.push_back(key);
+        runtime.ui_set_choice(choice.component_id, choice.index, true);
+        ++result.lcdui_actions_sent;
+        record_input_action(result,
+                            "lcdui-choice:" + std::to_string(choice.component_id) +
+                                ":" + std::to_string(choice.index) + ":" +
+                                choice.label);
+        add_milestone(result, "autoplay-lcdui-choice");
+        return true;
+    }
+
+    const CommandCandidate* best = nullptr;
+    phoneme::i32 best_score = 0;
+    for (const auto& command : state.commands) {
+        if (contains_id(state.selected_command_ids, command.id)) continue;
+        const auto score = command_score(command);
+        if (best == nullptr || score > best_score) {
+            best = &command;
+            best_score = score;
+        }
+    }
+    if (best != nullptr && best_score > 0) {
+        state.selected_command_ids.push_back(best->id);
+        runtime.ui_select_command(best->id);
+        ++result.lcdui_actions_sent;
+        record_input_action(result,
+                            "lcdui-command:" + std::to_string(best->id) + ":" +
+                                best->label);
+        add_milestone(result, "autoplay-lcdui-command");
+        return true;
+    }
+
+    for (const auto component_id : state.activatable_items) {
+        if (contains_id(state.activated_items, component_id)) continue;
+        state.activated_items.push_back(component_id);
+        runtime.ui_activate_item(component_id);
+        ++result.lcdui_actions_sent;
+        record_input_action(result,
+                            "lcdui-activate:" + std::to_string(component_id));
+        add_milestone(result, "autoplay-lcdui-activate");
+        return true;
+    }
+    return false;
+}
+
+void autoplay_tick(phoneme::runtime::Runtime& runtime,
+                   const Options& options,
+                   AutoplayState& state,
+                   HarnessResult& result,
+                   Clock::time_point now) {
+    if (state.key_down && now >= state.release_at) {
+        runtime.send_key(state.active_key, false);
+        ++result.key_events_sent;
+        record_input_action(result,
+                            std::string("key-release:") + key_name(state.active_key) +
+                                ":" + std::to_string(state.active_key));
+        state.key_down = false;
+    }
+    if (state.key_down || now < state.next_action_at) return;
+
+    if (run_lcdui_action(runtime, state, result)) {
+        state.next_action_at = now +
+            std::chrono::milliseconds(options.input_interval_ms);
+        return;
+    }
+
+    static constexpr std::array<phoneme::i32, 28> kGameKeys {
+        -5, -6, -5, '5', -2, -5, -4, -5, -2, -2, -5, -3, -5, -1,
+        -5, '5', '0', '1', '3', '7', '9', '*', '#', -6, -5, -4, -5, -7,
+    };
+    const auto key = kGameKeys[state.key_index % kGameKeys.size()];
+    ++state.key_index;
+    state.active_key = key;
+    state.key_down = true;
+    state.release_at = now + std::chrono::milliseconds(35);
+    state.next_action_at = now +
+        std::chrono::milliseconds(options.input_interval_ms);
+    runtime.send_key(key, true);
+    ++result.key_presses;
+    ++result.key_events_sent;
+    record_input_action(result,
+                        std::string("key-press:") + key_name(key) + ":" +
+                            std::to_string(key));
+    add_milestone(result, "autoplay-key");
+}
+
+[[nodiscard]] phoneme::usize collect_ui_events(
+    phoneme::runtime::Runtime& runtime,
+    HarnessResult& result,
+    AutoplayState* autoplay = nullptr) {
+    phoneme::usize collected = 0;
     while (auto event = runtime.poll_ui_event()) {
+        ++collected;
         ++result.ui_event_count;
         add_milestone(result, "ui-event");
         const auto text_component = milestone_component(event->text);
@@ -368,14 +728,70 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
             ++result.lcdui_event_count;
             add_milestone(result, "lcdui-event");
             if (event->kind == 2) add_milestone(result, "lcdui-component-created");
-            if (event->kind == 4) add_milestone(result, "lcdui-screen-shown");
+            if (event->kind == 4) {
+                ++result.screens_shown;
+                result.visual_output_observed = true;
+                add_milestone(result, "lcdui-screen-shown");
+            }
+        }
+
+        if (autoplay == nullptr) continue;
+        if (event->kind == 14) {
+            // Reset only what is currently visible. Keep action history across
+            // screens so a stable Command object cannot trap autoplay in a
+            // Start -> settings -> Start loop.
+            autoplay->commands.clear();
+            autoplay->choices.clear();
+            autoplay->activatable_items.clear();
+        } else if (event->kind == 15 && event->component_id != 0) {
+            const auto duplicate = std::find_if(
+                autoplay->commands.begin(), autoplay->commands.end(),
+                [&](const CommandCandidate& command) {
+                    return command.id == event->component_id;
+                });
+            if (duplicate == autoplay->commands.end()) {
+                autoplay->commands.push_back(CommandCandidate {
+                    .id = event->component_id,
+                    .type = event->arguments[0],
+                    .priority = event->arguments[1],
+                    .label = event->text,
+                });
+            }
+        } else if (event->kind == 12 && event->component_id != 0 &&
+                   event->index >= 0) {
+            const auto key = std::pair {event->component_id, event->index};
+            const auto duplicate = std::find_if(
+                autoplay->choices.begin(), autoplay->choices.end(),
+                [&](const ChoiceCandidate& choice) {
+                    return std::pair {choice.component_id, choice.index} == key;
+                });
+            if (duplicate == autoplay->choices.end()) {
+                autoplay->choices.push_back(ChoiceCandidate {
+                    .component_id = event->component_id,
+                    .component_type = event->component_type,
+                    .index = event->index,
+                    .label = event->text,
+                });
+            }
+        } else if ((event->kind == 7 || event->kind == 9) &&
+                   event->component_id != 0 &&
+                   (event->component_type == 9 || event->component_type == 10 ||
+                    event->component_type == 13 || event->component_type == 14)) {
+            if (!contains_id(autoplay->activatable_items, event->component_id)) {
+                autoplay->activatable_items.push_back(event->component_id);
+            }
         }
     }
+    return collected;
 }
 
 [[nodiscard]] int run(const Options& options) {
     HarnessResult result;
+    AutoplayState autoplay;
     const auto started_at = Clock::now();
+    auto last_progress_at = started_at;
+    phoneme::u64 last_frame_hash = 0;
+    bool have_frame_hash = false;
     phoneme::runtime::Runtime runtime;
     constexpr phoneme::AppId kAppId {17};
 
@@ -385,6 +801,11 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
         if (!write_native_coverage(options, native_counts)) return 91;
         if (!write_result(options, result)) return 90;
         return code;
+    };
+    const auto mark_progress = [&](Clock::time_point now) {
+        last_progress_at = now;
+        result.last_progress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - started_at).count();
     };
 
     auto configured = runtime.configure(options.runtime_home);
@@ -433,10 +854,11 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     if (!midlet_started.has_value()) {
         capture_error(result, midlet_started.error());
         result.app_state = app_state_name(runtime.app_state(kAppId));
-        collect_ui_events(runtime, result);
-        if (result.canvas_event_count != 0U) {
-            (void)write_ppm(options, runtime.frame_snapshot(), result);
-        }
+        (void)collect_ui_events(
+            runtime, result, options.autoplay ? &autoplay : nullptr);
+        auto frame = runtime.frame_snapshot();
+        (void)observe_frame(frame, result, last_frame_hash, have_frame_hash);
+        if (!frame.rgba.empty()) (void)write_ppm(options, frame, result);
         const auto console_output = runtime.app_console_output(kAppId);
         if (!console_output.empty()) {
             std::cout << console_output;
@@ -450,49 +872,139 @@ void collect_ui_events(phoneme::runtime::Runtime& runtime,
     if (result.app_state == "active") add_milestone(result, "app-active");
     if (result.app_state == "paused") add_milestone(result, "app-paused");
     if (result.app_state == "destroyed") add_milestone(result, "app-self-destroyed");
+    mark_progress(Clock::now());
     // Persist a diagnostic checkpoint so an external timeout can distinguish
     // a launch hang from teardown or frame-collection deadlock.
     (void)write_result(options, result);
 
-    collect_ui_events(runtime, result);
+    const auto initial_events = collect_ui_events(
+        runtime, result, options.autoplay ? &autoplay : nullptr);
+    if (initial_events != 0U) mark_progress(Clock::now());
     auto latest_frame = runtime.frame_snapshot();
-    if (result.canvas_event_count != 0U) {
-        (void)write_ppm(options, latest_frame, result);
-    }
+    (void)observe_frame(latest_frame, result, last_frame_hash, have_frame_hash);
+    if (!latest_frame.rgba.empty()) (void)write_ppm(options, latest_frame, result);
 
     if (options.observe_ms > 0 &&
         runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
         add_milestone(result, "observation-begin");
-        const auto deadline = Clock::now() +
+        const auto observation_started_at = Clock::now();
+        const auto deadline = observation_started_at +
             std::chrono::milliseconds(options.observe_ms);
+        auto next_confirm = observation_started_at +
+            std::chrono::milliseconds(options.confirm_interval_ms);
+        auto next_heartbeat = observation_started_at +
+            std::chrono::milliseconds(options.heartbeat_ms);
+        autoplay.next_action_at = observation_started_at +
+            std::chrono::milliseconds(options.input_start_delay_ms);
+        phoneme::i32 confirms_sent = 0;
         phoneme::u64 last_generation = latest_frame.generation;
+        auto previous_state = runtime.app_state(kAppId);
         while (Clock::now() < deadline &&
                runtime.app_state(kAppId) !=
                    phoneme::runtime::AppState::destroyed) {
+            const auto now = Clock::now();
+            if (options.autoplay) {
+                autoplay_tick(runtime, options, autoplay, result, now);
+            } else if (options.confirm_interval_ms > 0 &&
+                       confirms_sent < options.confirm_count &&
+                       now >= next_confirm) {
+                runtime.send_key(-5, true);
+                runtime.send_key(-5, false);
+                result.key_presses += 1U;
+                result.key_events_sent += 2U;
+                record_input_action(result, "confirm-tap:fire:-5");
+                ++confirms_sent;
+                next_confirm += std::chrono::milliseconds(
+                    options.confirm_interval_ms);
+                add_milestone(result, "confirm-tap");
+            }
+
             runtime.pump_events();
-            collect_ui_events(runtime, result);
+            const auto current_state = runtime.app_state(kAppId);
+            if (current_state != previous_state) {
+                previous_state = current_state;
+                mark_progress(Clock::now());
+            }
+            const auto event_count = collect_ui_events(
+                runtime, result, options.autoplay ? &autoplay : nullptr);
+            if (event_count != 0U) mark_progress(Clock::now());
+
             auto frame = runtime.frame_snapshot();
             if (frame.generation != last_generation) {
                 last_generation = frame.generation;
                 latest_frame = std::move(frame);
                 ++result.frames_produced;
+                (void)observe_frame(latest_frame, result,
+                                    last_frame_hash, have_frame_hash);
+                // A new framebuffer generation proves that the VM/render loop
+                // is still making progress even when a static menu redraws the
+                // same pixels. Pixel-hash changes remain a separate metric.
+                mark_progress(Clock::now());
+            }
+
+            const auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                Clock::now() - last_progress_at).count();
+            result.longest_idle_ms = std::max(result.longest_idle_ms, idle_ms);
+            const auto actions_sent = result.key_presses + result.lcdui_actions_sent;
+            result.stall_suspected =
+                options.stall_ms > 0 && actions_sent >= 3U &&
+                result.visual_output_observed && idle_ms >= options.stall_ms;
+
+            if (current_state == phoneme::runtime::AppState::error) break;
+            if (Clock::now() >= next_heartbeat) {
+                ++result.heartbeat_count;
+                result.app_state = app_state_name(current_state);
+                (void)write_result(options, result);
+                next_heartbeat += std::chrono::milliseconds(options.heartbeat_ms);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+
+        if (autoplay.key_down) {
+            runtime.send_key(autoplay.active_key, false);
+            ++result.key_events_sent;
+            autoplay.key_down = false;
+        }
         runtime.pump_events();
-        if (result.canvas_event_count != 0U && !latest_frame.rgba.empty()) {
+        const auto final_events = collect_ui_events(
+            runtime, result, options.autoplay ? &autoplay : nullptr);
+        if (final_events != 0U) mark_progress(Clock::now());
+        auto final_frame = runtime.frame_snapshot();
+        if (final_frame.generation != last_generation) {
+            ++result.frames_produced;
+            latest_frame = std::move(final_frame);
+            (void)observe_frame(latest_frame, result,
+                                last_frame_hash, have_frame_hash);
+            mark_progress(Clock::now());
+        }
+        if (!latest_frame.rgba.empty()) {
             (void)write_ppm(options, latest_frame, result);
         }
+        const auto final_idle_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                Clock::now() - last_progress_at).count();
+        result.longest_idle_ms = std::max(result.longest_idle_ms, final_idle_ms);
+        const auto actions_sent = result.key_presses + result.lcdui_actions_sent;
+        result.stall_suspected =
+            options.stall_ms > 0 && actions_sent >= 3U &&
+            result.visual_output_observed && final_idle_ms >= options.stall_ms;
+        if (result.stall_suspected) add_milestone(result, "stall-suspected");
         add_milestone(result, "observation-end");
     }
 
     runtime.pump_events();
     result.app_state = app_state_name(runtime.app_state(kAppId));
+    if (result.app_state == "error") {
+        result.error_message = runtime.app_error_message(kAppId);
+        add_milestone(result, "app-error");
+    }
     const auto console_output = runtime.app_console_output(kAppId);
     if (!console_output.empty()) {
         std::cout << console_output;
         std::cout.flush();
     }
+
+    if (result.app_state == "error") return finish(16);
 
     if (runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
         add_milestone(result, "destroy-begin");

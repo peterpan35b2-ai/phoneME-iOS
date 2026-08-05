@@ -24,7 +24,42 @@
       "jar": "jar_test/Nicknsonet_E72_x1_graphics.jar",
       "sha256": "c50eeda8e7fda44088abf8678a65e9ae7f84549a1c196a588d60d129f79596d3",
       "target_milestone": "login-screen",
-      "timeout_seconds": 90
+      "timeout_seconds": 90,
+      "observe_ms": 12000,
+      "screen_probe": {
+        "required_milestones": [
+          "observation-begin",
+          "observation-end",
+          "canvas-shown",
+          "frame-nonblank"
+        ],
+        "min_frames_produced": 5,
+        "min_unique_colors": 2000,
+        "min_nonblack_pixels": 20000,
+        "regions": [
+          {
+            "x": 120,
+            "y": 80,
+            "width": 40,
+            "height": 40,
+            "sha256": "407a74f7478452ffd6d072ed6896cc6e37183b2c2576a20ba7d71013503d69da"
+          },
+          {
+            "x": 160,
+            "y": 120,
+            "width": 40,
+            "height": 40,
+            "sha256": "a0261b0b455adec812c44f05aabd9a78d5d46df011eaab137c2fece4636fdbe4"
+          },
+          {
+            "x": 280,
+            "y": 200,
+            "width": 40,
+            "height": 40,
+            "sha256": "400ce069822cf4ce0dbce435b803052715a84d0bbe5d6fccb5e8c731d55fb6e6"
+          }
+        ]
+      }
     },
     {
       "id": "midplay-http-app",
@@ -40,7 +75,42 @@
       "jar": "jar_test/Opera 4.2 mod EN.jar",
       "sha256": "b3ced4db87a223d8fb02fe47740eee7c65abdff2ebaeeb8ec42884500894e20d",
       "target_milestone": "connection-screen",
-      "timeout_seconds": 90
+      "timeout_seconds": 90,
+      "observe_ms": 12000,
+      "screen_probe": {
+        "required_milestones": [
+          "observation-begin",
+          "observation-end",
+          "canvas-shown",
+          "frame-nonblank"
+        ],
+        "min_frames_produced": 10,
+        "min_unique_colors": 190,
+        "min_nonblack_pixels": 76000,
+        "regions": [
+          {
+            "x": 80,
+            "y": 80,
+            "width": 40,
+            "height": 40,
+            "sha256": "3654a9c22f82f6fb71975089ccf93f205a213ff4999db9e95ad6893a129c9bb6"
+          },
+          {
+            "x": 120,
+            "y": 120,
+            "width": 40,
+            "height": 40,
+            "sha256": "c22b80235072e47c1b239c09ef4a55e8af14314aba495475b05f6e085bd24443"
+          },
+          {
+            "x": 0,
+            "y": 200,
+            "width": 40,
+            "height": 40,
+            "sha256": "741a3dc62764896927646ba9f0f1a9597e24ac7249c723183f63a5d59856ce68"
+          }
+        ]
+      }
     },
     {
       "id": "large-obfuscated-clinit",
@@ -56,7 +126,42 @@
       "jar": "jar_test/Avatar_LAPRO_293.jar",
       "sha256": "f888cc71889679c3e3ec6f29ba0de74b696ab9a12391384ce8d01c5de5438160",
       "target_milestone": "login-screen",
-      "timeout_seconds": 120
+      "timeout_seconds": 120,
+      "observe_ms": 12000,
+      "screen_probe": {
+        "required_milestones": [
+          "observation-begin",
+          "observation-end",
+          "canvas-shown",
+          "frame-nonblank"
+        ],
+        "min_frames_produced": 40,
+        "min_unique_colors": 200,
+        "min_nonblack_pixels": 75000,
+        "regions": [
+          {
+            "x": 120,
+            "y": 80,
+            "width": 40,
+            "height": 40,
+            "sha256": "8551878886834f021ea4a2551c5950a443c32269b1cb3cc4a51f5622d71662ae"
+          },
+          {
+            "x": 160,
+            "y": 120,
+            "width": 40,
+            "height": 40,
+            "sha256": "dfecdb53d85f4a11934b0dbe28a5d1b9fe22ecb5e2e707005faa2019139efa77"
+          },
+          {
+            "x": 80,
+            "y": 120,
+            "width": 40,
+            "height": 40,
+            "sha256": "57484f5f54c0c5e2309a7501f4104d24654222bc361c3d0b715b46d057d7b787"
+          }
+        ]
+      }
     }
   ]
 }

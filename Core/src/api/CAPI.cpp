@@ -250,18 +250,61 @@ int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
             std::array<i32, 7> {up, down, left, right, fire, soft1, soft2}));
 }
 
-int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
-                                      int32_t enabled,
-                                      const char* source_language,
-                                      const char* target_language) {
+int32_t phoneme_configure_app_frame_pacing(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t frames_per_second,
+    int32_t pacing_mode) {
     Runtime* instance = cast_runtime(runtime);
     if (instance == nullptr) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     return status_code(
         instance,
+        instance->configure_app_frame_pacing(
+            phoneme::AppId {app_id},
+            frames_per_second,
+            static_cast<phoneme::vm::FramePacingMode>(pacing_mode)));
+}
+
+int32_t phoneme_configure_app_heap(PhoneMERuntimeRef runtime,
+                                   int32_t app_id,
+                                   int32_t heap_megabytes) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(
+        instance,
+        instance->configure_app_heap(
+            phoneme::AppId {app_id}, heap_megabytes));
+}
+
+int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
+                                      int32_t enabled,
+                                      const char* source_language,
+                                      const char* target_language) {
+    return phoneme_configure_translation_v2(
+        runtime, enabled, PHONEME_TRANSLATION_PROVIDER_GOOGLE,
+        source_language, target_language);
+}
+
+int32_t phoneme_configure_translation_v2(PhoneMERuntimeRef runtime,
+                                         int32_t enabled,
+                                         int32_t provider,
+                                         const char* source_language,
+                                         const char* target_language) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr ||
+        (provider != PHONEME_TRANSLATION_PROVIDER_GOOGLE &&
+         provider != PHONEME_TRANSLATION_PROVIDER_BING)) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(
+        instance,
         instance->configure_translation(
             enabled != 0,
+            static_cast<phoneme::translation::TranslationProvider>(provider),
             source_language == nullptr ? std::string("auto")
                                        : std::string(source_language),
             target_language == nullptr ? std::string("vi")
@@ -274,8 +317,22 @@ int32_t phoneme_configure_app_translation(
     int32_t enabled,
     const char* source_language,
     const char* target_language) {
+    return phoneme_configure_app_translation_v2(
+        runtime, app_id, enabled, PHONEME_TRANSLATION_PROVIDER_GOOGLE,
+        source_language, target_language);
+}
+
+int32_t phoneme_configure_app_translation_v2(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t enabled,
+    int32_t provider,
+    const char* source_language,
+    const char* target_language) {
     Runtime* instance = cast_runtime(runtime);
-    if (instance == nullptr) {
+    if (instance == nullptr ||
+        (provider != PHONEME_TRANSLATION_PROVIDER_GOOGLE &&
+         provider != PHONEME_TRANSLATION_PROVIDER_BING)) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     return status_code(
@@ -283,6 +340,7 @@ int32_t phoneme_configure_app_translation(
         instance->configure_app_translation(
             phoneme::AppId {app_id},
             enabled != 0,
+            static_cast<phoneme::translation::TranslationProvider>(provider),
             source_language == nullptr ? std::string("auto")
                                        : std::string(source_language),
             target_language == nullptr ? std::string("vi")

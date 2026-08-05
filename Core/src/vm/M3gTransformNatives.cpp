@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <numbers>
 #include <span>
 #include <vector>
@@ -14,28 +15,7 @@ namespace {
 
 using namespace m3g;
 
-[[nodiscard]] Result<Matrix> composite_matrix(Machine& machine,
-                                              ObjectRef object) {
-    std::vector<ObjectRef> chain;
-    ObjectRef current = object;
-    for (usize depth = 0; depth < 1'024U && !current.is_null(); ++depth) {
-        chain.push_back(current);
-        auto parent = reference_field(machine, current, kNode,
-                                      "parent", "Ljavax/microedition/m3g/Node;");
-        if (!parent) break;
-        current = *parent;
-    }
-    std::reverse(chain.begin(), chain.end());
-    Matrix result = identity_matrix();
-    for (ObjectRef item : chain) {
-        auto local = local_transform(machine, item);
-        if (!local) return std::unexpected(local.error());
-        auto matrix = transform_matrix(machine, *local);
-        if (!matrix) return std::unexpected(matrix.error());
-        result = multiply(result, *matrix);
-    }
-    return result;
-}
+constexpr const char* kVertexArray = "javax/microedition/m3g/VertexArray";
 
 void register_transform(NativeMethodRegistry& registry) {
     add(registry, kTransform, "<init>", "()V",
@@ -242,10 +222,11 @@ void register_transform(NativeMethodRegistry& registry) {
             auto values = read_float_array(machine, *array,
                                            "Transform.transform");
             if (!values) return std::unexpected(values.error());
-            if (values->empty() || values->size() % 4U != 0U) {
+            if (values->size() % 4U != 0U) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "Transform.transform requires groups of four floats");
             }
+            if (values->empty()) return std::optional<Value> {};
             auto matrix = transform_matrix(machine, *object);
             if (!matrix) return std::unexpected(matrix.error());
             for (usize base = 0; base < values->size(); base += 4U) {
@@ -267,8 +248,86 @@ void register_transform(NativeMethodRegistry& registry) {
         });
     add(registry, kTransform, "transform",
         "(Ljavax/microedition/m3g/VertexArray;[FZ)V",
-        [](Machine&, std::span<const Value>)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Transform.transform");
+            auto input = reference_argument(arguments, 1U,
+                                            "Transform.transform", false);
+            auto output = reference_argument(arguments, 2U,
+                                             "Transform.transform", false);
+            auto use_w = int_argument(arguments, 3U,
+                                      "Transform.transform");
+            if (!object) return std::unexpected(object.error());
+            if (!input) return std::unexpected(input.error());
+            if (!output) return std::unexpected(output.error());
+            if (!use_w) return std::unexpected(use_w.error());
+
+            auto vertex_count = int_field(machine, *input, kVertexArray,
+                                          "vertexCount");
+            auto component_count = int_field(machine, *input, kVertexArray,
+                                             "componentCount");
+            auto component_size = int_field(machine, *input, kVertexArray,
+                                            "componentSize");
+            auto data = reference_field(machine, *input, kVertexArray,
+                                        "data", "Ljava/lang/Object;");
+            if (!vertex_count) return std::unexpected(vertex_count.error());
+            if (!component_count) {
+                return std::unexpected(component_count.error());
+            }
+            if (!component_size) {
+                return std::unexpected(component_size.error());
+            }
+            if (!data) return std::unexpected(data.error());
+            if (*vertex_count < 0 ||
+                (*component_count != 2 && *component_count != 3) ||
+                (*component_size != 1 && *component_size != 2) ||
+                data->is_null()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Transform vertex array is invalid");
+            }
+            auto output_length = machine.heap().array_length(*output);
+            auto data_length = machine.heap().array_length(*data);
+            if (!output_length) return std::unexpected(output_length.error());
+            if (!data_length) return std::unexpected(data_length.error());
+            const usize vertices = static_cast<usize>(*vertex_count);
+            const usize components = static_cast<usize>(*component_count);
+            if (*output_length < vertices * 4U ||
+                *data_length < vertices * components) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Transform output or vertex data is too short");
+            }
+            auto matrix = transform_matrix(machine, *object);
+            if (!matrix) return std::unexpected(matrix.error());
+            std::vector<float> transformed(vertices * 4U, 0.0F);
+            for (usize vertex = 0U; vertex < vertices; ++vertex) {
+                std::array<float, 4> input_value {
+                    0.0F, 0.0F, 0.0F, *use_w != 0 ? 1.0F : 0.0F};
+                for (usize component = 0U; component < components;
+                     ++component) {
+                    auto value = machine.heap().element(
+                        *data, vertex * components + component);
+                    if (!value) return std::unexpected(value.error());
+                    auto integer = value->as_int();
+                    if (!integer) return std::unexpected(integer.error());
+                    input_value[component] = *component_size == 1
+                        ? static_cast<float>(static_cast<std::int8_t>(
+                            *integer & 0xFF))
+                        : static_cast<float>(static_cast<std::int16_t>(
+                            *integer & 0xFFFF));
+                }
+                for (usize row = 0U; row < 4U; ++row) {
+                    transformed[vertex * 4U + row] =
+                        (*matrix)[row * 4U] * input_value[0U] +
+                        (*matrix)[row * 4U + 1U] * input_value[1U] +
+                        (*matrix)[row * 4U + 2U] * input_value[2U] +
+                        (*matrix)[row * 4U + 3U] * input_value[3U];
+                }
+            }
+            for (usize index = 0U; index < transformed.size(); ++index) {
+                auto stored = machine.heap().set_element(
+                    *output, index, Value::from_float(transformed[index]));
+                if (!stored) return std::unexpected(stored.error());
+            }
             return std::optional<Value> {};
         });
 }
@@ -282,7 +341,7 @@ void register_transformable(NativeMethodRegistry& registry) {
             -> Result<std::optional<Value>> {
             auto object = receiver(arguments, "Transformable.setTransform");
             auto source = reference_argument(arguments, 1U,
-                                             "Transformable.setTransform");
+                                             "Transformable.setTransform", true);
             if (!object) return std::unexpected(object.error());
             if (!source) return std::unexpected(source.error());
             Matrix matrix = identity_matrix();
@@ -291,9 +350,11 @@ void register_transformable(NativeMethodRegistry& registry) {
                 if (!read) return std::unexpected(read.error());
                 matrix = *read;
             }
-            auto target = local_transform(machine, *object);
+            auto target = generic_transform(machine, *object);
             if (!target) return std::unexpected(target.error());
             auto stored = set_transform_matrix(machine, *target, matrix);
+            if (!stored) return std::unexpected(stored.error());
+            stored = rebuild_transformable_matrix(machine, *object);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
@@ -308,13 +369,11 @@ void register_transformable(NativeMethodRegistry& registry) {
                     arguments, 1U, "Transformable.getTransform", false);
                 if (!object) return std::unexpected(object.error());
                 if (!destination) return std::unexpected(destination.error());
-                Result<Matrix> matrix = composite
-                    ? composite_matrix(machine, *object)
-                    : [&]() -> Result<Matrix> {
-                        auto local = local_transform(machine, *object);
-                        if (!local) return std::unexpected(local.error());
-                        return transform_matrix(machine, *local);
-                    }();
+                auto source = composite
+                    ? local_transform(machine, *object)
+                    : generic_transform(machine, *object);
+                if (!source) return std::unexpected(source.error());
+                auto matrix = transform_matrix(machine, *source);
                 if (!matrix) return std::unexpected(matrix.error());
                 auto stored = set_transform_matrix(machine, *destination, *matrix);
                 if (!stored) return std::unexpected(stored.error());
@@ -335,15 +394,19 @@ void register_transformable(NativeMethodRegistry& registry) {
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!z) return std::unexpected(z.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto matrix = transform_matrix(machine, *local);
-            if (!matrix) return std::unexpected(matrix.error());
-            (*matrix)[3] = *x;
-            (*matrix)[7] = *y;
-            (*matrix)[11] = *z;
-            auto stored = set_transform_matrix(machine, *local, *matrix);
-            if (!stored) return std::unexpected(stored.error());
+            const std::array<Status, 3> stored {
+                set_float_field(machine, *object, kTransformable,
+                                "translationX", *x),
+                set_float_field(machine, *object, kTransformable,
+                                "translationY", *y),
+                set_float_field(machine, *object, kTransformable,
+                                "translationZ", *z),
+            };
+            for (const Status& status : stored) {
+                if (!status) return std::unexpected(status.error());
+            }
+            auto rebuilt = rebuild_transformable_matrix(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value> {};
         });
     add(registry, kTransformable, "getTranslation", "([F)V",
@@ -354,64 +417,89 @@ void register_transformable(NativeMethodRegistry& registry) {
                                                   "Transformable.getTranslation", false);
             if (!object) return std::unexpected(object.error());
             if (!destination) return std::unexpected(destination.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto matrix = transform_matrix(machine, *local);
-            if (!matrix) return std::unexpected(matrix.error());
-            const std::array<float, 3> values {
-                (*matrix)[3], (*matrix)[7], (*matrix)[11],
-            };
+            auto x = float_field(machine, *object, kTransformable, "translationX");
+            auto y = float_field(machine, *object, kTransformable, "translationY");
+            auto z = float_field(machine, *object, kTransformable, "translationZ");
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!z) return std::unexpected(z.error());
+            const std::array<float, 3> values {*x, *y, *z};
             auto stored = write_float_array(machine, *destination, values);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
 
-    const auto register_local_operation = [&registry](
-        const char* name,
-        const char* descriptor,
-        bool pre,
-        auto factory) {
-        add(registry, kTransformable, name, descriptor,
-            [pre, factory](Machine& machine, std::span<const Value> arguments)
-                -> Result<std::optional<Value>> {
-                auto object = receiver(arguments, "Transformable operation");
-                if (!object) return std::unexpected(object.error());
-                auto operation = factory(arguments);
-                if (!operation) return std::unexpected(operation.error());
-                auto local = local_transform(machine, *object);
-                if (!local) return std::unexpected(local.error());
-                auto current = transform_matrix(machine, *local);
-                if (!current) return std::unexpected(current.error());
-                auto stored = set_transform_matrix(
-                    machine, *local,
-                    pre ? multiply(*operation, *current)
-                        : multiply(*current, *operation));
-                if (!stored) return std::unexpected(stored.error());
-                return std::optional<Value> {};
-            });
-    };
-    register_local_operation("translate", "(FFF)V", false,
-        [](std::span<const Value> arguments) -> Result<Matrix> {
+    add(registry, kTransformable, "translate", "(FFF)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Transformable.translate");
             auto x = float_argument(arguments, 1U, "Transformable.translate");
             auto y = float_argument(arguments, 2U, "Transformable.translate");
             auto z = float_argument(arguments, 3U, "Transformable.translate");
+            if (!object) return std::unexpected(object.error());
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!z) return std::unexpected(z.error());
-            return translation_matrix(*x, *y, *z);
+            auto current_x = float_field(machine, *object, kTransformable,
+                                         "translationX");
+            auto current_y = float_field(machine, *object, kTransformable,
+                                         "translationY");
+            auto current_z = float_field(machine, *object, kTransformable,
+                                         "translationZ");
+            if (!current_x) return std::unexpected(current_x.error());
+            if (!current_y) return std::unexpected(current_y.error());
+            if (!current_z) return std::unexpected(current_z.error());
+            const std::array<Status, 3> stored {
+                set_float_field(machine, *object, kTransformable,
+                                "translationX", *current_x + *x),
+                set_float_field(machine, *object, kTransformable,
+                                "translationY", *current_y + *y),
+                set_float_field(machine, *object, kTransformable,
+                                "translationZ", *current_z + *z),
+            };
+            for (const Status& status : stored) {
+                if (!status) return std::unexpected(status.error());
+            }
+            auto rebuilt = rebuild_transformable_matrix(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
+            return std::optional<Value> {};
         });
-    register_local_operation("scale", "(FFF)V", false,
-        [](std::span<const Value> arguments) -> Result<Matrix> {
+
+    add(registry, kTransformable, "scale", "(FFF)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments, "Transformable.scale");
             auto x = float_argument(arguments, 1U, "Transformable.scale");
             auto y = float_argument(arguments, 2U, "Transformable.scale");
             auto z = float_argument(arguments, 3U, "Transformable.scale");
+            if (!object) return std::unexpected(object.error());
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!z) return std::unexpected(z.error());
-            return scale_matrix(*x, *y, *z);
+            auto current_x = float_field(machine, *object, kTransformable, "scaleX");
+            auto current_y = float_field(machine, *object, kTransformable, "scaleY");
+            auto current_z = float_field(machine, *object, kTransformable, "scaleZ");
+            if (!current_x) return std::unexpected(current_x.error());
+            if (!current_y) return std::unexpected(current_y.error());
+            if (!current_z) return std::unexpected(current_z.error());
+            const std::array<Status, 3> stored {
+                set_float_field(machine, *object, kTransformable,
+                                "scaleX", *current_x * *x),
+                set_float_field(machine, *object, kTransformable,
+                                "scaleY", *current_y * *y),
+                set_float_field(machine, *object, kTransformable,
+                                "scaleZ", *current_z * *z),
+            };
+            for (const Status& status : stored) {
+                if (!status) return std::unexpected(status.error());
+            }
+            auto rebuilt = rebuild_transformable_matrix(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
+            return std::optional<Value> {};
         });
+
     const auto rotation_factory = [](std::span<const Value> arguments)
-        -> Result<Matrix> {
+        -> Result<Quaternion> {
         auto angle = float_argument(arguments, 1U, "Transformable.rotate");
         auto x = float_argument(arguments, 2U, "Transformable.rotate");
         auto y = float_argument(arguments, 3U, "Transformable.rotate");
@@ -420,10 +508,35 @@ void register_transformable(NativeMethodRegistry& registry) {
         if (!x) return std::unexpected(x.error());
         if (!y) return std::unexpected(y.error());
         if (!z) return std::unexpected(z.error());
-        return rotation_matrix(*angle, *x, *y, *z);
+        return axis_angle_quaternion(*angle, *x, *y, *z);
     };
-    register_local_operation("postRotate", "(FFFF)V", false, rotation_factory);
-    register_local_operation("preRotate", "(FFFF)V", true, rotation_factory);
+    const auto register_rotation = [&registry, rotation_factory](
+        const char* name,
+        bool pre) {
+        add(registry, kTransformable, name, "(FFFF)V",
+            [pre, rotation_factory](Machine& machine,
+                                    std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments, "Transformable.rotate");
+                auto rotation = rotation_factory(arguments);
+                if (!object) return std::unexpected(object.error());
+                if (!rotation) return std::unexpected(rotation.error());
+                auto current = transformable_quaternion(machine, *object);
+                if (!current) return std::unexpected(current.error());
+                auto combined = pre
+                    ? multiply_quaternion(*rotation, *current)
+                    : multiply_quaternion(*current, *rotation);
+                if (!combined) return std::unexpected(combined.error());
+                auto stored = set_transformable_quaternion(
+                    machine, *object, *combined);
+                if (!stored) return std::unexpected(stored.error());
+                stored = rebuild_transformable_matrix(machine, *object);
+                if (!stored) return std::unexpected(stored.error());
+                return std::optional<Value> {};
+            });
+    };
+    register_rotation("postRotate", false);
+    register_rotation("preRotate", true);
 
     add(registry, kTransformable, "setScale", "(FFF)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -436,16 +549,16 @@ void register_transformable(NativeMethodRegistry& registry) {
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!z) return std::unexpected(z.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto current = transform_matrix(machine, *local);
-            if (!current) return std::unexpected(current.error());
-            Matrix matrix = scale_matrix(*x, *y, *z);
-            matrix[3] = (*current)[3];
-            matrix[7] = (*current)[7];
-            matrix[11] = (*current)[11];
-            auto stored = set_transform_matrix(machine, *local, matrix);
-            if (!stored) return std::unexpected(stored.error());
+            const std::array<Status, 3> stored {
+                set_float_field(machine, *object, kTransformable, "scaleX", *x),
+                set_float_field(machine, *object, kTransformable, "scaleY", *y),
+                set_float_field(machine, *object, kTransformable, "scaleZ", *z),
+            };
+            for (const Status& status : stored) {
+                if (!status) return std::unexpected(status.error());
+            }
+            auto rebuilt = rebuild_transformable_matrix(machine, *object);
+            if (!rebuilt) return std::unexpected(rebuilt.error());
             return std::optional<Value> {};
         });
     add(registry, kTransformable, "getScale", "([F)V",
@@ -456,21 +569,13 @@ void register_transformable(NativeMethodRegistry& registry) {
                                                   "Transformable.getScale", false);
             if (!object) return std::unexpected(object.error());
             if (!destination) return std::unexpected(destination.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto matrix = transform_matrix(machine, *local);
-            if (!matrix) return std::unexpected(matrix.error());
-            const std::array<float, 3> values {
-                std::sqrt((*matrix)[0] * (*matrix)[0] +
-                          (*matrix)[4] * (*matrix)[4] +
-                          (*matrix)[8] * (*matrix)[8]),
-                std::sqrt((*matrix)[1] * (*matrix)[1] +
-                          (*matrix)[5] * (*matrix)[5] +
-                          (*matrix)[9] * (*matrix)[9]),
-                std::sqrt((*matrix)[2] * (*matrix)[2] +
-                          (*matrix)[6] * (*matrix)[6] +
-                          (*matrix)[10] * (*matrix)[10]),
-            };
+            auto x = float_field(machine, *object, kTransformable, "scaleX");
+            auto y = float_field(machine, *object, kTransformable, "scaleY");
+            auto z = float_field(machine, *object, kTransformable, "scaleZ");
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!z) return std::unexpected(z.error());
+            const std::array<float, 3> values {*x, *y, *z};
             auto stored = write_float_array(machine, *destination, values);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
@@ -482,14 +587,10 @@ void register_transformable(NativeMethodRegistry& registry) {
             auto rotation = rotation_factory(arguments);
             if (!object) return std::unexpected(object.error());
             if (!rotation) return std::unexpected(rotation.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto current = transform_matrix(machine, *local);
-            if (!current) return std::unexpected(current.error());
-            (*rotation)[3] = (*current)[3];
-            (*rotation)[7] = (*current)[7];
-            (*rotation)[11] = (*current)[11];
-            auto stored = set_transform_matrix(machine, *local, *rotation);
+            auto stored = set_transformable_quaternion(
+                machine, *object, *rotation);
+            if (!stored) return std::unexpected(stored.error());
+            stored = rebuild_transformable_matrix(machine, *object);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
@@ -501,24 +602,9 @@ void register_transformable(NativeMethodRegistry& registry) {
                                                   "Transformable.getOrientation", false);
             if (!object) return std::unexpected(object.error());
             if (!destination) return std::unexpected(destination.error());
-            auto local = local_transform(machine, *object);
-            if (!local) return std::unexpected(local.error());
-            auto matrix = transform_matrix(machine, *local);
-            if (!matrix) return std::unexpected(matrix.error());
-            const float cosine = std::clamp(
-                (((*matrix)[0] + (*matrix)[5] + (*matrix)[10]) - 1.0F) * 0.5F,
-                -1.0F, 1.0F);
-            const float radians = std::acos(cosine);
-            const float sine = std::sin(radians);
-            std::array<float, 4> values {
-                radians * (180.0F / std::numbers::pi_v<float>),
-                0.0F, 0.0F, 1.0F,
-            };
-            if (std::abs(sine) > 1.0e-5F) {
-                values[1] = ((*matrix)[9] - (*matrix)[6]) / (2.0F * sine);
-                values[2] = ((*matrix)[2] - (*matrix)[8]) / (2.0F * sine);
-                values[3] = ((*matrix)[4] - (*matrix)[1]) / (2.0F * sine);
-            }
+            auto orientation = transformable_quaternion(machine, *object);
+            if (!orientation) return std::unexpected(orientation.error());
+            const auto values = quaternion_angle_axis(*orientation);
             auto stored = write_float_array(machine, *destination, values);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};

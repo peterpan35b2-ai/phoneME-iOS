@@ -85,6 +85,7 @@ public:
     [[nodiscard]] Status collect(std::span<const ObjectRef> roots);
     void clear() noexcept;
     [[nodiscard]] usize estimated_bytes() const noexcept;
+    [[nodiscard]] bool automatic_collection_due() const noexcept;
     [[nodiscard]] HeapStats stats() const noexcept;
 
 private:
@@ -110,6 +111,7 @@ private:
     [[nodiscard]] Result<ObjectRef> allocate_unlocked(Object object,
                                                       usize accounted_bytes);
     [[nodiscard]] Status ensure_capacity_unlocked(usize object_bytes) noexcept;
+    void update_automatic_collection_threshold_unlocked() noexcept;
     void mark_unlocked(ObjectRef root, std::vector<ObjectRef>& pending);
     [[nodiscard]] static Result<usize> estimate_object_bytes(
         std::string_view class_name,
@@ -123,6 +125,7 @@ private:
     std::vector<usize> free_slots_;
     usize live_bytes_ {0};
     usize peak_bytes_ {0};
+    usize automatic_collection_threshold_ {0};
     usize collections_ {0};
     usize failed_allocations_ {0};
 };

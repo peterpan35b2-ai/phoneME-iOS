@@ -1,11 +1,16 @@
 #pragma once
 
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
 #include <thread>
+
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 #include "phoneme/base/Error.hpp"
 #include "phoneme/vm/ExecutionContext.hpp"
@@ -22,6 +27,35 @@ enum class JavaThreadState : u8 {
     sleeping,
     joining,
     terminated,
+};
+
+class JavaWorkerThread final {
+public:
+    JavaWorkerThread() = default;
+    ~JavaWorkerThread();
+
+    JavaWorkerThread(const JavaWorkerThread&) = delete;
+    JavaWorkerThread& operator=(const JavaWorkerThread&) = delete;
+
+    [[nodiscard]] Status start(
+        std::function<void(std::stop_token)> task);
+    void request_stop() noexcept;
+    [[nodiscard]] bool joinable() const noexcept;
+    [[nodiscard]] bool is_current_thread() const noexcept;
+    void join();
+    void detach();
+
+private:
+#if defined(__APPLE__)
+    struct StartContext;
+    static void* thread_entry(void* context) noexcept;
+
+    pthread_t thread_ {};
+    std::stop_source stop_source_;
+    bool joinable_ {false};
+#else
+    std::jthread thread_;
+#endif
 };
 
 struct JavaThreadSnapshot final {
@@ -55,7 +89,7 @@ private:
     std::shared_ptr<ExecutionContext> context_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
-    std::jthread worker_;
+    JavaWorkerThread worker_;
     JavaThreadState state_ {JavaThreadState::new_thread};
     i32 priority_ {5};
     bool interrupted_ {false};

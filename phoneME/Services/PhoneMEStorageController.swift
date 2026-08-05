@@ -15,6 +15,13 @@ enum PhoneMEStorageLocation: String, CaseIterable, Identifiable {
         }
     }
 
+    var systemImage: String {
+        switch self {
+        case .local: return "iphone"
+        case .iCloud: return "icloud"
+        }
+    }
+
     var subtitle: String {
         switch self {
         case .local:

@@ -144,10 +144,16 @@ int main() {
                 })
                 .has_value(),
             "register native method with runtime ID");
-    const auto native_id = natives.resolve("test/Native", "call", "()V");
-    require(native_id.valid(), "resolve registered native method ID");
+    const auto registered_generation = natives.generation();
+    require(registered_generation != initial_generation,
+            "native registration advances registry generation");
+    const auto native_binding = natives.resolve_binding(
+        "test/Native", "call", "()V");
+    require(native_binding.id.valid() &&
+                native_binding.generation == registered_generation,
+            "resolve registered native method with atomic generation");
     natives.clear();
-    require(natives.generation() != initial_generation,
+    require(natives.generation() != registered_generation,
             "native clear advances registry generation");
     require(!natives.resolve("test/Native", "call", "()V").valid(),
             "native clear invalidates prior resolution");

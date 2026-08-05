@@ -28,6 +28,18 @@ fi
 OBJECT_ROOT="$BUILD_ROOT/objects"
 OUTPUT_ARCHIVE="${PHONEME_CORE_OUTPUT:-$BUILD_ROOT/libphoneMECore.a}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}"
+# Decoded execution has passed the host differential, sanitizer and pinned-JAR
+# corpus gates. Keep it enabled for production iOS builds; the legacy
+# interpreter remains available at runtime through
+# PHONEME_USE_DECODED_EXECUTION=0 for diagnostics.
+DECODED_EXECUTION="${PHONEME_ENABLE_DECODED_EXECUTION:-1}"
+case "$DECODED_EXECUTION" in
+  0|1) ;;
+  *)
+    echo "PHONEME_ENABLE_DECODED_EXECUTION must be 0 or 1." >&2
+    exit 2
+    ;;
+esac
 
 version_is_supported() {
   /usr/bin/awk -v version="$1" 'BEGIN {
@@ -102,6 +114,7 @@ COMMON_FLAGS=(
   "$MIN_VERSION_FLAG"
   -I"$CORE_ROOT/include"
   -DPHONEME_IPHONEOS_ONLY=1
+  -DPHONEME_ENABLE_DECODED_EXECUTION="$DECODED_EXECUTION"
   -fno-exceptions
   -fno-rtti
   -fvisibility=hidden
@@ -182,6 +195,7 @@ minimum_ios=$IOS_DEPLOYMENT_TARGET
 compiler=$CXX
 sdk=$SDK_ROOT
 cxx_standard=c++23
+decoded_execution_compiled=$DECODED_EXECUTION
 legacy_source_compiled=false
 vendor_source_compiled=false
 external_runtime_archive_required=false
@@ -199,6 +213,7 @@ PHONEME_CORE_BUILD_DIR=$BUILD_ROOT
 PHONEME_CORE_OUTPUT=$OUTPUT_ARCHIVE
 IOS_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET
 PHONEME_APPLE_SDK=$APPLE_SDK
+PHONEME_ENABLE_DECODED_EXECUTION=$DECODED_EXECUTION
 EOF
 
 cat <<EOF
@@ -209,6 +224,7 @@ Architecture: arm64
 Platform: $APPLE_SDK
 Deployment target: iOS $IOS_DEPLOYMENT_TARGET
 C++ standard: C++23
+Decoded execution compiled: $DECODED_EXECUTION
 Source files: $SOURCE_COUNT
 Archive members: $OBJECT_COUNT
 Archive size: $ARCHIVE_SIZE

@@ -1,3 +1,6 @@
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
@@ -67,6 +70,89 @@ public final class NetworkOps {
         output.close();
         connection.close();
         return endpoint + reply;
+    }
+
+    public static int nestedDataOutputBulkWrite() throws Exception {
+        SocketConnection connection = (SocketConnection) Connector.open(
+            "socket://example.test:4321", Connector.READ_WRITE, true);
+        DataOutputStream output = new DataOutputStream(
+            new BufferedOutputStream(connection.openOutputStream()));
+        DataInputStream input = new DataInputStream(connection.openInputStream());
+        output.writeInt(0x12345678);
+        output.flush();
+        int value = input.readInt();
+        input.close();
+        output.close();
+        connection.close();
+        return value;
+    }
+
+    public static int socketExactReadSemantics() throws Exception {
+        SocketConnection connection = (SocketConnection) Connector.open(
+            "socket://example.test:4321", Connector.READ_WRITE, true);
+        OutputStream output = connection.openOutputStream();
+        InputStream input = connection.openInputStream();
+        byte[] payload = new byte[64];
+        for (int index = 0; index < payload.length; index++) {
+            payload[index] = (byte) index;
+        }
+        output.write(payload);
+        output.flush();
+
+        byte[] first = new byte[3];
+        byte[] second = new byte[5];
+        byte[] remainder = new byte[56];
+        int firstCount = input.read(first);
+        int secondCount = input.read(second);
+        int remainderCount = input.read(remainder);
+        int checksum = 0;
+        for (int index = 0; index < first.length; index++) {
+            checksum += first[index] & 0xFF;
+        }
+        for (int index = 0; index < second.length; index++) {
+            checksum += second[index] & 0xFF;
+        }
+        for (int index = 0; index < remainder.length; index++) {
+            checksum += remainder[index] & 0xFF;
+        }
+
+        input.close();
+        output.close();
+        connection.close();
+        if (firstCount != 3 || secondCount != 5 || remainderCount != 56) {
+            return -1;
+        }
+        return checksum;
+    }
+
+    public static int socketLargePayload() throws Exception {
+        SocketConnection connection = (SocketConnection) Connector.open(
+            "socket://example.test:4321", Connector.READ_WRITE, true);
+        DataOutputStream output = new DataOutputStream(
+            connection.openOutputStream());
+        DataInputStream input = new DataInputStream(
+            connection.openInputStream());
+        byte[] payload = new byte[64 * 1024];
+        for (int index = 0; index < payload.length; index++) {
+            payload[index] = (byte) ((index * 37 + 11) & 0xFF);
+        }
+        output.write(payload);
+        output.flush();
+
+        byte[] received = new byte[payload.length];
+        input.readFully(received);
+        int result = 1;
+        for (int index = 0; index < payload.length; index++) {
+            if (received[index] != payload[index]) {
+                result = 0;
+                break;
+            }
+        }
+
+        input.close();
+        output.close();
+        connection.close();
+        return result;
     }
 
     public static int streamSurvivesConnectionClose() throws Exception {

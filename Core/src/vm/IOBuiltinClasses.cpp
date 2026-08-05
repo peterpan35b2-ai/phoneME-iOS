@@ -369,7 +369,13 @@ using namespace builtin;
     }
     if (name == "java/nio/charset/Charset") {
         return make_class("java/nio/charset/Charset", "java/lang/Object",
-                          kOrdinary);
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "canonicalName", "Ljava/lang/String;"),
+        }, {
+            method(kPrivate, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic | kFinal, "name", "()Ljava/lang/String;"),
+            method(kPublic | kFinal, "toString", "()Ljava/lang/String;"),
+        });
     }
     if (name == "java/nio/charset/StandardCharsets") {
         return make_class("java/nio/charset/StandardCharsets",
@@ -377,6 +383,9 @@ using namespace builtin;
                           {
                               field(kPublic | kStatic | kFinal, "UTF_8",
                                     "Ljava/nio/charset/Charset;"),
+                          }, {
+                              method(kPrivate, "<init>", "()V"),
+                              method(kStatic, "<clinit>", "()V"),
                           });
     }
     if (name == "java/io/Serializable") {

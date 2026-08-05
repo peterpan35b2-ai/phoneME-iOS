@@ -33,7 +33,13 @@ while IFS= read -r source; do
   [[ "$source" == */api/CAPI.cpp ]] && continue
   [[ "$source" == */runtime/Runtime.cpp ]] && continue
   if [[ "$source" == "$CORE_ROOT/src/vm/"*Natives.cpp &&
-        "$source" != "$CORE_ROOT/src/vm/CoreNatives.cpp" ]]; then
+        "$source" != "$CORE_ROOT/src/vm/CoreNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/HeadlessCompatNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/Micro3dNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/Micro3dMathNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/Micro3dRenderNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/Micro3dResourceNatives.cpp" &&
+        "$source" != "$CORE_ROOT/src/vm/Micro3dStateNatives.cpp" ]]; then
     continue
   fi
   SOURCES+=("$source")

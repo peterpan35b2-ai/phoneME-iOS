@@ -3,7 +3,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <string_view>
 
 #include "phoneme/vm/CanvasBridge.hpp"
@@ -66,6 +68,116 @@ void require(bool condition, const char* message) {
         std::cerr << "FAILED: " << message << '\n';
         std::abort();
     }
+}
+
+std::chrono::milliseconds measure_frame_pacing(
+    phoneme::vm::ClassRepository& classes,
+    phoneme::vm::FramePacingMode mode,
+    int frames_per_second,
+    int requested_sleep_millis,
+    int iterations) {
+    phoneme::vm::Machine machine(classes);
+    machine.configure_frame_pacing(frames_per_second, mode);
+
+    auto thread_root = machine.allocate_pinned_instance("java/lang/Thread");
+    auto target_root = machine.allocate_pinned_instance("java/lang/Object");
+    require(thread_root.has_value() && target_root.has_value(),
+            "allocate frame pacing test thread");
+    auto thread = thread_root->get();
+    auto target = target_root->get();
+    require(thread.has_value() && target.has_value(),
+            "resolve frame pacing test roots");
+    require(machine.initialize_java_thread(*thread, *target).has_value(),
+            "initialize frame pacing test thread");
+
+    auto completion = std::make_shared<std::promise<long long>>();
+    auto future = completion->get_future();
+    require(machine.scheduler().start_native_thread(
+                machine,
+                *thread,
+                [&machine,
+                 completion,
+                 requested_sleep_millis,
+                 iterations](std::stop_token)
+                    -> phoneme::Result<
+                        std::optional<phoneme::vm::ObjectRef>> {
+                    const auto started = std::chrono::steady_clock::now();
+                    for (int index = 0; index < iterations; ++index) {
+                        machine.pace_frame_publication();
+                        machine.note_frame_pacing_boundary();
+                        if (requested_sleep_millis > 0) {
+                            auto slept = machine.sleep_current_thread(
+                                requested_sleep_millis);
+                            if (!slept) {
+                                completion->set_value(-1);
+                                return std::unexpected(slept.error());
+                            }
+                        }
+                    }
+                    completion->set_value(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - started).count());
+                    return std::optional<phoneme::vm::ObjectRef> {};
+                }).has_value(),
+            "start frame pacing test thread");
+    require(future.wait_for(std::chrono::seconds(5)) ==
+                std::future_status::ready,
+            "frame pacing test completes");
+    const long long elapsed = future.get();
+    require(elapsed >= 0, "frame pacing test sleep succeeds");
+    return std::chrono::milliseconds(elapsed);
+}
+
+std::chrono::milliseconds measure_cap_reconfiguration_release(
+    phoneme::vm::ClassRepository& classes) {
+    phoneme::vm::Machine machine(classes);
+    machine.configure_frame_pacing(
+        1,
+        phoneme::vm::FramePacingMode::cap);
+
+    auto thread_root = machine.allocate_pinned_instance("java/lang/Thread");
+    auto target_root = machine.allocate_pinned_instance("java/lang/Object");
+    require(thread_root.has_value() && target_root.has_value(),
+            "allocate cap reconfiguration test thread");
+    auto thread = thread_root->get();
+    auto target = target_root->get();
+    require(thread.has_value() && target.has_value(),
+            "resolve cap reconfiguration test roots");
+    require(machine.initialize_java_thread(*thread, *target).has_value(),
+            "initialize cap reconfiguration test thread");
+
+    auto waiting = std::make_shared<std::promise<void>>();
+    auto waiting_future = waiting->get_future();
+    auto completion = std::make_shared<std::promise<long long>>();
+    auto completion_future = completion->get_future();
+    require(machine.scheduler().start_native_thread(
+                machine,
+                *thread,
+                [&machine, waiting, completion](std::stop_token)
+                    -> phoneme::Result<
+                        std::optional<phoneme::vm::ObjectRef>> {
+                    machine.pace_frame_publication();
+                    machine.note_frame_pacing_boundary();
+                    waiting->set_value();
+                    const auto started = std::chrono::steady_clock::now();
+                    machine.pace_frame_publication();
+                    completion->set_value(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - started).count());
+                    return std::optional<phoneme::vm::ObjectRef> {};
+                }).has_value(),
+            "start cap reconfiguration test thread");
+    require(waiting_future.wait_for(std::chrono::seconds(1)) ==
+                std::future_status::ready,
+            "cap reconfiguration wait begins");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    machine.configure_frame_pacing(
+        60,
+        phoneme::vm::FramePacingMode::native);
+    require(completion_future.wait_for(std::chrono::seconds(1)) ==
+                std::future_status::ready,
+            "cap reconfiguration releases the publication gate");
+    return std::chrono::milliseconds(completion_future.get());
 }
 
 class BlockingWaitProbeBridge final : public phoneme::vm::CanvasBridge {
@@ -143,6 +255,50 @@ int main(int argc, char** argv) {
     phoneme::vm::ClassRepository classes;
     require(classes.add_archive(argv[1]).has_value(),
             "add scheduler fixture archive");
+
+    if (performance_gate_enabled) {
+        const auto native_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::native,
+            60,
+            40,
+            12);
+        const auto override_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::override_game_loop,
+            60,
+            40,
+            12);
+        const auto capped_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::cap,
+            10,
+            10,
+            5);
+        const auto capped_busy_loop_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::cap,
+            20,
+            0,
+            6);
+        const auto cap_reconfiguration_release =
+            measure_cap_reconfiguration_release(classes);
+
+        require(native_elapsed >= std::chrono::milliseconds(400),
+                "native pacing preserves the game's requested sleeps");
+        require(override_elapsed >= std::chrono::milliseconds(400) &&
+                    override_elapsed <= native_elapsed +
+                        std::chrono::milliseconds(120),
+                "legacy override preserves KPAH-style 40 ms Java sleeps");
+        require(capped_elapsed >= std::chrono::milliseconds(380) &&
+                    capped_elapsed <= std::chrono::milliseconds(650),
+                "cap pacing limits actual frame publications without drift");
+        require(capped_busy_loop_elapsed >= std::chrono::milliseconds(220) &&
+                    capped_busy_loop_elapsed <= std::chrono::milliseconds(450),
+                "cap pacing limits non-sleeping loops without over-throttling");
+        require(cap_reconfiguration_release < std::chrono::milliseconds(250),
+                "frame pacing changes release an active cap immediately");
+    }
 
     {
         phoneme::vm::Machine wait_machine(classes);

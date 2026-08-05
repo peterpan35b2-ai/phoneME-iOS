@@ -364,7 +364,9 @@ void register_constructor(NativeMethodRegistry& registry,
                 }
                 length = static_cast<i32>(*array_length);
             }
-            Charset charset = Charset::utf8;
+            // CLDC String(byte[]) follows microedition.encoding. phoneME's
+            // platform default is ISO-8859-1, not UTF-8.
+            Charset charset = Charset::latin1;
             if (has_charset) {
                 auto name = arguments[cursor].as_reference();
                 if (!name) return std::unexpected(name.error());
@@ -397,7 +399,10 @@ void register_string_encoding_natives(NativeMethodRegistry& registry) {
                 -> Result<std::optional<Value>> {
                 auto string = receiver(arguments);
                 if (!string) return std::unexpected(string.error());
-                Charset charset = Charset::utf8;
+                // CLDC String.getBytes() follows microedition.encoding.
+                // Keep this aligned with the exposed ISO8859_1 property and
+                // the original phoneME i18n Helper fallback.
+                Charset charset = Charset::latin1;
                 if (has_charset) {
                     auto name = arguments[1].as_reference();
                     if (!name) return std::unexpected(name.error());

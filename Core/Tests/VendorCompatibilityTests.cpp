@@ -97,8 +97,21 @@ int main() {
     require_method(*scheduler, "<init>", "()V", false, false);
     require_method(*scheduler, "getScheduler",
                    "()Lcom/sun/midp/midlet/Scheduler;", true);
+    require_method(*scheduler, "getMIDletSuite",
+                   "()Lcom/sun/midp/midlet/MIDletSuite;", false);
     require_method(*scheduler, "getActiveMIDlet",
                    "()Ljavax/microedition/midlet/MIDlet;", false);
+
+    const auto midlet_suite = registry.find(
+        "com/sun/midp/midlet/MIDletSuite");
+    require(midlet_suite != nullptr,
+            "phoneME MIDletSuite compatibility interface is missing");
+    require_method(*midlet_suite, "getProperty",
+                   "(Ljava/lang/String;)Ljava/lang/String;", false);
+    require_method(*midlet_suite, "checkPermission",
+                   "(Ljava/lang/String;)I", false);
+    require_method(*midlet_suite, "getID", "()I", false);
+    require_method(*midlet_suite, "isTrusted", "()Z", false);
 
     const auto siemens_light = require_class(
         registry, "com/siemens/mp/game/Light");

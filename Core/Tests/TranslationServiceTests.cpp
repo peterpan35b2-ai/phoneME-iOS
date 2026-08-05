@@ -72,12 +72,15 @@ public:
     enum class Mode {
         normal,
         malformed_batch,
+        bing,
     };
 
     explicit FakeTranslationAdapter(Mode mode = Mode::normal) : mode_(mode) {}
 
     std::atomic<int> request_count {0};
     std::atomic<int> batch_request_count {0};
+    std::atomic<int> bing_home_request_count {0};
+    std::atomic<int> bing_translation_request_count {0};
 
     phoneme::Result<phoneme::network::OperationId> open_stream(
         const phoneme::network::Url&, phoneme::i32,
@@ -129,30 +132,108 @@ public:
         phoneme::network::HttpRequest request,
         phoneme::network::Completion<phoneme::network::HttpResponse> completion) override {
         const int current_request = request_count.fetch_add(1) + 1;
-        require(request.url.host == "translate.googleapis.com",
-                "translation request targets Google Translate");
+        if (request.url.host == "www.bing.com" &&
+            request.url.path == "/translator") {
+            require(mode_ == Mode::bing,
+                    "Bing provider initializes its own web session");
+            require(request.method == "GET",
+                    "Bing token bootstrap uses a GET request");
+            bing_home_request_count.fetch_add(1);
+            const std::string payload =
+                R"(<html><div id="rich_tta" data-iid="translator.5023"></div><script>IG:"ABC123";var params_AbusePreventionHelper = [1234567890, "token-value", 3600000];</script></html>)";
+            auto final_url = phoneme::network::Url::parse(
+                "https://www.bing.com/translator");
+            require(final_url.has_value(), "fake Bing home URL parses");
+            phoneme::network::HttpResponse response {
+                .final_url = std::move(*final_url),
+                .status_code = 200,
+                .reason = "OK",
+                .body = std::vector<phoneme::u8>(payload.begin(), payload.end()),
+            };
+            completion(std::move(response));
+            return phoneme::network::OperationId {
+                static_cast<phoneme::u64>(current_request),
+            };
+        }
 
-        const bool is_batch = request.url.query.find("%3B") !=
-            std::string::npos;
+        if (request.url.host == "www.bing.com" &&
+            request.url.path == "/ttranslatev3") {
+            require(mode_ == Mode::bing,
+                    "Bing translation uses the selected provider");
+            require(request.method == "POST",
+                    "Bing translation uses a POST request");
+            bing_translation_request_count.fetch_add(1);
+            const std::string body(request.body.begin(), request.body.end());
+            require(body.find("fromLang=auto-detect") != std::string::npos,
+                    "Bing preserves automatic source detection");
+            require(body.find("to=vi") != std::string::npos,
+                    "Bing preserves the target language");
+            require(body.find("token=token-value") != std::string::npos,
+                    "Bing sends the page token");
+            require(body.find("key=1234567890") != std::string::npos,
+                    "Bing sends the page key");
+
+            const bool is_batch = body.find("%3B") != std::string::npos;
+            if (is_batch) batch_request_count.fetch_add(1);
+            std::string translated;
+            if (is_batch && body.find("%E5%95%86%E5%BA%97") !=
+                    std::string::npos) {
+                translated = "Đăng nhập vào trò chơi; tự nhiên; cửa hàng";
+            } else if (is_batch) {
+                translated = "Đăng nhập vào trò chơi; tự nhiên";
+            } else if (body.find("%E8%87%AA%E7%84%B6") !=
+                       std::string::npos) {
+                translated = "tự nhiên";
+            } else {
+                translated = "Đăng nhập vào trò chơi";
+            }
+            const std::string payload =
+                "[{\"translations\":[{\"text\":\"" + translated +
+                "\",\"to\":\"vi\"}],\"detectedLanguage\":{\"language\":\"zh-Hans\"}}]";
+            auto final_url = phoneme::network::Url::parse(
+                "https://www.bing.com/ttranslatev3");
+            require(final_url.has_value(), "fake Bing response URL parses");
+            phoneme::network::HttpResponse response {
+                .final_url = std::move(*final_url),
+                .status_code = 200,
+                .reason = "OK",
+                .body = std::vector<phoneme::u8>(payload.begin(), payload.end()),
+            };
+            completion(std::move(response));
+            return phoneme::network::OperationId {
+                static_cast<phoneme::u64>(current_request),
+            };
+        }
+
+        require(request.url.host == "translate.googleapis.com",
+                "primary translation request targets Google Translate");
+        require(request.method == "POST",
+                "Google translation uses a POST request");
+        const std::string body(request.body.begin(), request.body.end());
+        require(body.find("client=gtx") != std::string::npos &&
+                    body.find("dt=t") != std::string::npos,
+                "Google request keeps only the required response data");
+
+        const bool is_batch = body.find("%3B") != std::string::npos;
         if (is_batch) batch_request_count.fetch_add(1);
 
         std::string translated;
         if (is_batch && mode_ == Mode::malformed_batch) {
             translated = "Đăng nhập vào trò chơi";
-        } else if (is_batch && request.url.query.find(
+        } else if (is_batch && body.find(
                        "%E5%95%86%E5%BA%97") != std::string::npos) {
             translated = "Đăng nhập vào trò chơi; tự nhiên; cửa hàng";
         } else if (is_batch) {
             translated = "Đăng nhập vào trò chơi; tự nhiên";
-        } else if (request.url.query.find("%E5%95%86%E5%BA%97") !=
+        } else if (body.find("%E5%95%86%E5%BA%97") !=
                    std::string::npos) {
             translated = "cửa hàng";
-        } else if (request.url.query.find("%E8%87%AA%E7%84%B6") !=
+        } else if (body.find("%E8%87%AA%E7%84%B6") !=
                    std::string::npos) {
             translated = "tự nhiên";
-        } else if (request.url.query.find("q=hello") != std::string::npos) {
+        } else if (body.find("q=hello") != std::string::npos) {
             translated = "xin chào";
-        } else if (request.url.query.find(
+        } else if (body.find(
                        "%E3%82%B2%E3%83%BC%E3%83%A0%E9%96%8B%E5%A7%8B") !=
                    std::string::npos) {
             translated = "Bắt đầu trò chơi";
@@ -160,8 +241,7 @@ public:
             translated = "Đăng nhập vào trò chơi";
         }
 
-        const std::string payload =
-            "[[[\"" + translated +
+        const std::string payload = "[[[\"" + translated +
             "\",\"source\",null,null,3]],null,\"zh-CN\"]";
         auto final_url = phoneme::network::Url::parse(
             "https://translate.googleapis.com/");
@@ -267,6 +347,16 @@ int main() {
     require(!TranslationService::parse_google_response(bytes(malformed)),
             "reject an unexpected response shape");
 
+    const std::string bing =
+        R"([{"translations":[{"text":"Đăng nhập vào trò chơi","to":"vi"}],"detectedLanguage":{"language":"zh-Hans"}},{"inputTransliteration":"Dēnglù yóuxì","script":"Latn"}])";
+    auto bing_result = TranslationService::parse_bing_response(bytes(bing));
+    require(bing_result && *bing_result == "Đăng nhập vào trò chơi",
+            "parse the current Bing Translator response shape");
+
+    const std::string malformed_bing = R"({"translations":[]})";
+    require(!TranslationService::parse_bing_response(bytes(malformed_bing)),
+            "reject an unexpected Bing response shape");
+
     const std::array<char32_t, 4> chinese {{U'登', U'录', U'游', U'戏'}};
     const std::array<char32_t, 5> latin {{U'h', U'e', U'l', U'l', U'o'}};
     const std::array<char32_t, 4> japanese {{U'ゲ', U'ー', U'ム', U'開'}};
@@ -313,6 +403,87 @@ int main() {
                 "bulk result caches the first source independently");
         require(cached_natural && *cached_natural == "tự nhiên",
                 "bulk result caches the second source independently");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        auto configuration = test_configuration();
+        configuration.batch_coalescing_delay_ms = 20;
+        configuration.maximum_batch_wait_ms = 50;
+        TranslationService service(configuration, adapter);
+        const phoneme::u64 generation_before = service.generation();
+
+        service.prefetch_utf8("登录游戏");
+        service.prefetch_utf8("自然");
+        for (int attempt = 0;
+             attempt < 100 && adapter->request_count.load() == 0;
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        const auto cached_login = service.lookup_or_request_utf8("登录游戏");
+        const auto cached_natural = service.lookup_or_request_utf8("自然");
+        require(cached_login && *cached_login == "Đăng nhập vào trò chơi" &&
+                    cached_natural && *cached_natural == "tự nhiên",
+                "background prefetch warms independent cache entries");
+        require(adapter->request_count.load() == 1 &&
+                    adapter->batch_request_count.load() == 1,
+                "nearby prefetch candidates share one low-priority batch");
+        require(service.generation() == generation_before,
+                "pure prefetch completion does not force a Canvas repaint");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>();
+        auto configuration = test_configuration();
+        configuration.batch_coalescing_delay_ms = 60;
+        configuration.maximum_batch_wait_ms = 120;
+        TranslationService service(configuration, adapter);
+        CompletionCollector collector;
+
+        service.prefetch_utf8("登录游戏");
+        require(!service.lookup_or_request_utf8(
+                    "登录游戏", collector.callback("promoted")),
+                "foreground lookup promotes an already queued prefetch");
+        require(collector.wait_for(1),
+                "promoted prefetch completes its foreground callback");
+        require(collector.value("promoted") == "Đăng nhập vào trò chơi",
+                "promoted prefetch keeps the translated value");
+        require(adapter->request_count.load() == 1,
+                "prefetch promotion does not duplicate the HTTP request");
+        require(service.generation() > 0U,
+                "promoted text invalidates the active translated frame");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>(
+            FakeTranslationAdapter::Mode::bing);
+        auto configuration = test_configuration();
+        configuration.provider =
+            phoneme::translation::TranslationProvider::bing;
+        TranslationService service(configuration, adapter);
+        CompletionCollector collector;
+
+        require(!service.lookup_or_request_utf8(
+                    "登录游戏", collector.callback("login")),
+                "Bing starts with the original login text");
+        require(!service.lookup_or_request_utf8(
+                    "自然", collector.callback("natural")),
+                "Bing starts with the original natural text");
+        require(collector.wait_for(2),
+                "Bing provider completes the translated batch");
+        require(collector.value("login") == "Đăng nhập vào trò chơi" &&
+                    collector.value("natural") == "tự nhiên",
+                "Bing preserves per-item batch mappings");
+        require(adapter->request_count.load() == 2,
+                "Bing performs one bootstrap and one translation request");
+        require(adapter->batch_request_count.load() == 1,
+                "Bing translates same-script strings in one batch");
+        require(adapter->bing_home_request_count.load() == 1,
+                "Bing initializes its web session once");
+        require(adapter->bing_translation_request_count.load() == 1,
+                "Bing sends one translation request");
     }
 
     {
@@ -470,6 +641,82 @@ int main() {
                 "overlapping translated text is shifted vertically");
         machine.end_character_translation_frame();
 
+        constexpr std::u32string_view outlined_line =
+            U"Tăng cấp Sinh Mệnh";
+        constexpr std::u32string_view outlined_next_line =
+            U"Năng lượng Kiếm";
+        const auto capture_outlined_layout =
+            [&](std::u32string_view text, phoneme::i32 x, phoneme::i32 y) {
+                return machine.plan_translated_text(
+                    7U,
+                    std::span<const char32_t>(text.data(), text.size()),
+                    x,
+                    y,
+                    0,
+                    0,
+                    0,
+                    8,
+                    0,
+                    0,
+                    80,
+                    60,
+                    0,
+                    0);
+            };
+
+        machine.begin_character_translation_frame();
+        const auto outline_capture_1 =
+            capture_outlined_layout(outlined_line, 5, 8);
+        const auto outline_capture_2 =
+            capture_outlined_layout(outlined_line, 6, 8);
+        const auto outline_capture_3 =
+            capture_outlined_layout(outlined_line, 5, 9);
+        const auto outline_capture_4 =
+            capture_outlined_layout(outlined_line, 5, 8);
+        const auto outline_next_capture =
+            capture_outlined_layout(outlined_next_line, 5, 22);
+        require(!outline_capture_1.planned &&
+                    !outline_capture_2.planned &&
+                    !outline_capture_3.planned &&
+                    !outline_capture_4.planned &&
+                    !outline_next_capture.planned,
+                "first outlined text frame captures all game shadow passes");
+        machine.end_character_translation_frame();
+
+        machine.begin_character_translation_frame();
+        const std::array outline_replay {
+            capture_outlined_layout(outlined_line, 5, 8),
+            capture_outlined_layout(outlined_line, 6, 8),
+            capture_outlined_layout(outlined_line, 5, 9),
+            capture_outlined_layout(outlined_line, 5, 8),
+        };
+        const auto outline_next_replay =
+            capture_outlined_layout(outlined_next_line, 5, 22);
+        phoneme::usize suppressed_outline_passes = 0U;
+        phoneme::usize visible_outline_passes = 0U;
+        const phoneme::vm::Machine::TextTranslationLayoutDecision*
+            visible_outline = nullptr;
+        for (const auto &layout : outline_replay) {
+            require(layout.planned,
+                    "outlined translated text replays from the frame plan");
+            if (layout.suppress) {
+                ++suppressed_outline_passes;
+            } else {
+                ++visible_outline_passes;
+                visible_outline = &layout;
+            }
+        }
+        require(suppressed_outline_passes == 3U &&
+                    visible_outline_passes == 1U,
+                "game outline passes collapse to one translated string");
+        require(!outline_next_replay.suppress,
+                "the following translated line remains visible");
+        require(visible_outline != nullptr &&
+                    visible_outline->y + visible_outline->height <
+                        outline_next_replay.y,
+                "suppressed shadow passes do not disturb paragraph spacing");
+        machine.end_character_translation_frame();
+
         constexpr std::u32string_view threshold_text = U"Một\nhai";
         const auto above_quarter = machine.plan_translated_text(
             7U,
@@ -590,7 +837,8 @@ int main() {
     {
         auto adapter = std::make_shared<FakeTranslationAdapter>(
             FakeTranslationAdapter::Mode::malformed_batch);
-        TranslationService service(test_configuration(), adapter);
+        auto configuration = test_configuration();
+        TranslationService service(configuration, adapter);
         CompletionCollector collector;
 
         (void)service.lookup_or_request_utf8(

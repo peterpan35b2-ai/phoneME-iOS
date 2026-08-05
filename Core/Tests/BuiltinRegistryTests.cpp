@@ -162,10 +162,14 @@ void test_util_registry() {
             "List is exposed as an interface");
     require_method(list, "add", "(Ljava/lang/Object;)Z",
                    "List exposes object insertion");
-    require(array_list != nullptr && array_list->fields().size() == 3U &&
+    require(array_list != nullptr && array_list->fields().size() == 4U &&
+                array_list->fields()[0].name == "elementData" &&
+                array_list->fields()[1].name == "size" &&
+                array_list->fields()[2].name == "capacityIncrement" &&
+                array_list->fields()[3].name == "mutationMode" &&
                 array_list->interfaces().size() == 1U &&
                 array_list->interfaces().front() == "java/util/List",
-            "ArrayList preserves storage layout and implements List");
+            "ArrayList preserves native storage layout and implements List");
     require_method(array_list, "contains", "(Ljava/lang/Object;)Z",
                    "ArrayList exposes value lookup");
     require_method(local_time, "of", "(II)Ljava/time/LocalTime;",

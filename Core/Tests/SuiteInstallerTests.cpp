@@ -112,6 +112,35 @@ std::string make_jad(const std::filesystem::path& jar,
     return result;
 }
 
+void test_version_comparison() {
+    auto four_part_newer = SuiteInstaller::compare_versions("1.2.3.4", "1.2.3.3");
+    check(four_part_newer.has_value() && *four_part_newer > 0,
+          "accept and compare four-part MIDlet versions");
+
+    auto many_part_newer = SuiteInstaller::compare_versions(
+        "10.20.30.40.50", "10.20.30.40.49");
+    check(many_part_newer.has_value() && *many_part_newer > 0,
+          "accept MIDlet versions with more than four numeric components");
+
+    auto trailing_zero_equal = SuiteInstaller::compare_versions(
+        "2.5.0.0", "2.5");
+    check(trailing_zero_equal.has_value() && *trailing_zero_equal == 0,
+          "treat trailing zero version components as equivalent");
+
+    auto large_component = SuiteInstaller::compare_versions(
+        "1.0.20260805.1", "1.0.9999.9");
+    check(large_component.has_value() && *large_component > 0,
+          "accept full unsigned numeric version components");
+
+    auto empty_component = SuiteInstaller::compare_versions("1..2.3", "1.2.3");
+    check_error(empty_component, ErrorCode::invalid_argument,
+                "reject empty MIDlet version components");
+
+    auto non_numeric = SuiteInstaller::compare_versions("1.2.beta.4", "1.2.3.4");
+    check_error(non_numeric, ErrorCode::invalid_argument,
+                "reject non-numeric MIDlet version components");
+}
+
 void test_parser() {
     const std::string text =
         "Alpha: first\n"
@@ -794,6 +823,7 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path root(argv[1]);
     test_parser();
+    test_version_comparison();
     test_install_flow(root / "store", argv[2], argv[3]);
     test_transaction_faults(root / "transaction-faults", argv[2], argv[3]);
     test_database_durability_unknown(

@@ -4,9 +4,232 @@
 #include <limits>
 #include <utility>
 
+#include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
 
 namespace phoneme::vm {
+
+Status OperandResolutionEntry::begin(
+    OperandResolutionKind expected_kind) {
+    if (expected_kind == OperandResolutionKind::none) {
+        return fail(ErrorCode::invalid_argument,
+                    "decoded operand resolution kind must be concrete");
+    }
+    if (state != OperandResolutionState::unresolved) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded operand resolution did not begin unresolved");
+    }
+    kind = expected_kind;
+    state = OperandResolutionState::resolving;
+    return {};
+}
+
+Status OperandResolutionEntry::resolve_field(
+    std::shared_ptr<const FieldLocation> resolved_field) {
+    if (state != OperandResolutionState::resolving ||
+        kind != OperandResolutionKind::field || resolved_field == nullptr) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded field resolution completed in an invalid state");
+    }
+    field = std::move(resolved_field);
+    target_method = {};
+    receiver_class = {};
+    target_native_method = {};
+    native_generation = 0U;
+    native_binding_cached = false;
+    target_class = {};
+    target_class_file.reset();
+    target_class_name.clear();
+    target_array_name.clear();
+    failure.reset();
+    state = OperandResolutionState::resolved;
+    return {};
+}
+
+Status OperandResolutionEntry::resolve_direct_call(
+    MethodId resolved_method,
+    NativeMethodId resolved_native_method,
+    u64 resolved_native_generation) {
+    if (state != OperandResolutionState::resolving ||
+        kind != OperandResolutionKind::direct_call ||
+        !resolved_method.valid() || resolved_native_generation == 0U) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded direct call completed in an invalid state");
+    }
+    field.reset();
+    target_method = resolved_method;
+    receiver_class = {};
+    target_native_method = resolved_native_method;
+    native_generation = resolved_native_generation;
+    native_binding_cached = true;
+    target_class = {};
+    target_class_file.reset();
+    target_class_name.clear();
+    target_array_name.clear();
+    failure.reset();
+    state = OperandResolutionState::resolved;
+    return {};
+}
+
+Status OperandResolutionEntry::begin_virtual_call(
+    ClassId resolved_receiver_class) {
+    if (!resolved_receiver_class.valid()) {
+        return fail(ErrorCode::invalid_argument,
+                    "decoded virtual call requires a receiver class");
+    }
+    auto began = begin(OperandResolutionKind::virtual_call);
+    if (!began) return began;
+    receiver_class = resolved_receiver_class;
+    return {};
+}
+
+Status OperandResolutionEntry::resolve_virtual_call(
+    MethodId resolved_method,
+    NativeMethodId resolved_native_method,
+    u64 resolved_native_generation) {
+    if (state != OperandResolutionState::resolving ||
+        kind != OperandResolutionKind::virtual_call ||
+        !receiver_class.valid() || !resolved_method.valid() ||
+        resolved_native_generation == 0U) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded virtual call completed in an invalid state");
+    }
+    field.reset();
+    target_method = resolved_method;
+    target_native_method = resolved_native_method;
+    native_generation = resolved_native_generation;
+    native_binding_cached = true;
+    target_class = {};
+    target_class_file.reset();
+    target_class_name.clear();
+    target_array_name.clear();
+    failure.reset();
+    state = OperandResolutionState::resolved;
+    return {};
+}
+
+Status OperandResolutionEntry::update_native_binding(
+    NativeMethodId resolved_native_method,
+    u64 resolved_native_generation) {
+    if (state != OperandResolutionState::resolved ||
+        (kind != OperandResolutionKind::direct_call &&
+         kind != OperandResolutionKind::virtual_call) ||
+        !target_method.valid() || resolved_native_generation == 0U) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded native binding updated in an invalid state");
+    }
+    target_native_method = resolved_native_method;
+    native_generation = resolved_native_generation;
+    native_binding_cached = true;
+    return {};
+}
+
+Status OperandResolutionEntry::resolve_class_reference(
+    std::string resolved_class_name,
+    ClassId resolved_class,
+    std::shared_ptr<const classfile::ClassFile> resolved_class_file,
+    std::string resolved_array_name) {
+    if (state != OperandResolutionState::resolving ||
+        kind != OperandResolutionKind::class_reference ||
+        resolved_class_name.empty()) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded class reference completed in an invalid state");
+    }
+    if (resolved_class_file != nullptr &&
+        (!resolved_class.valid() ||
+         resolved_class_file->name() != resolved_class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded class reference metadata is inconsistent");
+    }
+    field.reset();
+    target_method = {};
+    receiver_class = {};
+    target_native_method = {};
+    native_generation = 0U;
+    native_binding_cached = false;
+    target_class = resolved_class;
+    target_class_file = std::move(resolved_class_file);
+    target_class_name = std::move(resolved_class_name);
+    target_array_name = std::move(resolved_array_name);
+    failure.reset();
+    state = OperandResolutionState::resolved;
+    return {};
+}
+
+Status OperandResolutionEntry::fail_resolution(Error error) {
+    if (state != OperandResolutionState::resolving ||
+        kind == OperandResolutionKind::none ||
+        error.code == ErrorCode::none) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded operand failure was cached in an invalid state");
+    }
+    field.reset();
+    target_method = {};
+    if (kind != OperandResolutionKind::virtual_call)
+        receiver_class = {};
+    target_native_method = {};
+    native_generation = 0U;
+    native_binding_cached = false;
+    target_class = {};
+    target_class_file.reset();
+    target_class_name.clear();
+    target_array_name.clear();
+    failure = std::move(error);
+    state = OperandResolutionState::failed;
+    return {};
+}
+
+void OperandResolutionEntry::reset() noexcept {
+    state = OperandResolutionState::unresolved;
+    kind = OperandResolutionKind::none;
+    field.reset();
+    target_method = {};
+    receiver_class = {};
+    target_native_method = {};
+    native_generation = 0U;
+    native_binding_cached = false;
+    target_class = {};
+    target_class_file.reset();
+    target_class_name.clear();
+    target_array_name.clear();
+    failure.reset();
+}
+
+OperandResolutionTable::OperandResolutionTable(const DecodedMethod& decoded)
+    : entries_(decoded.operands.size()) {
+    for (const DecodedInstruction& instruction : decoded.instructions) {
+        if (instruction.operand_index == kInvalidDecodedIndex ||
+            instruction.operand_index >= entries_.size()) {
+            continue;
+        }
+        entries_[instruction.operand_index].bytecode_pc =
+            instruction.bytecode_pc;
+    }
+}
+
+Result<OperandResolutionEntry*> OperandResolutionTable::entry(
+    u32 operand_index,
+    u32 bytecode_pc) noexcept {
+    if (operand_index >= entries_.size()) {
+        return fail(ErrorCode::out_of_range,
+                    "decoded operand resolution index is out of range");
+    }
+    OperandResolutionEntry& resolved = entries_[operand_index];
+    if (resolved.bytecode_pc == kInvalidDecodedIndex) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded operand is not owned by an instruction");
+    }
+    if (resolved.bytecode_pc != bytecode_pc) {
+        return fail(ErrorCode::invalid_state,
+                    "decoded operand resolution BCI does not match its owner");
+    }
+    return &resolved;
+}
+
+const OperandResolutionEntry* OperandResolutionTable::entry_for_test(
+    u32 operand_index) const noexcept {
+    return operand_index < entries_.size() ? &entries_[operand_index] : nullptr;
+}
 
 usize RuntimeMetadata::MethodPointerKeyHash::operator()(
     MethodPointerKey key) const noexcept {
@@ -83,6 +306,7 @@ Result<std::shared_ptr<const RuntimeMethod>> RuntimeMetadata::publish_method(
     }
     const MethodId method_id {next_method_id_};
     std::shared_ptr<const DecodedMethod> decoded;
+    std::shared_ptr<OperandResolutionTable> operand_resolutions;
     if (method.code.has_value()) {
         auto decoded_method = decode_method(method_id, method);
         if (!decoded_method) {
@@ -90,6 +314,7 @@ Result<std::shared_ptr<const RuntimeMethod>> RuntimeMetadata::publish_method(
         }
         decoded = std::make_shared<const DecodedMethod>(
             std::move(*decoded_method));
+        operand_resolutions = std::make_shared<OperandResolutionTable>(*decoded);
     }
     ++next_method_id_;
     auto runtime_method = std::make_shared<const RuntimeMethod>(RuntimeMethod {
@@ -99,6 +324,7 @@ Result<std::shared_ptr<const RuntimeMethod>> RuntimeMetadata::publish_method(
         .method = &method,
         .descriptor = std::move(*descriptor),
         .decoded = std::move(decoded),
+        .operand_resolutions = std::move(operand_resolutions),
     });
     methods_.emplace(key, runtime_method);
     methods_by_id_.emplace(runtime_method->id, runtime_method);

@@ -41,6 +41,14 @@ public:
         return bytes_[position_++];
     }
 
+    [[nodiscard]] Result<u16> read_u16(std::string_view what) {
+        if (remaining() < 2U) return std::unexpected(truncated(what));
+        const u16 result = static_cast<u16>(bytes_[position_]) |
+            static_cast<u16>(static_cast<u16>(bytes_[position_ + 1U]) << 8U);
+        position_ += 2U;
+        return result;
+    }
+
     [[nodiscard]] Result<u32> read_u32(std::string_view what) {
         if (remaining() < 4U) return std::unexpected(truncated(what));
         const u32 result = static_cast<u32>(bytes_[position_]) |
@@ -82,14 +90,37 @@ private:
     usize position_ {0};
 };
 
+struct ParsedSkinTransform final {
+    u32 bone {0U};
+    u32 first_vertex {0U};
+    u32 vertex_count {0U};
+    i32 weight {0};
+};
+
 struct ParsedObject final {
     u8 type {0};
     std::vector<u8> payload;
     u32 user_id {0};
+    std::vector<std::pair<u32, std::vector<u8>>> user_parameters;
     std::vector<u32> animation_tracks;
     u32 animation_sequence {0};
     u32 animation_controller {0};
     i32 animation_property {0};
+    i32 animation_active_start {std::numeric_limits<i32>::min()};
+    i32 animation_active_end {std::numeric_limits<i32>::max()};
+    i32 animation_reference_world_time {0};
+    float animation_speed {1.0F};
+    float animation_weight {1.0F};
+    float animation_reference_sequence_time {0.0F};
+    i32 keyframe_count {0};
+    i32 keyframe_component_count {0};
+    i32 keyframe_interpolation {176};
+    i32 keyframe_repeat_mode {192};
+    i32 keyframe_duration {0};
+    i32 keyframe_valid_first {0};
+    i32 keyframe_valid_last {0};
+    std::vector<i32> keyframe_times;
+    std::vector<float> keyframe_values;
     std::vector<u32> references;
     std::vector<u32> children;
     std::vector<std::pair<u32, u32>> submeshes;
@@ -103,13 +134,58 @@ struct ParsedObject final {
     u32 material {0};
     u32 active_camera {0};
     u32 background {0};
+    u32 skeleton {0};
+    std::vector<u32> morph_targets;
+    std::vector<float> morph_weights;
+    std::vector<ParsedSkinTransform> skin_transforms;
     u32 positions {0};
     u32 normals {0};
     u32 colors {0};
     std::vector<u32> texcoords;
+    std::array<float, 3> translation {0.0F, 0.0F, 0.0F};
+    std::array<float, 3> scale {1.0F, 1.0F, 1.0F};
+    std::array<float, 4> orientation {0.0F, 0.0F, 0.0F, 1.0F};
+    Matrix generic_transform {identity_matrix()};
+    i32 projection_type {0};
+    std::vector<float> projection;
+    i32 layer {0};
+    i32 color {0};
+    i32 secondary_color {0};
+    i32 tertiary_color {0};
+    i32 quaternary_color {0};
+    i32 mode {0};
+    i32 secondary_mode {0};
+    i32 tertiary_mode {0};
+    i32 quaternary_mode {0};
+    float scalar {0.0F};
+    float secondary_scalar {0.0F};
+    float tertiary_scalar {0.0F};
+    std::array<float, 3> vector3 {0.0F, 0.0F, 0.0F};
+    bool flag {false};
+    bool secondary_flag {false};
+    bool tertiary_flag {false};
+    bool quaternary_flag {false};
+    i32 crop_x {0};
+    i32 crop_y {0};
+    i32 crop_width {0};
+    i32 crop_height {0};
+    std::vector<i32> indices;
+    std::vector<i32> strip_lengths;
+    i32 vertex_count {0};
+    i32 component_count {0};
+    i32 component_size {0};
+    std::vector<i32> vertex_values;
+    i32 default_color {static_cast<i32>(0xFFFFFFFFU)};
+    float position_scale {1.0F};
+    std::array<float, 3> position_bias {0.0F, 0.0F, 0.0F};
+    std::vector<float> texcoord_scales;
+    std::vector<std::array<float, 3>> texcoord_biases;
     u8 image_format {99U};
     u32 width {1U};
     u32 height {1U};
+    bool mutable_image {false};
+    std::vector<u8> palette;
+    std::vector<u8> pixels;
     bool scaled {false};
     bool rendering_enabled {true};
     bool picking_enabled {true};
@@ -254,14 +330,20 @@ struct ParsedObject final {
     if (*parameter_count > 1'000'000U) {
         return io_failure("M3G user parameter count is unreasonable");
     }
+    std::unordered_set<u32> parameter_ids;
     for (u32 index = 0; index < *parameter_count; ++index) {
-        auto ignored_id = cursor.read_u32("Object3D user parameter ID");
+        auto id = cursor.read_u32("Object3D user parameter ID");
         auto length = cursor.read_u32("Object3D user parameter length");
-        if (!ignored_id) return std::unexpected(ignored_id.error());
+        if (!id) return std::unexpected(id.error());
         if (!length) return std::unexpected(length.error());
-        auto skipped = cursor.skip(static_cast<usize>(*length),
-                                   "Object3D user parameter data");
-        if (!skipped) return skipped;
+        if (!parameter_ids.insert(*id).second) {
+            return io_failure("duplicate Object3D user parameter ID");
+        }
+        auto bytes = cursor.read_bytes(
+            static_cast<usize>(*length), "Object3D user parameter data");
+        if (!bytes) return std::unexpected(bytes.error());
+        object.user_parameters.emplace_back(
+            *id, std::vector<u8>(bytes->begin(), bytes->end()));
     }
     return {};
 }
@@ -272,17 +354,41 @@ struct ParsedObject final {
     if (!base) return base;
     auto has_components = cursor.read_u8("Transformable component flag");
     if (!has_components) return std::unexpected(has_components.error());
+    if (*has_components > 1U) {
+        return io_failure("invalid Transformable component flag");
+    }
     if (*has_components != 0U) {
-        auto skipped = cursor.skip(10U * sizeof(float),
-                                   "Transformable components");
-        if (!skipped) return skipped;
+        for (float& value : object.translation) {
+            auto parsed = cursor.read_float("Transformable translation");
+            if (!parsed) return std::unexpected(parsed.error());
+            value = *parsed;
+        }
+        for (float& value : object.scale) {
+            auto parsed = cursor.read_float("Transformable scale");
+            if (!parsed) return std::unexpected(parsed.error());
+            value = *parsed;
+        }
+        for (float& value : object.orientation) {
+            auto parsed = cursor.read_float("Transformable orientation");
+            if (!parsed) return std::unexpected(parsed.error());
+            value = *parsed;
+        }
+        auto orientation = axis_angle_quaternion(
+            object.orientation[0U], object.orientation[1U],
+            object.orientation[2U], object.orientation[3U]);
+        if (!orientation) return std::unexpected(orientation.error());
     }
     auto has_matrix = cursor.read_u8("Transformable matrix flag");
     if (!has_matrix) return std::unexpected(has_matrix.error());
+    if (*has_matrix > 1U) {
+        return io_failure("invalid Transformable matrix flag");
+    }
     if (*has_matrix != 0U) {
-        auto skipped = cursor.skip(16U * sizeof(float),
-                                   "Transformable matrix");
-        if (!skipped) return skipped;
+        for (float& value : object.generic_transform) {
+            auto parsed = cursor.read_float("Transformable matrix");
+            if (!parsed) return std::unexpected(parsed.error());
+            value = *parsed;
+        }
     }
     return {};
 }
@@ -360,6 +466,172 @@ struct ParsedObject final {
     return {};
 }
 
+[[nodiscard]] Result<i32> read_rgb(Cursor& cursor,
+                                   std::string_view operation) {
+    auto bytes = cursor.read_bytes(3U, operation);
+    if (!bytes) return std::unexpected(bytes.error());
+    const u32 value = (static_cast<u32>((*bytes)[0U]) << 16U) |
+                      (static_cast<u32>((*bytes)[1U]) << 8U) |
+                      static_cast<u32>((*bytes)[2U]);
+    return static_cast<i32>(value);
+}
+
+[[nodiscard]] Result<i32> read_argb(Cursor& cursor,
+                                    std::string_view operation) {
+    auto bytes = cursor.read_bytes(4U, operation);
+    if (!bytes) return std::unexpected(bytes.error());
+    const u32 value = (static_cast<u32>((*bytes)[3U]) << 24U) |
+                      (static_cast<u32>((*bytes)[0U]) << 16U) |
+                      (static_cast<u32>((*bytes)[1U]) << 8U) |
+                      static_cast<u32>((*bytes)[2U]);
+    return static_cast<i32>(value);
+}
+
+[[nodiscard]] Status parse_triangle_strip(Cursor& cursor,
+                                          ParsedObject& object) {
+    auto base = parse_object3d(cursor, object);
+    if (!base) return base;
+    auto encoding = cursor.read_u8("TriangleStripArray encoding");
+    if (!encoding) return std::unexpected(encoding.error());
+
+    i32 first_index = 0;
+    bool implicit = false;
+    switch (*encoding) {
+    case 0U: {
+        auto value = cursor.read_u32("TriangleStripArray first index");
+        if (!value) return std::unexpected(value.error());
+        first_index = static_cast<i32>(*value);
+        implicit = true;
+        break;
+    }
+    case 1U: {
+        auto value = cursor.read_u8("TriangleStripArray first index");
+        if (!value) return std::unexpected(value.error());
+        first_index = static_cast<i32>(*value);
+        implicit = true;
+        break;
+    }
+    case 2U: {
+        auto value = cursor.read_u16("TriangleStripArray first index");
+        if (!value) return std::unexpected(value.error());
+        first_index = static_cast<i32>(*value);
+        implicit = true;
+        break;
+    }
+    case 128U:
+    case 129U:
+    case 130U: {
+        auto count = cursor.read_u32("TriangleStripArray index count");
+        if (!count) return std::unexpected(count.error());
+        if (*count > 16'000'000U) {
+            return io_failure("TriangleStripArray index count is unreasonable");
+        }
+        object.indices.reserve(static_cast<usize>(*count));
+        for (u32 index = 0U; index < *count; ++index) {
+            if (*encoding == 128U) {
+                auto value = cursor.read_u32("TriangleStripArray index");
+                if (!value) return std::unexpected(value.error());
+                object.indices.push_back(static_cast<i32>(*value));
+            } else if (*encoding == 129U) {
+                auto value = cursor.read_u8("TriangleStripArray index");
+                if (!value) return std::unexpected(value.error());
+                object.indices.push_back(static_cast<i32>(*value));
+            } else {
+                auto value = cursor.read_u16("TriangleStripArray index");
+                if (!value) return std::unexpected(value.error());
+                object.indices.push_back(static_cast<i32>(*value));
+            }
+        }
+        break;
+    }
+    default:
+        return io_failure("unsupported TriangleStripArray encoding");
+    }
+
+    auto strip_count = cursor.read_u32("TriangleStripArray strip count");
+    if (!strip_count) return std::unexpected(strip_count.error());
+    if (*strip_count == 0U || *strip_count > 4'000'000U) {
+        return io_failure("TriangleStripArray strip count is invalid");
+    }
+    usize total_indices = 0U;
+    object.strip_lengths.reserve(static_cast<usize>(*strip_count));
+    for (u32 index = 0U; index < *strip_count; ++index) {
+        auto length = cursor.read_u32("TriangleStripArray strip length");
+        if (!length) return std::unexpected(length.error());
+        if (*length < 3U || *length > 16'000'000U - total_indices) {
+            return io_failure("TriangleStripArray strip length is invalid");
+        }
+        object.strip_lengths.push_back(static_cast<i32>(*length));
+        total_indices += static_cast<usize>(*length);
+    }
+    if (implicit) {
+        object.indices.reserve(total_indices);
+        for (usize index = 0U; index < total_indices; ++index) {
+            if (index > static_cast<usize>(std::numeric_limits<i32>::max()) ||
+                first_index > std::numeric_limits<i32>::max() -
+                    static_cast<i32>(index)) {
+                return io_failure("TriangleStripArray implicit indices overflow");
+            }
+            object.indices.push_back(first_index + static_cast<i32>(index));
+        }
+    } else if (object.indices.size() != total_indices) {
+        return io_failure("TriangleStripArray strip lengths do not match indices");
+    }
+    return {};
+}
+
+[[nodiscard]] Status parse_vertex_array(Cursor& cursor,
+                                        ParsedObject& object) {
+    auto base = parse_object3d(cursor, object);
+    if (!base) return base;
+    auto component_size = cursor.read_u8("VertexArray component size");
+    auto component_count = cursor.read_u8("VertexArray component count");
+    auto encoding = cursor.read_u8("VertexArray encoding");
+    auto vertex_count = cursor.read_u16("VertexArray vertex count");
+    if (!component_size) return std::unexpected(component_size.error());
+    if (!component_count) return std::unexpected(component_count.error());
+    if (!encoding) return std::unexpected(encoding.error());
+    if (!vertex_count) return std::unexpected(vertex_count.error());
+    if ((*component_size != 1U && *component_size != 2U) ||
+        *component_count < 2U || *component_count > 4U ||
+        *vertex_count == 0U || *encoding > 1U) {
+        return io_failure("VertexArray metadata is invalid");
+    }
+    object.component_size = static_cast<i32>(*component_size);
+    object.component_count = static_cast<i32>(*component_count);
+    object.vertex_count = static_cast<i32>(*vertex_count);
+    const usize value_count = static_cast<usize>(*vertex_count) *
+                              static_cast<usize>(*component_count);
+    object.vertex_values.resize(value_count);
+    std::array<i32, 4> previous {};
+    for (usize vertex = 0U; vertex < static_cast<usize>(*vertex_count); ++vertex) {
+        for (usize component = 0U;
+             component < static_cast<usize>(*component_count); ++component) {
+            i32 value = 0;
+            if (*component_size == 1U) {
+                auto raw = cursor.read_u8("VertexArray byte component");
+                if (!raw) return std::unexpected(raw.error());
+                value = static_cast<i32>(static_cast<std::int8_t>(*raw));
+            } else {
+                auto raw = cursor.read_u16("VertexArray short component");
+                if (!raw) return std::unexpected(raw.error());
+                value = static_cast<i32>(static_cast<std::int16_t>(*raw));
+            }
+            if (*encoding != 0U) {
+                value = *component_size == 1U
+                    ? static_cast<i32>(static_cast<std::int8_t>(
+                        previous[component] + value))
+                    : static_cast<i32>(static_cast<std::int16_t>(
+                        previous[component] + value));
+            }
+            previous[component] = value;
+            object.vertex_values[
+                vertex * static_cast<usize>(*component_count) + component] = value;
+        }
+    }
+    return {};
+}
+
 [[nodiscard]] Status parse_serialized_object(ParsedObject& object) {
     if (object.type == 0U) return {};
     if (object.type == 255U) {
@@ -380,18 +652,44 @@ struct ParsedObject final {
     Cursor cursor(object.payload);
     Status parsed;
     switch (object.type) {
-    case 1U:
-    case 6U:
-    case 7U:
-    case 8U:
-    case 10U:
-    case 11U:
-    case 13U:
-    case 19U:
-    case 20U:
-    case 21U:
+    case 1U: {
         parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto speed = cursor.read_float("AnimationController speed");
+        auto weight = cursor.read_float("AnimationController weight");
+        auto active_start = cursor.read_u32("AnimationController active start");
+        auto active_end = cursor.read_u32("AnimationController active end");
+        auto reference_sequence_time = cursor.read_float(
+            "AnimationController reference sequence time");
+        auto reference_world_time = cursor.read_u32(
+            "AnimationController reference world time");
+        if (!speed) return std::unexpected(speed.error());
+        if (!weight) return std::unexpected(weight.error());
+        if (!active_start) return std::unexpected(active_start.error());
+        if (!active_end) return std::unexpected(active_end.error());
+        if (!reference_sequence_time) {
+            return std::unexpected(reference_sequence_time.error());
+        }
+        if (!reference_world_time) {
+            return std::unexpected(reference_world_time.error());
+        }
+        if (!std::isfinite(*speed) || !std::isfinite(*weight) ||
+            *weight < 0.0F || *weight > 1.0F ||
+            !std::isfinite(*reference_sequence_time)) {
+            return io_failure("AnimationController state is invalid");
+        }
+        object.animation_speed = *speed;
+        object.animation_weight = *weight;
+        object.animation_active_start = static_cast<i32>(*active_start);
+        object.animation_active_end = static_cast<i32>(*active_end);
+        object.animation_reference_sequence_time = *reference_sequence_time;
+        object.animation_reference_world_time =
+            static_cast<i32>(*reference_world_time);
+        if (object.animation_active_start > object.animation_active_end) {
+            return io_failure("AnimationController active interval is reversed");
+        }
         break;
+    }
     case 2U: {
         parsed = parse_object3d(cursor, object);
         if (!parsed) break;
@@ -423,6 +721,7 @@ struct ParsedObject final {
         if (!polygon) return std::unexpected(polygon.error());
         if (!material) return std::unexpected(material.error());
         if (!count) return std::unexpected(count.error());
+        object.layer = static_cast<i32>(static_cast<std::int8_t>(*layer));
         object.compositing_mode = *compositing;
         object.fog = *fog;
         object.polygon_mode = *polygon;
@@ -442,18 +741,233 @@ struct ParsedObject final {
     case 4U: {
         parsed = parse_object3d(cursor, object);
         if (!parsed) break;
-        auto color = cursor.read_u32("Background color");
+        auto color = read_argb(cursor, "Background color");
         auto image = cursor.read_u32("Background image reference");
+        auto mode_x = cursor.read_u8("Background image mode X");
+        auto mode_y = cursor.read_u8("Background image mode Y");
+        auto crop_x = cursor.read_u32("Background crop X");
+        auto crop_y = cursor.read_u32("Background crop Y");
+        auto crop_width = cursor.read_u32("Background crop width");
+        auto crop_height = cursor.read_u32("Background crop height");
+        auto color_clear = cursor.read_u8("Background color clear flag");
+        auto depth_clear = cursor.read_u8("Background depth clear flag");
         if (!color) return std::unexpected(color.error());
         if (!image) return std::unexpected(image.error());
+        if (!mode_x) return std::unexpected(mode_x.error());
+        if (!mode_y) return std::unexpected(mode_y.error());
+        if (!crop_x) return std::unexpected(crop_x.error());
+        if (!crop_y) return std::unexpected(crop_y.error());
+        if (!crop_width) return std::unexpected(crop_width.error());
+        if (!crop_height) return std::unexpected(crop_height.error());
+        if (!color_clear) return std::unexpected(color_clear.error());
+        if (!depth_clear) return std::unexpected(depth_clear.error());
+        if (*color_clear > 1U || *depth_clear > 1U) {
+            return io_failure("Background clear flags are invalid");
+        }
+        object.color = *color;
         object.image = *image;
+        object.mode = static_cast<i32>(*mode_x);
+        object.secondary_mode = static_cast<i32>(*mode_y);
+        object.crop_x = static_cast<i32>(*crop_x);
+        object.crop_y = static_cast<i32>(*crop_y);
+        object.crop_width = static_cast<i32>(*crop_width);
+        object.crop_height = static_cast<i32>(*crop_height);
+        object.flag = *color_clear != 0U;
+        object.secondary_flag = *depth_clear != 0U;
         (void)add_reference(object, *image);
         break;
     }
-    case 5U:
-    case 12U:
+    case 5U: {
         parsed = parse_node(cursor, object);
+        if (!parsed) break;
+        auto projection_type = cursor.read_u8("Camera projection type");
+        if (!projection_type) return std::unexpected(projection_type.error());
+        object.projection_type = static_cast<i32>(*projection_type);
+        const usize count = *projection_type == 52U ? 16U : 4U;
+        if (*projection_type != 48U && *projection_type != 50U &&
+            *projection_type != 52U) {
+            return io_failure("Camera projection type is invalid");
+        }
+        object.projection.resize(count);
+        for (float& value : object.projection) {
+            auto parsed_value = cursor.read_float("Camera projection value");
+            if (!parsed_value) return std::unexpected(parsed_value.error());
+            value = *parsed_value;
+        }
         break;
+    }
+    case 6U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto depth_test = cursor.read_u8("CompositingMode depth test");
+        auto depth_write = cursor.read_u8("CompositingMode depth write");
+        auto color_write = cursor.read_u8("CompositingMode color write");
+        auto alpha_write = cursor.read_u8("CompositingMode alpha write");
+        auto blending = cursor.read_u8("CompositingMode blending");
+        auto alpha_threshold = cursor.read_u8("CompositingMode alpha threshold");
+        auto depth_factor = cursor.read_float("CompositingMode depth factor");
+        auto depth_units = cursor.read_float("CompositingMode depth units");
+        if (!depth_test) return std::unexpected(depth_test.error());
+        if (!depth_write) return std::unexpected(depth_write.error());
+        if (!color_write) return std::unexpected(color_write.error());
+        if (!alpha_write) return std::unexpected(alpha_write.error());
+        if (!blending) return std::unexpected(blending.error());
+        if (!alpha_threshold) return std::unexpected(alpha_threshold.error());
+        if (!depth_factor) return std::unexpected(depth_factor.error());
+        if (!depth_units) return std::unexpected(depth_units.error());
+        if (*depth_test > 1U || *depth_write > 1U ||
+            *color_write > 1U || *alpha_write > 1U) {
+            return io_failure("CompositingMode boolean is invalid");
+        }
+        object.flag = *depth_test != 0U;
+        object.secondary_flag = *depth_write != 0U;
+        object.tertiary_flag = *color_write != 0U;
+        object.quaternary_flag = *alpha_write != 0U;
+        object.mode = static_cast<i32>(*blending);
+        object.scalar = static_cast<float>(*alpha_threshold) / 255.0F;
+        object.secondary_scalar = *depth_factor;
+        object.tertiary_scalar = *depth_units;
+        break;
+    }
+    case 7U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto color = read_rgb(cursor, "Fog color");
+        auto mode = cursor.read_u8("Fog mode");
+        if (!color) return std::unexpected(color.error());
+        if (!mode) return std::unexpected(mode.error());
+        object.color = *color;
+        object.mode = static_cast<i32>(*mode);
+        if (*mode == 80U) {
+            auto density = cursor.read_float("Fog density");
+            if (!density) return std::unexpected(density.error());
+            object.scalar = *density;
+        } else if (*mode == 81U) {
+            auto near_value = cursor.read_float("Fog near distance");
+            auto far_value = cursor.read_float("Fog far distance");
+            if (!near_value) return std::unexpected(near_value.error());
+            if (!far_value) return std::unexpected(far_value.error());
+            object.scalar = *near_value;
+            object.secondary_scalar = *far_value;
+        } else {
+            return io_failure("Fog mode is invalid");
+        }
+        break;
+    }
+    case 8U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto culling = cursor.read_u8("PolygonMode culling");
+        auto shading = cursor.read_u8("PolygonMode shading");
+        auto winding = cursor.read_u8("PolygonMode winding");
+        auto two_sided = cursor.read_u8("PolygonMode two-sided lighting");
+        auto local_camera = cursor.read_u8("PolygonMode local camera lighting");
+        auto perspective = cursor.read_u8("PolygonMode perspective correction");
+        if (!culling) return std::unexpected(culling.error());
+        if (!shading) return std::unexpected(shading.error());
+        if (!winding) return std::unexpected(winding.error());
+        if (!two_sided) return std::unexpected(two_sided.error());
+        if (!local_camera) return std::unexpected(local_camera.error());
+        if (!perspective) return std::unexpected(perspective.error());
+        if (*two_sided > 1U || *local_camera > 1U || *perspective > 1U) {
+            return io_failure("PolygonMode boolean is invalid");
+        }
+        object.mode = static_cast<i32>(*culling);
+        object.secondary_mode = static_cast<i32>(*shading);
+        object.tertiary_mode = static_cast<i32>(*winding);
+        object.flag = *two_sided != 0U;
+        object.secondary_flag = *local_camera != 0U;
+        object.tertiary_flag = *perspective != 0U;
+        break;
+    }
+    case 10U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto format = cursor.read_u8("Image2D format");
+        auto mutable_image = cursor.read_u8("Image2D mutable flag");
+        auto width = cursor.read_u32("Image2D width");
+        auto height = cursor.read_u32("Image2D height");
+        if (!format) return std::unexpected(format.error());
+        if (!mutable_image) return std::unexpected(mutable_image.error());
+        if (!width) return std::unexpected(width.error());
+        if (!height) return std::unexpected(height.error());
+        if (*mutable_image > 1U || *width == 0U || *height == 0U) {
+            return io_failure("Image2D metadata is invalid");
+        }
+        object.image_format = *format;
+        object.mutable_image = *mutable_image != 0U;
+        object.width = *width;
+        object.height = *height;
+        if (!object.mutable_image) {
+            auto palette_length = cursor.read_u32("Image2D palette length");
+            if (!palette_length) return std::unexpected(palette_length.error());
+            auto palette = cursor.read_bytes(
+                static_cast<usize>(*palette_length), "Image2D palette");
+            if (!palette) return std::unexpected(palette.error());
+            object.palette.assign(palette->begin(), palette->end());
+            auto pixel_length = cursor.read_u32("Image2D pixel length");
+            if (!pixel_length) return std::unexpected(pixel_length.error());
+            auto pixels = cursor.read_bytes(
+                static_cast<usize>(*pixel_length), "Image2D pixels");
+            if (!pixels) return std::unexpected(pixels.error());
+            object.pixels.assign(pixels->begin(), pixels->end());
+        }
+        break;
+    }
+    case 11U:
+        parsed = parse_triangle_strip(cursor, object);
+        break;
+    case 12U: {
+        parsed = parse_node(cursor, object);
+        if (!parsed) break;
+        for (float& value : object.vector3) {
+            auto attenuation = cursor.read_float("Light attenuation");
+            if (!attenuation) return std::unexpected(attenuation.error());
+            value = *attenuation;
+        }
+        auto color = read_rgb(cursor, "Light color");
+        auto mode = cursor.read_u8("Light mode");
+        auto intensity = cursor.read_float("Light intensity");
+        auto spot_angle = cursor.read_float("Light spot angle");
+        auto spot_exponent = cursor.read_float("Light spot exponent");
+        if (!color) return std::unexpected(color.error());
+        if (!mode) return std::unexpected(mode.error());
+        if (!intensity) return std::unexpected(intensity.error());
+        if (!spot_angle) return std::unexpected(spot_angle.error());
+        if (!spot_exponent) return std::unexpected(spot_exponent.error());
+        object.color = *color;
+        object.mode = static_cast<i32>(*mode);
+        object.scalar = *intensity;
+        object.secondary_scalar = *spot_angle;
+        object.tertiary_scalar = *spot_exponent;
+        break;
+    }
+    case 13U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto ambient = read_rgb(cursor, "Material ambient color");
+        auto diffuse = read_argb(cursor, "Material diffuse color");
+        auto emissive = read_rgb(cursor, "Material emissive color");
+        auto specular = read_rgb(cursor, "Material specular color");
+        auto shininess = cursor.read_float("Material shininess");
+        auto tracking = cursor.read_u8("Material vertex color tracking");
+        if (!ambient) return std::unexpected(ambient.error());
+        if (!diffuse) return std::unexpected(diffuse.error());
+        if (!emissive) return std::unexpected(emissive.error());
+        if (!specular) return std::unexpected(specular.error());
+        if (!shininess) return std::unexpected(shininess.error());
+        if (!tracking) return std::unexpected(tracking.error());
+        if (*tracking > 1U) {
+            return io_failure("Material tracking flag is invalid");
+        }
+        object.color = *ambient;
+        object.secondary_color = *diffuse;
+        object.tertiary_color = *emissive;
+        object.quaternary_color = *specular;
+        object.scalar = *shininess;
+        object.flag = *tracking != 0U;
+        break;
+    }
     case 9U:
         parsed = parse_group(cursor, object);
         break;
@@ -465,9 +979,21 @@ struct ParsedObject final {
         if (!parsed) break;
         auto target_count = cursor.read_u32("MorphingMesh target count");
         if (!target_count) return std::unexpected(target_count.error());
+        if (*target_count == 0U || *target_count > 1'000'000U) {
+            return io_failure("MorphingMesh target count is invalid");
+        }
+        object.morph_targets.reserve(*target_count);
+        object.morph_weights.reserve(*target_count);
         for (u32 index = 0; index < *target_count; ++index) {
             auto target = cursor.read_u32("MorphingMesh target reference");
+            auto weight = cursor.read_float("MorphingMesh target weight");
             if (!target) return std::unexpected(target.error());
+            if (!weight) return std::unexpected(weight.error());
+            if (!std::isfinite(*weight)) {
+                return io_failure("MorphingMesh target weight is not finite");
+            }
+            object.morph_targets.push_back(*target);
+            object.morph_weights.push_back(*weight);
             (void)add_reference(object, *target);
         }
         break;
@@ -476,33 +1002,244 @@ struct ParsedObject final {
         parsed = parse_mesh(cursor, object);
         if (!parsed) break;
         auto skeleton = cursor.read_u32("SkinnedMesh skeleton reference");
+        auto transform_count = cursor.read_u32(
+            "SkinnedMesh transform reference count");
         if (!skeleton) return std::unexpected(skeleton.error());
+        if (!transform_count) return std::unexpected(transform_count.error());
+        if (*transform_count > 1'000'000U) {
+            return io_failure("SkinnedMesh transform count is unreasonable");
+        }
+        object.skeleton = *skeleton;
         (void)add_reference(object, *skeleton);
+        object.skin_transforms.reserve(*transform_count);
+        for (u32 index = 0U; index < *transform_count; ++index) {
+            auto bone = cursor.read_u32("SkinnedMesh bone reference");
+            auto first_vertex = cursor.read_u32("SkinnedMesh first vertex");
+            auto vertex_count = cursor.read_u32("SkinnedMesh vertex count");
+            auto weight = cursor.read_u32("SkinnedMesh weight");
+            if (!bone) return std::unexpected(bone.error());
+            if (!first_vertex) return std::unexpected(first_vertex.error());
+            if (!vertex_count) return std::unexpected(vertex_count.error());
+            if (!weight) return std::unexpected(weight.error());
+            object.skin_transforms.push_back(ParsedSkinTransform {
+                .bone = *bone,
+                .first_vertex = *first_vertex,
+                .vertex_count = *vertex_count,
+                .weight = static_cast<i32>(*weight),
+            });
+            (void)add_reference(object, *bone);
+        }
         break;
     }
     case 17U: {
         parsed = parse_transformable(cursor, object);
         if (!parsed) break;
         auto image = cursor.read_u32("Texture2D image reference");
+        auto blend_color = read_rgb(cursor, "Texture2D blend color");
+        auto blending = cursor.read_u8("Texture2D blending");
+        auto wrap_s = cursor.read_u8("Texture2D wrap S");
+        auto wrap_t = cursor.read_u8("Texture2D wrap T");
+        auto level_filter = cursor.read_u8("Texture2D level filter");
+        auto image_filter = cursor.read_u8("Texture2D image filter");
         if (!image) return std::unexpected(image.error());
+        if (!blend_color) return std::unexpected(blend_color.error());
+        if (!blending) return std::unexpected(blending.error());
+        if (!wrap_s) return std::unexpected(wrap_s.error());
+        if (!wrap_t) return std::unexpected(wrap_t.error());
+        if (!level_filter) return std::unexpected(level_filter.error());
+        if (!image_filter) return std::unexpected(image_filter.error());
         object.image = *image;
+        object.color = *blend_color;
+        object.mode = static_cast<i32>(*blending);
+        object.secondary_mode = static_cast<i32>(*wrap_s);
+        object.tertiary_mode = static_cast<i32>(*wrap_t);
+        object.quaternary_mode = static_cast<i32>(*level_filter);
+        object.layer = static_cast<i32>(*image_filter);
         (void)add_reference(object, *image);
         break;
     }
     case 18U: {
         parsed = parse_node(cursor, object);
         if (!parsed) break;
-        auto scaled = cursor.read_u8("Sprite3D scaled flag");
         auto image = cursor.read_u32("Sprite3D image reference");
         auto appearance = cursor.read_u32("Sprite3D appearance reference");
-        if (!scaled) return std::unexpected(scaled.error());
+        auto scaled = cursor.read_u8("Sprite3D scaled flag");
+        auto crop_x = cursor.read_u32("Sprite3D crop X");
+        auto crop_y = cursor.read_u32("Sprite3D crop Y");
+        auto crop_width = cursor.read_u32("Sprite3D crop width");
+        auto crop_height = cursor.read_u32("Sprite3D crop height");
         if (!image) return std::unexpected(image.error());
         if (!appearance) return std::unexpected(appearance.error());
+        if (!scaled) return std::unexpected(scaled.error());
+        if (!crop_x) return std::unexpected(crop_x.error());
+        if (!crop_y) return std::unexpected(crop_y.error());
+        if (!crop_width) return std::unexpected(crop_width.error());
+        if (!crop_height) return std::unexpected(crop_height.error());
+        if (*scaled > 1U) return io_failure("invalid Sprite3D scaled flag");
+        const i32 signed_width = static_cast<i32>(*crop_width);
+        const i32 signed_height = static_cast<i32>(*crop_height);
+        if (signed_width == std::numeric_limits<i32>::min() ||
+            signed_height == std::numeric_limits<i32>::min()) {
+            return io_failure("Sprite3D crop dimensions are out of range");
+        }
         object.scaled = *scaled != 0U;
         object.image = *image;
         object.appearance = *appearance;
+        object.crop_x = static_cast<i32>(*crop_x);
+        object.crop_y = static_cast<i32>(*crop_y);
+        object.crop_width = signed_width < 0 ? -signed_width : signed_width;
+        object.crop_height = signed_height < 0 ? -signed_height : signed_height;
+        object.flag = signed_width < 0;
+        object.secondary_flag = signed_height < 0;
         (void)add_reference(object, *image);
         (void)add_reference(object, *appearance);
+        break;
+    }
+    case 19U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto interpolation = cursor.read_u8("KeyframeSequence interpolation");
+        auto repeat_mode = cursor.read_u8("KeyframeSequence repeat mode");
+        auto encoding = cursor.read_u8("KeyframeSequence encoding");
+        auto duration = cursor.read_u32("KeyframeSequence duration");
+        auto valid_first = cursor.read_u32("KeyframeSequence valid first");
+        auto valid_last = cursor.read_u32("KeyframeSequence valid last");
+        auto component_count = cursor.read_u32("KeyframeSequence component count");
+        auto keyframe_count = cursor.read_u32("KeyframeSequence keyframe count");
+        if (!interpolation) return std::unexpected(interpolation.error());
+        if (!repeat_mode) return std::unexpected(repeat_mode.error());
+        if (!encoding) return std::unexpected(encoding.error());
+        if (!duration) return std::unexpected(duration.error());
+        if (!valid_first) return std::unexpected(valid_first.error());
+        if (!valid_last) return std::unexpected(valid_last.error());
+        if (!component_count) return std::unexpected(component_count.error());
+        if (!keyframe_count) return std::unexpected(keyframe_count.error());
+        if (*interpolation < 176U || *interpolation > 180U ||
+            (*repeat_mode != 192U && *repeat_mode != 193U) ||
+            *encoding > 2U || *duration == 0U ||
+            *component_count == 0U || *keyframe_count == 0U ||
+            *valid_first > *valid_last || *valid_last >= *keyframe_count ||
+            *component_count > 1'000'000U || *keyframe_count > 1'000'000U) {
+            return io_failure("KeyframeSequence metadata is invalid");
+        }
+        const u64 value_count = static_cast<u64>(*component_count) *
+                                static_cast<u64>(*keyframe_count);
+        if (value_count > static_cast<u64>(kMaximumM3gBytes / sizeof(float))) {
+            return io_failure("KeyframeSequence data is too large");
+        }
+        object.keyframe_interpolation = static_cast<i32>(*interpolation);
+        object.keyframe_repeat_mode = static_cast<i32>(*repeat_mode);
+        object.keyframe_duration = static_cast<i32>(*duration);
+        object.keyframe_valid_first = static_cast<i32>(*valid_first);
+        object.keyframe_valid_last = static_cast<i32>(*valid_last);
+        object.keyframe_component_count = static_cast<i32>(*component_count);
+        object.keyframe_count = static_cast<i32>(*keyframe_count);
+        object.keyframe_times.resize(static_cast<usize>(*keyframe_count));
+        object.keyframe_values.resize(static_cast<usize>(value_count));
+
+        std::vector<float> bias(static_cast<usize>(*component_count), 0.0F);
+        std::vector<float> scale(static_cast<usize>(*component_count), 1.0F);
+        if (*encoding != 0U) {
+            for (float& value : bias) {
+                auto parsed_value = cursor.read_float("KeyframeSequence bias");
+                if (!parsed_value) return std::unexpected(parsed_value.error());
+                value = *parsed_value;
+            }
+            for (float& value : scale) {
+                auto parsed_value = cursor.read_float("KeyframeSequence scale");
+                if (!parsed_value) return std::unexpected(parsed_value.error());
+                value = *parsed_value;
+            }
+        }
+        for (u32 keyframe = 0U; keyframe < *keyframe_count; ++keyframe) {
+            auto time = cursor.read_u32("KeyframeSequence keyframe time");
+            if (!time) return std::unexpected(time.error());
+            object.keyframe_times[static_cast<usize>(keyframe)] =
+                static_cast<i32>(*time);
+            for (u32 component = 0U; component < *component_count; ++component) {
+                float value = 0.0F;
+                if (*encoding == 0U) {
+                    auto parsed_value = cursor.read_float(
+                        "KeyframeSequence keyframe value");
+                    if (!parsed_value) {
+                        return std::unexpected(parsed_value.error());
+                    }
+                    value = *parsed_value;
+                } else if (*encoding == 1U) {
+                    auto raw = cursor.read_u8("KeyframeSequence byte value");
+                    if (!raw) return std::unexpected(raw.error());
+                    value = bias[static_cast<usize>(component)] +
+                        scale[static_cast<usize>(component)] *
+                        (static_cast<float>(*raw) / 255.0F);
+                } else {
+                    auto raw = cursor.read_u16("KeyframeSequence short value");
+                    if (!raw) return std::unexpected(raw.error());
+                    value = bias[static_cast<usize>(component)] +
+                        scale[static_cast<usize>(component)] *
+                        (static_cast<float>(*raw) / 65535.0F);
+                }
+                object.keyframe_values[
+                    static_cast<usize>(keyframe) *
+                        static_cast<usize>(*component_count) +
+                    static_cast<usize>(component)] = value;
+            }
+        }
+        break;
+    }
+    case 20U:
+        parsed = parse_vertex_array(cursor, object);
+        break;
+    case 21U: {
+        parsed = parse_object3d(cursor, object);
+        if (!parsed) break;
+        auto default_color = read_argb(cursor, "VertexBuffer default color");
+        auto positions = cursor.read_u32("VertexBuffer positions reference");
+        if (!default_color) return std::unexpected(default_color.error());
+        if (!positions) return std::unexpected(positions.error());
+        object.default_color = *default_color;
+        object.positions = *positions;
+        (void)add_reference(object, *positions);
+        for (float& value : object.position_bias) {
+            auto bias = cursor.read_float("VertexBuffer position bias");
+            if (!bias) return std::unexpected(bias.error());
+            value = *bias;
+        }
+        auto position_scale = cursor.read_float("VertexBuffer position scale");
+        if (!position_scale) return std::unexpected(position_scale.error());
+        object.position_scale = *position_scale;
+        auto normals = cursor.read_u32("VertexBuffer normals reference");
+        auto colors = cursor.read_u32("VertexBuffer colors reference");
+        auto texcoord_count = cursor.read_u32("VertexBuffer texcoord count");
+        if (!normals) return std::unexpected(normals.error());
+        if (!colors) return std::unexpected(colors.error());
+        if (!texcoord_count) return std::unexpected(texcoord_count.error());
+        if (*texcoord_count > 256U) {
+            return io_failure("VertexBuffer texcoord count is unreasonable");
+        }
+        object.normals = *normals;
+        object.colors = *colors;
+        (void)add_reference(object, *normals);
+        (void)add_reference(object, *colors);
+        object.texcoords.reserve(static_cast<usize>(*texcoord_count));
+        object.texcoord_scales.reserve(static_cast<usize>(*texcoord_count));
+        object.texcoord_biases.reserve(static_cast<usize>(*texcoord_count));
+        for (u32 index = 0U; index < *texcoord_count; ++index) {
+            auto texcoord = cursor.read_u32("VertexBuffer texcoord reference");
+            if (!texcoord) return std::unexpected(texcoord.error());
+            std::array<float, 3> bias {};
+            for (float& value : bias) {
+                auto parsed_bias = cursor.read_float(
+                    "VertexBuffer texcoord bias");
+                if (!parsed_bias) return std::unexpected(parsed_bias.error());
+                value = *parsed_bias;
+            }
+            auto scale = cursor.read_float("VertexBuffer texcoord scale");
+            if (!scale) return std::unexpected(scale.error());
+            object.texcoords.push_back(*texcoord);
+            object.texcoord_biases.push_back(bias);
+            object.texcoord_scales.push_back(*scale);
+            (void)add_reference(object, *texcoord);
+        }
         break;
     }
     case 22U: {
@@ -523,53 +1260,6 @@ struct ParsedObject final {
                           std::to_string(object.type));
     }
     if (!parsed) return parsed;
-
-    if (object.type == 10U) {
-        auto format = cursor.read_u8("Image2D format");
-        auto mutable_image = cursor.read_u8("Image2D mutable flag");
-        auto width = cursor.read_u32("Image2D width");
-        auto height = cursor.read_u32("Image2D height");
-        if (!format) return std::unexpected(format.error());
-        if (!mutable_image) return std::unexpected(mutable_image.error());
-        if (!width) return std::unexpected(width.error());
-        if (!height) return std::unexpected(height.error());
-        object.image_format = *format;
-        object.width = std::max<u32>(*width, 1U);
-        object.height = std::max<u32>(*height, 1U);
-    } else if (object.type == 21U) {
-        auto default_color = cursor.read_u32("VertexBuffer default color");
-        auto positions = cursor.read_u32("VertexBuffer positions reference");
-        if (!default_color) return std::unexpected(default_color.error());
-        if (!positions) return std::unexpected(positions.error());
-        object.positions = *positions;
-        (void)add_reference(object, *positions);
-        if (*positions != 0U) {
-            auto skipped = cursor.skip(sizeof(float) * 4U,
-                                       "VertexBuffer position scale and bias");
-            if (!skipped) return skipped;
-        }
-        auto normals = cursor.read_u32("VertexBuffer normals reference");
-        auto colors = cursor.read_u32("VertexBuffer colors reference");
-        auto texcoord_count = cursor.read_u32("VertexBuffer texcoord count");
-        if (!normals) return std::unexpected(normals.error());
-        if (!colors) return std::unexpected(colors.error());
-        if (!texcoord_count) return std::unexpected(texcoord_count.error());
-        object.normals = *normals;
-        object.colors = *colors;
-        (void)add_reference(object, *normals);
-        (void)add_reference(object, *colors);
-        for (u32 index = 0; index < *texcoord_count; ++index) {
-            auto texcoord = cursor.read_u32("VertexBuffer texcoord reference");
-            if (!texcoord) return std::unexpected(texcoord.error());
-            object.texcoords.push_back(*texcoord);
-            (void)add_reference(object, *texcoord);
-            if (*texcoord != 0U) {
-                auto skipped = cursor.skip(sizeof(float) * 4U,
-                                           "VertexBuffer texcoord scale and bias");
-                if (!skipped) return skipped;
-            }
-        }
-    }
     return {};
 }
 
@@ -652,19 +1342,415 @@ struct ParsedObject final {
         if (!alpha) return alpha;
         if (!scope) return scope;
     }
-    if (object.type == 10U) {
-        auto format = set_int_field(machine, *allocated, kImage2D,
-                                    "format", object.image_format);
-        auto width = set_int_field(machine, *allocated, kImage2D,
-                                   "width", static_cast<i32>(object.width));
-        auto height = set_int_field(machine, *allocated, kImage2D,
-                                    "height", static_cast<i32>(object.height));
-        auto immutable = set_int_field(machine, *allocated, kImage2D,
-                                       "mutable", 0, "Z");
-        if (!format) return format;
-        if (!width) return width;
-        if (!height) return height;
-        if (!immutable) return immutable;
+    const bool transformable = object.type == 5U || object.type == 9U ||
+        object.type == 12U || object.type == 14U || object.type == 15U ||
+        object.type == 16U || object.type == 17U || object.type == 18U ||
+        object.type == 22U;
+    if (transformable) {
+        auto orientation = axis_angle_quaternion(
+            object.orientation[0U], object.orientation[1U],
+            object.orientation[2U], object.orientation[3U]);
+        if (!orientation) return std::unexpected(orientation.error());
+        auto generic = generic_transform(machine, *allocated);
+        if (!generic) return std::unexpected(generic.error());
+        auto generic_stored = set_transform_matrix(
+            machine, *generic, object.generic_transform);
+        if (!generic_stored) return generic_stored;
+        const std::array<Status, 6> component_stored {
+            set_float_field(machine, *allocated, kTransformable,
+                            "translationX", object.translation[0U]),
+            set_float_field(machine, *allocated, kTransformable,
+                            "translationY", object.translation[1U]),
+            set_float_field(machine, *allocated, kTransformable,
+                            "translationZ", object.translation[2U]),
+            set_float_field(machine, *allocated, kTransformable,
+                            "scaleX", object.scale[0U]),
+            set_float_field(machine, *allocated, kTransformable,
+                            "scaleY", object.scale[1U]),
+            set_float_field(machine, *allocated, kTransformable,
+                            "scaleZ", object.scale[2U]),
+        };
+        for (const Status& status : component_stored) {
+            if (!status) return status;
+        }
+        auto orientation_stored = set_transformable_quaternion(
+            machine, *allocated, *orientation);
+        if (!orientation_stored) return orientation_stored;
+        auto rebuilt = rebuild_transformable_matrix(machine, *allocated);
+        if (!rebuilt) return rebuilt;
+    }
+
+    if (object.type == 1U) {
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kAnimationController,
+                          "activeStart", object.animation_active_start),
+            set_int_field(machine, *allocated, kAnimationController,
+                          "activeEnd", object.animation_active_end),
+            set_float_field(machine, *allocated, kAnimationController,
+                            "speed", object.animation_speed),
+            set_float_field(machine, *allocated, kAnimationController,
+                            "weight", object.animation_weight),
+            set_float_field(machine, *allocated, kAnimationController,
+                            "refSequenceTime",
+                            object.animation_reference_sequence_time),
+            set_int_field(machine, *allocated, kAnimationController,
+                          "refWorldTime",
+                          object.animation_reference_world_time),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 3U) {
+        auto layer = set_int_field(machine, *allocated, kAppearance,
+                                   "layer", object.layer);
+        if (!layer) return layer;
+    } else if (object.type == 4U) {
+        const std::array<Status, 9> stored {
+            set_int_field(machine, *allocated, kBackground,
+                          "color", object.color),
+            set_int_field(machine, *allocated, kBackground,
+                          "imageModeX", object.mode),
+            set_int_field(machine, *allocated, kBackground,
+                          "imageModeY", object.secondary_mode),
+            set_int_field(machine, *allocated, kBackground,
+                          "cropX", object.crop_x),
+            set_int_field(machine, *allocated, kBackground,
+                          "cropY", object.crop_y),
+            set_int_field(machine, *allocated, kBackground,
+                          "cropWidth", object.crop_width),
+            set_int_field(machine, *allocated, kBackground,
+                          "cropHeight", object.crop_height),
+            set_int_field(machine, *allocated, kBackground,
+                          "colorClear", object.flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kBackground,
+                          "depthClear", object.secondary_flag ? 1 : 0, "Z"),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 5U) {
+        auto projection = allocate_array(
+            machine, "[F", object.projection.size(), Value::from_float(0.0F));
+        if (!projection) return std::unexpected(projection.error());
+        auto root = machine.pin_native_root(*projection);
+        if (!root) return std::unexpected(root.error());
+        for (usize index = 0U; index < object.projection.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *projection, index, Value::from_float(object.projection[index]));
+            if (!stored) return stored;
+        }
+        auto type = set_int_field(machine, *allocated, kCamera,
+                                  "projectionType", object.projection_type);
+        auto values = set_reference_field(machine, *allocated, kCamera,
+                                           "projection", "[F", *projection);
+        if (!type) return type;
+        if (!values) return values;
+    } else if (object.type == 6U) {
+        const std::array<Status, 8> stored {
+            set_int_field(machine, *allocated, kCompositingMode,
+                          "depthTest", object.flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kCompositingMode,
+                          "depthWrite", object.secondary_flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kCompositingMode,
+                          "colorWrite", object.tertiary_flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kCompositingMode,
+                          "alphaWrite", object.quaternary_flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kCompositingMode,
+                          "blending", object.mode),
+            set_float_field(machine, *allocated, kCompositingMode,
+                            "alphaThreshold", object.scalar),
+            set_float_field(machine, *allocated, kCompositingMode,
+                            "depthOffsetFactor", object.secondary_scalar),
+            set_float_field(machine, *allocated, kCompositingMode,
+                            "depthOffsetUnits", object.tertiary_scalar),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 7U) {
+        const std::array<Status, 5> stored {
+            set_int_field(machine, *allocated, kFog, "mode", object.mode),
+            set_float_field(machine, *allocated, kFog,
+                            "density", object.scalar),
+            set_float_field(machine, *allocated, kFog,
+                            "nearDistance", object.scalar),
+            set_float_field(machine, *allocated, kFog,
+                            "farDistance", object.secondary_scalar),
+            set_int_field(machine, *allocated, kFog, "color", object.color),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 8U) {
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "culling", object.mode),
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "shading", object.secondary_mode),
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "winding", object.tertiary_mode),
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "twoSided", object.flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "localCameraLighting",
+                          object.secondary_flag ? 1 : 0, "Z"),
+            set_int_field(machine, *allocated, kPolygonMode,
+                          "perspectiveCorrection",
+                          object.tertiary_flag ? 1 : 0, "Z"),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 10U) {
+        auto source = allocate_array(
+            machine, "[B", object.mutable_image
+                ? static_cast<usize>(object.width) *
+                    static_cast<usize>(object.height) *
+                    (object.image_format == 96U || object.image_format == 97U
+                        ? 1U : object.image_format == 98U ? 2U
+                        : object.image_format == 99U ? 3U : 4U)
+                : object.pixels.size(),
+            Value::from_int(0));
+        auto palette = allocate_array(machine, "[B", object.palette.size(),
+                                      Value::from_int(0));
+        if (!source) return std::unexpected(source.error());
+        if (!palette) return std::unexpected(palette.error());
+        auto source_root = machine.pin_native_root(*source);
+        auto palette_root = machine.pin_native_root(*palette);
+        if (!source_root) return std::unexpected(source_root.error());
+        if (!palette_root) return std::unexpected(palette_root.error());
+        for (usize index = 0U; index < object.pixels.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *source, index, Value::from_int(object.pixels[index]));
+            if (!stored) return stored;
+        }
+        for (usize index = 0U; index < object.palette.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *palette, index, Value::from_int(object.palette[index]));
+            if (!stored) return stored;
+        }
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kImage2D,
+                          "format", object.image_format),
+            set_int_field(machine, *allocated, kImage2D,
+                          "width", static_cast<i32>(object.width)),
+            set_int_field(machine, *allocated, kImage2D,
+                          "height", static_cast<i32>(object.height)),
+            set_int_field(machine, *allocated, kImage2D,
+                          "mutable", object.mutable_image ? 1 : 0, "Z"),
+            set_reference_field(machine, *allocated, kImage2D,
+                                "source", "Ljava/lang/Object;", *source),
+            set_reference_field(machine, *allocated, kImage2D,
+                                "palette", "[B", *palette),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 11U) {
+        auto indices = allocate_array(machine, "[I", object.indices.size(),
+                                      Value::from_int(0));
+        auto lengths = allocate_array(machine, "[I", object.strip_lengths.size(),
+                                      Value::from_int(0));
+        if (!indices) return std::unexpected(indices.error());
+        if (!lengths) return std::unexpected(lengths.error());
+        auto indices_root = machine.pin_native_root(*indices);
+        auto lengths_root = machine.pin_native_root(*lengths);
+        if (!indices_root) return std::unexpected(indices_root.error());
+        if (!lengths_root) return std::unexpected(lengths_root.error());
+        for (usize index = 0U; index < object.indices.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *indices, index, Value::from_int(object.indices[index]));
+            if (!stored) return stored;
+        }
+        for (usize index = 0U; index < object.strip_lengths.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *lengths, index, Value::from_int(object.strip_lengths[index]));
+            if (!stored) return stored;
+        }
+        auto first = set_reference_field(machine, *allocated, kIndexBuffer,
+                                         "indices", "[I", *indices);
+        auto second = set_reference_field(machine, *allocated, kIndexBuffer,
+                                          "stripLengths", "[I", *lengths);
+        if (!first) return first;
+        if (!second) return second;
+    } else if (object.type == 12U) {
+        auto attenuation = allocate_array(machine, "[F", 3U,
+                                          Value::from_float(0.0F));
+        if (!attenuation) return std::unexpected(attenuation.error());
+        auto root = machine.pin_native_root(*attenuation);
+        if (!root) return std::unexpected(root.error());
+        for (usize index = 0U; index < object.vector3.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *attenuation, index, Value::from_float(object.vector3[index]));
+            if (!stored) return stored;
+        }
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kLight,
+                          "mode", object.mode),
+            set_float_field(machine, *allocated, kLight,
+                            "intensity", object.scalar),
+            set_int_field(machine, *allocated, kLight,
+                          "color", object.color),
+            set_float_field(machine, *allocated, kLight,
+                            "spotAngle", object.secondary_scalar),
+            set_float_field(machine, *allocated, kLight,
+                            "spotExponent", object.tertiary_scalar),
+            set_reference_field(machine, *allocated, kLight,
+                                "attenuation", "[F", *attenuation),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 13U) {
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kMaterial,
+                          "ambient", object.color),
+            set_int_field(machine, *allocated, kMaterial,
+                          "diffuse", object.secondary_color),
+            set_int_field(machine, *allocated, kMaterial,
+                          "emissive", object.tertiary_color),
+            set_int_field(machine, *allocated, kMaterial,
+                          "specular", object.quaternary_color),
+            set_float_field(machine, *allocated, kMaterial,
+                            "shininess", object.scalar),
+            set_int_field(machine, *allocated, kMaterial,
+                          "vertexColorTracking", object.flag ? 1 : 0, "Z"),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 17U) {
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kTexture2D,
+                          "blendColor", object.color),
+            set_int_field(machine, *allocated, kTexture2D,
+                          "blending", object.mode),
+            set_int_field(machine, *allocated, kTexture2D,
+                          "wrapS", object.secondary_mode),
+            set_int_field(machine, *allocated, kTexture2D,
+                          "wrapT", object.tertiary_mode),
+            set_int_field(machine, *allocated, kTexture2D,
+                          "levelFilter", object.quaternary_mode),
+            set_int_field(machine, *allocated, kTexture2D,
+                          "imageFilter", object.layer),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 19U) {
+        auto times = allocate_array(machine, "[I", object.keyframe_times.size(),
+                                    Value::from_int(0));
+        auto values = allocate_array(machine, "[F", object.keyframe_values.size(),
+                                     Value::from_float(0.0F));
+        if (!times) return std::unexpected(times.error());
+        if (!values) return std::unexpected(values.error());
+        auto times_root = machine.pin_native_root(*times);
+        auto values_root = machine.pin_native_root(*values);
+        if (!times_root) return std::unexpected(times_root.error());
+        if (!values_root) return std::unexpected(values_root.error());
+        for (usize index = 0U; index < object.keyframe_times.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *times, index, Value::from_int(object.keyframe_times[index]));
+            if (!stored) return stored;
+        }
+        for (usize index = 0U; index < object.keyframe_values.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *values, index, Value::from_float(object.keyframe_values[index]));
+            if (!stored) return stored;
+        }
+        const std::array<Status, 9> stored {
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "keyframeCount", object.keyframe_count),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "componentCount", object.keyframe_component_count),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "interpolationType", object.keyframe_interpolation),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "validFirst", object.keyframe_valid_first),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "validLast", object.keyframe_valid_last),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "duration", object.keyframe_duration),
+            set_int_field(machine, *allocated, kKeyframeSequence,
+                          "repeatMode", object.keyframe_repeat_mode),
+            set_reference_field(machine, *allocated, kKeyframeSequence,
+                                "times", "[I", *times),
+            set_reference_field(machine, *allocated, kKeyframeSequence,
+                                "values", "[F", *values),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 20U) {
+        auto data = allocate_array(
+            machine, object.component_size == 1 ? "[B" : "[S",
+            object.vertex_values.size(), Value::from_int(0));
+        if (!data) return std::unexpected(data.error());
+        auto root = machine.pin_native_root(*data);
+        if (!root) return std::unexpected(root.error());
+        for (usize index = 0U; index < object.vertex_values.size(); ++index) {
+            auto stored = machine.heap().set_element(
+                *data, index, Value::from_int(object.vertex_values[index]));
+            if (!stored) return stored;
+        }
+        const std::array<Status, 4> stored {
+            set_int_field(machine, *allocated, kVertexArray,
+                          "vertexCount", object.vertex_count),
+            set_int_field(machine, *allocated, kVertexArray,
+                          "componentCount", object.component_count),
+            set_int_field(machine, *allocated, kVertexArray,
+                          "componentSize", object.component_size),
+            set_reference_field(machine, *allocated, kVertexArray,
+                                "data", "Ljava/lang/Object;", *data),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
+    } else if (object.type == 21U) {
+        auto texcoords = allocate_array(
+            machine, "[Ljavax/microedition/m3g/VertexArray;",
+            object.texcoords.size(), Value::from_reference({}));
+        auto scales = allocate_array(machine, "[F", object.texcoords.size(),
+                                     Value::from_float(1.0F));
+        auto biases = allocate_array(machine, "[[F", object.texcoords.size(),
+                                     Value::from_reference({}));
+        auto position_bias = allocate_array(machine, "[F", 3U,
+                                            Value::from_float(0.0F));
+        if (!texcoords) return std::unexpected(texcoords.error());
+        if (!scales) return std::unexpected(scales.error());
+        if (!biases) return std::unexpected(biases.error());
+        if (!position_bias) return std::unexpected(position_bias.error());
+        auto texcoords_root = machine.pin_native_root(*texcoords);
+        auto scales_root = machine.pin_native_root(*scales);
+        auto biases_root = machine.pin_native_root(*biases);
+        auto position_root = machine.pin_native_root(*position_bias);
+        if (!texcoords_root) return std::unexpected(texcoords_root.error());
+        if (!scales_root) return std::unexpected(scales_root.error());
+        if (!biases_root) return std::unexpected(biases_root.error());
+        if (!position_root) return std::unexpected(position_root.error());
+        for (usize index = 0U; index < 3U; ++index) {
+            auto stored = machine.heap().set_element(
+                *position_bias, index,
+                Value::from_float(object.position_bias[index]));
+            if (!stored) return stored;
+        }
+        const std::array<Status, 6> stored {
+            set_int_field(machine, *allocated, kVertexBuffer,
+                          "vertexCount", object.vertex_count),
+            set_int_field(machine, *allocated, kVertexBuffer,
+                          "defaultColor", object.default_color),
+            set_float_field(machine, *allocated, kVertexBuffer,
+                            "positionScale", object.position_scale),
+            set_reference_field(machine, *allocated, kVertexBuffer,
+                                "positionBias", "[F", *position_bias),
+            set_reference_field(machine, *allocated, kVertexBuffer,
+                "texScales", "[F", *scales),
+            set_reference_field(machine, *allocated, kVertexBuffer,
+                "texBiases", "[[F", *biases),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
     }
     return {};
 }
@@ -707,6 +1793,58 @@ struct ParsedObject final {
     return *array;
 }
 
+[[nodiscard]] Result<ObjectRef> user_parameter_table(
+    Machine& machine,
+    const ParsedObject& object) {
+    auto table = allocate_instance(machine, "java/util/Hashtable");
+    if (!table) return std::unexpected(table.error());
+    auto table_root = machine.pin_native_root(*table);
+    if (!table_root) return std::unexpected(table_root.error());
+    auto initialized = machine.invoke_instance(
+        *table, "java/util/Hashtable", "<init>", "()V");
+    if (!initialized) return std::unexpected(initialized.error());
+    if (!initialized->completed_normally()) {
+        return fail(ErrorCode::java_exception,
+                    "M3G user parameter table initialization failed");
+    }
+    for (const auto& [id, bytes] : object.user_parameters) {
+        const Value id_argument = Value::from_int(static_cast<i32>(id));
+        auto boxed = machine.invoke_static(
+            "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;",
+            std::span<const Value>(&id_argument, 1U));
+        if (!boxed) return std::unexpected(boxed.error());
+        if (!boxed->completed_normally() ||
+            !boxed->return_value.has_value()) {
+            return fail(ErrorCode::java_exception,
+                        "M3G user parameter ID boxing failed");
+        }
+        auto key = boxed->return_value->as_reference();
+        if (!key) return std::unexpected(key.error());
+        auto data = allocate_array(machine, "[B", bytes.size(),
+                                   Value::from_int(0));
+        if (!data) return std::unexpected(data.error());
+        auto key_root = machine.pin_native_root(*key);
+        auto data_root = machine.pin_native_root(*data);
+        if (!key_root) return std::unexpected(key_root.error());
+        if (!data_root) return std::unexpected(data_root.error());
+        auto written = machine.heap().write_byte_array(*data, 0U, bytes);
+        if (!written) return std::unexpected(written.error());
+        const std::array<Value, 2> put_arguments {
+            Value::from_reference(*key), Value::from_reference(*data),
+        };
+        auto inserted = machine.invoke_instance(
+            *table, "java/util/Hashtable", "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            put_arguments);
+        if (!inserted) return std::unexpected(inserted.error());
+        if (!inserted->completed_normally()) {
+            return fail(ErrorCode::java_exception,
+                        "M3G user parameter insertion failed");
+        }
+    }
+    return *table;
+}
+
 [[nodiscard]] Status link_loaded_object(
     Machine& machine,
     std::span<ParsedObject> objects,
@@ -726,6 +1864,14 @@ struct ParsedObject final {
         static_cast<i32>(object.animation_tracks.size()));
     if (!tracks_stored) return tracks_stored;
     if (!track_count_stored) return track_count_stored;
+    if (!object.user_parameters.empty()) {
+        auto table = user_parameter_table(machine, object);
+        if (!table) return std::unexpected(table.error());
+        auto stored = set_reference_field(
+            machine, object.java_object, kObject3D, "userObject",
+            "Ljava/lang/Object;", *table);
+        if (!stored) return stored;
+    }
 
     if (object.type == 2U) {
         auto sequence = referenced_object(all, object.animation_sequence,
@@ -787,6 +1933,15 @@ struct ParsedObject final {
         if (!background_stored) return background_stored;
     }
 
+    if (object.type == 4U) {
+        auto image = referenced_object(all, object.image, "Background image");
+        if (!image) return std::unexpected(image.error());
+        auto stored = set_reference_field(
+            machine, object.java_object, kBackground, "image",
+            "Ljavax/microedition/m3g/Image2D;", *image);
+        if (!stored) return stored;
+    }
+
     if (object.type == 3U) {
         auto textures = reference_array(
             machine, "[Ljavax/microedition/m3g/Texture2D;", all,
@@ -822,15 +1977,6 @@ struct ParsedObject final {
             machine, object.java_object, kTexture2D, "image",
             "Ljavax/microedition/m3g/Image2D;", *image);
         if (!stored) return stored;
-        for (const auto& [field, value] :
-             std::array<std::pair<const char*, i32>, 5> {{
-                 {"blending", 228}, {"levelFilter", 208},
-                 {"imageFilter", 209}, {"wrapS", 240}, {"wrapT", 240},
-             }}) {
-            auto value_stored = set_int_field(
-                machine, object.java_object, kTexture2D, field, value);
-            if (!value_stored) return value_stored;
-        }
     }
 
     if (object.type == 14U || object.type == 15U || object.type == 16U) {
@@ -867,26 +2013,95 @@ struct ParsedObject final {
         if (!appearances_stored) return appearances_stored;
     }
 
+    if (object.type == 15U) {
+        auto targets = reference_array(
+            machine, "[Ljavax/microedition/m3g/VertexBuffer;", all,
+            object.morph_targets, "MorphingMesh targets");
+        auto weights = float_array(machine, object.morph_weights);
+        if (!targets) return std::unexpected(targets.error());
+        if (!weights) return std::unexpected(weights.error());
+        auto targets_stored = set_reference_field(
+            machine, object.java_object,
+            "javax/microedition/m3g/MorphingMesh", "morphTargets",
+            "[Ljavax/microedition/m3g/VertexBuffer;", *targets);
+        auto weights_stored = set_reference_field(
+            machine, object.java_object,
+            "javax/microedition/m3g/MorphingMesh", "weights",
+            "[F", *weights);
+        if (!targets_stored) return targets_stored;
+        if (!weights_stored) return weights_stored;
+    }
+
+    if (object.type == 16U) {
+        auto skeleton = referenced_object(all, object.skeleton,
+                                          "SkinnedMesh skeleton");
+        if (!skeleton) return std::unexpected(skeleton.error());
+        auto skeleton_stored = set_reference_field(
+            machine, object.java_object,
+            "javax/microedition/m3g/SkinnedMesh", "skeleton",
+            "Ljavax/microedition/m3g/Group;", *skeleton);
+        if (!skeleton_stored) return skeleton_stored;
+        for (const ParsedSkinTransform& influence : object.skin_transforms) {
+            auto bone = referenced_object(all, influence.bone,
+                                          "SkinnedMesh bone");
+            if (!bone) return std::unexpected(bone.error());
+            const std::array<Value, 4> arguments {
+                Value::from_reference(*bone),
+                Value::from_int(influence.weight),
+                Value::from_int(static_cast<i32>(influence.first_vertex)),
+                Value::from_int(static_cast<i32>(influence.vertex_count)),
+            };
+            auto invoked = machine.invoke_instance(
+                object.java_object,
+                "javax/microedition/m3g/SkinnedMesh", "addTransform",
+                "(Ljavax/microedition/m3g/Node;III)V", arguments);
+            if (!invoked) return std::unexpected(invoked.error());
+            if (!invoked->completed_normally()) {
+                if (!invoked->throwable.has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "SkinnedMesh addTransform failed without a throwable");
+                }
+                auto class_name = machine.heap().class_name(*invoked->throwable);
+                if (!class_name) return std::unexpected(class_name.error());
+                return fail_java(*class_name,
+                                 "SkinnedMesh transform reference is invalid");
+            }
+        }
+    }
+
     if (object.type == 18U) {
         auto image = referenced_object(all, object.image, "Sprite3D image");
         auto appearance = referenced_object(all, object.appearance,
                                             "Sprite3D appearance");
         if (!image) return std::unexpected(image.error());
         if (!appearance) return std::unexpected(appearance.error());
-        auto scaled = set_int_field(machine, object.java_object, kSprite3D,
-                                    "scaled", object.scaled ? 1 : 0, "Z");
-        auto image_stored = set_reference_field(
-            machine, object.java_object, kSprite3D, "image",
-            "Ljavax/microedition/m3g/Image2D;", *image);
-        auto appearance_stored = set_reference_field(
-            machine, object.java_object, kSprite3D, "appearance",
-            "Ljavax/microedition/m3g/Appearance;", *appearance);
-        if (!scaled) return scaled;
-        if (!image_stored) return image_stored;
-        if (!appearance_stored) return appearance_stored;
+        const std::array<Status, 9> stored {
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "scaled", object.scaled ? 1 : 0, "Z"),
+            set_reference_field(machine, object.java_object, kSprite3D, "image",
+                "Ljavax/microedition/m3g/Image2D;", *image),
+            set_reference_field(machine, object.java_object, kSprite3D,
+                "appearance", "Ljavax/microedition/m3g/Appearance;", *appearance),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "cropX", object.crop_x),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "cropY", object.crop_y),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "cropWidth", object.crop_width),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "cropHeight", object.crop_height),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "flipX", object.flag ? 1 : 0, "Z"),
+            set_int_field(machine, object.java_object, kSprite3D,
+                          "flipY", object.secondary_flag ? 1 : 0, "Z"),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
     }
 
     if (object.type == 21U) {
+        ObjectRef positions {};
         for (const auto& [reference, field] :
              std::array<std::pair<u32, const char*>, 3> {{
                  {object.positions, "positions"},
@@ -895,19 +2110,67 @@ struct ParsedObject final {
              }}) {
             auto target = referenced_object(all, reference, "VertexBuffer array");
             if (!target) return std::unexpected(target.error());
+            if (std::string_view(field) == "positions") positions = *target;
             auto stored = set_reference_field(
                 machine, object.java_object, kVertexBuffer, field,
                 "Ljavax/microedition/m3g/VertexArray;", *target);
             if (!stored) return stored;
         }
+        if (!positions.is_null()) {
+            auto count = int_field(machine, positions, kVertexArray,
+                                   "vertexCount");
+            if (!count) return std::unexpected(count.error());
+            auto stored = set_int_field(machine, object.java_object,
+                                        kVertexBuffer, "vertexCount", *count);
+            if (!stored) return stored;
+        }
+
         auto texcoords = reference_array(
             machine, "[Ljavax/microedition/m3g/VertexArray;", all,
             object.texcoords, "VertexBuffer texcoords");
+        auto scales = allocate_array(machine, "[F", object.texcoord_scales.size(),
+                                     Value::from_float(1.0F));
+        auto biases = allocate_array(machine, "[[F", object.texcoord_biases.size(),
+                                     Value::from_reference({}));
         if (!texcoords) return std::unexpected(texcoords.error());
-        auto stored = set_reference_field(
-            machine, object.java_object, kVertexBuffer, "texCoords",
-            "[Ljavax/microedition/m3g/VertexArray;", *texcoords);
-        if (!stored) return stored;
+        if (!scales) return std::unexpected(scales.error());
+        if (!biases) return std::unexpected(biases.error());
+        auto texcoords_root = machine.pin_native_root(*texcoords);
+        auto scales_root = machine.pin_native_root(*scales);
+        auto biases_root = machine.pin_native_root(*biases);
+        if (!texcoords_root) return std::unexpected(texcoords_root.error());
+        if (!scales_root) return std::unexpected(scales_root.error());
+        if (!biases_root) return std::unexpected(biases_root.error());
+        for (usize index = 0U; index < object.texcoord_scales.size(); ++index) {
+            auto scale_stored = machine.heap().set_element(
+                *scales, index, Value::from_float(object.texcoord_scales[index]));
+            if (!scale_stored) return scale_stored;
+            auto bias = allocate_array(machine, "[F", 3U,
+                                       Value::from_float(0.0F));
+            if (!bias) return std::unexpected(bias.error());
+            auto bias_root = machine.pin_native_root(*bias);
+            if (!bias_root) return std::unexpected(bias_root.error());
+            for (usize component = 0U; component < 3U; ++component) {
+                auto stored = machine.heap().set_element(
+                    *bias, component,
+                    Value::from_float(object.texcoord_biases[index][component]));
+                if (!stored) return stored;
+            }
+            auto bias_stored = machine.heap().set_element(
+                *biases, index, Value::from_reference(*bias));
+            if (!bias_stored) return bias_stored;
+        }
+        const std::array<Status, 3> stored {
+            set_reference_field(machine, object.java_object, kVertexBuffer,
+                "texCoords", "[Ljavax/microedition/m3g/VertexArray;", *texcoords),
+            set_reference_field(machine, object.java_object, kVertexBuffer,
+                "texScales", "[F", *scales),
+            set_reference_field(machine, object.java_object, kVertexBuffer,
+                "texBiases", "[[F", *biases),
+        };
+        for (const Status& status : stored) {
+            if (!status) return status;
+        }
     }
     return {};
 }

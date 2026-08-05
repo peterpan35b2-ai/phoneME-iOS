@@ -34,6 +34,7 @@ struct CachedTranslation final {
 struct PendingSource final {
     std::string source;
     bool force_single {false};
+    bool prefetch {false};
 };
 
 struct CompletedTranslation final {
@@ -354,6 +355,132 @@ enum ScriptMask : u32 {
     });
 }
 
+[[nodiscard]] std::string bing_language_code(std::string_view value) {
+    if (value == "auto") return "auto-detect";
+    if (value == "zh-CN" || value == "zh-Hans") return "zh-Hans";
+    if (value == "zh-TW" || value == "zh-Hant") return "zh-Hant";
+    return std::string(value);
+}
+
+[[nodiscard]] std::optional<std::string> html_attribute(
+    std::string_view html,
+    std::string_view attribute,
+    usize start = 0U) {
+    std::string marker(attribute);
+    marker += "=\"";
+    const usize begin = html.find(marker, start);
+    if (begin == std::string_view::npos) return std::nullopt;
+    const usize value_begin = begin + marker.size();
+    const usize value_end = html.find('"', value_begin);
+    if (value_end == std::string_view::npos || value_end == value_begin) {
+        return std::nullopt;
+    }
+    return std::string(html.substr(value_begin, value_end - value_begin));
+}
+
+struct BingTokens final {
+    std::string host;
+    std::string ig;
+    std::string iid;
+    std::string key;
+    std::string token;
+};
+
+[[nodiscard]] Result<BingTokens> parse_bing_tokens(
+    const network::HttpResponse& response) {
+    const std::string_view html(
+        reinterpret_cast<const char*>(response.body.data()),
+        response.body.size());
+
+    const std::string_view ig_marker = "IG:\"";
+    const usize ig_begin = html.find(ig_marker);
+    if (ig_begin == std::string_view::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page did not contain IG");
+    }
+    const usize ig_value_begin = ig_begin + ig_marker.size();
+    const usize ig_end = html.find('"', ig_value_begin);
+    if (ig_end == std::string_view::npos || ig_end == ig_value_begin) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page contained an invalid IG");
+    }
+
+    const usize params_name = html.find("params_AbusePreventionHelper");
+    const usize params_begin = params_name == std::string_view::npos
+        ? std::string_view::npos
+        : html.find('[', params_name);
+    if (params_begin == std::string_view::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page did not contain request tokens");
+    }
+    usize cursor = params_begin + 1U;
+    while (cursor < html.size() &&
+           (html[cursor] == ' ' || html[cursor] == '\t' ||
+            html[cursor] == '\r' || html[cursor] == '\n')) {
+        ++cursor;
+    }
+    const usize key_begin = cursor;
+    while (cursor < html.size() &&
+           std::isdigit(static_cast<unsigned char>(html[cursor])) != 0) {
+        ++cursor;
+    }
+    if (cursor == key_begin) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page contained an invalid key");
+    }
+    const std::string key(html.substr(key_begin, cursor - key_begin));
+    cursor = html.find('"', cursor);
+    if (cursor == std::string_view::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page contained an invalid token");
+    }
+    const usize token_begin = ++cursor;
+    const usize token_end = html.find('"', token_begin);
+    if (token_end == std::string_view::npos || token_end == token_begin) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page contained an empty token");
+    }
+
+    const usize rich_tta = html.find("id=\"rich_tta\"");
+    auto iid = html_attribute(html, "data-iid", rich_tta ==
+        std::string_view::npos ? 0U : rich_tta);
+    if (!iid) {
+        const usize iid_marker = html.find("translator.");
+        if (iid_marker != std::string_view::npos) {
+            usize iid_end = iid_marker;
+            while (iid_end < html.size()) {
+                const char character = html[iid_end];
+                if (!(std::isalnum(static_cast<unsigned char>(character)) != 0 ||
+                      character == '.' || character == '_' ||
+                      character == '-')) {
+                    break;
+                }
+                ++iid_end;
+            }
+            if (iid_end > iid_marker) {
+                iid = std::string(html.substr(iid_marker,
+                                              iid_end - iid_marker));
+            }
+        }
+    }
+    if (!iid) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translator page did not contain IID");
+    }
+
+    return BingTokens {
+        .host = response.final_url.host.empty()
+            ? std::string("www.bing.com")
+            : response.final_url.host,
+        .ig = std::string(html.substr(ig_value_begin,
+                                     ig_end - ig_value_begin)),
+        .iid = std::move(*iid),
+        .key = key,
+        .token = std::string(html.substr(token_begin,
+                                        token_end - token_begin)),
+    };
+}
+
 class JsonCursor final {
 public:
     explicit JsonCursor(std::span<const u8> bytes) : bytes_(bytes) {}
@@ -642,6 +769,7 @@ struct TranslationService::State final {
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<CachedTranslation>> cache;
     std::unordered_set<std::string> scheduled;
+    std::unordered_set<std::string> prefetched;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>
         retry_after;
     std::unordered_map<std::string, std::vector<Utf8Completion>> waiters;
@@ -651,6 +779,12 @@ struct TranslationService::State final {
     usize in_flight {0U};
     bool pump_scheduled {false};
     bool stopped {false};
+    std::string bing_host;
+    std::string bing_ig;
+    std::string bing_iid;
+    std::string bing_key;
+    std::string bing_token;
+    u64 bing_request_count {0U};
     std::atomic<u64> generation {0U};
 };
 
@@ -726,7 +860,7 @@ void append_cache_record(const StateType& state,
                  static_cast<std::streamsize>(translated.size()));
 }
 
-[[nodiscard]] Result<network::HttpRequest> make_request(
+[[nodiscard]] Result<network::HttpRequest> make_google_request(
     const TranslationConfiguration& configuration,
     std::string_view source) {
     if (!valid_language_code(configuration.source_language) ||
@@ -734,25 +868,104 @@ void append_cache_record(const StateType& state,
         return fail(ErrorCode::invalid_argument,
                     "translation language code is invalid");
     }
-    std::string url =
-        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=";
-    url += configuration.source_language;
-    url += "&tl=";
-    url += configuration.target_language;
-    url += "&dt=t&q=";
-    url += percent_encode(source);
-    auto parsed = network::Url::parse(url);
+
+    auto parsed = network::Url::parse(
+        "https://translate.googleapis.com/translate_a/single");
+    if (!parsed) return std::unexpected(parsed.error());
+
+    std::string body = "client=gtx&dt=t&sl=";
+    body += percent_encode(configuration.source_language);
+    body += "&tl=";
+    body += percent_encode(configuration.target_language);
+    body += "&q=";
+    body += percent_encode(source);
+
+    return network::HttpRequest {
+        .url = std::move(*parsed),
+        .method = "POST",
+        .headers = {
+            {"Accept", "application/json"},
+            {"Accept-Language", "vi-VN,vi;q=0.9"},
+            {"Content-Type", "application/x-www-form-urlencoded;charset=UTF-8"},
+            {"User-Agent", "phoneME-iOS/translation"},
+        },
+        .body = std::vector<u8>(body.begin(), body.end()),
+        .timeout_ms = 5'000,
+        .redirect_limit = 1,
+    };
+}
+
+[[nodiscard]] Result<network::HttpRequest> make_bing_home_request() {
+    auto parsed = network::Url::parse("https://www.bing.com/translator");
     if (!parsed) return std::unexpected(parsed.error());
     return network::HttpRequest {
         .url = std::move(*parsed),
         .method = "GET",
         .headers = {
-            {"Accept", "application/json"},
-            {"Accept-Language", "vi-VN,vi;q=0.9"},
-            {"User-Agent", "phoneME-iOS/translation"},
+            {"Accept", "text/html,application/xhtml+xml"},
+            {"Accept-Language", "vi-VN,vi;q=0.9,en;q=0.8"},
+            {"User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"},
         },
         .body = {},
-        .timeout_ms = 8'000,
+        .timeout_ms = 5'000,
+        .redirect_limit = 3,
+    };
+}
+
+[[nodiscard]] Result<network::HttpRequest> make_bing_request(
+    const TranslationConfiguration& configuration,
+    std::string_view host,
+    std::string_view ig,
+    std::string_view iid,
+    std::string_view key,
+    std::string_view token,
+    u64 request_count,
+    std::string_view source) {
+    if (host.empty() || ig.empty() || iid.empty() || key.empty() ||
+        token.empty() || !valid_language_code(configuration.source_language) ||
+        !valid_language_code(configuration.target_language)) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translation request is invalid");
+    }
+
+    std::string url = "https://";
+    url += host;
+    url += "/ttranslatev3?isVertical=1&IG=";
+    url += percent_encode(ig);
+    url += "&IID=";
+    url += percent_encode(iid);
+    url.push_back('.');
+    url += std::to_string(request_count);
+    auto parsed = network::Url::parse(url);
+    if (!parsed) return std::unexpected(parsed.error());
+
+    std::string body = "fromLang=";
+    body += percent_encode(bing_language_code(configuration.source_language));
+    body += "&to=";
+    body += percent_encode(bing_language_code(configuration.target_language));
+    body += "&text=";
+    body += percent_encode(source);
+    body += "&token=";
+    body += percent_encode(token);
+    body += "&key=";
+    body += percent_encode(key);
+
+    std::string origin = "https://";
+    origin += host;
+    std::string referer = origin + "/translator";
+    return network::HttpRequest {
+        .url = std::move(*parsed),
+        .method = "POST",
+        .headers = {
+            {"Accept", "application/json"},
+            {"Accept-Language", "vi-VN,vi;q=0.9,en;q=0.8"},
+            {"Content-Type", "application/x-www-form-urlencoded"},
+            {"Origin", origin},
+            {"Referer", referer},
+            {"User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"},
+        },
+        .body = std::vector<u8>(body.begin(), body.end()),
+        .timeout_ms = 5'000,
         .redirect_limit = 2,
     };
 }
@@ -784,7 +997,10 @@ TranslationService::TranslationService(
         state_->configuration.maximum_batch_wait_ms,
         state_->configuration.batch_coalescing_delay_ms,
         500);
-    if (!state_->adapter ||
+    const bool valid_provider =
+        state_->configuration.provider == TranslationProvider::google ||
+        state_->configuration.provider == TranslationProvider::bing;
+    if (!state_->adapter || !valid_provider ||
         !valid_language_code(state_->configuration.source_language) ||
         !valid_language_code(state_->configuration.target_language)) {
         state_->configuration.enabled = false;
@@ -798,6 +1014,7 @@ TranslationService::~TranslationService() {
     state_->pending.clear();
     state_->pump_scheduled = false;
     state_->scheduled.clear();
+    state_->prefetched.clear();
     state_->waiters.clear();
 }
 
@@ -826,19 +1043,32 @@ TranslationService::lookup_or_request(std::span<const char32_t> text) {
             std::chrono::steady_clock::now() < retry->second) {
             return nullptr;
         }
-        if (state_->stopped || state_->scheduled.contains(source) ||
-            state_->scheduled.size() >=
-                state_->configuration.maximum_pending_requests) {
-            return nullptr;
+        if (state_->stopped) return nullptr;
+        if (state_->scheduled.contains(source)) {
+            state_->prefetched.erase(source);
+            const auto pending = std::find_if(
+                state_->pending.begin(), state_->pending.end(),
+                [&](const PendingSource& value) {
+                    return value.prefetch && value.source == source;
+                });
+            if (pending != state_->pending.end()) {
+                PendingSource promoted = std::move(*pending);
+                promoted.prefetch = false;
+                state_->pending.erase(pending);
+                state_->pending.push_front(std::move(promoted));
+                should_pump = true;
+            }
+        } else if (state_->scheduled.size() <
+                       state_->configuration.maximum_pending_requests) {
+            state_->scheduled.insert(source);
+            const auto now = std::chrono::steady_clock::now();
+            if (state_->pending.empty()) state_->first_enqueue_at = now;
+            state_->pending.push_back(PendingSource {
+                .source = source,
+            });
+            state_->last_enqueue_at = now;
+            should_pump = true;
         }
-        state_->scheduled.insert(source);
-        const auto now = std::chrono::steady_clock::now();
-        if (state_->pending.empty()) state_->first_enqueue_at = now;
-        state_->pending.push_back(PendingSource {
-            .source = source,
-        });
-        state_->last_enqueue_at = now;
-        should_pump = true;
     }
     if (should_pump) schedule_pump(state_);
     return nullptr;
@@ -866,25 +1096,91 @@ std::optional<std::string> TranslationService::lookup_or_request_utf8(
             state_->waiters.erase(source);
             return std::nullopt;
         }
-        if (state_->stopped || state_->scheduled.contains(source) ||
-            state_->scheduled.size() >=
-                state_->configuration.maximum_pending_requests) {
-            if (!state_->scheduled.contains(source)) {
-                state_->waiters.erase(source);
-            }
+        if (state_->stopped) {
+            state_->waiters.erase(source);
             return std::nullopt;
         }
+        if (state_->scheduled.contains(source)) {
+            state_->prefetched.erase(source);
+            const auto pending = std::find_if(
+                state_->pending.begin(), state_->pending.end(),
+                [&](const PendingSource& value) {
+                    return value.prefetch && value.source == source;
+                });
+            if (pending != state_->pending.end()) {
+                PendingSource promoted = std::move(*pending);
+                promoted.prefetch = false;
+                state_->pending.erase(pending);
+                state_->pending.push_front(std::move(promoted));
+                should_pump = true;
+            }
+        } else if (state_->scheduled.size() <
+                       state_->configuration.maximum_pending_requests) {
+            state_->scheduled.insert(source);
+            const auto now = std::chrono::steady_clock::now();
+            if (state_->pending.empty()) state_->first_enqueue_at = now;
+            state_->pending.push_back(PendingSource {
+                .source = source,
+            });
+            state_->last_enqueue_at = now;
+            should_pump = true;
+        } else {
+            state_->waiters.erase(source);
+        }
+    }
+    if (should_pump) schedule_pump(state_);
+    return std::nullopt;
+}
+
+void TranslationService::prefetch(std::span<const char32_t> text) {
+    if (!enabled() ||
+        !should_translate(text, state_->configuration.maximum_source_bytes)) {
+        return;
+    }
+    prefetch_utf8(encode_utf8(text));
+}
+
+void TranslationService::prefetch_utf8(std::string_view text) {
+    if (!enabled() || !should_translate_utf8(
+            text, state_->configuration.maximum_source_bytes)) {
+        return;
+    }
+    const std::string source(text);
+    bool should_pump = false;
+    {
+        std::scoped_lock lock(state_->mutex);
+        if (state_->stopped || state_->cache.contains(source) ||
+            state_->scheduled.contains(source)) {
+            return;
+        }
+        const auto retry = state_->retry_after.find(source);
+        if (retry != state_->retry_after.end() &&
+            std::chrono::steady_clock::now() < retry->second) {
+            return;
+        }
+        const usize maximum_prefetch_pending = std::clamp<usize>(
+            state_->configuration.maximum_pending_requests / 8U,
+            4U, 24U);
+        const usize prefetch_pending = static_cast<usize>(std::count_if(
+            state_->pending.begin(), state_->pending.end(),
+            [](const PendingSource& value) { return value.prefetch; }));
+        if (state_->scheduled.size() >=
+                state_->configuration.maximum_pending_requests ||
+            prefetch_pending >= maximum_prefetch_pending) {
+            return;
+        }
         state_->scheduled.insert(source);
+        state_->prefetched.insert(source);
         const auto now = std::chrono::steady_clock::now();
         if (state_->pending.empty()) state_->first_enqueue_at = now;
         state_->pending.push_back(PendingSource {
             .source = source,
+            .prefetch = true,
         });
         state_->last_enqueue_at = now;
         should_pump = true;
     }
     if (should_pump) schedule_pump(state_);
-    return std::nullopt;
 }
 
 bool TranslationService::contains_translatable_text(
@@ -947,6 +1243,89 @@ Result<std::string> TranslationService::parse_google_response(
     return translated;
 }
 
+Result<std::string> TranslationService::parse_bing_response(
+    std::span<const u8> body) {
+    if (body.empty()) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translation response is empty");
+    }
+
+    JsonCursor cursor(body);
+    if (!cursor.consume('[') || !cursor.consume('{')) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translation response has an unexpected shape");
+    }
+
+    std::string translated;
+    if (!cursor.consume('}')) {
+        for (;;) {
+            auto key = cursor.parse_string();
+            if (!key || !cursor.consume(':')) {
+                return fail(ErrorCode::invalid_argument,
+                            "Bing translation response has a malformed object");
+            }
+
+            if (*key == "translations") {
+                if (!cursor.consume('[') || cursor.consume(']') ||
+                    !cursor.consume('{')) {
+                    return fail(ErrorCode::invalid_argument,
+                                "Bing translation response has no translations");
+                }
+                if (!cursor.consume('}')) {
+                    for (;;) {
+                        auto translation_key = cursor.parse_string();
+                        if (!translation_key || !cursor.consume(':')) {
+                            return fail(
+                                ErrorCode::invalid_argument,
+                                "Bing translation response has a malformed translation");
+                        }
+                        if (*translation_key == "text") {
+                            auto value = cursor.parse_string();
+                            if (!value) return std::unexpected(value.error());
+                            translated = std::move(*value);
+                        } else {
+                            auto skipped = cursor.skip_value();
+                            if (!skipped) return std::unexpected(skipped.error());
+                        }
+                        if (cursor.consume('}')) break;
+                        if (!cursor.consume(',')) {
+                            return fail(
+                                ErrorCode::invalid_argument,
+                                "Bing translation response has a malformed translation");
+                        }
+                    }
+                }
+                while (!cursor.consume(']')) {
+                    if (!cursor.consume(',')) {
+                        return fail(
+                            ErrorCode::invalid_argument,
+                            "Bing translation response has malformed translations");
+                    }
+                    auto skipped = cursor.skip_value();
+                    if (!skipped) return std::unexpected(skipped.error());
+                }
+            } else {
+                auto skipped = cursor.skip_value();
+                if (!skipped) return std::unexpected(skipped.error());
+            }
+
+            if (cursor.consume('}')) break;
+            if (!cursor.consume(',')) {
+                return fail(ErrorCode::invalid_argument,
+                            "Bing translation response has a malformed object");
+            }
+        }
+    }
+
+    if (translated.empty()) {
+        return fail(ErrorCode::invalid_argument,
+                    "Bing translation response produced empty text");
+    }
+    auto decoded = decode_utf8(translated);
+    if (!decoded) return std::unexpected(decoded.error());
+    return translated;
+}
+
 void TranslationService::schedule_pump(
     const std::shared_ptr<State>& state) {
     {
@@ -1003,6 +1382,7 @@ void TranslationService::schedule_pump(
 void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
     for (;;) {
         std::vector<std::string> sources;
+        TranslationProvider provider = TranslationProvider::google;
         {
             std::scoped_lock lock(state->mutex);
             state->pump_scheduled = false;
@@ -1013,11 +1393,26 @@ void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
                 return;
             }
 
-            PendingSource first = std::move(state->pending.front());
-            state->pending.pop_front();
+            provider = state->configuration.provider;
+            // Only one request may bootstrap the Bing cookie/token session.
+            // Once tokens are ready, the configured concurrency is available.
+            if (provider == TranslationProvider::bing &&
+                state->bing_token.empty() && state->in_flight != 0U) {
+                return;
+            }
+
+            auto first_iterator = std::find_if(
+                state->pending.begin(), state->pending.end(),
+                [](const PendingSource& value) { return !value.prefetch; });
+            if (first_iterator == state->pending.end()) {
+                first_iterator = state->pending.begin();
+            }
+            PendingSource first = std::move(*first_iterator);
+            state->pending.erase(first_iterator);
             usize joined_size = first.source.size();
             const bool may_batch = !first.force_single &&
                 first.source.find(';') == std::string::npos;
+            const bool first_prefetch = first.prefetch;
             const u32 first_script_mask = batch_script_mask(first.source);
             sources.push_back(std::move(first.source));
 
@@ -1029,7 +1424,8 @@ void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
                     const bool compatible_script =
                         state->configuration.source_language != "auto" ||
                         batch_script_mask(iterator->source) == first_script_mask;
-                    if (iterator->force_single ||
+                    if (iterator->prefetch != first_prefetch ||
+                        iterator->force_single ||
                         iterator->source.find(';') != std::string::npos ||
                         !compatible_script) {
                         ++iterator;
@@ -1054,11 +1450,16 @@ void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
             ++state->in_flight;
         }
 
+        if (provider == TranslationProvider::bing) {
+            start_bing_request(state, std::move(sources), false, true);
+            continue;
+        }
+
         const std::string joined_source = join_batch_sources(sources);
-        auto request = make_request(state->configuration, joined_source);
+        auto request = make_google_request(state->configuration, joined_source);
         if (!request) {
-            complete_request(state, std::move(sources),
-                             std::unexpected(request.error()));
+            complete_google_request(state, std::move(sources),
+                                    std::unexpected(request.error()));
             continue;
         }
 
@@ -1067,17 +1468,17 @@ void TranslationService::pump_requests(const std::shared_ptr<State>& state) {
             std::move(*request),
             [state, sources = std::move(callback_sources)](
                 Result<network::HttpResponse> response) mutable {
-                complete_request(state, std::move(sources),
-                                 std::move(response));
+                complete_google_request(state, std::move(sources),
+                                        std::move(response));
             });
         if (!operation) {
-            complete_request(state, std::move(sources),
-                             std::unexpected(operation.error()));
+            complete_google_request(state, std::move(sources),
+                                    std::unexpected(operation.error()));
         }
     }
 }
 
-void TranslationService::complete_request(
+void TranslationService::complete_google_request(
     const std::shared_ptr<State>& state,
     std::vector<std::string> sources,
     Result<network::HttpResponse> response) {
@@ -1094,7 +1495,158 @@ void TranslationService::complete_request(
             }
         }
     }
+    finish_request(state, std::move(sources),
+                   std::move(translated_values));
+}
 
+void TranslationService::start_bing_request(
+    const std::shared_ptr<State>& state,
+    std::vector<std::string> sources,
+    bool force_token_refresh,
+    bool allow_retry) {
+    bool needs_tokens = force_token_refresh;
+    {
+        std::scoped_lock lock(state->mutex);
+        if (force_token_refresh) {
+            state->bing_host.clear();
+            state->bing_ig.clear();
+            state->bing_iid.clear();
+            state->bing_key.clear();
+            state->bing_token.clear();
+            state->bing_request_count = 0U;
+        }
+        needs_tokens = needs_tokens || state->bing_token.empty();
+    }
+
+    if (!needs_tokens) {
+        perform_bing_translation(state, std::move(sources), allow_retry);
+        return;
+    }
+
+    auto request = make_bing_home_request();
+    if (!request) {
+        finish_request(state, std::move(sources), {});
+        return;
+    }
+    auto callback_sources = sources;
+    auto operation = state->adapter->perform_http(
+        std::move(*request),
+        [state, sources = std::move(callback_sources), allow_retry](
+            Result<network::HttpResponse> response) mutable {
+            complete_bing_home_request(state, std::move(sources),
+                                       allow_retry, std::move(response));
+        });
+    if (!operation) finish_request(state, std::move(sources), {});
+}
+
+void TranslationService::complete_bing_home_request(
+    const std::shared_ptr<State>& state,
+    std::vector<std::string> sources,
+    bool allow_retry,
+    Result<network::HttpResponse> response) {
+    if (!response || response->status_code < 200 ||
+        response->status_code >= 300) {
+        finish_request(state, std::move(sources), {});
+        return;
+    }
+    auto tokens = parse_bing_tokens(*response);
+    if (!tokens) {
+        finish_request(state, std::move(sources), {});
+        return;
+    }
+    {
+        std::scoped_lock lock(state->mutex);
+        state->bing_host = std::move(tokens->host);
+        state->bing_ig = std::move(tokens->ig);
+        state->bing_iid = std::move(tokens->iid);
+        state->bing_key = std::move(tokens->key);
+        state->bing_token = std::move(tokens->token);
+        state->bing_request_count = 0U;
+    }
+    perform_bing_translation(state, std::move(sources), allow_retry);
+}
+
+void TranslationService::perform_bing_translation(
+    const std::shared_ptr<State>& state,
+    std::vector<std::string> sources,
+    bool allow_retry) {
+    std::string host;
+    std::string ig;
+    std::string iid;
+    std::string key;
+    std::string token;
+    u64 request_count = 0U;
+    {
+        std::scoped_lock lock(state->mutex);
+        host = state->bing_host;
+        ig = state->bing_ig;
+        iid = state->bing_iid;
+        key = state->bing_key;
+        token = state->bing_token;
+        request_count = ++state->bing_request_count;
+    }
+
+    const std::string joined_source = join_batch_sources(sources);
+    auto request = make_bing_request(
+        state->configuration, host, ig, iid, key, token,
+        request_count, joined_source);
+    if (!request) {
+        finish_request(state, std::move(sources), {});
+        return;
+    }
+    auto callback_sources = sources;
+    auto operation = state->adapter->perform_http(
+        std::move(*request),
+        [state, sources = std::move(callback_sources), allow_retry](
+            Result<network::HttpResponse> response) mutable {
+            complete_bing_request(state, std::move(sources), allow_retry,
+                                  std::move(response));
+        });
+    if (!operation) {
+        complete_bing_request(state, std::move(sources), allow_retry,
+                              std::unexpected(operation.error()));
+    }
+}
+
+void TranslationService::complete_bing_request(
+    const std::shared_ptr<State>& state,
+    std::vector<std::string> sources,
+    bool allow_retry,
+    Result<network::HttpResponse> response) {
+    std::vector<std::string> translated_values;
+    if (response && response->status_code >= 200 &&
+        response->status_code < 300) {
+        auto translated = parse_bing_response(response->body);
+        if (translated) {
+            if (sources.size() == 1U) {
+                translated_values.push_back(std::move(*translated));
+            } else if (auto split = split_batch_translation(
+                           *translated, sources.size())) {
+                translated_values = std::move(*split);
+            }
+        }
+    }
+
+    if (translated_values.size() == sources.size()) {
+        finish_request(state, std::move(sources),
+                       std::move(translated_values));
+        return;
+    }
+
+    const bool token_may_be_stale = response &&
+        (response->status_code == 401 || response->status_code == 429 ||
+         (response->status_code >= 200 && response->status_code < 300));
+    if (allow_retry && token_may_be_stale) {
+        start_bing_request(state, std::move(sources), true, false);
+        return;
+    }
+    finish_request(state, std::move(sources), {});
+}
+
+void TranslationService::finish_request(
+    const std::shared_ptr<State>& state,
+    std::vector<std::string> sources,
+    std::vector<std::string> translated_values) {
     std::vector<CompletedTranslation> completed;
     if (translated_values.size() == sources.size()) {
         completed.reserve(sources.size());
@@ -1122,11 +1674,13 @@ void TranslationService::complete_request(
                     state->pending.push_front(PendingSource {
                         .source = *iterator,
                         .force_single = true,
+                        .prefetch = state->prefetched.contains(*iterator),
                     });
                 }
             } else {
                 for (const auto& source : sources) {
                     state->scheduled.erase(source);
+                    state->prefetched.erase(source);
                     state->waiters.erase(source);
                 }
             }
@@ -1140,8 +1694,10 @@ void TranslationService::complete_request(
         std::scoped_lock lock(state->mutex);
         if (state->in_flight > 0U) --state->in_flight;
         if (!completed.empty() && !state->stopped) {
+            usize foreground_count = 0U;
             for (auto& item : completed) {
                 state->scheduled.erase(item.source);
+                const bool was_prefetch = state->prefetched.erase(item.source) > 0U;
                 state->retry_after.erase(item.source);
                 state->cache.insert_or_assign(item.source, item.cached);
                 if (const auto waiters = state->waiters.find(item.source);
@@ -1149,14 +1705,18 @@ void TranslationService::complete_request(
                     item.completions = std::move(waiters->second);
                     state->waiters.erase(waiters);
                 }
+                if (!was_prefetch) ++foreground_count;
             }
-            state->generation.fetch_add(
-                static_cast<u64>(completed.size()),
-                std::memory_order_release);
+            if (foreground_count != 0U) {
+                state->generation.fetch_add(
+                    static_cast<u64>(foreground_count),
+                    std::memory_order_release);
+            }
             stored = true;
         } else {
             for (const auto& source : sources) {
                 state->scheduled.erase(source);
+                state->prefetched.erase(source);
                 state->waiters.erase(source);
                 state->retry_after.insert_or_assign(
                     source,

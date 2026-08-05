@@ -200,18 +200,11 @@ final class ProfileTemplateStore: ObservableObject {
             }
         }
 
+        // V8 temporarily promoted every stored 30 FPS template to 60 FPS.
+        // Keep existing choices as-is and never repeat that migration now that
+        // newly created profiles default to 30 FPS again.
         if !defaults.bool(forKey: frameRate60MigrationKey) {
-            var changed = false
-            for index in templates.indices
-                where templates[index].profile.frameRateLimit
-                    == GameProfile.previousMaximumFrameRate {
-                templates[index].profile.frameRateLimit = GameProfile.maximumFrameRate
-                changed = true
-            }
             defaults.set(true, forKey: frameRate60MigrationKey)
-            if changed {
-                persist()
-            }
         }
         sort()
     }

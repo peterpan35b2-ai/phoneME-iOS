@@ -603,6 +603,13 @@ Status CanvasRuntime::request_game_flush(vm::ObjectRef canvas,
     if (clipped.has_value()) {
         merge_region((*state)->flush_region, *clipped);
     }
+    // GameCanvas.flushGraphics is a synchronous display operation. Publishing
+    // here preserves frame ordering and lets pacing observe the exact Java
+    // thread that completed the frame. Calls made recursively from a host pump
+    // remain deferred until that pump reaches process_flushes().
+    if (!pumping_ && clipped.has_value()) {
+        return process_flushes();
+    }
     return {};
 }
 

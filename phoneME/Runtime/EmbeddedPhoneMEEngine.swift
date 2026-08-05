@@ -223,19 +223,76 @@ final class EmbeddedPhoneMEEngine: NSObject {
         var usesIdleNativeCadence = false
 
         let frameIntervalNanoseconds: UInt64
-        let activePollIntervalNanoseconds: UInt64
         let idleNativePollIntervalNanoseconds: UInt64 = 100_000_000
         let idleNativePollThreshold: Int
 
+        private let framesPerSecond: UInt64
+        private let wholeFrameIntervalNanoseconds: UInt64
+        private let frameIntervalRemainder: UInt64
+        private var remainderAccumulator: UInt64 = 0
+        private var nextActiveDeadlineNanoseconds: UInt64 = 0
+
         init(framesPerSecond: Int) {
-            let normalizedFrameRate = min(
-                max(framesPerSecond, 1),
-                GameProfile.maximumFrameRate
+            let normalizedFrameRate = GameProfile.resolvedFrameRate(
+                framesPerSecond
             )
-            frameIntervalNanoseconds = 1_000_000_000
+            self.framesPerSecond = UInt64(normalizedFrameRate)
+            wholeFrameIntervalNanoseconds = 1_000_000_000
                 / UInt64(normalizedFrameRate)
-            activePollIntervalNanoseconds = frameIntervalNanoseconds
+            frameIntervalRemainder = 1_000_000_000
+                % UInt64(normalizedFrameRate)
+            frameIntervalNanoseconds = (
+                1_000_000_000 + UInt64(normalizedFrameRate / 2)
+            ) / UInt64(normalizedFrameRate)
             idleNativePollThreshold = max(normalizedFrameRate / 2, 1)
+        }
+
+        var pollLeewayNanoseconds: UInt64 {
+            if usesIdleNativeCadence {
+                return 4_000_000
+            }
+            return min(
+                max(frameIntervalNanoseconds / 32, 100_000),
+                500_000
+            )
+        }
+
+        func nextPollDeadline(after nowNanoseconds: UInt64) -> DispatchTime {
+            if usesIdleNativeCadence {
+                nextActiveDeadlineNanoseconds = 0
+                remainderAccumulator = 0
+                return DispatchTime(
+                    uptimeNanoseconds: nowNanoseconds
+                        + idleNativePollIntervalNanoseconds
+                )
+            }
+
+            if nextActiveDeadlineNanoseconds == 0 {
+                nextActiveDeadlineNanoseconds = nowNanoseconds
+            }
+            advanceActiveDeadline()
+
+            // A delayed callback must never trigger a burst of catch-up pumps.
+            // Re-anchor one frame ahead of wall time instead; Java clocks and
+            // Timer/Thread.sleep continue to observe real elapsed time only.
+            if nextActiveDeadlineNanoseconds <= nowNanoseconds {
+                nextActiveDeadlineNanoseconds = nowNanoseconds
+                remainderAccumulator = 0
+                advanceActiveDeadline()
+            }
+
+            return DispatchTime(
+                uptimeNanoseconds: nextActiveDeadlineNanoseconds
+            )
+        }
+
+        private func advanceActiveDeadline() {
+            nextActiveDeadlineNanoseconds += wholeFrameIntervalNanoseconds
+            remainderAccumulator += frameIntervalRemainder
+            if remainderAccumulator >= framesPerSecond {
+                nextActiveDeadlineNanoseconds += 1
+                remainderAccumulator -= framesPerSecond
+            }
         }
     }
 
@@ -341,9 +398,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
     private var launchIdentifier = UUID()
     private let continuousInputBuffer = ContinuousInputBuffer()
     private var renderRequestBuffer = RenderRequestBuffer()
-    private var framePollingFramesPerSecond = GameProfile.maximumFrameRate
+    private var framePollingFramesPerSecond = GameProfile.defaultFrameRate
     private var fpsFrameCount = 0
-    private var fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+    private var fpsMeasurementStartNanoseconds = DispatchTime.now()
+        .uptimeNanoseconds
 
     override init() {
         super.init()
@@ -365,9 +423,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
         screenWidth: Int,
         screenHeight: Int,
         frameRateLimit: Int,
+        framePacingMode: GameProfile.FramePacingMode,
+        heapSizeMegabytes: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
         autoTranslateToVietnamese: Bool,
+        translationProvider: TranslationProvider,
+        translationSourceLanguage: TranslationSourceLanguage,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -385,18 +447,19 @@ final class EmbeddedPhoneMEEngine: NSObject {
         // an in-flight suspend request or framebuffer operation.
         clearCurrentRuntime()
 
-        let requestedFPS = frameRateLimit > 0
-            ? min(
-                max(frameRateLimit, 1),
-                GameProfile.maximumFrameRate
-            )
-            : GameProfile.maximumFrameRate
+        let requestedFPS = GameProfile.resolvedFrameRate(
+            frameRateLimit,
+            mode: framePacingMode
+        )
+        let requestedHeapSizeMegabytes =
+            GameProfile.resolvedHeapSizeMegabytes(heapSizeMegabytes)
         // Native input wakes the MIDP select loop directly, so the host bridge
         // does not need a 120 Hz polling floor. Framebuffer delivery and active
         // LCDUI synchronization follow the profile cadence up to 60 FPS without
         // changing the MIDlet's own timing or game-loop speed.
         framePollingFramesPerSecond = requestedFPS
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
         setState(.starting)
 
         // Frame reads always run outside the main thread. These legacy fields
@@ -435,7 +498,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 let translationResult = loadedAPI.configureTranslation(
                     createdRuntime,
-                    enabled: autoTranslateToVietnamese
+                    enabled: autoTranslateToVietnamese,
+                    provider: translationProvider,
+                    sourceLanguage: translationSourceLanguage
                 )
                 guard translationResult == 0 else {
                     let error = loadedAPI.failure(
@@ -459,6 +524,35 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 guard keymapResult == 0 else {
                     let error = loadedAPI.failure(
                         status: keymapResult,
+                        runtime: createdRuntime
+                    )
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw error
+                }
+
+                let frameRateResult = loadedAPI.configureApplicationFramePacing(
+                    createdRuntime,
+                    appID: 1,
+                    framesPerSecond: requestedFPS,
+                    mode: framePacingMode
+                )
+                guard frameRateResult == 0 else {
+                    let error = loadedAPI.failure(
+                        status: frameRateResult,
+                        runtime: createdRuntime
+                    )
+                    loadedAPI.destroyRuntime(createdRuntime)
+                    throw error
+                }
+
+                let heapResult = loadedAPI.configureApplicationHeap(
+                    createdRuntime,
+                    appID: 1,
+                    heapMegabytes: requestedHeapSizeMegabytes
+                )
+                guard heapResult == 0 else {
+                    let error = loadedAPI.failure(
+                        status: heapResult,
                         runtime: createdRuntime
                     )
                     loadedAPI.destroyRuntime(createdRuntime)
@@ -767,9 +861,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
         screenWidth: Int,
         screenHeight: Int,
         frameRateLimit: Int,
+        framePacingMode: GameProfile.FramePacingMode,
+        heapSizeMegabytes: Int,
         immediateProcessing: Bool,
         parallelScreenRedrawing: Bool,
         autoTranslateToVietnamese: Bool,
+        translationProvider: TranslationProvider,
+        translationSourceLanguage: TranslationSourceLanguage,
         keyUp: Int32,
         keyDown: Int32,
         keyLeft: Int32,
@@ -778,11 +876,15 @@ final class EmbeddedPhoneMEEngine: NSObject {
         keySoftLeft: Int32,
         keySoftRight: Int32
     ) {
-        let requestedFPS = frameRateLimit > 0
-            ? min(max(frameRateLimit, 1), GameProfile.maximumFrameRate)
-            : GameProfile.maximumFrameRate
+        let requestedFPS = GameProfile.resolvedFrameRate(
+            frameRateLimit,
+            mode: framePacingMode
+        )
+        let requestedHeapSizeMegabytes =
+            GameProfile.resolvedHeapSizeMegabytes(heapSizeMegabytes)
         framePollingFramesPerSecond = requestedFPS
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
         _ = immediateProcessing
         _ = parallelScreenRedrawing
 
@@ -876,7 +978,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 let translationResult = loadedAPI.configureTranslation(
                     createdRuntime,
-                    enabled: autoTranslateToVietnamese
+                    enabled: autoTranslateToVietnamese,
+                    provider: translationProvider,
+                    sourceLanguage: translationSourceLanguage
                 )
                 guard translationResult == 0 else {
                     throw loadedAPI.failure(
@@ -900,6 +1004,36 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         status: keymapResult,
                         runtime: createdRuntime
                     )
+                }
+
+                let configureFramePacing: (Int32) throws -> Void = { appID in
+                    let result = loadedAPI.configureApplicationFramePacing(
+                        createdRuntime,
+                        appID: appID,
+                        framesPerSecond: requestedFPS,
+                        mode: framePacingMode
+                    )
+                    guard result == 0 else {
+                        throw loadedAPI.failure(
+                            status: result,
+                            runtime: createdRuntime,
+                            appID: appID
+                        )
+                    }
+                }
+                let configureHeap: (Int32) throws -> Void = { appID in
+                    let result = loadedAPI.configureApplicationHeap(
+                        createdRuntime,
+                        appID: appID,
+                        heapMegabytes: requestedHeapSizeMegabytes
+                    )
+                    guard result == 0 else {
+                        throw loadedAPI.failure(
+                            status: result,
+                            runtime: createdRuntime,
+                            appID: appID
+                        )
+                    }
                 }
 
                 let appID: Int32
@@ -935,6 +1069,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         appID = replacementAppID
                         context.appIDs[gameID] = replacementAppID
                         context.gameIDsByAppID[replacementAppID] = gameID
+                        try configureFramePacing(replacementAppID)
+                        try configureHeap(replacementAppID)
                         let result = loadedAPI.startMidlet(
                             createdRuntime,
                             suiteID: resolvedSuiteID,
@@ -954,6 +1090,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                         }
                     } else {
                         appID = existingAppID
+                        try configureFramePacing(existingAppID)
                         guard try Self.resumeApplicationIfNeeded(
                             api: loadedAPI,
                             runtime: createdRuntime,
@@ -980,6 +1117,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     appID = newAppID
                     context.appIDs[gameID] = newAppID
                     context.gameIDsByAppID[newAppID] = gameID
+                    try configureFramePacing(newAppID)
+                    try configureHeap(newAppID)
                     let result = loadedAPI.startMidlet(
                         createdRuntime,
                         suiteID: resolvedSuiteID,
@@ -1071,6 +1210,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
     func setApplicationTranslation(
         gameID: UUID,
         enabled: Bool,
+        provider: TranslationProvider,
+        sourceLanguage: TranslationSourceLanguage,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         let context = runtimeContext
@@ -1082,7 +1223,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 let status = loadedAPI.configureApplicationTranslation(
                     createdRuntime,
                     appID: appID,
-                    enabled: enabled
+                    enabled: enabled,
+                    provider: provider,
+                    sourceLanguage: sourceLanguage
                 )
                 result = status == 0
                     ? .success(())
@@ -1097,6 +1240,77 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 result = .success(())
             }
             DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    func setApplicationFramePacing(
+        gameID: UUID,
+        framesPerSecond: Int,
+        mode: GameProfile.FramePacingMode,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let requestedFPS = GameProfile.resolvedFrameRate(
+            framesPerSecond,
+            mode: mode
+        )
+        let context = runtimeContext
+        runtimeQueue.async { [weak self] in
+            let result: Result<Void, Error>
+            if let loadedAPI = context.api,
+               let createdRuntime = context.runtime,
+               let appID = context.appIDs[gameID] {
+                let status = loadedAPI.configureApplicationFramePacing(
+                    createdRuntime,
+                    appID: appID,
+                    framesPerSecond: requestedFPS,
+                    mode: mode
+                )
+                result = status == 0
+                    ? .success(())
+                    : .failure(loadedAPI.failure(
+                        status: status,
+                        runtime: createdRuntime,
+                        appID: appID
+                    ))
+            } else {
+                // The profile is still persisted by the caller and is applied
+                // automatically when the MIDlet starts next time.
+                result = .success(())
+            }
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    completion(result)
+                    return
+                }
+                if case .success = result,
+                   self.foregroundGameID == gameID,
+                   let api = self.api,
+                   let runtime = self.runtime,
+                   let appID = self.foregroundAppID {
+                    self.framePollingFramesPerSecond = requestedFPS
+                    self.fpsFrameCount = 0
+                    self.fpsMeasurementStartNanoseconds = DispatchTime.now()
+                        .uptimeNanoseconds
+                    // Invalidate callbacks from the previous cadence. Without
+                    // a new token, a cancelled timer callback could reschedule
+                    // the replacement timer using its old PollContext.
+                    let pollingLaunchIdentifier = UUID()
+                    self.launchIdentifier = pollingLaunchIdentifier
+                    self.renderRequestBuffer = RenderRequestBuffer()
+                    self.startPolling(
+                        api: api,
+                        runtime: runtime,
+                        launchIdentifier: pollingLaunchIdentifier,
+                        gameID: gameID,
+                        appID: appID
+                    )
+                    if !self.shouldRunInForeground {
+                        self.enterBackground()
+                    }
+                }
                 completion(result)
             }
         }
@@ -1466,7 +1680,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
-    func stop() {
+    func stop(
+        completion: (@MainActor @Sendable () -> Void)? = nil
+    ) {
         let currentAPI = api
         let currentRuntime = runtime
         let needsResume = runtimeIsSuspended
@@ -1478,6 +1694,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         setState(.stopped)
 
         guard let currentAPI, let currentRuntime else {
+            completion?()
             return
         }
 
@@ -1493,6 +1710,11 @@ final class EmbeddedPhoneMEEngine: NSObject {
             }
             currentAPI.stop(currentRuntime)
             currentAPI.destroyRuntime(currentRuntime)
+            if let completion {
+                DispatchQueue.main.async {
+                    completion()
+                }
+            }
         }
     }
 
@@ -1635,7 +1857,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
             pollTimerIsSuspended = true
         }
         fpsFrameCount = 0
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
         onFPSChange?(0)
     }
 
@@ -1647,7 +1870,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
             pollTimer.resume()
             pollTimerIsSuspended = false
         }
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
     }
 
     func sendKey(_ key: J2MEKey, pressed: Bool) {
@@ -1847,26 +2071,27 @@ final class EmbeddedPhoneMEEngine: NSObject {
         let renderQueue = renderQueue
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
 
-        // Poll at the capped Canvas cadence. Static native Form/List/Alert
-        // screens back off to 10 Hz after half a second without bridge events;
-        // key and pointer input still wake the VM immediately through the native
-        // event pipe and do not depend on this timer.
+        // Use one monotonic deadline per poll instead of a repeating source.
+        // Delayed callbacks are re-anchored one frame ahead and never replayed
+        // in a burst, which keeps render cadence independent from Java time.
         timer.schedule(
             deadline: .now(),
-            repeating: .nanoseconds(
-                Int(context.activePollIntervalNanoseconds)
-            ),
-            leeway: .nanoseconds(
-                Int(min(
-                    max(context.activePollIntervalNanoseconds / 8, 500_000),
-                    2_000_000
-                ))
-            )
+            leeway: .nanoseconds(Int(context.pollLeewayNanoseconds))
         )
         timer.setEventHandler { [weak self] in
             guard !context.didReportRuntimeExit else { return }
+            var shouldScheduleNextPoll = true
+            defer {
+                if shouldScheduleNextPoll {
+                    self?.scheduleNextPoll(
+                        context: context,
+                        launchIdentifier: launchIdentifier
+                    )
+                }
+            }
 
             guard api.isRunning(runtime) else {
+                shouldScheduleNextPoll = false
                 context.didReportRuntimeExit = true
                 let exitCode = api.lastExitCode(runtime)
                 let errorMessage = api.lastErrorMessage(runtime)
@@ -1891,6 +2116,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
             if let gameID, let appID {
                 let applicationState = api.midletState(runtime, appID: appID)
                 if applicationState == .destroyed || applicationState == .error {
+                    shouldScheduleNextPoll = false
                     context.didReportRuntimeExit = true
                     let errorMessage = applicationState == .error
                         ? api.midletErrorMessage(runtime, appID: appID)
@@ -1966,36 +2192,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
                    context.consecutiveIdleNativePolls
                     >= context.idleNativePollThreshold {
                     context.usesIdleNativeCadence = true
-                    timer.schedule(
-                        deadline: .now() + .nanoseconds(
-                            Int(context.idleNativePollIntervalNanoseconds)
-                        ),
-                        repeating: .nanoseconds(
-                            Int(context.idleNativePollIntervalNanoseconds)
-                        ),
-                        leeway: .milliseconds(4)
-                    )
                 }
             } else {
                 context.consecutiveIdleNativePolls = 0
-                if context.usesIdleNativeCadence {
-                    context.usesIdleNativeCadence = false
-                    timer.schedule(
-                        deadline: .now(),
-                        repeating: .nanoseconds(
-                            Int(context.activePollIntervalNanoseconds)
-                        ),
-                        leeway: .nanoseconds(
-                            Int(min(
-                                max(
-                                    context.activePollIntervalNanoseconds / 8,
-                                    500_000
-                                ),
-                                2_000_000
-                            ))
-                        )
-                    )
-                }
+                context.usesIdleNativeCadence = false
             }
 
             if !lcdUIEvents.isEmpty {
@@ -2011,12 +2211,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 }
             }
 
-            // The DispatchSourceTimer is already scheduled at the requested
-            // Canvas cadence. Do not apply a second deadline based on the
-            // callback's actual arrival time: a late timer callback followed by
-            // an on-time callback would otherwise drop the latter and produce
-            // alternating 16/33 ms presentation gaps. RenderRequestBuffer
-            // already coalesces ticks safely when frame copying is still busy.
+            // One host tick can request at most one frame. RenderRequestBuffer
+            // may replace an obsolete pending copy with the newest generation,
+            // but it never executes extra game updates to catch up.
             let wantsFrame = resolvedVisibleScreen?.usesNativeLCDUI != true
 
             guard !imageComponentIDs.isEmpty || wantsFrame else {
@@ -2080,17 +2277,44 @@ final class EmbeddedPhoneMEEngine: NSObject {
         timer.resume()
     }
 
+    private func scheduleNextPoll(
+        context: PollContext,
+        launchIdentifier: UUID
+    ) {
+        guard
+            self.launchIdentifier == launchIdentifier,
+            let pollTimer
+        else {
+            return
+        }
+
+        let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+        pollTimer.schedule(
+            deadline: context.nextPollDeadline(after: nowNanoseconds),
+            leeway: .nanoseconds(Int(context.pollLeewayNanoseconds))
+        )
+    }
+
     private func deliver(_ frame: (image: CGImage, generation: UInt64)) {
         lastFrameGeneration = frame.generation
         onFrame?(frame.image)
 
         fpsFrameCount += 1
-        let now = Date.timeIntervalSinceReferenceDate
-        let elapsed = now - fpsMeasurementStart
-        if elapsed >= 0.5 {
-            onFPSChange?(Double(fpsFrameCount) / elapsed)
+        let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+        guard nowNanoseconds >= fpsMeasurementStartNanoseconds else {
             fpsFrameCount = 0
-            fpsMeasurementStart = now
+            fpsMeasurementStartNanoseconds = nowNanoseconds
+            return
+        }
+
+        let elapsedNanoseconds = nowNanoseconds
+            - fpsMeasurementStartNanoseconds
+        if elapsedNanoseconds >= 500_000_000 {
+            let measuredFPS = Double(fpsFrameCount) * 1_000_000_000
+                / Double(elapsedNanoseconds)
+            onFPSChange?(measuredFPS)
+            fpsFrameCount = 0
+            fpsMeasurementStartNanoseconds = nowNanoseconds
         }
     }
 
@@ -2215,7 +2439,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
         continuousInputBuffer.reset()
         renderRequestBuffer = RenderRequestBuffer()
         fpsFrameCount = 0
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
         onFPSChange?(0)
     }
 
@@ -2241,7 +2466,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
         // retains the previous buffer and is rejected by launchIdentifier.
         renderRequestBuffer = RenderRequestBuffer()
         fpsFrameCount = 0
-        fpsMeasurementStart = Date.timeIntervalSinceReferenceDate
+        fpsMeasurementStartNanoseconds = DispatchTime.now()
+            .uptimeNanoseconds
         onFPSChange?(0)
         runtime = nil
         api = nil

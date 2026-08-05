@@ -9,6 +9,7 @@
 #include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "phoneme/classfile/ClassFile.hpp"
 
@@ -380,14 +381,20 @@ void append_permissions(std::vector<std::string>& output,
     return value;
 }
 
-[[nodiscard]] Result<std::array<u32, 3>> parse_version(std::string_view version) {
-    std::array<u32, 3> parts {};
-    usize part_index = 0;
-    usize offset = 0;
+constexpr usize kMaximumVersionComponents = 64U;
+
+[[nodiscard]] Result<std::vector<u32>> parse_version(
+    std::string_view version) {
+    std::vector<u32> parts;
+    parts.reserve(std::min<usize>(
+        static_cast<usize>(std::count(version.begin(), version.end(), '.')) + 1U,
+        kMaximumVersionComponents));
+
+    usize offset = 0U;
     while (offset <= version.size()) {
-        if (part_index >= parts.size()) {
+        if (parts.size() >= kMaximumVersionComponents) {
             return fail(ErrorCode::invalid_argument,
-                        "MIDlet-Version must contain at most three numeric components");
+                        "MIDlet-Version contains too many numeric components");
         }
         const usize dot = version.find('.', offset);
         const usize end = dot == std::string_view::npos ? version.size() : dot;
@@ -396,22 +403,27 @@ void append_permissions(std::vector<std::string>& output,
             return fail(ErrorCode::invalid_argument,
                         "MIDlet-Version contains an empty component");
         }
-        u32 value = 0;
+
+        u32 value = 0U;
         const auto [parsed_end, error] = std::from_chars(
             part.data(), part.data() + part.size(), value);
-        if (error != std::errc {} || parsed_end != part.data() + part.size() ||
-            value > 9999U) {
+        if (error != std::errc {} || parsed_end != part.data() + part.size()) {
             return fail(ErrorCode::invalid_argument,
                         "MIDlet-Version contains an invalid numeric component");
         }
-        parts[part_index++] = value;
+        parts.push_back(value);
+
         if (dot == std::string_view::npos) {
             break;
         }
         offset = dot + 1U;
     }
-    if (part_index == 0U) {
+
+    if (parts.empty()) {
         return fail(ErrorCode::invalid_argument, "MIDlet-Version is empty");
+    }
+    while (parts.size() > 1U && parts.back() == 0U) {
+        parts.pop_back();
     }
     return parts;
 }
@@ -676,8 +688,17 @@ Result<i32> SuiteInstaller::compare_versions(std::string_view left,
     auto right_parts = parse_version(right);
     if (!left_parts) return std::unexpected(left_parts.error());
     if (!right_parts) return std::unexpected(right_parts.error());
-    if (*left_parts < *right_parts) return -1;
-    if (*left_parts > *right_parts) return 1;
+
+    const usize component_count =
+        std::max(left_parts->size(), right_parts->size());
+    for (usize index = 0U; index < component_count; ++index) {
+        const u32 left_value =
+            index < left_parts->size() ? (*left_parts)[index] : 0U;
+        const u32 right_value =
+            index < right_parts->size() ? (*right_parts)[index] : 0U;
+        if (left_value < right_value) return -1;
+        if (left_value > right_value) return 1;
+    }
     return 0;
 }
 

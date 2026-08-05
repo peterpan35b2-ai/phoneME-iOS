@@ -1082,6 +1082,146 @@ void test_posix_socket_workers(
     NativeConnection client = std::move(**client_result);
     NativeConnection accepted = std::move(**accepted_result);
 
+    const auto get_delay = [&](const char* description) {
+        AsyncResult<phoneme::i32> wait;
+        auto operation = adapter->get_socket_option(
+            client.handle,
+            phoneme::network::SocketOption::delay,
+            [&wait](phoneme::Result<phoneme::i32> result) {
+                wait.complete(std::move(result));
+            });
+        require(operation.has_value() && wait.wait_for(), description);
+        auto result = wait.take();
+        require(result.has_value() && result->has_value(), description);
+        return **result;
+    };
+    const auto set_delay = [&](phoneme::i32 value, const char* description) {
+        AsyncResult<bool> wait;
+        auto operation = adapter->set_socket_option(
+            client.handle,
+            phoneme::network::SocketOption::delay,
+            value,
+            [&wait](phoneme::Result<bool> result) {
+                wait.complete(std::move(result));
+            });
+        require(operation.has_value() && wait.wait_for(), description);
+        auto result = wait.take();
+        require(result.has_value() && result->has_value() && **result,
+                description);
+    };
+
+    require(get_delay("read default Java ME DELAY option") == 0,
+            "connected sockets disable small-write delay by default");
+    set_delay(1, "enable Java ME small-write delay");
+    require(get_delay("read enabled Java ME DELAY option") == 1,
+            "DELAY=1 enables Nagle through inverse TCP_NODELAY mapping");
+    set_delay(0, "disable Java ME small-write delay");
+    require(get_delay("read disabled Java ME DELAY option") == 0,
+            "DELAY=0 restores low-latency socket writes");
+
+    constexpr phoneme::usize kLargePayloadSize = 64U * 1024U;
+    std::vector<phoneme::u8> large_payload(kLargePayloadSize);
+    for (phoneme::usize index = 0; index < large_payload.size(); ++index) {
+        large_payload[index] = static_cast<phoneme::u8>(
+            (index * 37U + 11U) & 0xFFU);
+    }
+    AsyncResult<phoneme::usize> large_write_wait;
+    auto large_write = adapter->write(
+        client.handle, large_payload, 5'000,
+        [&large_write_wait](phoneme::Result<phoneme::usize> result) {
+            large_write_wait.complete(std::move(result));
+        });
+    require(large_write.has_value() && large_write_wait.wait_for(),
+            "queue large loopback socket payload");
+    auto large_write_result = large_write_wait.take();
+    require(large_write_result.has_value() &&
+                large_write_result->has_value() &&
+                **large_write_result == large_payload.size(),
+            "large loopback socket payload is fully written");
+
+    phoneme::usize queued_large_bytes = 0U;
+    for (int attempt = 0; attempt < 100 &&
+         queued_large_bytes < large_payload.size(); ++attempt) {
+        AsyncResult<phoneme::usize> available_wait;
+        auto available_operation = adapter->available(
+            accepted.handle,
+            [&available_wait](phoneme::Result<phoneme::usize> result) {
+                available_wait.complete(std::move(result));
+            });
+        require(available_operation.has_value() && available_wait.wait_for(),
+                "query queued large socket payload");
+        auto available_result = available_wait.take();
+        require(available_result.has_value() &&
+                    available_result->has_value(),
+                "large socket payload availability succeeds");
+        queued_large_bytes = **available_result;
+        if (queued_large_bytes < large_payload.size()) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+    require(queued_large_bytes >= large_payload.size(),
+            "large socket payload is queued before the read");
+
+    AsyncResult<std::vector<phoneme::u8>> large_read_wait;
+    auto large_read = adapter->read(
+        accepted.handle, large_payload.size(), 5'000,
+        [&large_read_wait](
+            phoneme::Result<std::vector<phoneme::u8>> result) {
+            large_read_wait.complete(std::move(result));
+        });
+    require(large_read.has_value() && large_read_wait.wait_for(),
+            "read large socket payload in one Java-sized operation");
+    auto large_read_result = large_read_wait.take();
+    require(large_read_result.has_value() &&
+                large_read_result->has_value() &&
+                **large_read_result == large_payload,
+            "socket reads are not capped at 16 KiB");
+
+    const phoneme::usize workers_before_byte_handoffs =
+        phoneme::network::detail::posix_network_worker_count_for_tests(
+            adapter);
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        AsyncResult<std::vector<phoneme::u8>> byte_read_wait;
+        auto byte_read = adapter->read(
+            accepted.handle, 1U, 5'000,
+            [&byte_read_wait](
+                phoneme::Result<std::vector<phoneme::u8>> result) {
+                byte_read_wait.complete(std::move(result));
+            });
+        require(byte_read.has_value(),
+                "queue sequential DataInputStream-style byte read");
+
+        const phoneme::u8 expected = static_cast<phoneme::u8>(iteration);
+        AsyncResult<phoneme::usize> byte_write_wait;
+        auto byte_write = adapter->write(
+            client.handle, std::vector<phoneme::u8> {expected}, 5'000,
+            [&byte_write_wait](phoneme::Result<phoneme::usize> result) {
+                byte_write_wait.complete(std::move(result));
+            });
+        require(byte_write.has_value() && byte_write_wait.wait_for(),
+                "write sequential DataInputStream-style byte");
+        require(byte_read_wait.wait_for(),
+                "read sequential DataInputStream-style byte");
+        auto byte_write_result = byte_write_wait.take();
+        auto byte_read_result = byte_read_wait.take();
+        require(byte_write_result.has_value() &&
+                    byte_write_result->has_value() &&
+                    **byte_write_result == 1U,
+                "sequential byte write completes");
+        require(byte_read_result.has_value() &&
+                    byte_read_result->has_value() &&
+                    (*byte_read_result)->size() == 1U &&
+                    (*byte_read_result)->front() == expected,
+                "sequential byte read preserves payload");
+    }
+    std::this_thread::sleep_for(20ms);
+    const phoneme::usize workers_after_byte_handoffs =
+        phoneme::network::detail::posix_network_worker_count_for_tests(
+            adapter);
+    require(workers_after_byte_handoffs <=
+                workers_before_byte_handoffs + 2U,
+            "sequential read callbacks reuse workers instead of growing the pool");
+
     AsyncResult<std::vector<phoneme::u8>> serialized_read_wait;
     auto serialized_read = adapter->read(
         accepted.handle, 16U, 5'000,

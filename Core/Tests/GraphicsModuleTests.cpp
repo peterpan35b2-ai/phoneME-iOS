@@ -273,6 +273,87 @@ void test_clip_translate_alpha_and_dirty_region() {
             "drawRGB ignores source alpha when processAlpha is false");
     require(alpha_image->pixel(1, 0).value() == 0xFFFF0000U,
             "drawRGB processAlpha=false writes opaque RGB");
+
+    auto zero_stride_image = Image::create_mutable(2, 2);
+    require(zero_stride_image.has_value(),
+            "create zero-scanlength compatibility target");
+    zero_stride_image->clear_dirty_region();
+    phoneme::graphics::GraphicsContext zero_stride_context;
+    zero_stride_context.target_key = 3U;
+    zero_stride_context.clip =
+        phoneme::graphics::target_bounds(*zero_stride_image);
+    constexpr std::array<Pixel, 2> zero_stride_source {
+        0xFFFF0000U, 0xFF00FF00U,
+    };
+    require(phoneme::graphics::draw_rgb(
+                *zero_stride_image,
+                zero_stride_context,
+                zero_stride_source,
+                0,
+                0,
+                0,
+                0,
+                2,
+                2,
+                true)
+                .has_value(),
+            "drawRGB accepts phoneME zero scanlength as a no-op");
+    require(!zero_stride_image->has_dirty_region(),
+            "zero-scanlength drawRGB leaves the target unchanged");
+
+    constexpr std::array<Pixel, 1> undersized_zero_stride_source {
+        0xFFFFFFFFU,
+    };
+    const auto out_of_bounds = phoneme::graphics::draw_rgb(
+        *zero_stride_image,
+        zero_stride_context,
+        undersized_zero_stride_source,
+        0,
+        0,
+        0,
+        0,
+        2,
+        2,
+        true);
+    require(!out_of_bounds.has_value() &&
+                out_of_bounds.error().code == phoneme::ErrorCode::out_of_range,
+            "zero-scanlength drawRGB still validates the source slice");
+
+    constexpr std::array<Pixel, 3> negative_dimension_source {
+        0xFFFF0000U, 0xFF00FF00U, 0xFF0000FFU,
+    };
+    require(phoneme::graphics::draw_rgb(
+                *zero_stride_image,
+                zero_stride_context,
+                negative_dimension_source,
+                2,
+                1,
+                0,
+                0,
+                -1,
+                1,
+                true)
+                .has_value(),
+            "phoneME drawRGB accepts a bounds-valid negative-width no-op");
+    require(!zero_stride_image->has_dirty_region(),
+            "negative-width drawRGB leaves the target unchanged");
+
+    constexpr std::array<Pixel, 0> empty_source {};
+    const auto zero_size_out_of_bounds = phoneme::graphics::draw_rgb(
+        *zero_stride_image,
+        zero_stride_context,
+        empty_source,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        true);
+    require(!zero_size_out_of_bounds.has_value() &&
+                zero_size_out_of_bounds.error().code ==
+                    phoneme::ErrorCode::out_of_range,
+            "phoneME drawRGB validates even a zero-size operation first");
 }
 
 void test_anchor_matrix_and_transform() {
@@ -379,6 +460,55 @@ void test_anchor_matrix_and_transform() {
     require(target->pixel(2, 2).value() == 0xFFFF0000U &&
                 target->pixel(3, 3).value() == 0xFFFFFFFFU,
             "anchor places image relative to destination point");
+
+    constexpr std::array<Pixel, 6> non_square_pixels {
+        0xFFFF0000U, 0xFF00FF00U,
+        0xFF0000FFU, 0xFFFFFFFFU,
+        0xFFFFFF00U, 0xFFFF00FFU,
+    };
+    auto non_square_source = Image::create_immutable(
+        2, 3, non_square_pixels);
+    auto non_square_target = Image::create_mutable(8, 8);
+    require(non_square_source.has_value() && non_square_target.has_value(),
+            "create non-square drawRegion anchor fixtures");
+    phoneme::graphics::GraphicsContext non_square_context;
+    non_square_context.clip =
+        phoneme::graphics::target_bounds(*non_square_target);
+    require(phoneme::graphics::draw_region(
+                *non_square_target,
+                non_square_context,
+                *non_square_source,
+                0,
+                0,
+                2,
+                3,
+                phoneme::graphics::Transform::rotate_90,
+                6,
+                6,
+                phoneme::graphics::anchor_right |
+                    phoneme::graphics::anchor_bottom)
+                .has_value(),
+            "drawRegion rotates a non-square phoneME anchor fixture");
+    require(non_square_target->pixel(4, 3).value() == 0xFFFFFF00U,
+            "phoneME anchors rotated regions using source dimensions");
+    require(non_square_target->pixel(3, 4).value() == 0xFFFFFFFFU,
+            "drawRegion does not anchor using transformed dimensions");
+
+    require(phoneme::graphics::draw_region(
+                *non_square_target,
+                non_square_context,
+                *non_square_source,
+                2,
+                3,
+                0,
+                0,
+                phoneme::graphics::Transform::none,
+                0,
+                0,
+                phoneme::graphics::anchor_left |
+                    phoneme::graphics::anchor_top)
+                .has_value(),
+            "phoneME accepts an in-bounds zero-size drawRegion no-op");
 }
 
 void test_primitive_golden_and_overflow_clipping() {
@@ -741,22 +871,28 @@ void test_font_unicode_and_measurement() {
                   "phoneME logical font exposes its 14-pixel cell height");
     require_equal(font->baseline(), 11,
                   "phoneME font.bin exposes its 11-pixel baseline");
-    require_equal(font->char_width(U'A'), 9,
-                  "phoneME logical metrics use a fixed 9-pixel cell");
-    require_equal(font->chars_width(text), 18,
-                  "phoneME style metadata does not change logical advance");
+    const i32 width_a = font->char_width(U'A');
+    const i32 width_b = font->char_width(U'B');
+    require(width_a > 0 && width_b > 0 &&
+                font->chars_width(text) == width_a + width_b,
+            "phoneME bitmap metrics preserve proportional glyph advances");
 
     auto unicode_font = phoneme::graphics::Font::create(
         static_cast<i32>(phoneme::graphics::FontFace::system),
         phoneme::graphics::style_plain,
         static_cast<i32>(phoneme::graphics::FontSize::medium));
     require(unicode_font.has_value(), "create Unicode system font");
-    require_equal(unicode_font->char_width(U'I'), 9,
-                  "phoneME logical metrics keep narrow glyphs in one cell");
-    require_equal(unicode_font->char_width(U'W'), 9,
-                  "phoneME logical metrics keep wide glyphs in one cell");
-    require_equal(unicode_font->char_width(U'\U0001F642'), 18,
-                  "supplementary glyphs occupy two UTF-16 cells");
+    const i32 narrow_width = unicode_font->char_width(U'I');
+    const i32 wide_width = unicode_font->char_width(U'W');
+    require(narrow_width > 0 && wide_width > narrow_width,
+            "phoneME bitmap metrics do not spread narrow glyphs into fixed cells");
+    constexpr std::array<char32_t, 4> narrow_text {U'i', U'i', U'i', U'i'};
+    constexpr std::array<char32_t, 4> wide_text {U'W', U'W', U'W', U'W'};
+    require(unicode_font->chars_width(narrow_text) <
+                unicode_font->chars_width(wide_text),
+            "Canvas text keeps proportional spacing across complete strings");
+    require(unicode_font->char_width(U'\U0001F642') > 0,
+            "supplementary glyph fallback exposes a positive advance");
     constexpr std::u32string_view unicode_text = U"Tiếng Việt 日本語 \U0001F642";
     const std::span<const char32_t> characters(unicode_text.data(),
                                                unicode_text.size());

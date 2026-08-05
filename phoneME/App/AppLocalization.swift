@@ -22,6 +22,13 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    var systemImage: String {
+        switch self {
+        case .vietnamese: return "globe.asia.australia.fill"
+        case .english: return "textformat.abc"
+        }
+    }
+
     static var selected: AppLanguage {
         guard let rawValue = UserDefaults.standard.string(forKey: preferenceKey),
               let language = AppLanguage(rawValue: rawValue) else {

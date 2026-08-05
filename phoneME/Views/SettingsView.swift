@@ -15,6 +15,14 @@ enum AppTheme: String, CaseIterable, Identifiable {
         }
     }
 
+    var systemImage: String {
+        switch self {
+        case .light: return "sun.max"
+        case .dark: return "moon"
+        case .system: return "circle.lefthalf.filled"
+        }
+    }
+
     var colorScheme: ColorScheme? {
         switch self {
         case .light: return .light
@@ -35,6 +43,8 @@ struct SettingsView: View {
     @AppStorage(AppLanguage.preferenceKey) private var appLanguage =
         AppLanguage.defaultLanguage.rawValue
     @AppStorage("appTheme") private var appTheme = AppTheme.system.rawValue
+    @AppStorage(TranslationProvider.preferenceKey)
+    private var translationProvider = TranslationProvider.defaultProvider.rawValue
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
     @AppStorage("keepScreenOn") private var keepScreenOn = false
@@ -45,7 +55,7 @@ struct SettingsView: View {
             Section {
                 Picker("Language", selection: $appLanguage) {
                     ForEach(AppLanguage.allCases) { language in
-                        Text(language.title)
+                        Label(language.title, systemImage: language.systemImage)
                             .tag(language.rawValue)
                     }
                 }
@@ -58,7 +68,7 @@ struct SettingsView: View {
             Section {
                 Picker("Appearance", selection: $appTheme) {
                     ForEach(AppTheme.allCases) { theme in
-                        Text(theme.title)
+                        Label(theme.title, systemImage: theme.systemImage)
                             .tag(theme.rawValue)
                     }
                 }
@@ -66,6 +76,19 @@ struct SettingsView: View {
                 Text("Appearance")
             } footer: {
                 Text("System follows the appearance selected in iOS Settings.")
+            }
+
+            Section {
+                Picker("Translation service", selection: translationProviderBinding) {
+                    ForEach(TranslationProvider.allCases) { provider in
+                        Label(provider.title, systemImage: provider.systemImage)
+                            .tag(provider.rawValue)
+                    }
+                }
+            } header: {
+                Text("Translation")
+            } footer: {
+                Text("Bing Translator is the default. It uses a web session and may take slightly longer on the first request.")
             }
 
             Section("Player") {
@@ -101,7 +124,7 @@ struct SettingsView: View {
             Section {
                 Picker("Data Storage", selection: storageLocationBinding) {
                     ForEach(PhoneMEStorageLocation.allCases) { location in
-                        Text(location.title)
+                        Label(location.title, systemImage: location.systemImage)
                             .tag(location)
                     }
                 }
@@ -131,6 +154,29 @@ struct SettingsView: View {
         } message: {
             Text(storageErrorMessage ?? "")
         }
+    }
+
+    private var translationProviderBinding: Binding<String> {
+        Binding(
+            get: { translationProvider },
+            set: { rawValue in
+                translationProvider = rawValue
+                guard let provider = TranslationProvider(rawValue: rawValue) else {
+                    return
+                }
+                for application in session.runningApplications.values {
+                    let profile = profiles.profile(for: application.game)
+                    guard profile.isAutoTranslationEnabled else { continue }
+                    session.setAutoTranslationConfiguration(
+                        enabled: true,
+                        sourceLanguage:
+                            profile.effectiveAutoTranslationSourceLanguage,
+                        provider: provider,
+                        for: application.game
+                    ) { _ in }
+                }
+            }
+        )
     }
 
     private var storageLocationBinding: Binding<PhoneMEStorageLocation> {
@@ -236,18 +282,26 @@ struct ProfilesView: View {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
-                        Button("Set as Default") {
+                        Button {
                             templates.setDefault(template)
+                        } label: {
+                            Label("Set as Default", systemImage: "checkmark.circle")
                         }
-                        Button("Edit") {
+                        Button {
                             editingTemplate = template
+                        } label: {
+                            Label("Edit", systemImage: "slider.horizontal.3")
                         }
-                        Button("Rename") {
+                        Button {
                             enteredName = template.name
                             renamingTemplate = template
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
                         }
-                        Button("Delete", role: .destructive) {
+                        Button(role: .destructive) {
                             templates.remove(template)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
                     }
                 }

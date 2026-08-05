@@ -502,6 +502,11 @@ def objective_c_compiler_command() -> tuple[list[str], list[str]]:
     return [compiler], []
 
 
+def compile_time_feature(name: str) -> str:
+    value = os.environ.get(name, "0").strip().casefold()
+    return "1" if value in {"1", "true", "yes", "on"} else "0"
+
+
 def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Path | None, str]:
     build_root = output_root / "harness-build"
     build_root.mkdir(parents=True, exist_ok=True)
@@ -574,6 +579,8 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
         *compiler,
         "-std=c++23",
         *sdk_flags,
+        f"-DPHONEME_ENABLE_VM_PROFILING={compile_time_feature('PHONEME_ENABLE_VM_PROFILING')}",
+        f"-DPHONEME_ENABLE_DECODED_EXECUTION={compile_time_feature('PHONEME_ENABLE_DECODED_EXECUTION')}",
         f"-I{CORE_ROOT / 'include'}",
         "-fno-exceptions",
         "-fno-rtti",
@@ -650,7 +657,12 @@ def add_failure(failures: list[dict[str, str]], kind: str, detail: str) -> None:
     failures.append({"kind": kind, "detail": normalized})
 
 
-def classify_status(execution: Any, observed: Mapping[str, Any], failures: Sequence[Mapping[str, str]]) -> str:
+def classify_status(
+    execution: Any,
+    observed: Mapping[str, Any],
+    failures: Sequence[Mapping[str, str]],
+    require_visual: bool,
+) -> str:
     if execution is None:
         return "STATIC_ONLY"
     if execution.timed_out:
@@ -679,9 +691,17 @@ def classify_status(execution: Any, observed: Mapping[str, Any], failures: Seque
     }
     if any(str(item.get("kind")) in severe for item in failures):
         return "FAILED"
+    if observed.get("stall_suspected") is True:
+        return "STALLED"
+    milestones = set(str(value) for value in observed.get("milestones", []))
+    visual = bool(observed.get("visual_output_observed")) or (
+        int(observed.get("nonzero_frame_bytes", 0) or 0) > 0
+        or "lcdui-screen-shown" in milestones
+    )
+    if require_visual and not visual:
+        return "NO_VISUAL"
     if int(observed.get("frames_produced", 0) or 0) > 0:
         return "STARTED_FRAME"
-    milestones = set(str(value) for value in observed.get("milestones", []))
     if any(value.startswith(("canvas-", "lcdui-", "ui-")) for value in milestones):
         return "STARTED_UI"
     return "STARTED"
@@ -694,6 +714,13 @@ def inspect_target(
     runner: pathlib.Path | None,
     mode: str,
     timeout_ms: int,
+    observe_ms: int,
+    autoplay: bool,
+    input_start_delay_ms: int,
+    input_interval_ms: int,
+    stall_ms: int,
+    heartbeat_ms: int,
+    require_visual: bool,
     width: int,
     height: int,
 ) -> TargetResult:
@@ -722,7 +749,16 @@ def inspect_target(
         item = {
             "id": target.item_id,
             "main_class": target.main_class,
-            "input_sequence": [{"action": "launch"}],
+            "input_sequence": [
+                {"action": "launch"},
+                {
+                    "action": "autoplay" if autoplay else "observe",
+                    "observe_ms": observe_ms,
+                    "input_start_delay_ms": input_start_delay_ms,
+                    "input_interval_ms": input_interval_ms,
+                    "stall_ms": stall_ms,
+                },
+            ],
             "expected": {
                 "install": "success",
                 "exit": "normal",
@@ -735,8 +771,25 @@ def inspect_target(
                 "max_startup_ms": timeout_ms,
             },
         }
+        runner_tokens = [str(runner)]
+        if observe_ms > 0:
+            runner_tokens.extend(["--observe-ms", str(observe_ms)])
+        runner_tokens.extend(
+            [
+                "--autoplay",
+                "1" if autoplay else "0",
+                "--input-start-delay-ms",
+                str(input_start_delay_ms),
+                "--input-interval-ms",
+                str(input_interval_ms),
+                "--stall-ms",
+                str(stall_ms),
+                "--heartbeat-ms",
+                str(heartbeat_ms),
+            ]
+        )
         execution = compat.execute_runner(
-            [str(runner)],
+            runner_tokens,
             item,
             target.jar_path,
             run_dir,
@@ -838,7 +891,82 @@ def inspect_target(
             )
 
     observed = compat.observed_data(execution)
-    status = classify_status(execution, observed, failures)
+    if execution is not None and execution.result:
+        for key in (
+            "frame_changes",
+            "unique_frames",
+            "nonzero_frame_bytes",
+            "ui_event_count",
+            "canvas_event_count",
+            "lcdui_event_count",
+            "screens_shown",
+            "key_presses",
+            "key_events_sent",
+            "lcdui_actions_sent",
+            "heartbeat_count",
+            "last_progress_ms",
+            "longest_idle_ms",
+            "visual_output_observed",
+            "stall_suspected",
+            "final_frame_hash",
+            "last_input_action",
+            "input_actions",
+            "frame_hashes",
+        ):
+            if key in execution.result:
+                observed[key] = execution.result[key]
+
+    milestones = set(str(value) for value in observed.get("milestones", []))
+    if observed.get("stall_suspected") is True:
+        add_failure(
+            failures,
+            "performance/memory failure",
+            "no UI or framebuffer progress for "
+            f"{int(observed.get('longest_idle_ms', 0) or 0)} ms after "
+            f"{int(observed.get('key_presses', 0) or 0)} key presses and "
+            f"{int(observed.get('lcdui_actions_sent', 0) or 0)} LCDUI actions",
+        )
+    if require_visual:
+        visual = bool(observed.get("visual_output_observed")) or (
+            int(observed.get("nonzero_frame_bytes", 0) or 0) > 0
+            or "lcdui-screen-shown" in milestones
+        )
+        if not visual:
+            frames = int(observed.get("frames_produced", 0) or 0)
+            if frames > 0:
+                detail = (
+                    f"only blank framebuffer data after {observe_ms} ms; "
+                    f"frames={frames}, unique={int(observed.get('unique_frames', 0) or 0)}"
+                )
+            else:
+                detail = f"no Canvas frame or native LCDUI screen after {observe_ms} ms"
+            add_failure(failures, "graphics/framebuffer/render failure", detail)
+
+    # A first-run openRecordStore(name, false) is required by MIDP to throw
+    # RecordStoreNotFoundException. Many games catch it, print it for
+    # diagnostics, create the store, and continue normally. Do not turn that
+    # handled console output into a corpus failure when the structured runner
+    # reports no Java exception and the MIDlet remains observable.
+    if execution is not None and execution.result:
+        structured_exception = execution.result.get("java_exception_class")
+        observable = observed.get("app_state") in ("active", "paused") and (
+            int(observed.get("frames_produced", 0) or 0) > 0
+            or any(
+                str(value).startswith(("canvas-", "lcdui-", "ui-"))
+                for value in observed.get("milestones", [])
+            )
+        )
+        if not structured_exception and observable:
+            failures[:] = [
+                failure
+                for failure in failures
+                if not (
+                    failure.get("kind") == "RMS/persistence failure"
+                    and "RecordStoreNotFoundException" in
+                        str(failure.get("detail", ""))
+                )
+            ]
+    status = classify_status(execution, observed, failures, require_visual)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     result = TargetResult(
@@ -921,6 +1049,15 @@ def aggregate_report(
     output_root: pathlib.Path,
     mode: str,
     timeout_ms: int,
+    observe_ms: int,
+    observe_manifest: pathlib.Path | None,
+    observe_overrides: Mapping[str, int],
+    autoplay: bool,
+    input_start_delay_ms: int,
+    input_interval_ms: int,
+    stall_ms: int,
+    heartbeat_ms: int,
+    require_visual: bool,
     jobs: int,
     smoke_limit: int,
     smoke_filters: Sequence[str],
@@ -991,6 +1128,17 @@ def aggregate_report(
             "output_root": str(output_root),
             "mode": mode,
             "timeout_ms": timeout_ms,
+            "observe_ms": observe_ms,
+            "observe_manifest": (
+                str(observe_manifest) if observe_manifest is not None else ""
+            ),
+            "observe_overrides": dict(sorted(observe_overrides.items())),
+            "autoplay": autoplay,
+            "input_start_delay_ms": input_start_delay_ms,
+            "input_interval_ms": input_interval_ms,
+            "stall_ms": stall_ms,
+            "heartbeat_ms": heartbeat_ms,
+            "require_visual": require_visual,
             "jobs": jobs,
             "smoke_limit": smoke_limit,
             "smoke_filters": list(smoke_filters),
@@ -1033,8 +1181,9 @@ def write_markdown_report(report: Mapping[str, Any], path: pathlib.Path) -> None
         "",
         f"Generated: `{report['generated_at']}`  ",
         f"JAR root: `{config['jar_root']}`  ",
-        f"Mode: `{config['mode']}`, timeout: `{config['timeout_ms']} ms`, jobs: `{config['jobs']}`, "
-        f"smoke limit: `{config['smoke_limit'] or 'all'}`  ",
+        f"Mode: `{config['mode']}`, timeout: `{config['timeout_ms']} ms`, observe: `{config['observe_ms']} ms`, jobs: `{config['jobs']}`, "
+        f"autoplay: `{'on' if config['autoplay'] else 'off'}`, require visual: `{'yes' if config['require_visual'] else 'no'}`, "
+        f"stall threshold: `{config['stall_ms']} ms`, smoke limit: `{config['smoke_limit'] or 'all'}`  ",
         f"Runner: `{config['runner'] or 'none'}`  ",
         f"Runner SHA-256: `{config['runner_sha256'] or 'n/a'}`",
         "",
@@ -1134,8 +1283,8 @@ def write_markdown_report(report: Mapping[str, Any], path: pathlib.Path) -> None
             "",
             "## Per-game result",
             "",
-            "| JAR | Main MIDlet | Status | Startup | Frame | Primary error | Artifacts |",
-            "| --- | --- | --- | ---: | ---: | --- | --- |",
+            "| JAR | Main MIDlet | Status | Startup | Frames/unique | Inputs | Max idle | Primary error | Artifacts |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for item in report["items"]:
@@ -1147,12 +1296,18 @@ def write_markdown_report(report: Mapping[str, Any], path: pathlib.Path) -> None
         artifacts = item["artifacts"]
         artifact_text = artifacts.get("run_dir", "")
         lines.append(
-            "| `{jar}` | `{main}` | `{status}` | {startup} | {frames} | {error} | `{artifacts}` |".format(
+            "| `{jar}` | `{main}` | `{status}` | {startup} | {frames}/{unique} | {inputs} | {idle} | {error} | `{artifacts}` |".format(
                 jar=markdown_escape(str(item["relative_path"])),
                 main=markdown_escape(str(item["main_class"])),
                 status=markdown_escape(str(item["status"])),
                 startup=observed.get("startup_ms", ""),
                 frames=observed.get("frames_produced", 0),
+                unique=observed.get("unique_frames", 0),
+                inputs=(
+                    int(observed.get("key_presses", 0) or 0)
+                    + int(observed.get("lcdui_actions_sent", 0) or 0)
+                ),
+                idle=observed.get("longest_idle_ms", 0),
                 error=markdown_escape(primary),
                 artifacts=markdown_escape(str(artifact_text)),
             )
@@ -1164,7 +1319,10 @@ def write_markdown_report(report: Mapping[str, Any], path: pathlib.Path) -> None
             "## Re-run commands",
             "",
             "```sh",
-            "# Full folder: static scan + launch smoke test",
+            "# Full headless integration run with real input and visual/stall checks",
+            "bash Core/Tools/test-jar-integration.sh",
+            "",
+            "# Basic static scan + launch smoke test",
             "bash Core/Tools/test-jar-directory.sh",
             "",
             "# Test only matching names",
@@ -1209,6 +1367,51 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--jobs", type=int, default=max(1, min(8, os.cpu_count() or 1)))
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
+    parser.add_argument(
+        "--observe-ms",
+        type=int,
+        default=0,
+        help="default duration to keep each MIDlet alive while pumping events",
+    )
+    parser.add_argument(
+        "--observe-manifest",
+        type=pathlib.Path,
+        help="benchmark manifest whose per-JAR observe_ms values override the default",
+    )
+    parser.add_argument(
+        "--autoplay",
+        action="store_true",
+        help="send real key press/release events and activate native LCDUI controls",
+    )
+    parser.add_argument(
+        "--input-start-delay-ms",
+        type=int,
+        default=400,
+        help="delay before the first automated input",
+    )
+    parser.add_argument(
+        "--input-interval-ms",
+        type=int,
+        default=220,
+        help="interval between automated inputs",
+    )
+    parser.add_argument(
+        "--stall-ms",
+        type=int,
+        default=0,
+        help="fail when visual/UI progress stops for this long after input; 0 disables",
+    )
+    parser.add_argument(
+        "--heartbeat-ms",
+        type=int,
+        default=1_000,
+        help="checkpoint runner state at this interval so hard hangs retain evidence",
+    )
+    parser.add_argument(
+        "--require-visual",
+        action="store_true",
+        help="require a nonblank Canvas frame or a shown native LCDUI screen",
+    )
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     parser.add_argument("--runner", type=pathlib.Path, help="reuse an existing CompatibilityHarness binary")
@@ -1222,6 +1425,20 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--jobs must be > 0")
     if args.timeout_ms <= 0:
         parser.error("--timeout-ms must be > 0")
+    if not (0 <= args.observe_ms <= 120_000):
+        parser.error("--observe-ms must be in 0..120000")
+    if not (0 <= args.input_start_delay_ms <= 60_000):
+        parser.error("--input-start-delay-ms must be in 0..60000")
+    if not (40 <= args.input_interval_ms <= 60_000):
+        parser.error("--input-interval-ms must be in 40..60000")
+    if not (0 <= args.stall_ms <= 120_000):
+        parser.error("--stall-ms must be in 0..120000")
+    if not (100 <= args.heartbeat_ms <= 60_000):
+        parser.error("--heartbeat-ms must be in 100..60000")
+    if args.autoplay and args.observe_ms == 0 and args.observe_manifest is None:
+        parser.error("--autoplay requires --observe-ms > 0 or --observe-manifest")
+    if args.stall_ms > 0 and not args.autoplay:
+        parser.error("--stall-ms requires --autoplay")
     if not (1 <= args.width <= 8192 and 1 <= args.height <= 8192):
         parser.error("--width/--height must be in 1..8192")
     return args
@@ -1232,6 +1449,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     jar_root = args.jar_dir.expanduser().resolve()
     if not jar_root.is_dir():
         print(f"JAR directory does not exist: {jar_root}", file=sys.stderr)
+        return 2
+
+    observe_manifest: pathlib.Path | None = None
+    observe_overrides: dict[str, int] = {}
+    if args.observe_manifest is not None:
+        observe_manifest = args.observe_manifest.expanduser().resolve()
+        try:
+            observe_data = json.loads(observe_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"Cannot read observe manifest: {error}", file=sys.stderr)
+            return 2
+        benchmarks = observe_data.get("benchmarks", [])
+        if not isinstance(benchmarks, list):
+            print("Observe manifest has no benchmark list", file=sys.stderr)
+            return 2
+        for benchmark in benchmarks:
+            if not isinstance(benchmark, dict):
+                continue
+            jar_value = benchmark.get("jar")
+            duration_value = benchmark.get("observe_ms", 0)
+            if not isinstance(jar_value, str) or not jar_value:
+                continue
+            if (not isinstance(duration_value, int) or
+                    not 0 <= duration_value <= 120_000):
+                print(
+                    f"Invalid observe_ms for {jar_value}: {duration_value}",
+                    file=sys.stderr,
+                )
+                return 2
+            jar_name = pathlib.PurePosixPath(jar_value).name
+            observe_overrides[jar_name] = duration_value
+
+    maximum_observe_ms = max([args.observe_ms, *observe_overrides.values()])
+    if (
+        args.mode in ("smoke", "both")
+        and maximum_observe_ms > 0
+        and args.timeout_ms <= maximum_observe_ms + 1_000
+    ):
+        print(
+            "--timeout-ms must be at least 1000 ms longer than the longest observe duration",
+            file=sys.stderr,
+        )
         return 2
 
     output_root = (
@@ -1313,6 +1572,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runner if target.item_id in smoke_ids else None,
                     args.mode,
                     args.timeout_ms,
+                    observe_overrides.get(
+                        target.relative_path,
+                        observe_overrides.get(
+                            pathlib.PurePosixPath(target.relative_path).name,
+                            args.observe_ms,
+                        ),
+                    ),
+                    args.autoplay,
+                    args.input_start_delay_ms,
+                    args.input_interval_ms,
+                    args.stall_ms,
+                    args.heartbeat_ms,
+                    args.require_visual,
                     args.width,
                     args.height,
                 )
@@ -1331,6 +1603,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=output_root,
         mode=args.mode,
         timeout_ms=args.timeout_ms,
+        observe_ms=args.observe_ms,
+        observe_manifest=observe_manifest,
+        observe_overrides=observe_overrides,
+        autoplay=args.autoplay,
+        input_start_delay_ms=args.input_start_delay_ms,
+        input_interval_ms=args.input_interval_ms,
+        stall_ms=args.stall_ms,
+        heartbeat_ms=args.heartbeat_ms,
+        require_visual=args.require_visual,
         jobs=args.jobs,
         smoke_limit=args.smoke_limit,
         smoke_filters=args.smoke_filter,
@@ -1351,7 +1632,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if build_error:
         return 2
-    failed_statuses = {"FAILED", "TIMEOUT", "NATIVE_CRASH", "LAUNCH_ERROR"}
+    failed_statuses = {
+        "FAILED",
+        "TIMEOUT",
+        "NATIVE_CRASH",
+        "LAUNCH_ERROR",
+        "STALLED",
+        "NO_VISUAL",
+    }
     failed = sum(1 for result in results if result.status in failed_statuses)
     return 1 if failed or discovery_issues else 0
 

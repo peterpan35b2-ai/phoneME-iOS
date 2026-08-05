@@ -28,7 +28,7 @@ FIXTURE_JAR="$(find "$BUILD_ROOT" -type f -name core-fixture.jar -print -quit)"
   exit 1
 }
 
-FILTERS=(vm-invocation vm-extended micro3d)
+FILTERS=(vm-invocation vm-dispatch micro3d)
 if [[ -n "${PHONEME_DECODED_DIFF_FILTERS:-}" ]]; then
   read -r -a FILTERS <<<"$PHONEME_DECODED_DIFF_FILTERS"
 fi
@@ -67,7 +67,31 @@ interpreter_keys = (
     "instruction_budget_exits",
     "scheduler_quanta",
 )
+# Resolution/cache counters are intentionally allowed to differ: decoded
+# execution exists to remove repeated lookups. Keep immutable decode totals in
+# the comparison while treating hot-path cache activity as performance data.
 metadata_ignored = {
+    "class_cache_hits",
+    "class_cache_misses",
+    "method_resolution_hits",
+    "method_resolution_misses",
+    "declared_method_resolution_hits",
+    "declared_method_resolution_misses",
+    "field_resolution_hits",
+    "field_resolution_misses",
+    "assignability_cache_hits",
+    "assignability_cache_misses",
+    "native_registry_lookups",
+    "metadata_key_constructions",
+    "virtual_inline_cache_hits",
+    "virtual_inline_cache_misses",
+    "direct_call_cache_hits",
+    "direct_call_cache_misses",
+    "operand_resolution_hits",
+    "operand_resolution_misses",
+    "operand_resolution_failures",
+    "descriptor_cache_hits",
+    "descriptor_cache_misses",
     "decoded_opcode_dispatches",
     "decoded_operand_dispatches",
 }

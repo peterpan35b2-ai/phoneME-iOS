@@ -745,7 +745,8 @@ static NSURLSession *PhoneMETranslationSession(void) {
         configuration.HTTPCookieStorage = nil;
         configuration.HTTPShouldSetCookies = NO;
         configuration.waitsForConnectivity = NO;
-        configuration.HTTPMaximumConnectionsPerHost = 2;
+        configuration.HTTPShouldUsePipelining = YES;
+        configuration.HTTPMaximumConnectionsPerHost = 4;
         session = [NSURLSession sessionWithConfiguration:configuration];
     });
     return session;

@@ -155,6 +155,17 @@ typedef struct {
     int32_t scope;
 } PhoneMEPermissionResponse;
 
+typedef enum {
+    PHONEME_FRAME_PACING_NATIVE = 0,
+    PHONEME_FRAME_PACING_CAP = 1,
+    PHONEME_FRAME_PACING_OVERRIDE_GAME_LOOP = 2,
+} PhoneMEFramePacingMode;
+
+typedef enum {
+    PHONEME_TRANSLATION_PROVIDER_GOOGLE = 0,
+    PHONEME_TRANSLATION_PROVIDER_BING = 1,
+} PhoneMETranslationProvider;
+
 /* Invoked synchronously on the requesting runtime thread. Do not re-enter
  * the same runtime from this callback. String pointers are valid only for
  * the duration of the callback. */
@@ -177,6 +188,21 @@ int32_t phoneme_configure_keymap(PhoneMERuntimeRef runtime,
                                  int32_t fire,
                                  int32_t soft1,
                                  int32_t soft2);
+/* Configures one MIDlet's frame pacing. This may be called before or after the
+ * MIDlet is started. CAP never shortens Java sleeps; OVERRIDE_GAME_LOOP is an
+ * explicit compatibility mode for stable synchronous Canvas/GameCanvas loops.
+ * Java clocks, Timer, Object.wait and unrelated Thread.sleep remain wall-time
+ * based in every mode. */
+int32_t phoneme_configure_app_frame_pacing(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t frames_per_second,
+    int32_t pacing_mode);
+/* Configures the maximum Java heap for one MIDlet before it starts. The limit
+ * is allocated on demand. Changes to a running MIDlet require a restart. */
+int32_t phoneme_configure_app_heap(PhoneMERuntimeRef runtime,
+                                   int32_t app_id,
+                                   int32_t heap_megabytes);
 /* Selects the translation service for subsequently created MIDlets. Existing
  * MIDlets keep the setting they had at launch. Language pointers may be NULL
  * to use auto detection and Vietnamese output. */
@@ -184,12 +210,25 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                       int32_t enabled,
                                       const char* source_language,
                                       const char* target_language);
+/* Provider-aware variant. Google remains provider 0 for ABI compatibility. */
+int32_t phoneme_configure_translation_v2(PhoneMERuntimeRef runtime,
+                                         int32_t enabled,
+                                         int32_t provider,
+                                         const char* source_language,
+                                         const char* target_language);
 /* Changes translation only for one already-running MIDlet. */
 int32_t phoneme_configure_app_translation(PhoneMERuntimeRef runtime,
                                           int32_t app_id,
                                           int32_t enabled,
                                           const char* source_language,
                                           const char* target_language);
+int32_t phoneme_configure_app_translation_v2(
+    PhoneMERuntimeRef runtime,
+    int32_t app_id,
+    int32_t enabled,
+    int32_t provider,
+    const char* source_language,
+    const char* target_language);
 /* Configure before phoneme_start_system. Passing NULL clears the callback. */
 int32_t phoneme_configure_permission_prompt(
     PhoneMERuntimeRef runtime,

@@ -22,6 +22,8 @@
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <deque>
@@ -295,6 +297,54 @@ void configure_descriptor(int descriptor) noexcept {
 #endif
 }
 
+void configure_stream_descriptor(int descriptor) noexcept {
+    configure_descriptor(descriptor);
+
+    // SocketConnection.DELAY defaults to zero, meaning small-write delay is
+    // disabled. Many J2ME protocols emit packet headers via repeated
+    // DataOutputStream.writeByte calls, so enabling TCP_NODELAY by default
+    // avoids Nagle/delayed-ACK stalls during login and proxy handshakes.
+    int no_delay = 1;
+    (void)::setsockopt(descriptor, IPPROTO_TCP, TCP_NODELAY,
+                       &no_delay, static_cast<socklen_t>(sizeof(no_delay)));
+}
+
+[[nodiscard]] bool network_trace_enabled() noexcept {
+    const char* value = std::getenv("PHONEME_NETWORK_TRACE");
+    return value != nullptr && std::string_view(value) != "0";
+}
+
+void trace_network_wait(const char* event,
+                        int descriptor,
+                        usize requested,
+                        usize queued = 0U) noexcept {
+    if (!network_trace_enabled()) return;
+    std::fprintf(stderr,
+                 "[PhoneMENetwork] %s fd=%d requested=%zu queued=%zu\n",
+                 event,
+                 descriptor,
+                 requested,
+                 queued);
+}
+
+void trace_network_bytes(const char* direction,
+                         int descriptor,
+                         std::span<const u8> bytes) noexcept {
+    if (!network_trace_enabled()) return;
+    std::fprintf(stderr, "[PhoneMENetwork] %s fd=%d bytes=%zu hex=",
+                 direction, descriptor, bytes.size());
+    const bool show_full_packet =
+        std::getenv("PHONEME_NETWORK_TRACE_FULL") != nullptr;
+    const usize shown = show_full_packet
+        ? bytes.size()
+        : std::min<usize>(bytes.size(), 64U);
+    for (usize index = 0; index < shown; ++index) {
+        std::fprintf(stderr, "%02x", static_cast<unsigned>(bytes[index]));
+    }
+    if (shown < bytes.size()) std::fprintf(stderr, "...");
+    std::fprintf(stderr, "\n");
+}
+
 [[nodiscard]] Result<Endpoint> endpoint_from_sockaddr(
     const sockaddr* address,
     socklen_t address_length) {
@@ -423,7 +473,14 @@ void resolve_addresses_on_dispatch_queue(void* opaque) {
     hints.ai_protocol = socket_type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
     hints.ai_flags = passive ? AI_PASSIVE : 0;
     const std::string service = std::to_string(port);
-    const std::string host_text(host);
+    std::string host_text(host);
+    if (port == 1080U) {
+        const char* redirect =
+            std::getenv("PHONEME_NETWORK_REDIRECT_1080_HOST");
+        if (redirect != nullptr && redirect[0] != '\0') {
+            host_text.assign(redirect);
+        }
+    }
 
 #if defined(__APPLE__)
     auto state = std::make_shared<AddressResolutionState>();
@@ -493,7 +550,7 @@ void resolve_addresses_on_dispatch_queue(void* opaque) {
                                      "socket creation failed");
             continue;
         }
-        configure_descriptor(descriptor);
+        configure_stream_descriptor(descriptor);
         auto nonblocking = set_nonblocking(descriptor, true);
         if (!nonblocking) {
             last_error = nonblocking.error();
@@ -1597,6 +1654,11 @@ public:
         }
     }
 
+    [[nodiscard]] usize worker_count_for_tests() const noexcept override {
+        std::scoped_lock lock(operation_mutex_);
+        return workers_.size();
+    }
+
     Result<OperationId> open_stream(
         const Url& url,
         i32 timeout_ms,
@@ -1613,6 +1675,13 @@ public:
                 ScopedDescriptor owned(*descriptor);
                 auto connection = store_connection(owned.value, true);
                 if (!connection) return std::unexpected(connection.error());
+                if (std::getenv("PHONEME_NETWORK_REDIRECT_1080_HOST") !=
+                    nullptr) {
+                    connection->remote = Endpoint {
+                        .host = url.host,
+                        .port = url.effective_port(),
+                    };
+                }
                 (void)owned.release();
                 return std::move(*connection);
             },
@@ -1680,7 +1749,7 @@ public:
                         return io_failure("accept failed");
                     }
                     ScopedDescriptor owned(accepted);
-                    configure_descriptor(owned.value);
+                    configure_stream_descriptor(owned.value);
                     auto nonblocking = set_nonblocking(owned.value, true);
                     if (!nonblocking) {
                         return std::unexpected(nonblocking.error());
@@ -1747,17 +1816,90 @@ public:
                 auto gate = acquire_operation_gate(
                     descriptor->state->input_gate, deadline, cancelled);
                 if (!gate) return std::unexpected(gate.error());
-                std::vector<u8> bytes(
-                    std::min(maximum_bytes, kIoChunkSize));
+                std::vector<u8> bytes;
                 while (true) {
+                    trace_network_wait("read-wait",
+                                       descriptor->descriptor.value,
+                                       maximum_bytes);
                     auto ready = wait_fd(descriptor->descriptor.value, POLLIN,
                                          deadline, cancelled);
                     if (!ready) return std::unexpected(ready.error());
+
+                    int queued = 0;
+                    if (::ioctl(descriptor->descriptor.value,
+                                FIONREAD,
+                                &queued) != 0) {
+                        return io_failure("FIONREAD failed before socket read");
+                    }
+
+                    // Match phoneME's BSD PCSL implementation: pass the full
+                    // Java-requested length to recv instead of imposing an
+                    // artificial 16 KiB transport ceiling. FIONREAD keeps the
+                    // temporary allocation bounded by bytes already queued in
+                    // the kernel, while a one-byte fallback still detects EOF.
+                    trace_network_wait("read-ready",
+                                       descriptor->descriptor.value,
+                                       maximum_bytes,
+                                       static_cast<usize>(std::max(queued, 0)));
+                    const usize initial_capacity = queued > 0
+                        ? std::min(maximum_bytes,
+                                   static_cast<usize>(queued))
+                        : 1U;
+                    bytes.resize(initial_capacity);
                     const ssize_t count = ::recv(
                         descriptor->descriptor.value, bytes.data(),
                         bytes.size(), 0);
-                    if (count >= 0) {
+                    if (count > 0) {
                         bytes.resize(static_cast<usize>(count));
+
+                        // Drain only bytes that are already readable. This
+                        // preserves InputStream's partial-read contract while
+                        // avoiding one worker dispatch and one Java/native copy
+                        // per small TCP segment during large payload bursts.
+                        while (bytes.size() < maximum_bytes) {
+                            int additional = 0;
+                            if (::ioctl(descriptor->descriptor.value,
+                                        FIONREAD,
+                                        &additional) != 0) {
+                                return io_failure(
+                                    "FIONREAD failed while draining socket read");
+                            }
+                            if (additional <= 0) break;
+
+                            const usize previous_size = bytes.size();
+                            const usize amount = std::min(
+                                maximum_bytes - previous_size,
+                                static_cast<usize>(additional));
+                            bytes.resize(previous_size + amount);
+                            const ssize_t drained = ::recv(
+                                descriptor->descriptor.value,
+                                bytes.data() + previous_size,
+                                amount,
+                                0);
+                            if (drained > 0) {
+                                bytes.resize(previous_size +
+                                             static_cast<usize>(drained));
+                                continue;
+                            }
+                            bytes.resize(previous_size);
+                            if (drained == 0 || errno == EAGAIN ||
+                                errno == EWOULDBLOCK) {
+                                break;
+                            }
+                            if (errno == EINTR) continue;
+                            return io_failure("socket read drain failed");
+                        }
+
+                        trace_network_bytes("recv",
+                                            descriptor->descriptor.value,
+                                            bytes);
+                        return bytes;
+                    }
+                    if (count == 0) {
+                        bytes.clear();
+                        trace_network_bytes("recv",
+                                            descriptor->descriptor.value,
+                                            bytes);
                         return bytes;
                     }
                     if (errno == EINTR || errno == EAGAIN ||
@@ -1785,6 +1927,8 @@ public:
                 auto gate = acquire_operation_gate(
                     descriptor->state->output_gate, deadline, cancelled);
                 if (!gate) return std::unexpected(gate.error());
+                trace_network_bytes("send", descriptor->descriptor.value,
+                                    bytes);
                 auto written = send_all(descriptor->descriptor.value, bytes,
                                         deadline, cancelled);
                 if (!written) return std::unexpected(written.error());
@@ -2014,7 +2158,8 @@ public:
                 case SocketOption::delay:
                     level = IPPROTO_TCP;
                     name = TCP_NODELAY;
-                    integer = value == 0 ? 0 : 1;
+                    // Java ME exposes DELAY, while POSIX exposes its inverse.
+                    integer = value == 0 ? 1 : 0;
                     break;
                 case SocketOption::linger:
                     name = SO_LINGER;
@@ -2089,6 +2234,9 @@ public:
                 if (option == SocketOption::linger) {
                     integer = linger_value.l_onoff == 0
                         ? 0 : linger_value.l_linger;
+                } else if (option == SocketOption::delay) {
+                    // Convert TCP_NODELAY back to Java ME DELAY semantics.
+                    integer = integer == 0 ? 1 : 0;
                 }
                 return static_cast<i32>(integer);
             });
@@ -2182,6 +2330,7 @@ private:
         AsyncTask task = [this,
                           operation,
                           state,
+                          task_class,
                           completion = std::move(completion),
                           work = std::move(work),
                           cleanup = std::move(cleanup)]() mutable {
@@ -2198,6 +2347,17 @@ private:
                 }
                 deliver = !stopping_ &&
                           !state->cancelled.load(std::memory_order_acquire);
+
+                // The worker has finished its blocking/native work and is now
+                // only delivering the callback. Java often submits the next
+                // readByte() from that callback before this task returns. Mark
+                // this worker as immediately reusable so the capacity check
+                // does not mistake the handoff window for pool starvation and
+                // spawn one permanent thread per byte read.
+                ++completing_workers_;
+                if (task_class == NetworkTaskClass::blocking_input) {
+                    ++completing_blocking_workers_;
+                }
             }
             if (!deliver) {
                 cleanup(result);
@@ -2261,17 +2421,23 @@ private:
 
     void ensure_worker_capacity_unlocked() {
         if (stopping_ || workers_.size() >= kMaximumNetworkWorkerCount) return;
-        const usize idle_workers = workers_.size() > active_workers_
-            ? workers_.size() - active_workers_ : 0U;
+        const usize effective_active_workers =
+            active_workers_ > completing_workers_
+                ? active_workers_ - completing_workers_ : 0U;
+        const usize idle_workers = workers_.size() > effective_active_workers
+            ? workers_.size() - effective_active_workers : 0U;
         const usize latency_runnable = std::min(
             latency_sensitive_queue_.size(), idle_workers);
         const usize idle_after_latency = idle_workers - latency_runnable;
         const usize reserved = reserved_worker_count_unlocked();
         const usize blocking_capacity = workers_.size() > reserved
             ? workers_.size() - reserved : 1U;
+        const usize effective_active_blocking_workers =
+            active_blocking_workers_ > completing_blocking_workers_
+                ? active_blocking_workers_ - completing_blocking_workers_ : 0U;
         const usize blocking_slots =
-            blocking_capacity > active_blocking_workers_
-                ? blocking_capacity - active_blocking_workers_ : 0U;
+            blocking_capacity > effective_active_blocking_workers
+                ? blocking_capacity - effective_active_blocking_workers : 0U;
         const usize blocking_runnable = std::min(
             blocking_input_queue_.size(),
             std::min(idle_after_latency, blocking_slots));
@@ -2320,8 +2486,12 @@ private:
             {
                 std::scoped_lock lock(operation_mutex_);
                 if (active_workers_ != 0U) --active_workers_;
+                if (completing_workers_ != 0U) --completing_workers_;
                 if (blocking_input && active_blocking_workers_ != 0U) {
                     --active_blocking_workers_;
+                }
+                if (blocking_input && completing_blocking_workers_ != 0U) {
+                    --completing_blocking_workers_;
                 }
             }
             operation_condition_.notify_all();
@@ -2422,6 +2592,8 @@ private:
     std::vector<std::jthread> workers_;
     usize active_workers_ {0U};
     usize active_blocking_workers_ {0U};
+    usize completing_workers_ {0U};
+    usize completing_blocking_workers_ {0U};
     bool stopping_ {false};
 
     mutable std::mutex mutex_;
@@ -2433,6 +2605,11 @@ private:
 } // namespace
 
 namespace detail {
+
+usize posix_network_worker_count_for_tests(
+    const std::shared_ptr<AsyncNetworkAdapter>& adapter) noexcept {
+    return adapter == nullptr ? 0U : adapter->worker_count_for_tests();
+}
 
 Result<HttpResponse> parse_http_response_bytes(
     const Url& url,

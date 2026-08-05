@@ -726,7 +726,10 @@ public final class Jdk8Semantics {
         String original = "A\u0000Việt\u20ac";
         byte[] utf8 = original.getBytes("UTF-8");
         if (new String(utf8, "UTF-8").equals(original)) result |= 1;
-        if (new String(original.getBytes()).equals(original)) result |= 2;
+        byte[] defaultEncoded = "\u00e5".getBytes();
+        if (defaultEncoded.length == 1
+                && (defaultEncoded[0] & 0xff) == 0xe5
+                && new String(defaultEncoded).equals("\u00e5")) result |= 2;
         byte[] sliced = {0, 65, 66, 0};
         if (new String(sliced, 1, 2, "US-ASCII").equals("AB")) result |= 4;
         String latin = new String(new byte[] {(byte) 0xe9}, "ISO-8859-1");
@@ -1020,14 +1023,14 @@ public final class Jdk8Semantics {
         int result = 0;
         if ("CLDC-1.1".equals(
                 System.getProperty("microedition.configuration"))) result |= 1;
-        if ("MIDP-2.0".equals(
+        if ("MIDP-2.1".equals(
                 System.getProperty("microedition.profiles"))) result |= 2;
         if (System.getProperty("phoneME.missing") == null) result |= 4;
         if ("fallback".equals(
                 System.getProperty("phoneME.missing", "fallback"))) result |= 8;
         if ("\n".equals(System.getProperty("line.separator"))) result |= 16;
         String platform = System.getProperty("microedition.platform");
-        if (platform != null && platform.length() >= 9) result |= 256;
+        if ("j2me".equals(platform)) result |= 256;
         Runtime first = Runtime.getRuntime();
         Runtime second = Runtime.getRuntime();
         if (first == second) result |= 32;

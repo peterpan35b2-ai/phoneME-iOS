@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -59,6 +60,37 @@ namespace phoneme::vm
 
   using UiEventSink = std::function<void(UiBridgeEvent)>;
 
+  enum class ImageDrawKind : u8
+  {
+    image,
+    region,
+  };
+
+  struct ImageDrawEvent final
+  {
+    ImageDrawKind kind{ImageDrawKind::image};
+    u64 graphics_id{0};
+    u64 target_image_id{0};
+    u64 source_image_id{0};
+    i32 source_x{0};
+    i32 source_y{0};
+    i32 source_width{0};
+    i32 source_height{0};
+    i32 transform{0};
+    i32 destination_x{0};
+    i32 destination_y{0};
+    i32 anchor{0};
+    i32 translate_x{0};
+    i32 translate_y{0};
+    i32 clip_x{0};
+    i32 clip_y{0};
+    i32 clip_width{0};
+    i32 clip_height{0};
+    bool display_target{false};
+  };
+
+  using ImageDrawSink = std::function<void(const ImageDrawEvent&)>;
+
   enum class MidletSignal : u8
   {
     none,
@@ -95,6 +127,7 @@ namespace phoneme::vm
     struct TextTranslationLayoutDecision final
     {
       bool planned{false};
+      bool suppress{false};
       i32 y{0};
       i32 height{0};
     };
@@ -107,6 +140,7 @@ namespace phoneme::vm
 
     explicit Machine(ClassRepository &classes,
                      usize maximum_heap_objects = 1'000'000);
+    explicit Machine(ClassRepository &classes, HeapLimits heap_limits);
     ~Machine();
     void shutdown() noexcept;
 
@@ -145,8 +179,15 @@ namespace phoneme::vm
     [[nodiscard]] Status initialize_java_thread(ObjectRef thread,
                                                 ObjectRef target);
     [[nodiscard]] Status start_java_thread(ObjectRef thread);
+    [[nodiscard]] Result<ExecutionResult> run_java_thread_entry(
+        ObjectRef thread);
     [[nodiscard]] Result<std::optional<Value>> run_java_thread_target(
         ObjectRef thread);
+    void configure_frame_pacing(i32 frames_per_second,
+                                FramePacingMode mode) noexcept;
+    void pace_frame_publication();
+    void note_frame_pacing_boundary() noexcept;
+    void break_frame_pacing_sequence() noexcept;
     [[nodiscard]] Result<SchedulerWaitResult> sleep_current_thread(i64 millis);
     [[nodiscard]] Result<SchedulerWaitResult> join_java_thread(
         ObjectRef thread,
@@ -202,6 +243,8 @@ namespace phoneme::vm
         i32 clip_height,
         i32 translate_x,
         i32 translate_y);
+    void configure_image_draw_interceptor(ImageDrawSink sink);
+    void intercept_image_draw(const ImageDrawEvent& event) const;
     [[nodiscard]] double next_random_double() noexcept;
     void configure_ui_bridge(i32 app_namespace, UiEventSink sink);
     [[nodiscard]] i32 allocate_ui_component_id() noexcept;
@@ -370,30 +413,7 @@ namespace phoneme::vm
       TranslatedTextDrawSample sample;
       i32 y{0};
       i32 height{0};
-    };
-
-    enum class OperandResolutionState : u8
-    {
-      unresolved,
-      resolving,
-      resolved,
-      failed,
-    };
-
-    enum class OperandResolutionKind : u8
-    {
-      none,
-      field,
-      direct_call,
-    };
-
-    struct OperandResolutionEntry final
-    {
-      OperandResolutionState state{OperandResolutionState::unresolved};
-      OperandResolutionKind kind{OperandResolutionKind::none};
-      std::shared_ptr<const FieldLocation> field;
-      MethodId target_method;
-      std::optional<Error> failure;
+      bool suppress{false};
     };
 
     struct DirectCallCache final
@@ -427,14 +447,29 @@ namespace phoneme::vm
         Invocation invocation,
         u64 instruction_budget,
         InstructionBudgetMode budget_mode = InstructionBudgetMode::total);
+    [[nodiscard]] NativeMethodBinding resolve_native_binding(
+        const classfile::ClassFile& owner,
+        const classfile::Method& method);
     [[nodiscard]] Result<Invocation> prepare_invocation(
         ResolvedMethod method,
         std::span<const Value> arguments,
-        bool has_receiver);
+        bool has_receiver,
+        std::optional<NativeMethodId> prebound_native_method = std::nullopt);
     void refresh_metadata_bindings_if_needed() noexcept;
     [[nodiscard]] Result<OperandResolutionEntry*> operand_resolution_entry(
         MethodId method_id,
-        u32 operand_index);
+        u32 operand_index,
+        usize bytecode_pc);
+    [[nodiscard]] Result<OperandResolutionEntry*> resolve_class_operand(
+        MethodId method_id,
+        u32 operand_index,
+        usize bytecode_pc,
+        const classfile::ClassFile& owner,
+        u16 constant_pool_index,
+        bool load_target_class,
+        bool derive_reference_array_name);
+    [[nodiscard]] Result<std::shared_ptr<const classfile::ClassFile>>
+    load_linkage_class(std::string_view class_name);
     [[nodiscard]] Result<std::optional<ObjectRef>> ensure_initialized(
         std::string_view class_name,
         u64 instruction_budget);
@@ -487,6 +522,9 @@ namespace phoneme::vm
     graphics::GraphicsStore graphics_;
     mutable std::mutex translation_service_mutex_;
     std::shared_ptr<translation::TranslationService> translation_service_;
+    mutable std::mutex image_draw_sink_mutex_;
+    ImageDrawSink image_draw_sink_;
+    std::atomic_bool image_draw_interception_enabled_{false};
     std::vector<CharacterDrawSample> character_translation_capture_;
     std::vector<PlannedCharacterSample> character_translation_plan_samples_;
     std::vector<CharacterRunPlan> character_translation_runs_;
@@ -509,12 +547,9 @@ namespace phoneme::vm
     std::unordered_map<i32, ObjectRef> ui_components_;
     std::unordered_map<u64, LambdaBinding> lambda_bindings_;
     u64 metadata_binding_generation_ {0U};
+    mutable std::mutex native_bindings_mutex_;
     u64 native_binding_generation_ {0U};
     std::unordered_map<const classfile::Method*, NativeMethodId> native_bindings_;
-    std::unordered_map<
-        MethodId,
-        std::vector<OperandResolutionEntry>,
-        MetadataIdHash<MethodId>> operand_resolution_tables_;
     std::unordered_map<
         const classfile::ClassFile*,
         std::unordered_map<u32, std::shared_ptr<const FieldLocation>>>
@@ -535,8 +570,10 @@ namespace phoneme::vm
     std::optional<NativeRootScope> lcd_ui_alert_timeout_root_;
     std::chrono::steady_clock::time_point lcd_ui_alert_timeout_deadline_ {};
     ObjectRef emergency_out_of_memory_error_ {};
+    mutable std::mutex class_initialization_mutex_;
+    std::condition_variable class_initialization_condition_;
     std::unordered_set<std::string> initialized_classes_;
-    std::unordered_set<std::string> initializing_classes_;
+    std::unordered_map<std::string, JavaThreadId> initializing_class_owners_;
     std::unordered_set<std::string> erroneous_classes_;
     std::unordered_map<std::u16string, std::u16string> app_properties_;
     std::unordered_map<std::u16string, std::u16string> system_properties_;

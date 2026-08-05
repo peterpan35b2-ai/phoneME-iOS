@@ -13,6 +13,8 @@ FIXTURE_RESOURCE="$FIXTURE_ROOT/corefixture/data.bin"
 FIXTURE_MANIFEST="$FIXTURE_ROOT/MANIFEST.MF"
 STUB_ROOT="$CORE_ROOT/Tests/stubs"
 STUB_CLASSES="$TEST_ROOT/compile-stubs"
+LINKAGE_STUB_ROOT="$CORE_ROOT/Tests/linkage-stubs"
+LINKAGE_STUB_CLASSES="$TEST_ROOT/linkage-stubs"
 FIXTURE_CLASSES="$TEST_ROOT/fixture-classes"
 FIXTURE_JAR="$TEST_ROOT/core-fixture.jar"
 CXX="$(xcrun --sdk macosx --find clang++)"
@@ -27,7 +29,7 @@ SANITIZER_FLAGS="$PHONEME_SANITIZER_FLAGS"
   exit 1
 }
 
-mkdir -p "$STUB_CLASSES" "$FIXTURE_CLASSES"
+mkdir -p "$STUB_CLASSES" "$LINKAGE_STUB_CLASSES" "$FIXTURE_CLASSES"
 
 # Stubs are compile-time only and are intentionally excluded from the JAR.
 # Runtime resolution must therefore come from the C++ built-in class registry.
@@ -61,13 +63,47 @@ case "${PHONEME_TEST_FILTER:-}" in
     ;;
 esac
 
+LINKAGE_FIXTURES_ENABLED=0
+REGULAR_FIXTURE_SOURCES=()
+for source in "${FIXTURE_SOURCES[@]}"; do
+  case "$source" in
+    "$FIXTURE_ROOT/LinkageOps.java"|"$FIXTURE_ROOT/LinkageTarget.java")
+      LINKAGE_FIXTURES_ENABLED=1
+      ;;
+    *)
+      REGULAR_FIXTURE_SOURCES+=("$source")
+      ;;
+  esac
+done
+FIXTURE_SOURCES=("${REGULAR_FIXTURE_SOURCES[@]}")
+
 "$JAVAC" -source 8 -target 8 -Xlint:-options -Xlint:-unchecked \
   -d "$STUB_CLASSES" \
   "${STUB_SOURCES[@]}"
-"$JAVAC" -source 8 -target 8 -Xlint:-options \
-  -classpath "$STUB_CLASSES" \
-  -d "$FIXTURE_CLASSES" \
-  "${FIXTURE_SOURCES[@]}"
+if [[ "${#FIXTURE_SOURCES[@]}" -gt 0 ]]; then
+  "$JAVAC" -source 8 -target 8 -Xlint:-options \
+    -classpath "$STUB_CLASSES" \
+    -d "$FIXTURE_CLASSES" \
+    "${FIXTURE_SOURCES[@]}"
+fi
+
+if [[ "$LINKAGE_FIXTURES_ENABLED" -eq 1 ]]; then
+  LINKAGE_STUB_SOURCES=()
+  while IFS= read -r source; do
+    LINKAGE_STUB_SOURCES+=("$source")
+  done < <(find "$LINKAGE_STUB_ROOT" -type f -name '*.java' -print | LC_ALL=C sort)
+  "$JAVAC" -source 8 -target 8 -Xlint:-options \
+    -d "$LINKAGE_STUB_CLASSES" \
+    "${LINKAGE_STUB_SOURCES[@]}"
+  "$JAVAC" -source 8 -target 8 -Xlint:-options \
+    -classpath "$STUB_CLASSES:$LINKAGE_STUB_CLASSES" \
+    -d "$FIXTURE_CLASSES" \
+    "$FIXTURE_ROOT/LinkageOps.java"
+  "$JAVAC" -source 8 -target 8 -Xlint:-options \
+    -classpath "$STUB_CLASSES" \
+    -d "$FIXTURE_CLASSES" \
+    "$FIXTURE_ROOT/LinkageTarget.java"
+fi
 mkdir -p "$FIXTURE_CLASSES/corefixture"
 cp "$FIXTURE_RESOURCE" "$FIXTURE_CLASSES/corefixture/data.bin"
 
@@ -80,6 +116,10 @@ if "$JAR" tf "$FIXTURE_JAR" | grep -q '^javax/microedition/'; then
 fi
 if "$JAR" tf "$FIXTURE_JAR" | grep -q '^com/sun/midp/'; then
   echo "Fixture JAR accidentally contains compile-time internal stubs." >&2
+  exit 1
+fi
+if "$JAR" tf "$FIXTURE_JAR" | grep -q '^corefixture/LinkageMissing.class$'; then
+  echo "Fixture JAR accidentally contains the missing-linkage compile stub." >&2
   exit 1
 fi
 
