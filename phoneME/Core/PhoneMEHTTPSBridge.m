@@ -1073,7 +1073,7 @@ int32_t phoneme_ios_https_execute_async(
     }
 
     const BOOL fastTranslationRequest = secureRequest &&
-        [url.host.lowercaseString isEqualToString:@"translate.googleapis.com"] &&
+        [url.host.lowercaseString isEqualToString:@"translate.google.com"] &&
         [[request valueForHTTPHeaderField:@"User-Agent"]
             isEqualToString:@"phoneME-iOS/translation"];
     if (fastTranslationRequest) {

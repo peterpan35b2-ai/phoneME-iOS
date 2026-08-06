@@ -4,9 +4,12 @@ import com.mascotcapsule.micro3d.v3.ActionTable;
 import com.mascotcapsule.micro3d.v3.AffineTrans;
 import com.mascotcapsule.micro3d.v3.Effect3D;
 import com.mascotcapsule.micro3d.v3.Figure;
+import com.mascotcapsule.micro3d.v3.FigureLayout;
 import com.mascotcapsule.micro3d.v3.Graphics3D;
 import com.mascotcapsule.micro3d.v3.Util3D;
 import com.mascotcapsule.micro3d.v3.Vector3D;
+import javax.microedition.lcdui.Graphics;
+import javax.microedition.lcdui.Image;
 
 public final class Micro3dOps {
     private Micro3dOps() {}
@@ -77,6 +80,40 @@ public final class Micro3dOps {
         } catch (IllegalArgumentException expected) {
             return 1;
         }
+    }
+
+    public static int primitiveRenderOps() {
+        Image image = Image.createImage(32, 32);
+        Graphics target = image.getGraphics();
+        target.setColor(0);
+        target.fillRect(0, 0, 32, 32);
+
+        Graphics3D graphics = new Graphics3D();
+        FigureLayout layout = new FigureLayout();
+        layout.setCenter(16, 16);
+        layout.setScale(4096, 4096);
+        Effect3D effect = new Effect3D();
+        int[] coordinates = {
+            -8, -8, 0,
+             8, -8, 0,
+             0,  8, 0
+        };
+        graphics.bind(target);
+        graphics.renderPrimitives(
+            null, 0, 0, layout, effect,
+            Graphics3D.PRIMITVE_TRIANGLES |
+                Graphics3D.PDATA_COLOR_PER_COMMAND,
+            1, coordinates, new int[0], new int[0],
+            new int[] {0x00ff0000});
+        graphics.flush();
+        graphics.release(target);
+
+        int[] pixel = new int[1];
+        image.getRGB(pixel, 0, 1, 16, 16, 1, 1);
+        int red = (pixel[0] >>> 16) & 255;
+        int green = (pixel[0] >>> 8) & 255;
+        int blue = pixel[0] & 255;
+        return red > 200 && green < 32 && blue < 32 ? 1 : 0;
     }
 
     public static int classAndConstantOps() {

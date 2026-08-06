@@ -158,11 +158,12 @@
 "Force Canvas fullscreen" = "Buộc Canvas toàn màn hình";
 "Show FPS" = "Hiển thị FPS";
 "Frame rate limit" = "Giới hạn tốc độ khung hình";
-"Override FPS" = "Giới hạn FPS";
+"Override FPS" = "Ghi đè FPS";
 "Limit FPS" = "Giới hạn FPS";
 "FPS" = "FPS";
 "FPS override is off by default. Enable it only for games that need a higher frame rate; frame-based gameplay may run faster." = "Mặc định giới hạn 30 FPS và không tăng tốc bộ đếm thời gian Java.";
 "FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated." = "Mặc định giới hạn 30 FPS và không rút ngắn thời gian ngủ Java của game, nên timer và game online không bị tua nhanh.";
+"FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration." = "Ghi đè FPS mặc định là 30 và chỉ điều chỉnh nhịp ngủ ổn định của vòng lặp vẽ sau khi xuất khung hình. Các khoảng chờ khi loading, timer và I/O vẫn giữ nguyên.";
 "Auto (30)" = "Tự động (30)";
 "Frame pacing" = "Điều khiển nhịp khung hình";
 "Native game timing" = "Giữ nhịp gốc của game";
@@ -260,7 +261,8 @@
 "Auto translate" = "Tự động dịch";
 "Translation" = "Dịch thuật";
 "Translation service" = "Dịch vụ dịch";
-"Bing Translator is the default. It uses a web session and may take slightly longer on the first request." = "Bing Translator là mặc định. Dịch vụ này dùng phiên web nên yêu cầu đầu tiên có thể chậm hơn một chút.";
+"Automatic" = "Tự động";
+"Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked." = "Chế độ Tự động gom yêu cầu theo lô, dùng lại bộ nhớ đệm, chủ động giảm nhịp trước khi bị giới hạn và đổi dịch vụ khi một bên tạm thời bị chặn.";
 "Auto detect" = "Tự động nhận diện";
 "Chinese (Simplified)" = "Tiếng Trung giản thể";
 "Chinese (Traditional)" = "Tiếng Trung phồn thể";
@@ -364,6 +366,7 @@
 "All screens will return to an evenly arranged layout." = "Các màn hình sẽ được xếp theo tỷ lệ và độ phân giải của từng ứng dụng.";
 "Unavailable screen" = "Màn hình không khả dụng";
 "Focused" = "Đang được chọn";
+"Show All Screens" = "Hiện tất cả màn hình";
 "Resize screen" = "Đổi kích thước màn hình";
 "Display Settings" = "Cài đặt hiển thị";
 "Replace App" = "Thay ứng dụng";

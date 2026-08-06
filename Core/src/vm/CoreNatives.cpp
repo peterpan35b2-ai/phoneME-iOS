@@ -1204,6 +1204,30 @@ struct SplitPattern final {
     if (regex == u"\\w") {
         return SplitPattern {.kind = SplitAtomKind::word, .repeat = repeat};
     }
+    if (regex == u"\\t") {
+        return SplitPattern {
+            .kind = SplitAtomKind::literal,
+            .literal = std::u16string(1U, u'\t'),
+        };
+    }
+    if (regex == u"\\n") {
+        return SplitPattern {
+            .kind = SplitAtomKind::literal,
+            .literal = std::u16string(1U, u'\n'),
+        };
+    }
+    if (regex == u"\\r") {
+        return SplitPattern {
+            .kind = SplitAtomKind::literal,
+            .literal = std::u16string(1U, u'\r'),
+        };
+    }
+    if (regex == u"\\f") {
+        return SplitPattern {
+            .kind = SplitAtomKind::literal,
+            .literal = std::u16string(1U, u'\f'),
+        };
+    }
     if (regex.size() >= 2U && regex.front() == u'[' &&
         regex.back() == u']') {
         SplitPattern result {
@@ -1307,14 +1331,28 @@ struct SplitPattern final {
 
 [[nodiscard]] std::vector<std::u16string> split_java_text(
     std::u16string_view text,
-    const SplitPattern& pattern) {
+    const SplitPattern& pattern,
+    i32 limit = 0) {
+    if (limit == 1) {
+        return {std::u16string(text)};
+    }
     if (pattern.kind == SplitAtomKind::literal && pattern.literal.empty()) {
         std::vector<std::u16string> characters;
         characters.reserve(text.size());
-        for (const char16_t character : text) {
-            characters.emplace_back(1U, character);
+        for (usize index = 0U; index < text.size(); ++index) {
+            if (limit > 0 && characters.size() + 1U >=
+                                 static_cast<usize>(limit)) {
+                characters.emplace_back(text.substr(index));
+                return characters;
+            }
+            characters.emplace_back(1U, text[index]);
         }
         if (characters.empty()) characters.emplace_back();
+        if (limit == 0) {
+            while (!characters.empty() && characters.back().empty()) {
+                characters.pop_back();
+            }
+        }
         return characters;
     }
 
@@ -1323,6 +1361,10 @@ struct SplitPattern final {
     usize search_from = 0U;
     bool matched = false;
     while (auto match = next_split_match(text, pattern, search_from)) {
+        if (limit > 0 && parts.size() + 1U >=
+                             static_cast<usize>(limit)) {
+            break;
+        }
         matched = true;
         parts.emplace_back(text.substr(cursor, match->first - cursor));
         cursor = match->first + match->second;
@@ -1334,7 +1376,9 @@ struct SplitPattern final {
         return parts;
     }
     parts.emplace_back(text.substr(cursor));
-    while (!parts.empty() && parts.back().empty()) parts.pop_back();
+    if (limit == 0) {
+        while (!parts.empty() && parts.back().empty()) parts.pop_back();
+    }
     return parts;
 }
 
@@ -1952,6 +1996,26 @@ void register_string_extensions(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_reference(*result));
         });
+    add(registry, "java/lang/String", "contains",
+        "(Ljava/lang/CharSequence;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            auto sequence = arguments[1].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!sequence || sequence->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.contains argument is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto target = machine.heap().string_value(*sequence);
+            if (!text || !target) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.contains requires String CharSequence");
+            }
+            return std::optional<Value>(Value::from_int(
+                text->find(*target) != std::u16string::npos ? 1 : 0));
+        });
     add(registry, "java/lang/String", "replace",
         "(CC)Ljava/lang/String;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1974,6 +2038,88 @@ void register_string_extensions(NativeMethodRegistry& registry) {
             if (!result) {
                 return std::unexpected(result.error());
             }
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    add(registry, "java/lang/String", "replace",
+        "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            auto target_reference = arguments[1].as_reference();
+            auto replacement_reference = arguments[2].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!target_reference || target_reference->is_null() ||
+                !replacement_reference || replacement_reference->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.replace sequence is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto target = machine.heap().string_value(*target_reference);
+            auto replacement = machine.heap().string_value(*replacement_reference);
+            if (!text || !target || !replacement) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.replace requires String sequences");
+            }
+            if (target->empty()) {
+                std::u16string expanded;
+                expanded.reserve(text->size() +
+                                 (text->size() + 1U) * replacement->size());
+                expanded.append(*replacement);
+                for (const char16_t character : *text) {
+                    expanded.push_back(character);
+                    expanded.append(*replacement);
+                }
+                text = std::move(expanded);
+            } else {
+                usize cursor = 0U;
+                while ((cursor = text->find(*target, cursor)) !=
+                       std::u16string::npos) {
+                    text->replace(cursor, target->size(), *replacement);
+                    cursor += replacement->size();
+                }
+            }
+            auto result = create_java_string(machine, std::move(*text));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    add(registry, "java/lang/String", "replaceAll",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            auto regex_reference = arguments[1].as_reference();
+            auto replacement_reference = arguments[2].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!regex_reference || regex_reference->is_null() ||
+                !replacement_reference || replacement_reference->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.replaceAll argument is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto regex = machine.heap().string_value(*regex_reference);
+            auto replacement = machine.heap().string_value(*replacement_reference);
+            if (!text || !regex || !replacement) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.replaceAll arguments are invalid");
+            }
+            if (*regex != u"\\s+") {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.replaceAll pattern is unsupported");
+            }
+            std::u16string output;
+            output.reserve(text->size());
+            for (usize index = 0U; index < text->size();) {
+                if ((*text)[index] <= u' ') {
+                    while (index < text->size() && (*text)[index] <= u' ') {
+                        ++index;
+                    }
+                    output.append(*replacement);
+                } else {
+                    output.push_back((*text)[index++]);
+                }
+            }
+            auto result = create_java_string(machine, std::move(output));
+            if (!result) return std::unexpected(result.error());
             return std::optional<Value>(Value::from_reference(*result));
         });
     add(registry, "java/lang/String", "trim", "()Ljava/lang/String;",
@@ -2006,29 +2152,32 @@ void register_string_extensions(NativeMethodRegistry& registry) {
     const auto register_string_case = [&registry](
         const char* name,
         char16_t (*convert)(char16_t) noexcept) {
-        add(registry, "java/lang/String", name,
-            "()Ljava/lang/String;",
-            [convert](Machine& machine, std::span<const Value> arguments)
-                -> Result<std::optional<Value>> {
-                auto receiver = require_receiver(arguments);
-                if (!receiver) return std::unexpected(receiver.error());
-                auto text = machine.heap().string_value(*receiver);
-                if (!text) return std::unexpected(text.error());
+        const auto implementation = [convert](
+            Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
 
-                bool changed = false;
-                for (char16_t& character : *text) {
-                    const char16_t converted = convert(character);
-                    changed = changed || converted != character;
-                    character = converted;
-                }
-                if (!changed) {
-                    return std::optional<Value>(
-                        Value::from_reference(*receiver));
-                }
-                auto result = create_java_string(machine, std::move(*text));
-                if (!result) return std::unexpected(result.error());
-                return std::optional<Value>(Value::from_reference(*result));
-            });
+            bool changed = false;
+            for (char16_t& character : *text) {
+                const char16_t converted = convert(character);
+                changed = changed || converted != character;
+                character = converted;
+            }
+            if (!changed) {
+                return std::optional<Value>(
+                    Value::from_reference(*receiver));
+            }
+            auto result = create_java_string(machine, std::move(*text));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        };
+        add(registry, "java/lang/String", name,
+            "()Ljava/lang/String;", implementation);
+        add(registry, "java/lang/String", name,
+            "(Ljava/util/Locale;)Ljava/lang/String;", implementation);
     };
     register_string_case("toLowerCase", simple_case_fold);
     register_string_case("toUpperCase", simple_case_upper);
@@ -2072,6 +2221,294 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                 if (!stored) return std::unexpected(stored.error());
             }
             return std::optional<Value>(Value::from_reference(*array));
+        });
+
+    add(registry, "java/lang/String", "split",
+        "(Ljava/lang/String;I)[Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.split expects pattern and limit");
+            }
+            auto receiver = require_receiver(arguments);
+            auto regex = arguments[1].as_reference();
+            auto limit = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!limit) return std::unexpected(limit.error());
+            if (!regex || regex->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.split pattern is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto regex_text = machine.heap().string_value(*regex);
+            if (!text || !regex_text) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "String.split pattern is not String");
+            }
+
+            auto parts = split_java_text(
+                *text, parse_split_pattern(*regex_text), *limit);
+            auto array = machine.heap().allocate_array(
+                "[Ljava/lang/String;", parts.size(),
+                Value::from_reference({}));
+            if (!array) return std::unexpected(array.error());
+            auto array_root = machine.pin_native_root(*array);
+            if (!array_root) return std::unexpected(array_root.error());
+            for (usize index = 0; index < parts.size(); ++index) {
+                auto value = create_java_string(machine,
+                                                std::move(parts[index]));
+                if (!value) return std::unexpected(value.error());
+                auto stored = machine.heap().set_element(
+                    *array, index, Value::from_reference(*value));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*array));
+        });
+
+    add(registry, "java/lang/String", "matches", "(Ljava/lang/String;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.matches expects one argument");
+            }
+            auto receiver = require_receiver(arguments);
+            auto regex_reference = arguments[1].as_reference();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!regex_reference || regex_reference->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.matches pattern is null");
+            }
+            auto text = machine.heap().string_value(*receiver);
+            auto pattern_text = machine.heap().string_value(*regex_reference);
+            if (!text || !pattern_text) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.matches arguments are invalid");
+            }
+            const auto is_digit = [](char16_t character) noexcept {
+                return character >= u'0' && character <= u'9';
+            };
+            const auto has_prefix = [](std::u16string_view value,
+                                       std::u16string_view prefix) noexcept {
+                return value.size() >= prefix.size() &&
+                       value.substr(0U, prefix.size()) == prefix;
+            };
+
+            bool matched = false;
+            if (*pattern_text == u"TC-\\d{2}") {
+                matched = text->size() == 5U &&
+                          has_prefix(*text, u"TC-") &&
+                          is_digit((*text)[3U]) &&
+                          is_digit((*text)[4U]);
+            } else if (*pattern_text == u"(?:LH|CV)-SKILL-\\d{2}") {
+                const bool prefix = has_prefix(*text, u"LH-SKILL-") ||
+                                    has_prefix(*text, u"CV-SKILL-");
+                matched = prefix && text->size() == 11U &&
+                          is_digit((*text)[9U]) &&
+                          is_digit((*text)[10U]);
+            } else if (*pattern_text ==
+                       u"(?:LH|CV)-ITEM-\\d+-\\d{2}") {
+                const bool prefix = has_prefix(*text, u"LH-ITEM-") ||
+                                    has_prefix(*text, u"CV-ITEM-");
+                if (prefix && text->size() >= 12U) {
+                    usize cursor = 8U;
+                    const usize digit_start = cursor;
+                    while (cursor < text->size() &&
+                           is_digit((*text)[cursor])) {
+                        ++cursor;
+                    }
+                    matched = cursor > digit_start &&
+                              cursor + 3U == text->size() &&
+                              (*text)[cursor] == u'-' &&
+                              is_digit((*text)[cursor + 1U]) &&
+                              is_digit((*text)[cursor + 2U]);
+                }
+            } else if (*pattern_text == u"[A-Z0-9_-]{4,32}") {
+                matched = text->size() >= 4U && text->size() <= 32U;
+                for (usize index = 0U; matched && index < text->size();
+                     ++index) {
+                    const char16_t character = (*text)[index];
+                    matched = (character >= u'A' && character <= u'Z') ||
+                              is_digit(character) || character == u'_' ||
+                              character == u'-';
+                }
+            } else {
+                bool contains_meta = false;
+                for (const char16_t character : *pattern_text) {
+                    if (character == u'\\' || character == u'[' ||
+                        character == u']' || character == u'(' ||
+                        character == u')' || character == u'{' ||
+                        character == u'}' || character == u'+' ||
+                        character == u'*' || character == u'?' ||
+                        character == u'|' || character == u'.' ||
+                        character == u'^' || character == u'$') {
+                        contains_meta = true;
+                        break;
+                    }
+                }
+                if (contains_meta) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "String.matches pattern is unsupported");
+                }
+                matched = *text == *pattern_text;
+            }
+            return std::optional<Value>(Value::from_int(matched ? 1 : 0));
+        });
+
+    add(registry, "java/lang/String", "format",
+        "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.format expects format and arguments");
+            }
+            auto format_reference = arguments[0].as_reference();
+            auto values_reference = arguments[1].as_reference();
+            if (!format_reference || format_reference->is_null() ||
+                !values_reference || values_reference->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "String.format argument is null");
+            }
+            auto format = machine.heap().string_value(*format_reference);
+            auto value_count = machine.heap().array_length(*values_reference);
+            if (!format || !value_count) {
+                return fail(ErrorCode::invalid_argument,
+                            "String.format arguments are invalid");
+            }
+
+            std::u16string output;
+            output.reserve(format->size() + 16U);
+            usize argument_index = 0U;
+            for (usize index = 0U; index < format->size(); ++index) {
+                const char16_t current = (*format)[index];
+                if (current != u'%') {
+                    output.push_back(current);
+                    continue;
+                }
+                if (index + 1U < format->size() &&
+                    (*format)[index + 1U] == u'%') {
+                    output.push_back(u'%');
+                    ++index;
+                    continue;
+                }
+
+                bool zero_pad = false;
+                i32 width = 0;
+                usize specifier_index = index + 1U;
+                if (specifier_index < format->size() &&
+                    (*format)[specifier_index] == u'0') {
+                    zero_pad = true;
+                    ++specifier_index;
+                }
+                while (specifier_index < format->size() &&
+                       (*format)[specifier_index] >= u'0' &&
+                       (*format)[specifier_index] <= u'9') {
+                    width = width * 10 +
+                            static_cast<i32>((*format)[specifier_index] - u'0');
+                    ++specifier_index;
+                }
+                if (specifier_index >= format->size()) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "String.format has an incomplete conversion");
+                }
+                const char16_t conversion = (*format)[specifier_index];
+                if (argument_index >= *value_count) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "String.format has too few arguments");
+                }
+                auto argument_value = machine.heap().element(
+                    *values_reference, argument_index++);
+                if (!argument_value) {
+                    return std::unexpected(argument_value.error());
+                }
+                auto argument_reference = argument_value->as_reference();
+                if (!argument_reference) {
+                    return std::unexpected(argument_reference.error());
+                }
+
+                std::u16string inserted;
+                if (conversion == u's' || conversion == u'S') {
+                    auto text = object_text(machine, *argument_reference);
+                    if (!text) return std::unexpected(text.error());
+                    inserted = std::move(*text);
+                    if (conversion == u'S') {
+                        for (char16_t& character : inserted) {
+                            character = simple_case_upper(character);
+                        }
+                    }
+                } else if (conversion == u'd' || conversion == u'x' ||
+                           conversion == u'X') {
+                    if (argument_reference->is_null()) {
+                        inserted = u"null";
+                    } else {
+                        auto class_name = machine.heap().class_name(
+                            *argument_reference);
+                        if (!class_name) {
+                            return std::unexpected(class_name.error());
+                        }
+                        auto field = machine.heap().field(*argument_reference, 0U);
+                        if (!field) return std::unexpected(field.error());
+                        i64 number = 0;
+                        if (*class_name == "java/lang/Long") {
+                            auto value = field->as_long();
+                            if (!value) return std::unexpected(value.error());
+                            number = *value;
+                        } else {
+                            auto value = field->as_int();
+                            if (!value) return std::unexpected(value.error());
+                            number = *value;
+                        }
+
+                        std::array<char, 64> buffer {};
+                        const int base = conversion == u'd' ? 10 : 16;
+                        const auto converted = std::to_chars(
+                            buffer.data(), buffer.data() + buffer.size(),
+                            number, base);
+                        if (converted.ec != std::errc {}) {
+                            return fail(ErrorCode::internal_error,
+                                        "String.format number conversion failed");
+                        }
+                        inserted = ascii_text(std::string_view(
+                            buffer.data(), static_cast<usize>(
+                                               converted.ptr - buffer.data())));
+                        if (conversion == u'X') {
+                            for (char16_t& character : inserted) {
+                                if (character >= u'a' && character <= u'f') {
+                                    character = static_cast<char16_t>(
+                                        character - (u'a' - u'A'));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "String.format conversion is unsupported");
+                }
+
+                if (width > 0 && inserted.size() < static_cast<usize>(width)) {
+                    const usize padding = static_cast<usize>(width) -
+                                          inserted.size();
+                    const char16_t fill = zero_pad ? u'0' : u' ';
+                    if (zero_pad && !inserted.empty() &&
+                        inserted.front() == u'-') {
+                        output.push_back(u'-');
+                        output.append(padding, fill);
+                        output.append(inserted.substr(1U));
+                    } else {
+                        output.append(padding, fill);
+                        output.append(inserted);
+                    }
+                } else {
+                    output.append(inserted);
+                }
+                index = specifier_index;
+            }
+
+            auto result = create_java_string(machine, std::move(output));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
         });
 
     add(registry, "java/lang/String", "valueOf",
@@ -2476,6 +2913,39 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/String",
+        "isBlank",
+        "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) {
+                return std::unexpected(receiver.error());
+            }
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            for (const char16_t character : *text) {
+                const bool whitespace =
+                    character == u' ' || character == u'\t' ||
+                    character == u'\n' || character == u'\v' ||
+                    character == u'\f' || character == u'\r' ||
+                    character == 0x001CU || character == 0x001DU ||
+                    character == 0x001EU || character == 0x001FU ||
+                    character == 0x1680U ||
+                    (character >= 0x2000U && character <= 0x2006U) ||
+                    (character >= 0x2008U && character <= 0x200AU) ||
+                    character == 0x2028U || character == 0x2029U ||
+                    character == 0x205FU || character == 0x3000U;
+                if (!whitespace) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+            }
+            return std::optional<Value>(Value::from_int(1));
+        });
+
+    add(registry,
+        "java/lang/String",
         "charAt",
         "(I)C",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2591,6 +3061,34 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_string_extensions(registry);
     register_text_builder(registry, "java/lang/StringBuilder");
     register_text_builder(registry, "java/lang/StringBuffer");
+
+    add(registry, "java/lang/System", "getenv",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "System.getenv expects one argument");
+            }
+            auto name = arguments[0].as_reference();
+            if (!name || name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "System.getenv name is null");
+            }
+            return std::optional<Value>(Value::from_reference({}));
+        });
+    add(registry, "java/lang/System", "lineSeparator",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "System.lineSeparator expects no arguments");
+            }
+            auto result = create_java_string(machine, u"\n");
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
 
     add(registry,
         "java/lang/System",

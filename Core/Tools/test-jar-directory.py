@@ -35,8 +35,8 @@ CORE_ROOT = SCRIPT_PATH.parent.parent
 PROJECT_ROOT = CORE_ROOT.parent
 DEFAULT_JAR_DIR = PROJECT_ROOT / "jar_test"
 DEFAULT_TIMEOUT_MS = 2_500
-DEFAULT_WIDTH = 320
-DEFAULT_HEIGHT = 240
+DEFAULT_WIDTH = 240
+DEFAULT_HEIGHT = 320
 MAX_ERROR_TEXT = 700
 
 FAILURE_KIND_ALIASES = {
@@ -118,6 +118,9 @@ class JarTarget:
     midlet_name: str
     main_class: str
     main_source: str
+    display_width: int | None = None
+    display_height: int | None = None
+    orientation: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -257,19 +260,72 @@ def read_zip_manifest(archive: zipfile.ZipFile) -> dict[str, str]:
     return parse_manifest_text(decode_manifest(archive.read(manifest_name)))
 
 
-def read_jad_midlets(jar_path: pathlib.Path) -> list[MidletEntry]:
+def read_jad_attributes(jar_path: pathlib.Path) -> dict[str, str]:
     candidates = [jar_path.with_suffix(".jad"), jar_path.with_suffix(".JAD")]
     for candidate in candidates:
         if not candidate.is_file():
             continue
         try:
-            attributes = parse_manifest_text(decode_manifest(candidate.read_bytes()))
+            return parse_manifest_text(decode_manifest(candidate.read_bytes()))
         except OSError:
             continue
-        entries = midlets_from_attributes(attributes, f"JAD:{candidate.name}")
-        if entries:
-            return entries
-    return []
+    return {}
+
+
+def read_jad_midlets(jar_path: pathlib.Path) -> list[MidletEntry]:
+    attributes = read_jad_attributes(jar_path)
+    if not attributes:
+        return []
+    return midlets_from_attributes(
+        attributes,
+        f"JAD:{jar_path.with_suffix('.jad').name}",
+    )
+
+
+def inferred_display(
+    attributes: Mapping[str, str],
+) -> tuple[int | None, int | None, str]:
+    orientation = ""
+    for key in (
+        "nokia-midlet-app-orientation",
+        "screenmode",
+        "midlet-screen-mode",
+    ):
+        value = attributes.get(key, "").strip().casefold()
+        if "portrait" in value:
+            orientation = "portrait"
+            break
+        if "landscape" in value:
+            orientation = "landscape"
+            break
+
+    width: int | None = None
+    height: int | None = None
+    for key in (
+        "target-display-size",
+        "nokia-midlet-target-display-size",
+        "nokia-midlet-original-display-size",
+        "midlet-original-display-size",
+    ):
+        value = attributes.get(key, "")
+        match = re.search(r"(\d+)\s*[,xX*]\s*(\d+)", value)
+        if match:
+            width = int(match.group(1))
+            height = int(match.group(2))
+            break
+    if width is None or height is None:
+        width_text = attributes.get("lge-midlet-targetlcd-width", "")
+        height_text = attributes.get("lge-midlet-targetlcd-height", "")
+        if width_text.isdigit() and height_text.isdigit():
+            width = int(width_text)
+            height = int(height_text)
+
+    if width is not None and height is not None:
+        if orientation == "portrait" and width > height:
+            width, height = height, width
+        elif orientation == "landscape" and width < height:
+            width, height = height, width
+    return width, height, orientation
 
 
 def read_u1(data: memoryview, offset: int) -> tuple[int, int]:
@@ -394,12 +450,26 @@ def discover_jar(
         relative_path = str(jar_path)
 
     entries: list[MidletEntry] = []
+    display_width: int | None = None
+    display_height: int | None = None
+    orientation = ""
     try:
         with zipfile.ZipFile(jar_path) as archive:
-            attributes = read_zip_manifest(archive)
-            entries = midlets_from_attributes(attributes, "JAR manifest")
-            if not entries:
-                entries = read_jad_midlets(jar_path)
+            manifest_attributes = read_zip_manifest(archive)
+            jad_attributes = read_jad_attributes(jar_path)
+            combined_attributes = dict(manifest_attributes)
+            combined_attributes.update(jad_attributes)
+            display_width, display_height, orientation = inferred_display(
+                combined_attributes
+            )
+            entries = midlets_from_attributes(
+                manifest_attributes, "JAR manifest"
+            )
+            if not entries and jad_attributes:
+                entries = midlets_from_attributes(
+                    jad_attributes,
+                    f"JAD:{jar_path.with_suffix('.jad').name}",
+                )
             if not entries:
                 entries = detect_midlet_classes(archive)
     except (OSError, zipfile.BadZipFile, RuntimeError, ValueError) as exc:
@@ -424,6 +494,9 @@ def discover_jar(
             midlet_name=entry.name,
             main_class=entry.class_name,
             main_source=entry.source,
+            display_width=display_width,
+            display_height=display_height,
+            orientation=orientation,
         )
         for entry in selected
     ]
@@ -721,6 +794,7 @@ def inspect_target(
     stall_ms: int,
     heartbeat_ms: int,
     require_visual: bool,
+    skip_teardown: bool,
     width: int,
     height: int,
 ) -> TargetResult:
@@ -742,6 +816,13 @@ def inspect_target(
     execution = None
     failures: list[dict[str, str]] = []
     run_dir = output_root / "items" / target.item_id
+    run_width = target.display_width or width
+    run_height = target.display_height or height
+    if target.display_width is None or target.display_height is None:
+        if target.orientation == "portrait" and run_width > run_height:
+            run_width, run_height = run_height, run_width
+        elif target.orientation == "landscape" and run_width < run_height:
+            run_width, run_height = run_height, run_width
     if static_error:
         add_failure(failures, "static scan", static_error)
 
@@ -786,15 +867,22 @@ def inspect_target(
                 str(stall_ms),
                 "--heartbeat-ms",
                 str(heartbeat_ms),
+                "--skip-teardown",
+                "1" if skip_teardown else "0",
             ]
         )
+        # The external process must cover both the startup budget and the
+        # requested observation window. Previously the process timeout equaled
+        # only max_startup_ms, so a MIDlet that started near the limit and then
+        # rendered successfully during observation was mislabeled TIMEOUT.
+        process_timeout_ms = timeout_ms + max(0, observe_ms) + 5_000
         execution = compat.execute_runner(
             runner_tokens,
             item,
             target.jar_path,
             run_dir,
-            timeout_ms,
-            {"width": width, "height": height},
+            process_timeout_ms,
+            {"width": run_width, "height": run_height},
         )
         logs = compat.combined_logs(execution)
         classified = compat.classify_failures(logs)
@@ -891,6 +979,10 @@ def inspect_target(
             )
 
     observed = compat.observed_data(execution)
+    observed["test_width"] = run_width
+    observed["test_height"] = run_height
+    if target.orientation:
+        observed["declared_orientation"] = target.orientation
     if execution is not None and execution.result:
         for key in (
             "frame_changes",
@@ -1015,6 +1107,11 @@ def target_result_to_json(result: TargetResult) -> dict[str, Any]:
         "midlet_name": result.target.midlet_name,
         "main_class": result.target.main_class,
         "main_source": result.target.main_source,
+        "display_hint": {
+            "width": result.target.display_width,
+            "height": result.target.display_height,
+            "orientation": result.target.orientation,
+        },
         "status": result.status,
         "duration_ms": result.duration_ms,
         "static_error": result.static_error,
@@ -1058,6 +1155,7 @@ def aggregate_report(
     stall_ms: int,
     heartbeat_ms: int,
     require_visual: bool,
+    skip_teardown: bool,
     jobs: int,
     smoke_limit: int,
     smoke_filters: Sequence[str],
@@ -1139,6 +1237,7 @@ def aggregate_report(
             "stall_ms": stall_ms,
             "heartbeat_ms": heartbeat_ms,
             "require_visual": require_visual,
+            "skip_teardown": skip_teardown,
             "jobs": jobs,
             "smoke_limit": smoke_limit,
             "smoke_filters": list(smoke_filters),
@@ -1412,6 +1511,11 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="require a nonblank Canvas frame or a shown native LCDUI screen",
     )
+    parser.add_argument(
+        "--skip-teardown",
+        action="store_true",
+        help="exit the isolated runner after observation without invoking MIDlet teardown",
+    )
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     parser.add_argument("--runner", type=pathlib.Path, help="reuse an existing CompatibilityHarness binary")
@@ -1585,6 +1689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.stall_ms,
                     args.heartbeat_ms,
                     args.require_visual,
+                    args.skip_teardown,
                     args.width,
                     args.height,
                 )
@@ -1612,6 +1717,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         stall_ms=args.stall_ms,
         heartbeat_ms=args.heartbeat_ms,
         require_visual=args.require_visual,
+        skip_teardown=args.skip_teardown,
         jobs=args.jobs,
         smoke_limit=args.smoke_limit,
         smoke_filters=args.smoke_filter,

@@ -326,11 +326,13 @@ constexpr std::array<Pass, 7> kAdam7 {{
     }
     case 3: {
         const u16 palette_index = sample(row, pixel_index, depth);
-        if (palette_index >= palette.size()) {
-            return fail(ErrorCode::malformed_archive,
-                        "PNG palette index is out of range");
-        }
-        Pixel value = palette[palette_index];
+        // A number of commercial J2ME assets contain isolated 8-bit palette
+        // indices beyond the short PLTE table. Reference handset decoders and
+        // ImageIO tolerate these entries as opaque black; rejecting the whole
+        // image prevents the accompanying bitmap-font metrics from loading.
+        Pixel value = palette_index < palette.size()
+            ? palette[palette_index]
+            : argb(255U, 0U, 0U, 0U);
         if (palette_index < palette_alpha.size()) {
             value = (value & 0x00FFFFFFU) |
                     (static_cast<Pixel>(palette_alpha[palette_index]) << 24U);

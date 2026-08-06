@@ -20,6 +20,33 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;Z)V"),
         });
     }
+    if (name == "java/security/MessageDigest") {
+        return make_class("java/security/MessageDigest", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate, "buffer", "[B"),
+            field(kPrivate, "count", "I"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPublic | kStatic, "getInstance",
+                   "(Ljava/lang/String;)Ljava/security/MessageDigest;"),
+            method(kPublic, "getAlgorithm", "()Ljava/lang/String;"),
+            method(kPublic, "getDigestLength", "()I"),
+            method(kPublic, "update", "(B)V"),
+            method(kPublic, "update", "([B)V"),
+            method(kPublic, "update", "([BII)V"),
+            method(kPublic, "digest", "()[B"),
+            method(kPublic, "digest", "([B)[B"),
+            method(kPublic, "reset", "()V"),
+            method(kPublic | kStatic, "isEqual", "([B[B)Z"),
+        });
+    }
+    if (name == "java/security/NoSuchAlgorithmException") {
+        return make_class("java/security/NoSuchAlgorithmException",
+                          "java/lang/Exception", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
     // CLDC 1.1.1 ships AccessController with only checkPermission(); the
     // doPrivileged / getContext machinery is commented out in the source, so
     // those members are deliberately absent here. The body of checkPermission

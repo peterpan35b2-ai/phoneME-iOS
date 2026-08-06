@@ -16,6 +16,7 @@
 #include <zlib.h>
 
 #include "M3gNativeSupport.hpp"
+#include "phoneme/graphics/Image.hpp"
 #include "phoneme/vm/NativeRootScope.hpp"
 
 namespace phoneme::vm::m3g {
@@ -26,6 +27,42 @@ constexpr std::array<u8, 12> kM3gSignature {
     0x34U, 0xBBU, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
 };
 constexpr usize kMaximumM3gBytes = 64U * 1024U * 1024U;
+
+[[nodiscard]] std::string utf8_from_utf16(std::u16string_view text) {
+    std::string output;
+    output.reserve(text.size());
+    for (usize index = 0U; index < text.size(); ++index) {
+        u32 code_point = static_cast<u16>(text[index]);
+        if (code_point >= 0xD800U && code_point <= 0xDBFFU &&
+            index + 1U < text.size()) {
+            const u32 low = static_cast<u16>(text[index + 1U]);
+            if (low >= 0xDC00U && low <= 0xDFFFU) {
+                code_point = 0x10000U + ((code_point - 0xD800U) << 10U) +
+                             (low - 0xDC00U);
+                ++index;
+            }
+        }
+        if (code_point <= 0x7FU) {
+            output.push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7FFU) {
+            output.push_back(static_cast<char>(0xC0U | (code_point >> 6U)));
+            output.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        } else if (code_point <= 0xFFFFU) {
+            output.push_back(static_cast<char>(0xE0U | (code_point >> 12U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        } else {
+            output.push_back(static_cast<char>(0xF0U | (code_point >> 18U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 12U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | ((code_point >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (code_point & 0x3FU)));
+        }
+    }
+    return output;
+}
 
 class Cursor final {
 public:
@@ -1546,6 +1583,15 @@ struct ParsedObject final {
         for (const Status& status : stored) {
             if (!status) return status;
         }
+        if (object.mutable_image) {
+            auto image = graphics::Image::create_mutable(
+                static_cast<i32>(object.width),
+                static_cast<i32>(object.height));
+            if (!image) return std::unexpected(image.error());
+            auto attached = machine.graphics().attach_image(
+                allocated->bits, std::move(*image));
+            if (!attached) return attached;
+        }
     } else if (object.type == 11U) {
         auto indices = allocate_array(machine, "[I", object.indices.size(),
                                       Value::from_int(0));
@@ -1779,9 +1825,12 @@ struct ParsedObject final {
     std::string class_name,
     std::span<const ParsedObject> objects,
     std::span<const u32> references,
-    std::string_view operation) {
-    auto array = allocate_array(machine, std::move(class_name),
-                                references.size(), Value::from_reference({}));
+    std::string_view operation,
+    usize minimum_length = 0U) {
+    auto array = allocate_array(
+        machine, std::move(class_name),
+        std::max(references.size(), minimum_length),
+        Value::from_reference({}));
     if (!array) return std::unexpected(array.error());
     for (usize index = 0; index < references.size(); ++index) {
         auto object = referenced_object(objects, references[index], operation);
@@ -1845,6 +1894,38 @@ struct ParsedObject final {
     return *table;
 }
 
+[[nodiscard]] Status link_group_hierarchy(
+    Machine& machine,
+    std::span<ParsedObject> objects,
+    ParsedObject& object) {
+    if (object.java_object.is_null() ||
+        (object.type != 9U && object.type != 22U)) {
+        return {};
+    }
+    const auto all = std::span<const ParsedObject>(objects.data(), objects.size());
+    auto children = reference_array(
+        machine, "[Ljavax/microedition/m3g/Node;", all,
+        object.children, "Group children");
+    if (!children) return std::unexpected(children.error());
+    auto children_stored = set_reference_field(
+        machine, object.java_object, kGroup, "children",
+        "[Ljavax/microedition/m3g/Node;", *children);
+    auto count_stored = set_int_field(
+        machine, object.java_object, kGroup, "childCount",
+        static_cast<i32>(object.children.size()));
+    if (!children_stored) return children_stored;
+    if (!count_stored) return count_stored;
+    for (u32 child_index : object.children) {
+        auto child = referenced_object(all, child_index, "Group child");
+        if (!child) return std::unexpected(child.error());
+        auto parent = set_reference_field(
+            machine, *child, kNode, "parent",
+            "Ljavax/microedition/m3g/Node;", object.java_object);
+        if (!parent) return parent;
+    }
+    return {};
+}
+
 [[nodiscard]] Status link_loaded_object(
     Machine& machine,
     std::span<ParsedObject> objects,
@@ -1894,28 +1975,8 @@ struct ParsedObject final {
         if (!property_stored) return property_stored;
     }
 
-    if (object.type == 9U || object.type == 22U) {
-        auto children = reference_array(
-            machine, "[Ljavax/microedition/m3g/Node;", all,
-            object.children, "Group children");
-        if (!children) return std::unexpected(children.error());
-        auto children_stored = set_reference_field(
-            machine, object.java_object, kGroup, "children",
-            "[Ljavax/microedition/m3g/Node;", *children);
-        auto count_stored = set_int_field(
-            machine, object.java_object, kGroup, "childCount",
-            static_cast<i32>(object.children.size()));
-        if (!children_stored) return children_stored;
-        if (!count_stored) return count_stored;
-        for (u32 child_index : object.children) {
-            auto child = referenced_object(all, child_index, "Group child");
-            if (!child) return std::unexpected(child.error());
-            auto parent = set_reference_field(
-                machine, *child, kNode, "parent",
-                "Ljavax/microedition/m3g/Node;", object.java_object);
-            if (!parent) return parent;
-        }
-    }
+    auto hierarchy_linked = link_group_hierarchy(machine, objects, object);
+    if (!hierarchy_linked) return hierarchy_linked;
 
     if (object.type == 22U) {
         auto camera = referenced_object(all, object.active_camera, "World camera");
@@ -1945,7 +2006,7 @@ struct ParsedObject final {
     if (object.type == 3U) {
         auto textures = reference_array(
             machine, "[Ljavax/microedition/m3g/Texture2D;", all,
-            object.textures, "Appearance textures");
+            object.textures, "Appearance textures", 8U);
         if (!textures) return std::unexpected(textures.error());
         auto textures_stored = set_reference_field(
             machine, object.java_object, kAppearance, "textures",
@@ -2063,8 +2124,24 @@ struct ParsedObject final {
                 }
                 auto class_name = machine.heap().class_name(*invoked->throwable);
                 if (!class_name) return std::unexpected(class_name.error());
-                return fail_java(*class_name,
-                                 "SkinnedMesh transform reference is invalid");
+                std::string detail =
+                    "SkinnedMesh transform reference is invalid"
+                    " (weight=" + std::to_string(influence.weight) +
+                    ", firstVertex=" +
+                    std::to_string(influence.first_vertex) +
+                    ", vertexCount=" +
+                    std::to_string(influence.vertex_count) + ")";
+                auto message_field = machine.heap().field(*invoked->throwable, 0U);
+                if (message_field) {
+                    auto message = message_field->as_reference();
+                    if (message && !message->is_null()) {
+                        auto text = machine.heap().string_value(*message);
+                        if (text && !text->empty()) {
+                            detail += ": " + utf8_from_utf16(*text);
+                        }
+                    }
+                }
+                return fail_java(*class_name, std::move(detail));
             }
         }
     }
@@ -2213,6 +2290,15 @@ Result<ObjectRef> load_m3g(
         auto root = machine.pin_native_root(object.java_object);
         if (!root) return std::unexpected(root.error());
         pinned.push_back(std::move(*root));
+    }
+    // Parent links must exist for the whole scene graph before a SkinnedMesh
+    // validates that each bone belongs to its skeleton. Serialized files are
+    // free to place the SkinnedMesh before the Group objects it references.
+    for (ParsedObject& object : objects) {
+        auto hierarchy_linked = link_group_hierarchy(machine, objects, object);
+        if (!hierarchy_linked) {
+            return std::unexpected(hierarchy_linked.error());
+        }
     }
     for (ParsedObject& object : objects) {
         auto linked = link_loaded_object(machine, objects, object);

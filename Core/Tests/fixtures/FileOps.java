@@ -27,11 +27,14 @@ public final class FileOps {
         InputStream relative = FileOps.class.getResourceAsStream("data.bin");
         InputStream absolute =
             FileOps.class.getResourceAsStream("/corefixture/data.bin");
-        if (relative == null || absolute == null) {
+        InputStream packageFallback =
+            FileOps.class.getResourceAsStream("/data.bin");
+        if (relative == null || absolute == null || packageFallback == null) {
             return 0;
         }
         int relativeCount = 0;
         int absoluteCount = 0;
+        int fallbackCount = 0;
         int first = relative.read();
         int value;
         while ((value = relative.read()) >= 0) {
@@ -40,10 +43,14 @@ public final class FileOps {
         while (absolute.read() >= 0) {
             absoluteCount++;
         }
+        while (packageFallback.read() >= 0) {
+            fallbackCount++;
+        }
         relative.close();
         absolute.close();
-        return first == 'P' && relativeCount == 16 && absoluteCount == 17
-            ? 1 : 0;
+        packageFallback.close();
+        return first == 'P' && relativeCount == 16 && absoluteCount == 17 &&
+            fallbackCount == 17 ? 1 : 0;
     }
 
     public static int resourceTraversalBlocked() {

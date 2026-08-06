@@ -1,16 +1,20 @@
 import Foundation
 
 enum TranslationProvider: String, CaseIterable, Identifiable {
+    case automatic
     case google
     case bing
 
     static let preferenceKey = "translationProvider"
-    static let defaultProvider = TranslationProvider.bing
+    private static let automaticMigrationKey =
+        "translationProviderAutomaticMigrationV1"
+    static let defaultProvider = TranslationProvider.automatic
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .automatic: return L10n.string("Automatic")
         case .google: return "Google Translate"
         case .bing: return "Bing Translator"
         }
@@ -18,6 +22,7 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .automatic: return "arrow.triangle.2.circlepath"
         case .google: return "g.circle"
         case .bing: return "b.circle"
         }
@@ -27,11 +32,18 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
         switch self {
         case .google: return 0
         case .bing: return 1
+        case .automatic: return 2
         }
     }
 
     static var selected: TranslationProvider {
-        let stored = UserDefaults.standard.string(forKey: preferenceKey)
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: automaticMigrationKey) {
+            defaults.set(true, forKey: automaticMigrationKey)
+            defaults.set(defaultProvider.rawValue, forKey: preferenceKey)
+            return defaultProvider
+        }
+        let stored = defaults.string(forKey: preferenceKey)
         return stored.flatMap(TranslationProvider.init(rawValue:)) ?? defaultProvider
     }
 }
@@ -328,10 +340,11 @@ struct GameProfile: Codable, Equatable {
     var forceFullscreen = false
     var showFPS = false
     var frameRateLimit = Self.defaultFrameRate
-    // Optional keeps older profile JSON decodable. Missing/nil uses the safe
-    // 30 FPS publication cap. The legacy loop override is migrated to the same
-    // cap so a saved profile can never shorten Java sleeps or speed game logic.
-    var framePacingMode: FramePacingMode? = .cap
+    // Optional keeps older profile JSON decodable. Missing/nil uses the 30 FPS
+    // render-loop override. The core only adjusts sleeps that immediately
+    // follow stable frame publications; unrelated loading, timer and I/O sleeps
+    // keep their original duration.
+    var framePacingMode: FramePacingMode? = .overrideGameLoop
     // Optional keeps older profile JSON decodable. Missing/nil uses the
     // runtime's 64 MiB default heap limit.
     var heapSizeMegabytes: Int?
@@ -392,18 +405,21 @@ struct GameProfile: Codable, Equatable {
             case .native:
                 return .native
             case .cap, .overrideGameLoop, nil:
-                return .cap
+                // `.cap` was written by a short-lived build that mislabeled
+                // the FPS override as a publication limit. Treat it as the
+                // intended render-loop override when loading old profiles.
+                return .overrideGameLoop
             }
         }
         set {
-            framePacingMode = newValue == .native ? .native : .cap
+            framePacingMode = newValue == .native ? .native : .overrideGameLoop
         }
     }
 
     var isFrameRateOverrideEnabled: Bool {
-        get { effectiveFramePacingMode == .cap }
+        get { effectiveFramePacingMode == .overrideGameLoop }
         set {
-            effectiveFramePacingMode = newValue ? .cap : .native
+            effectiveFramePacingMode = newValue ? .overrideGameLoop : .native
             if newValue, frameRateLimit <= 0 {
                 frameRateLimit = Self.defaultFrameRate
             }
@@ -455,8 +471,8 @@ struct GameProfile: Codable, Equatable {
             max(frameRateLimit, 0),
             Self.maximumFrameRate
         )
-        if framePacingMode == .overrideGameLoop {
-            framePacingMode = .cap
+        if framePacingMode == .cap {
+            framePacingMode = .overrideGameLoop
         }
         if let heapSizeMegabytes {
             let resolved = Self.resolvedHeapSizeMegabytes(heapSizeMegabytes)

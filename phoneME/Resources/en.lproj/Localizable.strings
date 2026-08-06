@@ -158,11 +158,12 @@
 "Force Canvas fullscreen" = "Force Canvas fullscreen";
 "Show FPS" = "Show FPS";
 "Frame rate limit" = "Frame rate limit";
-"Override FPS" = "Limit FPS";
+"Override FPS" = "Override FPS";
 "Limit FPS" = "Limit FPS";
 "FPS" = "FPS";
 "FPS override is off by default. Enable it only for games that need a higher frame rate; frame-based gameplay may run faster." = "FPS limiting defaults to 30 and never accelerates Java timers.";
 "FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated." = "FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated.";
+"FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration." = "FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration.";
 "Auto (30)" = "Auto (30)";
 "Frame pacing" = "Frame pacing";
 "Native game timing" = "Native game timing";
@@ -260,7 +261,8 @@
 "Auto translate" = "Auto translate";
 "Translation" = "Translation";
 "Translation service" = "Translation service";
-"Bing Translator is the default. It uses a web session and may take slightly longer on the first request." = "Bing Translator is the default. It uses a web session and may take slightly longer on the first request.";
+"Automatic" = "Automatic";
+"Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked." = "Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked.";
 "Auto detect" = "Auto detect";
 "Chinese (Simplified)" = "Chinese (Simplified)";
 "Chinese (Traditional)" = "Chinese (Traditional)";
@@ -364,6 +366,7 @@
 "All screens will return to an evenly arranged layout." = "Screens will be packed by each app's aspect ratio and resolution.";
 "Unavailable screen" = "Unavailable screen";
 "Focused" = "Focused";
+"Show All Screens" = "Show All Screens";
 "Resize screen" = "Resize screen";
 "Display Settings" = "Display Settings";
 "Replace App" = "Replace App";

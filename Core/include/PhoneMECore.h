@@ -164,6 +164,7 @@ typedef enum {
 typedef enum {
     PHONEME_TRANSLATION_PROVIDER_GOOGLE = 0,
     PHONEME_TRANSLATION_PROVIDER_BING = 1,
+    PHONEME_TRANSLATION_PROVIDER_AUTOMATIC = 2,
 } PhoneMETranslationProvider;
 
 /* Invoked synchronously on the requesting runtime thread. Do not re-enter
@@ -210,7 +211,8 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                       int32_t enabled,
                                       const char* source_language,
                                       const char* target_language);
-/* Provider-aware variant. Google remains provider 0 for ABI compatibility. */
+/* Provider-aware variant. Google and Bing keep their existing ABI values.
+ * AUTOMATIC adds throttling, circuit breaking and provider fallback. */
 int32_t phoneme_configure_translation_v2(PhoneMERuntimeRef runtime,
                                          int32_t enabled,
                                          int32_t provider,
@@ -242,6 +244,29 @@ int32_t phoneme_set_suite_trust(PhoneMERuntimeRef runtime,
 int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
                             const char* jar_path,
                             int32_t* suite_id_out);
+/* Host-scoped installation keeps imports with identical MIDP manifest identity
+ * separate. Reinstalling the same scope replaces changed same-version bytes
+ * while preserving the stable suite ID and its RMS/files. */
+int32_t phoneme_install_jar_scoped(PhoneMERuntimeRef runtime,
+                                   const char* jar_path,
+                                   const char* identity_scope,
+                                   int32_t* suite_id_out);
+/* Finds a previously managed suite by its MIDP manifest identity without
+ * reopening and hashing the source JAR. Returns PHONEME_OK with suite_id_out
+ * set to 0 when no exact vendor/name/version match exists. An empty version
+ * matches any installed version for that identity. */
+int32_t phoneme_find_installed_suite(PhoneMERuntimeRef runtime,
+                                     const char* vendor,
+                                     const char* name,
+                                     const char* version,
+                                     int32_t* suite_id_out);
+int32_t phoneme_find_installed_suite_scoped(
+    PhoneMERuntimeRef runtime,
+    const char* vendor,
+    const char* name,
+    const char* version,
+    const char* identity_scope,
+    int32_t* suite_id_out);
 /* Removes the installed suite. When remove_data is nonzero, RMS, FileConnection,
  * permissions, PushRegistry and temporary suite state are removed as well. */
 int32_t phoneme_uninstall_suite(PhoneMERuntimeRef runtime,

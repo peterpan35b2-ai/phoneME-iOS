@@ -285,7 +285,7 @@ int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                       const char* source_language,
                                       const char* target_language) {
     return phoneme_configure_translation_v2(
-        runtime, enabled, PHONEME_TRANSLATION_PROVIDER_GOOGLE,
+        runtime, enabled, PHONEME_TRANSLATION_PROVIDER_AUTOMATIC,
         source_language, target_language);
 }
 
@@ -297,7 +297,8 @@ int32_t phoneme_configure_translation_v2(PhoneMERuntimeRef runtime,
     Runtime* instance = cast_runtime(runtime);
     if (instance == nullptr ||
         (provider != PHONEME_TRANSLATION_PROVIDER_GOOGLE &&
-         provider != PHONEME_TRANSLATION_PROVIDER_BING)) {
+         provider != PHONEME_TRANSLATION_PROVIDER_BING &&
+         provider != PHONEME_TRANSLATION_PROVIDER_AUTOMATIC)) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     return status_code(
@@ -318,7 +319,7 @@ int32_t phoneme_configure_app_translation(
     const char* source_language,
     const char* target_language) {
     return phoneme_configure_app_translation_v2(
-        runtime, app_id, enabled, PHONEME_TRANSLATION_PROVIDER_GOOGLE,
+        runtime, app_id, enabled, PHONEME_TRANSLATION_PROVIDER_AUTOMATIC,
         source_language, target_language);
 }
 
@@ -332,7 +333,8 @@ int32_t phoneme_configure_app_translation_v2(
     Runtime* instance = cast_runtime(runtime);
     if (instance == nullptr ||
         (provider != PHONEME_TRANSLATION_PROVIDER_GOOGLE &&
-         provider != PHONEME_TRANSLATION_PROVIDER_BING)) {
+         provider != PHONEME_TRANSLATION_PROVIDER_BING &&
+         provider != PHONEME_TRANSLATION_PROVIDER_AUTOMATIC)) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     return status_code(
@@ -416,6 +418,68 @@ int32_t phoneme_install_jar(PhoneMERuntimeRef runtime,
     *suite_id_out = suite->value;
     g_last_suite_store_stage.store(1, std::memory_order_relaxed);
     g_last_install_stage.store(2, std::memory_order_relaxed);
+    return PHONEME_OK;
+}
+
+int32_t phoneme_install_jar_scoped(PhoneMERuntimeRef runtime,
+                                   const char* jar_path,
+                                   const char* identity_scope,
+                                   int32_t* suite_id_out) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || jar_path == nullptr || identity_scope == nullptr ||
+        suite_id_out == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+
+    g_last_install_stage.store(1, std::memory_order_relaxed);
+    auto suite = instance->install_jar(jar_path, identity_scope);
+    if (!suite) {
+        g_last_install_stage.store(-1, std::memory_order_relaxed);
+        instance->record_error(suite.error());
+        return map_error(suite.error());
+    }
+    instance->clear_error();
+    *suite_id_out = suite->value;
+    g_last_suite_store_stage.store(1, std::memory_order_relaxed);
+    g_last_install_stage.store(2, std::memory_order_relaxed);
+    return PHONEME_OK;
+}
+
+int32_t phoneme_find_installed_suite(PhoneMERuntimeRef runtime,
+                                     const char* vendor,
+                                     const char* name,
+                                     const char* version,
+                                     int32_t* suite_id_out) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || vendor == nullptr || name == nullptr ||
+        version == nullptr || suite_id_out == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+
+    const auto suite = instance->find_installed_suite(vendor, name, version);
+    *suite_id_out = suite.has_value() ? suite->value : 0;
+    instance->clear_error();
+    return PHONEME_OK;
+}
+
+int32_t phoneme_find_installed_suite_scoped(
+    PhoneMERuntimeRef runtime,
+    const char* vendor,
+    const char* name,
+    const char* version,
+    const char* identity_scope,
+    int32_t* suite_id_out) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || vendor == nullptr || name == nullptr ||
+        version == nullptr || identity_scope == nullptr ||
+        suite_id_out == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+
+    const auto suite = instance->find_installed_suite(
+        vendor, name, version, identity_scope);
+    *suite_id_out = suite.has_value() ? suite->value : 0;
+    instance->clear_error();
     return PHONEME_OK;
 }
 

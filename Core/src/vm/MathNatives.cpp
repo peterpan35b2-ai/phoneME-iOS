@@ -226,6 +226,103 @@ void register_math_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(
                 Value::from_long(java_round(*value)));
         });
+    add(registry, "floorDiv", "(II)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto dividend = arguments[0].as_int();
+            auto divisor = arguments[1].as_int();
+            if (!dividend || !divisor) {
+                return fail(ErrorCode::invalid_argument,
+                            "Math.floorDiv operands are invalid");
+            }
+            if (*divisor == 0) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "division by zero");
+            }
+            i32 quotient = *dividend / *divisor;
+            const i32 remainder = *dividend % *divisor;
+            if (remainder != 0 && ((*dividend ^ *divisor) < 0)) {
+                --quotient;
+            }
+            return std::optional<Value>(Value::from_int(quotient));
+        });
+    add(registry, "floorMod", "(II)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto dividend = arguments[0].as_int();
+            auto divisor = arguments[1].as_int();
+            if (!dividend || !divisor) {
+                return fail(ErrorCode::invalid_argument,
+                            "Math.floorMod operands are invalid");
+            }
+            if (*divisor == 0) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "division by zero");
+            }
+            i32 remainder = *dividend % *divisor;
+            if (remainder != 0 && ((remainder ^ *divisor) < 0)) {
+                remainder += *divisor;
+            }
+            return std::optional<Value>(Value::from_int(remainder));
+        });
+    add(registry, "floorMod", "(JJ)J",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto dividend = arguments[0].as_long();
+            auto divisor = arguments[1].as_long();
+            if (!dividend || !divisor) {
+                return fail(ErrorCode::invalid_argument,
+                            "Math.floorMod operands are invalid");
+            }
+            if (*divisor == 0) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "division by zero");
+            }
+            i64 remainder = *dividend % *divisor;
+            if (remainder != 0 && ((remainder ^ *divisor) < 0)) {
+                remainder += *divisor;
+            }
+            return std::optional<Value>(Value::from_long(remainder));
+        });
+    add(registry, "addExact", "(II)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto left = arguments[0].as_int();
+            auto right = arguments[1].as_int();
+            if (!left || !right) {
+                return fail(ErrorCode::invalid_argument,
+                            "Math.addExact operands are invalid");
+            }
+            const i64 result = static_cast<i64>(*left) +
+                               static_cast<i64>(*right);
+            if (result < std::numeric_limits<i32>::min() ||
+                result > std::numeric_limits<i32>::max()) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "integer overflow");
+            }
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(result)));
+        });
+    add(registry, "multiplyExact", "(II)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto left = arguments[0].as_int();
+            auto right = arguments[1].as_int();
+            if (!left || !right) {
+                return fail(ErrorCode::invalid_argument,
+                            "Math.multiplyExact operands are invalid");
+            }
+            const i64 result = static_cast<i64>(*left) *
+                               static_cast<i64>(*right);
+            if (result < std::numeric_limits<i32>::min() ||
+                result > std::numeric_limits<i32>::max()) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "integer overflow");
+            }
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(result)));
+        });
+
     add(registry, "toDegrees", "(D)D",
         [](Machine&, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

@@ -31,8 +31,8 @@ struct Options final {
     std::string result_path;
     std::string frame_path;
     std::string native_coverage_path;
-    phoneme::i32 width {320};
-    phoneme::i32 height {240};
+    phoneme::i32 width {240};
+    phoneme::i32 height {320};
     phoneme::i32 observe_ms {0};
     phoneme::i32 confirm_interval_ms {0};
     phoneme::i32 confirm_count {0};
@@ -41,6 +41,7 @@ struct Options final {
     phoneme::i32 input_interval_ms {220};
     phoneme::i32 stall_ms {0};
     phoneme::i32 heartbeat_ms {1'000};
+    bool skip_teardown {false};
 };
 
 struct HarnessResult final {
@@ -133,7 +134,7 @@ struct AutoplayState final {
                     "--observe-ms N --confirm-interval-ms N "
                     "--confirm-count N --autoplay 0|1 "
                     "--input-start-delay-ms N --input-interval-ms N "
-                    "--stall-ms N --heartbeat-ms N]";
+                    "--stall-ms N --heartbeat-ms N --skip-teardown 0|1]";
             return false;
         }
         if (index + 1 >= argc) {
@@ -223,6 +224,13 @@ struct AutoplayState final {
                 return false;
             }
             options.heartbeat_ms = *parsed;
+        } else if (argument == "--skip-teardown") {
+            const auto parsed = parse_i32(value);
+            if (!parsed.has_value() || (*parsed != 0 && *parsed != 1)) {
+                error = "invalid skip-teardown value: " + value;
+                return false;
+            }
+            options.skip_teardown = *parsed != 0;
         } else {
             error = "unknown argument: " + std::string(argument);
             return false;
@@ -683,6 +691,16 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
         -5, -6, -5, '5', -2, -5, -4, -5, -2, -2, -5, -3, -5, -1,
         -5, '5', '0', '1', '3', '7', '9', '*', '#', -6, -5, -4, -5, -7,
     };
+    if (const char* configured_limit =
+            std::getenv("PHONEME_HARNESS_AUTOPLAY_KEY_LIMIT");
+        configured_limit != nullptr && configured_limit[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long limit = std::strtoul(configured_limit, &end, 10);
+        if (end != configured_limit && *end == '\0' &&
+            state.key_index >= static_cast<phoneme::usize>(limit)) {
+            return;
+        }
+    }
     const auto key = kGameKeys[state.key_index % kGameKeys.size()];
     ++state.key_index;
     state.active_key = key;
@@ -815,6 +833,21 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
     }
     result.configured = true;
     add_milestone(result, "runtime-configured");
+
+    const char* enable_bing = std::getenv("PHONEME_HARNESS_BING_TRANSLATION");
+    if (enable_bing != nullptr && enable_bing[0] != '\0' &&
+        std::string_view(enable_bing) != "0") {
+        auto translation = runtime.configure_translation(
+            true,
+            phoneme::translation::TranslationProvider::bing,
+            "en",
+            "vi");
+        if (!translation.has_value()) {
+            capture_error(result, translation.error());
+            return finish(16);
+        }
+        add_milestone(result, "bing-translation-enabled");
+    }
 
     auto suite_id = runtime.install_jar(options.jar);
     if (!suite_id.has_value()) {
@@ -1005,6 +1038,20 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
     }
 
     if (result.app_state == "error") return finish(16);
+
+    if (options.skip_teardown) {
+        // The process is the isolation boundary for corpus integration tests.
+        // Some MIDlets intentionally keep worker loops alive and can block
+        // destroyApp/VM shutdown even though launch, rendering and input are
+        // healthy. Persist the complete observation result, then terminate
+        // without running Runtime's destructor so teardown cannot turn a
+        // successful game smoke test into a timeout.
+        add_milestone(result, "teardown-skipped");
+        const int result_code = finish(0);
+        std::cout.flush();
+        std::cerr.flush();
+        std::_Exit(result_code);
+    }
 
     if (runtime.app_state(kAppId) != phoneme::runtime::AppState::destroyed) {
         add_milestone(result, "destroy-begin");

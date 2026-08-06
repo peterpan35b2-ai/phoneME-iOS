@@ -41,6 +41,7 @@
 		A00000000000000000000033 /* EmulatorWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000037 /* EmulatorWorkspace.swift */; };
 		A00000000000000000000034 /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000038 /* WorkspaceStore.swift */; };
 		A00000000000000000000035 /* WorkspacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000039 /* WorkspacesView.swift */; };
+		A00000000000000000000036 /* PhoneMEMetal3DBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003A /* PhoneMEMetal3DBridge.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -85,6 +86,7 @@
 		B00000000000000000000037 /* EmulatorWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorWorkspace.swift; sourceTree = "<group>"; };
 		B00000000000000000000038 /* WorkspaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
 		B00000000000000000000039 /* WorkspacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacesView.swift; sourceTree = "<group>"; };
+		B0000000000000000000003A /* PhoneMEMetal3DBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PhoneMEMetal3DBridge.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -199,6 +201,7 @@
 				B0000000000000000000001F /* PhoneMEMediaBridge.m */,
 				B00000000000000000000023 /* PhoneMEHTTPSBridge.m */,
 				B00000000000000000000025 /* PhoneMEPlatformBridge.m */,
+				B0000000000000000000003A /* PhoneMEMetal3DBridge.mm */,
 				B00000000000000000000020 /* AVFoundation.framework */,
 				B00000000000000000000022 /* MediaPlayer.framework */,
 				B00000000000000000000024 /* Security.framework */,
@@ -337,6 +340,7 @@
 				A00000000000000000000033 /* EmulatorWorkspace.swift in Sources */,
 				A00000000000000000000034 /* WorkspaceStore.swift in Sources */,
 				A00000000000000000000035 /* WorkspacesView.swift in Sources */,
+				A00000000000000000000036 /* PhoneMEMetal3DBridge.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

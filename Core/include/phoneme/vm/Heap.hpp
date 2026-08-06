@@ -58,6 +58,10 @@ public:
     [[nodiscard]] Status set_field(ObjectRef reference, usize index, Value value);
     [[nodiscard]] Result<Value> element(ObjectRef reference, usize index) const;
     [[nodiscard]] Status set_element(ObjectRef reference, usize index, Value value);
+    [[nodiscard]] Status fill_array_range(ObjectRef reference,
+                                           usize index,
+                                           usize length,
+                                           Value value);
     [[nodiscard]] Status copy_array_range(ObjectRef source,
                                           usize source_index,
                                           ObjectRef destination,

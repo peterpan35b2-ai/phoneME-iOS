@@ -305,6 +305,7 @@ struct WorkspaceDetailView: View {
                 .disabled(focusedPanel == nil)
 
                 Button {
+                    focusedPanelID = nil
                     isEditingLayout.toggle()
                 } label: {
                     Label(
@@ -385,9 +386,6 @@ struct WorkspaceDetailView: View {
         }
         .onAppear {
             runtimeStore.activateWorkspace(workspaceID)
-            if focusedPanelID == nil {
-                focusedPanelID = workspace?.panels.first?.id
-            }
         }
         .onDisappear {
             runtimeStore.deactivateWorkspace(workspaceID)
@@ -469,6 +467,9 @@ struct WorkspaceDetailView: View {
                                         && !isEditingLayout,
                                     onFocus: {
                                         focusedPanelID = panel.id
+                                    },
+                                    onShowOverview: {
+                                        focusedPanelID = nil
                                     },
                                     onMove: { frame in
                                         workspaceStore.updatePanelFrame(
@@ -781,7 +782,7 @@ struct WorkspaceDetailView: View {
             viewportSize: panelViewportSize
         )
         if focusedPanelID == panel.id {
-            focusedPanelID = workspace?.panels.first?.id
+            focusedPanelID = nil
         }
     }
 
@@ -804,6 +805,7 @@ private struct WorkspacePanelCard: View {
     let isEditingLayout: Bool
     let isZoomed: Bool
     let onFocus: () -> Void
+    let onShowOverview: () -> Void
     let onMove: (EmulatorWorkspaceFrame) -> Void
     let onResize: (EmulatorWorkspaceFrame) -> Void
     let onConfigure: () -> Void
@@ -914,6 +916,20 @@ private struct WorkspacePanelCard: View {
                 moveGesture(baseRect: baseRect),
                 including: isEditingLayout ? .all : .none
             )
+
+            if isZoomed {
+                Button(action: onShowOverview) {
+                    Image(systemName: "rectangle.grid.2x2")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.14))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show All Screens")
+            }
 
             runStopButton
             panelMenu

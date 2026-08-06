@@ -546,15 +546,6 @@ void Scheduler::set_host_foreground(bool foreground) noexcept {
 void Scheduler::configure_frame_pacing(
     i32 frames_per_second,
     FramePacingMode mode) noexcept {
-    // Mode 2 shipped briefly as an experimental loop override that shortened
-    // a MIDlet's own Thread.sleep calls. That advances frame-count-based game
-    // logic (KPAH's native 40 ms loop became 16 ms at 60 FPS), desynchronizing
-    // online games and eventually leaving their renderer/network state stuck.
-    // Keep the numeric value ABI-compatible, but treat every legacy override as
-    // a publication-only cap so Java timers and sleeps are never accelerated.
-    const FramePacingMode safe_mode =
-        mode == FramePacingMode::override_game_loop
-            ? FramePacingMode::cap : mode;
     const i64 normalized = std::clamp<i64>(frames_per_second, 1, 240);
     const i64 interval =
         (1'000'000'000LL + normalized / 2LL) / normalized;
@@ -562,7 +553,7 @@ void Scheduler::configure_frame_pacing(
         std::max<i64>(interval, 1),
         std::memory_order_release);
     frame_pacing_mode_.store(
-        static_cast<i32>(safe_mode),
+        static_cast<i32>(mode),
         std::memory_order_release);
     frame_pacing_generation_.fetch_add(1U, std::memory_order_acq_rel);
     background_condition_.notify_all();
@@ -730,14 +721,20 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         // work. Release the VM gate so Java workers may run, but do not stretch
         // large obfuscated <clinit> blocks into minute-long launches.
         std::this_thread::yield();
-    } else {
-        // Pace sustained foreground interpreter work instead of merely
-        // surrendering the remainder of the current host timeslice. A plain
-        // yield can immediately reschedule the same VM thread, starving the
-        // framebuffer poll/render queues and producing uneven frame delivery.
-        // Bootstrap and paint callbacks opt into the unpaced branch above, so
-        // large class initializers and bounded rendering work remain fast.
+    } else if (deterministic_mode) {
+        // Deterministic harnesses deliberately retain a small, repeatable
+        // pause so timing-sensitive scheduler tests do not become host-load
+        // dependent.
         std::this_thread::sleep_for(backoff);
+    } else if ((tls_unblocked_quantum_count_ & 7U) == 0U) {
+        // Foreground execution must never be duty-cycle throttled. Asset
+        // decompression, table parsing and obfuscated loading loops routinely
+        // cross thousands of VM quanta; sleeping at every boundary stretched
+        // a few seconds of real CPU work into minute-long loading screens.
+        // The execution gate is released at every quantum, while an explicit
+        // host yield every eighth quantum provides fairness without taxing
+        // single-threaded loaders. Frame limiting remains publication-based.
+        std::this_thread::yield();
     }
     machine.resume_execution_after_blocking(depth);
     if (unpaced_execution) tls_unblocked_quantum_count_ = 0U;

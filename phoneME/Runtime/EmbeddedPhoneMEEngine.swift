@@ -455,8 +455,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
             GameProfile.resolvedHeapSizeMegabytes(heapSizeMegabytes)
         // Native input wakes the MIDP select loop directly, so the host bridge
         // does not need a 120 Hz polling floor. Framebuffer delivery and active
-        // LCDUI synchronization follow the profile cadence up to 60 FPS without
-        // changing the MIDlet's own timing or game-loop speed.
+        // LCDUI synchronization follow the selected cadence up to 60 FPS; the
+        // core separately applies render-loop override semantics when enabled.
         framePollingFramesPerSecond = requestedFPS
         fpsMeasurementStartNanoseconds = DispatchTime.now()
             .uptimeNanoseconds
@@ -561,7 +561,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                 let install = loadedAPI.installJar(
                     createdRuntime,
-                    jarURL: jarURL
+                    jarURL: jarURL,
+                    identityNamespace: gameID.uuidString.lowercased()
                 )
                 guard install.status == 0, let suiteID = install.suiteID else {
                     let error = loadedAPI.failure(
@@ -677,7 +678,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     where context.suiteIDs[gameID] == nil {
                     let install = loadedAPI.installJar(
                         createdRuntime,
-                        jarURL: jarURL
+                        jarURL: jarURL,
+                        identityNamespace: gameID.uuidString.lowercased()
                     )
                     phoneMEMultitaskingLogger.info(
                         "Prepared game \(gameID.uuidString, privacy: .public): status=\(install.status), suite=\(install.suiteID ?? 0), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
@@ -857,6 +859,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
         mainClass: String,
         mediaTitle: String,
         mediaArtist: String,
+        suiteVersion: String,
         mediaArtworkPath: String?,
         screenWidth: Int,
         screenHeight: Int,
@@ -933,7 +936,8 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 } else {
                     let install = loadedAPI.installJar(
                         createdRuntime,
-                        jarURL: jarURL
+                        jarURL: jarURL,
+                        identityNamespace: gameID.uuidString.lowercased()
                     )
                     phoneMEMultitaskingLogger.info(
                         "Prepared launch game \(gameID.uuidString, privacy: .public): status=\(install.status), suite=\(install.suiteID ?? 0), installerStage=\(loadedAPI.lastInstallStage()), storeStage=\(loadedAPI.lastSuiteStoreStage())"
@@ -1441,7 +1445,11 @@ final class EmbeddedPhoneMEEngine: NSObject {
             return suiteID
         }
 
-        let install = api.installJar(runtime, jarURL: jarURL)
+        let install = api.installJar(
+            runtime,
+            jarURL: jarURL,
+            identityNamespace: gameID.uuidString.lowercased()
+        )
         guard install.status == PHONEME_OK,
               let suiteID = install.suiteID else {
             throw api.failure(
@@ -1602,6 +1610,13 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 throw PhoneMECoreError.foregroundActivationFailed
             }
 
+            // Runtime::start_midlet commits both ACTIVE and foreground_app_id
+            // before returning. The old unconditional settle loop added 250 ms
+            // to every normal launch even though polling can safely begin now.
+            if state == .active, api.foregroundAppID(runtime) == appID {
+                return true
+            }
+
             // NAMS state/display callbacks are optional and arrive late on a
             // few phoneME builds. Re-assert only after the proxy is known to be
             // active; otherwise retain the original start request and finish a
@@ -1621,7 +1636,10 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     return false
                 }
                 didReassertForeground = true
-                settleDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+                if api.foregroundAppID(runtime) == appID {
+                    return true
+                }
+                settleDeadline = ProcessInfo.processInfo.systemUptime + 0.05
             }
 
             Thread.sleep(forTimeInterval: 0.005)

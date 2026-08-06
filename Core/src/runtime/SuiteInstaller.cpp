@@ -682,6 +682,26 @@ Result<SuiteDescriptor> SuiteInstaller::inspect(
     };
 }
 
+Status SuiteInstaller::scope_identity(
+    SuiteDescriptor& descriptor,
+    std::string_view identity_scope) {
+    constexpr usize kMaximumIdentityScopeBytes = 256U;
+    constexpr char kIdentityScopeSeparator = '\x1E';
+
+    if (identity_scope.empty()) return {};
+    if (identity_scope.size() > kMaximumIdentityScopeBytes ||
+        identity_scope.find('\0') != std::string_view::npos ||
+        identity_scope.find(kIdentityScopeSeparator) != std::string_view::npos) {
+        return fail(ErrorCode::invalid_argument,
+                    "suite identity scope is invalid");
+    }
+
+    descriptor.identity_key.push_back(kIdentityScopeSeparator);
+    descriptor.identity_key.append(identity_scope);
+    descriptor.identity_sha256 = sha256(descriptor.identity_key);
+    return {};
+}
+
 Result<i32> SuiteInstaller::compare_versions(std::string_view left,
                                              std::string_view right) {
     auto left_parts = parse_version(left);

@@ -221,6 +221,15 @@ using namespace builtin;
             method(kPublic, "countTokens", "()I"),
         }, {"java/util/Enumeration"});
     }
+    if (name == "java/util/Locale") {
+        return make_class("java/util/Locale", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPublic | kStatic | kFinal, "ROOT", "Ljava/util/Locale;"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kStatic, "<clinit>", "()V"),
+        });
+    }
     if (name == "java/util/List") {
         return make_class("java/util/List", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {}, {
@@ -239,7 +248,19 @@ using namespace builtin;
             method(kPublic | kAbstract, "lastIndexOf", "(Ljava/lang/Object;)I"),
             method(kPublic | kAbstract, "iterator", "()Ljava/util/Iterator;"),
             method(kPublic | kAbstract, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "toArray",
+                   "([Ljava/lang/Object;)[Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "sort", "(Ljava/util/Comparator;)V"),
             method(kPublic | kAbstract, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic | kStatic, "of", "()Ljava/util/List;"),
+            method(kPublic | kStatic, "of",
+                   "(Ljava/lang/Object;)Ljava/util/List;"),
+            method(kPublic | kStatic, "of",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;"),
+            method(kPublic | kStatic, "of",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;"),
+            method(kPublic | kStatic, "copyOf",
+                   "(Ljava/util/Collection;)Ljava/util/List;"),
         }, {"java/util/Collection"});
     }
     if (name == "java/util/ArrayList") {
@@ -266,7 +287,11 @@ using namespace builtin;
             method(kPublic, "lastIndexOf", "(Ljava/lang/Object;)I"),
             method(kPublic, "iterator", "()Ljava/util/Iterator;"),
             method(kPublic, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic, "toArray",
+                   "([Ljava/lang/Object;)[Ljava/lang/Object;"),
+            method(kPublic, "sort", "(Ljava/util/Comparator;)V"),
             method(kPublic, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
         }, {"java/util/List"});
     }

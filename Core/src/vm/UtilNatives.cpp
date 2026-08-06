@@ -429,6 +429,54 @@ struct TokenizerState final {
     return *value;
 }
 
+[[nodiscard]] Result<i32> comparator_compare(Machine& machine,
+                                              ObjectRef comparator,
+                                              ObjectRef left,
+                                              ObjectRef right) {
+    if (comparator.is_null()) {
+        if (left.is_null() || right.is_null()) {
+            if (left == right) return 0;
+            return left.is_null() ? -1 : 1;
+        }
+        auto left_class = machine.heap().class_name(left);
+        if (!left_class) return std::unexpected(left_class.error());
+        const Value argument = Value::from_reference(right);
+        auto result = machine.invoke_instance(
+            left, *left_class, "compareTo", "(Ljava/lang/Object;)I",
+            std::span<const Value>(&argument, 1U));
+        if (!result) return std::unexpected(result.error());
+        if (result->throwable.has_value()) {
+            auto throwable = machine.heap().class_name(*result->throwable);
+            if (!throwable) return std::unexpected(throwable.error());
+            return fail_java(*throwable, "Comparable.compareTo threw");
+        }
+        if (!result->return_value.has_value()) {
+            return fail(ErrorCode::internal_error,
+                        "Comparable.compareTo returned no value");
+        }
+        return result->return_value->as_int();
+    }
+    auto comparator_class = machine.heap().class_name(comparator);
+    if (!comparator_class) return std::unexpected(comparator_class.error());
+    const std::array<Value, 2> arguments {
+        Value::from_reference(left), Value::from_reference(right),
+    };
+    auto result = machine.invoke_instance(
+        comparator, *comparator_class, "compare",
+        "(Ljava/lang/Object;Ljava/lang/Object;)I", arguments);
+    if (!result) return std::unexpected(result.error());
+    if (result->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*result->throwable);
+        if (!throwable) return std::unexpected(throwable.error());
+        return fail_java(*throwable, "Comparator.compare threw");
+    }
+    if (!result->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Comparator.compare returned no value");
+    }
+    return result->return_value->as_int();
+}
+
 [[nodiscard]] Result<bool> values_equal(Machine& machine,
                                         ObjectRef left,
                                         ObjectRef right) {
@@ -1148,6 +1196,117 @@ void register_array_list(NativeMethodRegistry& registry) {
                                          kVectorCountField, 0);
             if (!updated) return std::unexpected(updated.error());
             return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "sort",
+        "(Ljava/util/Comparator;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto comparator = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!comparator) return std::unexpected(comparator.error());
+            auto mutable_list = require_array_list_mutation(
+                machine, *object, false);
+            if (!mutable_list) return std::unexpected(mutable_list.error());
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!count || !data) {
+                return fail(ErrorCode::invalid_state,
+                            "ArrayList state is invalid");
+            }
+            for (i32 index = 1; index < *count; ++index) {
+                auto current_value = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!current_value) {
+                    return std::unexpected(current_value.error());
+                }
+                auto current = current_value->as_reference();
+                if (!current) return std::unexpected(current.error());
+                i32 position = index;
+                while (position > 0) {
+                    auto previous_value = machine.heap().element(
+                        *data, static_cast<usize>(position - 1));
+                    if (!previous_value) {
+                        return std::unexpected(previous_value.error());
+                    }
+                    auto previous = previous_value->as_reference();
+                    if (!previous) return std::unexpected(previous.error());
+                    auto comparison = comparator_compare(
+                        machine, *comparator, *previous, *current);
+                    if (!comparison) {
+                        return std::unexpected(comparison.error());
+                    }
+                    if (*comparison <= 0) break;
+                    auto shifted = machine.heap().set_element(
+                        *data, static_cast<usize>(position),
+                        Value::from_reference(*previous));
+                    if (!shifted) return std::unexpected(shifted.error());
+                    --position;
+                }
+                auto stored = machine.heap().set_element(
+                    *data, static_cast<usize>(position),
+                    Value::from_reference(*current));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/ArrayList", "equals",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto other = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!other) return std::unexpected(other.error());
+            if (*object == *other) {
+                return std::optional<Value>(Value::from_int(1));
+            }
+            if (other->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            auto other_class = machine.heap().class_name(*other);
+            if (!other_class) return std::unexpected(other_class.error());
+            auto other_size = machine.invoke_instance(
+                *other, *other_class, "size", "()I", {});
+            if (!other_size || other_size->throwable.has_value() ||
+                !other_size->return_value.has_value()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto other_count = other_size->return_value->as_int();
+            auto count = int_field(machine, *object, kVectorCountField);
+            auto data = vector_data(machine, *object);
+            if (!other_count || !count || !data) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            if (*other_count != *count) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            for (i32 index = 0; index < *count; ++index) {
+                auto left = machine.heap().element(
+                    *data, static_cast<usize>(index));
+                if (!left) return std::unexpected(left.error());
+                const Value index_value = Value::from_int(index);
+                auto right_result = machine.invoke_instance(
+                    *other, *other_class, "get", "(I)Ljava/lang/Object;",
+                    std::span<const Value>(&index_value, 1U));
+                if (!right_result || right_result->throwable.has_value() ||
+                    !right_result->return_value.has_value()) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                auto left_ref = left->as_reference();
+                auto right_ref = right_result->return_value->as_reference();
+                if (!left_ref || !right_ref) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                auto equal = values_equal(machine, *left_ref, *right_ref);
+                if (!equal) return std::unexpected(equal.error());
+                if (!*equal) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+            }
+            return std::optional<Value>(Value::from_int(1));
         });
     add(registry, "java/util/ArrayList", "toString",
         "()Ljava/lang/String;",
@@ -2875,9 +3034,31 @@ void register_random(NativeMethodRegistry& registry) {
         });
 }
 
+void register_locale(NativeMethodRegistry& registry) {
+    add(registry, "java/util/Locale", "<clinit>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Locale.<clinit> expects no arguments");
+            }
+            auto root = machine.class_states().allocate_instance(
+                machine.heap(), "java/util/Locale");
+            if (!root) return std::unexpected(root.error());
+            auto field = machine.class_states().resolve_field(
+                "java/util/Locale", "ROOT", "Ljava/util/Locale;", true);
+            if (!field) return std::unexpected(field.error());
+            auto stored = machine.class_states().set_static_field(
+                *field, Value::from_reference(*root));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+}
+
 } // namespace
 
 void register_util_natives(NativeMethodRegistry& registry) {
+    register_locale(registry);
     register_string_tokenizer(registry);
     register_enumeration(registry);
     register_array_list(registry);

@@ -692,6 +692,16 @@ void test_png_variants_limits_and_fuzz() {
                 indexed->pixel(2, 0).value() == 0x000000FFU,
             "palette and tRNS preserve straight ARGB");
 
+    constexpr std::array<u8, 2> short_palette_rows {0U, 250U};
+    constexpr std::array<u8, 3> short_palette {255U, 255U, 255U};
+    const auto short_palette_png = make_png(
+        1, 1, 8, 3, 0, short_palette_rows, short_palette);
+    auto short_palette_decoded =
+        phoneme::graphics::decode_png(short_palette_png);
+    require(short_palette_decoded.has_value() &&
+                short_palette_decoded->pixel(0, 0).value() == 0xFF000000U,
+            "legacy palette indices beyond PLTE decode as opaque black");
+
     constexpr std::array<u8, 7> rgb_rows {
         0U, 1U, 2U, 3U, 4U, 5U, 6U,
     };

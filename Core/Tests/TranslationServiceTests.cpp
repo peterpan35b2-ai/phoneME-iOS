@@ -33,6 +33,15 @@ std::span<const phoneme::u8> bytes(std::string_view text) {
     };
 }
 
+std::string google_batch_response(std::string_view translated) {
+    std::string response =
+        ")]}'\n\n[[\"wrb.fr\",\"MkEWBc\",\"[[null],[[[null,null,null,null,null,[[\\\"";
+    response += translated;
+    response +=
+        "\\\",null,null]]]]]]\",null,null,null,\"generic\"]]\n";
+    return response;
+}
+
 class CompletionCollector final {
 public:
     phoneme::translation::TranslationService::Utf8Completion callback(
@@ -73,11 +82,13 @@ public:
         normal,
         malformed_batch,
         bing,
+        google_rate_limited,
     };
 
     explicit FakeTranslationAdapter(Mode mode = Mode::normal) : mode_(mode) {}
 
     std::atomic<int> request_count {0};
+    std::atomic<int> google_request_count {0};
     std::atomic<int> batch_request_count {0};
     std::atomic<int> bing_home_request_count {0};
     std::atomic<int> bing_translation_request_count {0};
@@ -134,8 +145,9 @@ public:
         const int current_request = request_count.fetch_add(1) + 1;
         if (request.url.host == "www.bing.com" &&
             request.url.path == "/translator") {
-            require(mode_ == Mode::bing,
-                    "Bing provider initializes its own web session");
+            require(mode_ == Mode::bing ||
+                        mode_ == Mode::google_rate_limited,
+                    "Bing initializes for an explicit selection or fallback");
             require(request.method == "GET",
                     "Bing token bootstrap uses a GET request");
             bing_home_request_count.fetch_add(1);
@@ -158,8 +170,9 @@ public:
 
         if (request.url.host == "www.bing.com" &&
             request.url.path == "/ttranslatev3") {
-            require(mode_ == Mode::bing,
-                    "Bing translation uses the selected provider");
+            require(mode_ == Mode::bing ||
+                        mode_ == Mode::google_rate_limited,
+                    "Bing translation uses selection or automatic fallback");
             require(request.method == "POST",
                     "Bing translation uses a POST request");
             bing_translation_request_count.fetch_add(1);
@@ -205,14 +218,32 @@ public:
             };
         }
 
-        require(request.url.host == "translate.googleapis.com",
-                "primary translation request targets Google Translate");
+        require(request.url.host == "translate.google.com" &&
+                    request.url.path ==
+                        "/_/TranslateWebserverUi/data/batchexecute",
+                "primary translation request targets Google Translate web RPC");
+        google_request_count.fetch_add(1);
         require(request.method == "POST",
                 "Google translation uses a POST request");
         const std::string body(request.body.begin(), request.body.end());
-        require(body.find("client=gtx") != std::string::npos &&
-                    body.find("dt=t") != std::string::npos,
-                "Google request keeps only the required response data");
+        require(body.find("f.req=") != std::string::npos &&
+                    body.find("MkEWBc") != std::string::npos,
+                "Google request uses the translation RPC payload");
+
+        if (mode_ == Mode::google_rate_limited) {
+            auto final_url = phoneme::network::Url::parse(
+                "https://www.google.com/sorry/index");
+            require(final_url.has_value(), "fake Google block URL parses");
+            phoneme::network::HttpResponse response {
+                .final_url = std::move(*final_url),
+                .status_code = 429,
+                .reason = "Too Many Requests",
+            };
+            completion(std::move(response));
+            return phoneme::network::OperationId {
+                static_cast<phoneme::u64>(current_request),
+            };
+        }
 
         const bool is_batch = body.find("%3B") != std::string::npos;
         if (is_batch) batch_request_count.fetch_add(1);
@@ -231,7 +262,7 @@ public:
         } else if (body.find("%E8%87%AA%E7%84%B6") !=
                    std::string::npos) {
             translated = "tự nhiên";
-        } else if (body.find("q=hello") != std::string::npos) {
+        } else if (body.find("hello") != std::string::npos) {
             translated = "xin chào";
         } else if (body.find(
                        "%E3%82%B2%E3%83%BC%E3%83%A0%E9%96%8B%E5%A7%8B") !=
@@ -241,10 +272,9 @@ public:
             translated = "Đăng nhập vào trò chơi";
         }
 
-        const std::string payload = "[[[\"" + translated +
-            "\",\"source\",null,null,3]],null,\"zh-CN\"]";
+        const std::string payload = google_batch_response(translated);
         auto final_url = phoneme::network::Url::parse(
-            "https://translate.googleapis.com/");
+            "https://translate.google.com/_/TranslateWebserverUi/data/batchexecute");
         require(final_url.has_value(), "fake response URL parses");
         phoneme::network::HttpResponse response {
             .final_url = std::move(*final_url),
@@ -314,34 +344,22 @@ phoneme::translation::TranslationConfiguration test_configuration() {
 int main() {
     using phoneme::translation::TranslationService;
 
-    const std::string simple =
-        R"([[ ["Xin chào","hello",null,null,10] ],null,"en"])";
-    auto simple_result = TranslationService::parse_google_response(
-        bytes(simple));
-    require(simple_result && *simple_result == "Xin chào",
-            "parse one Google Translate segment");
+    const std::string rpc_shape = google_batch_response("Xin chào thế giới");
+    auto rpc_shape_result = TranslationService::parse_google_response(
+        bytes(rpc_shape));
+    require(rpc_shape_result && *rpc_shape_result == "Xin chào thế giới",
+            "parse the current Google Translate web RPC response shape");
 
-    const std::string multiple =
-        R"([[ ["Xin chào ","hello "], ["thế giới","world"] ],null,"en"])";
-    auto multiple_result = TranslationService::parse_google_response(
-        bytes(multiple));
-    require(multiple_result && *multiple_result == "Xin chào thế giới",
-            "concatenate Google Translate response segments");
+    const std::string rpc_multiple = R"RPC()]}'
 
-    const std::string escaped =
-        R"([[ ["Vi\u1ec7t Nam \ud83c\uddfb\ud83c\uddf3","Vietnam"] ],null,"en"])";
-    auto escaped_result = TranslationService::parse_google_response(
-        bytes(escaped));
-    require(escaped_result && *escaped_result == "Việt Nam 🇻🇳",
-            "decode Unicode and surrogate-pair JSON escapes");
-
-    const std::string current_shape =
-        R"([[["Đăng nhập vào trò chơi","登录游戏",null,null,3,null,null,[[],[]],[[["af64405095a399ceb1e05c7abb7cda66","zh_en_2023q1.md"]],[["824257d7a249c58caeea06a2e64a25bd","en_vi_2023q1.md"]]]]],null,"zh-CN",null,null,null,1,[],[["zh-CN"],null,[1],["zh-CN"]]])";
-    auto current_shape_result = TranslationService::parse_google_response(
-        bytes(current_shape));
-    require(current_shape_result &&
-                *current_shape_result == "Đăng nhập vào trò chơi",
-            "parse the current Google Translate response shape");
+[["wrb.fr","MkEWBc","[[null],[[[null,null,null,null,null,[[\"Chào mừng đến với lâu đài.\",null,null],[\"Nhấn phím bất kỳ để tiếp tục.\",null,true]]]]]]",null,null,null,"generic"]]
+)RPC";
+    auto rpc_multiple_result = TranslationService::parse_google_response(
+        bytes(rpc_multiple));
+    require(rpc_multiple_result &&
+                *rpc_multiple_result ==
+                    "Chào mừng đến với lâu đài. Nhấn phím bất kỳ để tiếp tục.",
+            "join Google Translate RPC sentence segments with preserved spacing");
 
     const std::string malformed = R"({"translation":"Xin chào"})";
     require(!TranslationService::parse_google_response(bytes(malformed)),
@@ -484,6 +502,42 @@ int main() {
                 "Bing initializes its web session once");
         require(adapter->bing_translation_request_count.load() == 1,
                 "Bing sends one translation request");
+    }
+
+    {
+        auto adapter = std::make_shared<FakeTranslationAdapter>(
+            FakeTranslationAdapter::Mode::google_rate_limited);
+        auto configuration = test_configuration();
+        configuration.provider =
+            phoneme::translation::TranslationProvider::automatic;
+        TranslationService service(configuration, adapter);
+        CompletionCollector collector;
+
+        require(!service.lookup_or_request_utf8(
+                    "登录游戏", collector.callback("fallback-login")),
+                "automatic translation starts asynchronously");
+        require(collector.wait_for(1),
+                "automatic mode falls back after Google is rate limited");
+        require(collector.value("fallback-login") ==
+                    "Đăng nhập vào trò chơi",
+                "fallback provider returns the translated text");
+        require(adapter->google_request_count.load() == 1 &&
+                    adapter->bing_home_request_count.load() == 1 &&
+                    adapter->bing_translation_request_count.load() == 1,
+                "automatic mode tries Google once then completes through Bing");
+
+        require(!service.lookup_or_request_utf8(
+                    "自然", collector.callback("fallback-natural")),
+                "a new uncached phrase schedules another translation");
+        require(collector.wait_for(2),
+                "healthy fallback provider handles subsequent text");
+        require(collector.value("fallback-natural") == "tự nhiên",
+                "automatic provider stickiness preserves translation results");
+        require(adapter->google_request_count.load() == 1,
+                "Google circuit breaker avoids repeated blocked requests");
+        require(adapter->bing_home_request_count.load() == 1 &&
+                    adapter->bing_translation_request_count.load() == 2,
+                "Bing session and token are reused after fallback");
     }
 
     {

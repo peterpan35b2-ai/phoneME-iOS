@@ -373,6 +373,8 @@ using namespace builtin;
             field(kPrivate | kFinal, "canonicalName", "Ljava/lang/String;"),
         }, {
             method(kPrivate, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic | kStatic, "forName",
+                   "(Ljava/lang/String;)Ljava/nio/charset/Charset;"),
             method(kPublic | kFinal, "name", "()Ljava/lang/String;"),
             method(kPublic | kFinal, "toString", "()Ljava/lang/String;"),
         });

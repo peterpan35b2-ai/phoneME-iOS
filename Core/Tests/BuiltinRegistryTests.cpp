@@ -101,6 +101,7 @@ void test_io_registry() {
     const auto byte_output = registry.find("java/io/ByteArrayOutputStream");
     const auto interrupted = registry.find("java/io/InterruptedIOException");
     const auto print_stream = registry.find("java/io/PrintStream");
+    const auto charset = registry.find("java/nio/charset/Charset");
 
     require(input != nullptr && input->super_name() == "java/lang/Object",
             "io registry owns InputStream");
@@ -137,6 +138,9 @@ void test_io_registry() {
     require(print_stream != nullptr && !print_stream->fields().empty() &&
                 print_stream->fields().front().name == "out",
             "PrintStream preserves native delegate layout");
+    require_method(charset, "forName",
+                   "(Ljava/lang/String;)Ljava/nio/charset/Charset;",
+                   "Charset exposes Java-compatible name lookup");
     require(registry.find("java/util/Calendar") == nullptr,
             "io registry does not claim util classes");
 }
@@ -148,6 +152,7 @@ void test_util_registry() {
     const auto list = registry.find("java/util/List");
     const auto array_list = registry.find("java/util/ArrayList");
     const auto local_time = registry.find("java/time/LocalTime");
+    const auto locale = registry.find("java/util/Locale");
     const auto vector = registry.find("java/util/Vector");
     const auto stack = registry.find("java/util/Stack");
     const auto table = registry.find("java/util/Hashtable");
@@ -162,6 +167,8 @@ void test_util_registry() {
             "List is exposed as an interface");
     require_method(list, "add", "(Ljava/lang/Object;)Z",
                    "List exposes object insertion");
+    require_method(list, "of", "()Ljava/util/List;",
+                   "List exposes Java 9 empty immutable factory");
     require(array_list != nullptr && array_list->fields().size() == 4U &&
                 array_list->fields()[0].name == "elementData" &&
                 array_list->fields()[1].name == "size" &&
@@ -174,6 +181,9 @@ void test_util_registry() {
                    "ArrayList exposes value lookup");
     require_method(local_time, "of", "(II)Ljava/time/LocalTime;",
                    "LocalTime exposes hour/minute factory");
+    require(locale != nullptr && !locale->fields().empty() &&
+                locale->fields().front().name == "ROOT",
+            "Locale exposes the locale-neutral ROOT constant");
     require_method(local_time, "withNano", "(I)Ljava/time/LocalTime;",
                    "LocalTime exposes immutable nano normalization");
     require(vector != nullptr && vector->fields().size() == 3U,
@@ -395,6 +405,8 @@ void test_composed_registry() {
     const auto hash_map = phoneme::vm::load_builtin_class("java/util/HashMap");
     const auto arrays = phoneme::vm::load_builtin_class("java/util/Arrays");
     const auto base64 = phoneme::vm::load_builtin_class("java/util/Base64");
+    const auto message_digest =
+        phoneme::vm::load_builtin_class("java/security/MessageDigest");
     const auto form =
         phoneme::vm::load_builtin_class("javax/microedition/lcdui/Form");
     const auto sprite =
@@ -409,6 +421,11 @@ void test_composed_registry() {
             "composed registry resolves headless Arrays compatibility");
     require(base64.has_value(),
             "composed registry resolves Java 8 Base64 compatibility");
+    require(message_digest.has_value(),
+            "composed registry resolves SHA-256 MessageDigest compatibility");
+    require_method(*message_digest, "getInstance",
+                   "(Ljava/lang/String;)Ljava/security/MessageDigest;",
+                   "MessageDigest exposes Java-compatible factory");
     require(form.has_value(), "composed registry resolves lcdui classes");
     require(sprite.has_value(), "composed registry resolves Game API classes");
     require(!phoneme::vm::load_builtin_class("java/lang/ProcessBuilder").has_value(),

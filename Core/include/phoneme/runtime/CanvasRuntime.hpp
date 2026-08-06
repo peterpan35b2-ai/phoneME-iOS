@@ -116,6 +116,9 @@ private:
         bool size_change_pending {false};
         bool service_requested {false};
         bool initial_paint_completed {false};
+        bool initial_automatic_paint_pending {false};
+        std::chrono::steady_clock::time_point
+            initial_automatic_paint_deadline {};
         i32 key_states {0};
         std::unordered_set<i32> pressed_keys;
         std::unordered_map<i32, std::chrono::steady_clock::time_point>

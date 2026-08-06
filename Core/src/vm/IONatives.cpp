@@ -279,6 +279,20 @@ void add(NativeMethodRegistry& registry,
     return u"UTF8";
 }
 
+[[nodiscard]] std::u16string charset_canonical_name(StreamCharset charset) {
+    switch (charset) {
+    case StreamCharset::utf8:
+        return u"UTF-8";
+    case StreamCharset::latin1:
+        return u"ISO-8859-1";
+    case StreamCharset::ascii:
+        return u"US-ASCII";
+    case StreamCharset::utf16be:
+        return u"UTF-16BE";
+    }
+    return u"UTF-8";
+}
+
 [[nodiscard]] Result<std::u16string> decode_byte_array(
     Machine& machine,
     ObjectRef buffer,
@@ -1028,9 +1042,72 @@ void add(NativeMethodRegistry& registry,
     return {};
 }
 
+[[nodiscard]] Result<std::optional<std::vector<u8>>>
+read_required_from_byte_array(Machine& machine,
+                              ObjectRef input,
+                              usize count,
+                              usize depth) {
+    if (input.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "input stream is null");
+    }
+    if (depth >= kMaximumStreamDepth) {
+        return fail_java("java/io/IOException",
+                         "input stream filter chain is too deep");
+    }
+
+    auto runtime_class = machine.heap().class_name(input);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    if (*runtime_class == "java/io/DataInputStream" ||
+        *runtime_class == "java/io/FilterInputStream") {
+        auto wrapped = reference_field(machine, input, kFilterStreamField);
+        if (!wrapped) return std::unexpected(wrapped.error());
+        return read_required_from_byte_array(
+            machine, *wrapped, count, depth + 1U);
+    }
+    if (*runtime_class != "java/io/ByteArrayInputStream") {
+        return std::optional<std::vector<u8>> {};
+    }
+
+    auto position = int_field(machine, input, kByteInputPositionField);
+    auto limit = int_field(machine, input, kByteInputCountField);
+    auto buffer = reference_field(machine, input, kByteInputBufferField);
+    if (!position || !limit || !buffer || buffer->is_null() ||
+        *position < 0 || *limit < *position) {
+        return fail(ErrorCode::invalid_state,
+                    "ByteArrayInputStream state is invalid");
+    }
+
+    const usize available = static_cast<usize>(*limit - *position);
+    const usize copied_count = std::min(count, available);
+    auto bytes = machine.heap().read_byte_array(
+        *buffer, static_cast<usize>(*position), copied_count);
+    if (!bytes) return std::unexpected(bytes.error());
+    if (copied_count != 0U) {
+        auto updated = set_int_field(
+            machine,
+            input,
+            kByteInputPositionField,
+            *position + static_cast<i32>(copied_count));
+        if (!updated) return std::unexpected(updated.error());
+    }
+    if (copied_count != count) {
+        // Preserve DataInputStream's partial-consumption semantics: bytes that
+        // were available are consumed before EOFException is reported.
+        return fail_java("java/io/EOFException",
+                         "data stream reached end of input");
+    }
+    return std::optional<std::vector<u8>>(std::move(*bytes));
+}
+
 [[nodiscard]] Result<std::vector<u8>> read_required(Machine& machine,
                                                     ObjectRef input,
                                                     usize count) {
+    auto byte_array = read_required_from_byte_array(
+        machine, input, count, 0U);
+    if (!byte_array) return std::unexpected(byte_array.error());
+    if (byte_array->has_value()) return std::move(**byte_array);
+
     std::vector<u8> bytes;
     bytes.reserve(count);
     for (usize index = 0; index < count; ++index) {
@@ -2476,13 +2553,17 @@ void register_reader_writer(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "InputStreamReader expects Charset");
             }
+            auto name = reference_field(machine, *charset, kCharsetNameField);
+            if (!name) return std::unexpected(name.error());
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
             auto initialized = initialize_reader(machine, arguments, false);
             if (!initialized) return std::unexpected(initialized.error());
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
             auto stored = set_int_field(machine, *object,
                                         kReaderCharsetField,
-                                        static_cast<i32>(StreamCharset::utf8));
+                                        static_cast<i32>(*resolved));
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
@@ -2982,13 +3063,17 @@ void register_reader_writer(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "OutputStreamWriter expects Charset");
             }
+            auto name = reference_field(machine, *charset, kCharsetNameField);
+            if (!name) return std::unexpected(name.error());
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
             auto initialized = initialize_writer(machine, arguments, false);
             if (!initialized) return std::unexpected(initialized.error());
             auto object = receiver(arguments);
             if (!object) return std::unexpected(object.error());
             auto stored = set_int_field(machine, *object,
                                         kWriterCharsetField,
-                                        static_cast<i32>(StreamCharset::utf8));
+                                        static_cast<i32>(*resolved));
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
         });
@@ -3631,6 +3716,41 @@ void register_charset_natives(NativeMethodRegistry& registry) {
                 machine, *object, kCharsetNameField, *name);
             if (!stored) return std::unexpected(stored.error());
             return std::optional<Value> {};
+        });
+
+    add(registry, "java/nio/charset/Charset", "forName",
+        "(Ljava/lang/String;)Ljava/nio/charset/Charset;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Charset.forName is missing its name");
+            }
+            auto name = arguments[0].as_reference();
+            if (!name) return std::unexpected(name.error());
+            if (name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Charset name is null");
+            }
+            auto class_name = machine.heap().class_name(*name);
+            if (!class_name || *class_name != "java/lang/String") {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Charset name must be a String");
+            }
+            auto resolved = resolve_stream_charset(machine, *name);
+            if (!resolved) return std::unexpected(resolved.error());
+            auto canonical_name = create_string(
+                machine, charset_canonical_name(*resolved));
+            if (!canonical_name) {
+                return std::unexpected(canonical_name.error());
+            }
+            auto charset = machine.class_states().allocate_instance(
+                machine.heap(), "java/nio/charset/Charset");
+            if (!charset) return std::unexpected(charset.error());
+            auto stored = set_reference_field(
+                machine, *charset, kCharsetNameField, *canonical_name);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*charset));
         });
 
     for (const std::string_view method_name : {"name", "toString"}) {

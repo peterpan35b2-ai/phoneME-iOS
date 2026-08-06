@@ -93,6 +93,7 @@ printf '%s\n' \
 
 JAR_V1="$TEST_ROOT/app-v1.jar"
 JAR_V2="$TEST_ROOT/app-v2.jar"
+JAR_V1_CHANGED="$TEST_ROOT/app-v1-changed.jar"
 JAR_MISSING="$TEST_ROOT/missing.jar"
 JAR_TRAVERSAL="$TEST_ROOT/traversal.jar"
 JAR_ZIP_BOMB="$TEST_ROOT/zip-bomb.jar"
@@ -108,6 +109,9 @@ printf '%s\n' 'unverified-test-signature-block' > "$SIGNATURE_ROOT/META-INF/PHON
   -C "$SIGNATURE_ROOT" META-INF/PHONE.RSA
 "$JAR" uf "$JAR_V2" -C "$SIGNATURE_ROOT" META-INF/PHONE.SF \
   -C "$SIGNATURE_ROOT" META-INF/PHONE.RSA
+cp "$JAR_V1" "$JAR_V1_CHANGED"
+printf '%s\n' 'same-version changed resource' > "$TEST_ROOT/scoped-resource.txt"
+"$JAR" uf "$JAR_V1_CHANGED" -C "$TEST_ROOT" scoped-resource.txt
 
 "$PYTHON" -c '
 import pathlib, sys, zipfile
@@ -147,4 +151,4 @@ with zipfile.ZipFile(sys.argv[3], "w", zipfile.ZIP_DEFLATED, compresslevel=9) as
 
 phoneme_run_with_timeout "${PHONEME_TEST_TIMEOUT:-300}" \
   "$TEST_BINARY" "$TEST_ROOT/runtime" "$JAR_V1" "$JAR_V2" \
-  "$JAR_MISSING" "$JAR_TRAVERSAL" "$JAR_ZIP_BOMB"
+  "$JAR_V1_CHANGED" "$JAR_MISSING" "$JAR_TRAVERSAL" "$JAR_ZIP_BOMB"

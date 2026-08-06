@@ -1100,6 +1100,44 @@ void register_array_list_extensions(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_reference(*result));
         });
+    add(registry, "java/util/ArrayList", "toArray",
+        "([Ljava/lang/Object;)[Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto supplied = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!supplied) return std::unexpected(supplied.error());
+            auto data = array_list_data(machine, *object);
+            auto size = int_field(machine, *object, kArrayListSizeField);
+            auto supplied_size = machine.heap().array_length(*supplied);
+            auto supplied_class = machine.heap().class_name(*supplied);
+            if (!data) return std::unexpected(data.error());
+            if (!size) return std::unexpected(size.error());
+            if (!supplied_size) return std::unexpected(supplied_size.error());
+            if (!supplied_class) return std::unexpected(supplied_class.error());
+            ObjectRef result = *supplied;
+            if (*supplied_size < static_cast<usize>(*size)) {
+                auto allocated = machine.heap().allocate_array(
+                    *supplied_class, static_cast<usize>(*size),
+                    Value::from_reference({}));
+                if (!allocated) return std::unexpected(allocated.error());
+                result = *allocated;
+            }
+            if (*size > 0) {
+                auto copied = machine.heap().copy_array_range(
+                    *data, 0U, result, 0U, static_cast<usize>(*size));
+                if (!copied) return std::unexpected(copied.error());
+            }
+            if (*supplied_size > static_cast<usize>(*size) &&
+                result == *supplied) {
+                auto terminated = machine.heap().set_element(
+                    result, static_cast<usize>(*size),
+                    Value::from_reference({}));
+                if (!terminated) return std::unexpected(terminated.error());
+            }
+            return std::optional<Value>(Value::from_reference(result));
+        });
     add(registry, "java/util/ArrayList", "addAll",
         "(Ljava/util/Collection;)Z",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1122,6 +1160,67 @@ void register_array_list_extensions(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_int(
                 elements->empty() ? 0 : 1));
+        });
+
+    const auto list_of = [&registry](const char* descriptor, usize count) {
+        add(registry, "java/util/List", "of", descriptor,
+            [count](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                if (arguments.size() != count) {
+                    return fail(ErrorCode::invalid_argument,
+                                "List.of argument count is invalid");
+                }
+                auto list = create_array_list(machine, static_cast<i32>(count));
+                if (!list) return std::unexpected(list.error());
+                auto root = NativeRootScope::pin(machine.native_roots(), *list);
+                if (!root) return std::unexpected(root.error());
+                for (usize index = 0U; index < count; ++index) {
+                    auto value = arguments[index].as_reference();
+                    if (!value) return std::unexpected(value.error());
+                    if (value->is_null()) {
+                        return fail_java("java/lang/NullPointerException",
+                                         "List.of element is null");
+                    }
+                    auto appended = array_list_append(machine, *list, *value);
+                    if (!appended) return std::unexpected(appended.error());
+                }
+                auto immutable = set_int_field(
+                    machine, *list, kArrayListMutationModeField,
+                    kArrayListImmutable);
+                if (!immutable) return std::unexpected(immutable.error());
+                return std::optional<Value>(Value::from_reference(*list));
+            });
+    };
+    list_of("(Ljava/lang/Object;)Ljava/util/List;", 1U);
+    list_of("(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", 2U);
+    list_of("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/List;", 3U);
+
+    add(registry, "java/util/List", "copyOf",
+        "(Ljava/util/Collection;)Ljava/util/List;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = reference_argument(arguments, 0U);
+            if (!source) return std::unexpected(source.error());
+            auto elements = collection_elements(machine, *source);
+            if (!elements) return std::unexpected(elements.error());
+            auto list = create_array_list(
+                machine, static_cast<i32>(elements->size()));
+            if (!list) return std::unexpected(list.error());
+            auto root = NativeRootScope::pin(machine.native_roots(), *list);
+            if (!root) return std::unexpected(root.error());
+            for (const ObjectRef element : *elements) {
+                if (element.is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "List.copyOf element is null");
+                }
+                auto appended = array_list_append(machine, *list, element);
+                if (!appended) return std::unexpected(appended.error());
+            }
+            auto immutable = set_int_field(
+                machine, *list, kArrayListMutationModeField,
+                kArrayListImmutable);
+            if (!immutable) return std::unexpected(immutable.error());
+            return std::optional<Value>(Value::from_reference(*list));
         });
 }
 
@@ -1249,6 +1348,179 @@ void register_hash_map(NativeMethodRegistry& registry) {
                 *values, static_cast<usize>(*index));
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(*value);
+        });
+    add(registry, "java/util/HashMap", "getOrDefault",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto key = reference_argument(arguments, 1U, true);
+            auto fallback = reference_argument(arguments, 2U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!key) return std::unexpected(key.error());
+            if (!fallback) return std::unexpected(fallback.error());
+            auto index = map_find_key(machine, *object, *key);
+            if (!index) return std::unexpected(index.error());
+            if (*index < 0) {
+                return std::optional<Value>(Value::from_reference(*fallback));
+            }
+            auto values = reference_field(machine, *object,
+                                          kHashMapValuesField);
+            if (!values || values->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "HashMap values are invalid");
+            }
+            auto value = machine.heap().element(
+                *values, static_cast<usize>(*index));
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(*value);
+        });
+    add(registry, "java/util/HashMap", "putIfAbsent",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto key = reference_argument(arguments, 1U, true);
+            auto value = reference_argument(arguments, 2U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!key) return std::unexpected(key.error());
+            if (!value) return std::unexpected(value.error());
+            auto index = map_find_key(machine, *object, *key);
+            if (!index) return std::unexpected(index.error());
+            if (*index >= 0) {
+                auto values = reference_field(machine, *object,
+                                              kHashMapValuesField);
+                if (!values || values->is_null()) {
+                    return fail(ErrorCode::invalid_state,
+                                "HashMap values are invalid");
+                }
+                auto current = machine.heap().element(
+                    *values, static_cast<usize>(*index));
+                if (!current) return std::unexpected(current.error());
+                auto current_reference = current->as_reference();
+                if (!current_reference) {
+                    return std::unexpected(current_reference.error());
+                }
+                if (!current_reference->is_null()) {
+                    return std::optional<Value>(*current);
+                }
+            }
+            auto previous = hash_map_put(machine, *object, *key, *value);
+            if (!previous) return std::unexpected(previous.error());
+            return std::optional<Value>(Value::from_reference(*previous));
+        });
+    add(registry, "java/util/HashMap", "computeIfAbsent",
+        "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto key = reference_argument(arguments, 1U, true);
+            auto function = reference_argument(arguments, 2U);
+            if (!object) return std::unexpected(object.error());
+            if (!key) return std::unexpected(key.error());
+            if (!function) return std::unexpected(function.error());
+            auto index = map_find_key(machine, *object, *key);
+            if (!index) return std::unexpected(index.error());
+            if (*index >= 0) {
+                auto values = reference_field(machine, *object,
+                                              kHashMapValuesField);
+                if (!values || values->is_null()) {
+                    return fail(ErrorCode::invalid_state,
+                                "HashMap values are invalid");
+                }
+                auto current = machine.heap().element(
+                    *values, static_cast<usize>(*index));
+                if (!current) return std::unexpected(current.error());
+                auto current_reference = current->as_reference();
+                if (!current_reference) {
+                    return std::unexpected(current_reference.error());
+                }
+                if (!current_reference->is_null()) {
+                    return std::optional<Value>(*current);
+                }
+            }
+            const Value key_argument = Value::from_reference(*key);
+            auto computed = invoke_checked(
+                machine, *function, "java/util/function/Function", "apply",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!computed) return std::unexpected(computed.error());
+            if (!computed->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Function.apply returned no value");
+            }
+            auto computed_reference = computed->value().as_reference();
+            if (!computed_reference) {
+                return std::unexpected(computed_reference.error());
+            }
+            if (!computed_reference->is_null()) {
+                auto stored = hash_map_put(
+                    machine, *object, *key, *computed_reference);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(
+                Value::from_reference(*computed_reference));
+        });
+    add(registry, "java/util/HashMap", "merge",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto key = reference_argument(arguments, 1U, true);
+            auto value = reference_argument(arguments, 2U);
+            auto function = reference_argument(arguments, 3U);
+            if (!object) return std::unexpected(object.error());
+            if (!key) return std::unexpected(key.error());
+            if (!value) return std::unexpected(value.error());
+            if (!function) return std::unexpected(function.error());
+            auto index = map_find_key(machine, *object, *key);
+            if (!index) return std::unexpected(index.error());
+            ObjectRef merged = *value;
+            if (*index >= 0) {
+                auto values = reference_field(machine, *object,
+                                              kHashMapValuesField);
+                if (!values || values->is_null()) {
+                    return fail(ErrorCode::invalid_state,
+                                "HashMap values are invalid");
+                }
+                auto current = machine.heap().element(
+                    *values, static_cast<usize>(*index));
+                if (!current) return std::unexpected(current.error());
+                auto current_reference = current->as_reference();
+                if (!current_reference) {
+                    return std::unexpected(current_reference.error());
+                }
+                if (!current_reference->is_null()) {
+                    const std::array<Value, 2> callback_arguments {
+                        Value::from_reference(*current_reference),
+                        Value::from_reference(*value),
+                    };
+                    auto combined = invoke_checked(
+                        machine, *function, "java/util/function/BiFunction",
+                        "apply",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                        callback_arguments);
+                    if (!combined) return std::unexpected(combined.error());
+                    if (!combined->has_value()) {
+                        return fail(ErrorCode::internal_error,
+                                    "BiFunction.apply returned no value");
+                    }
+                    auto combined_reference =
+                        combined->value().as_reference();
+                    if (!combined_reference) {
+                        return std::unexpected(combined_reference.error());
+                    }
+                    merged = *combined_reference;
+                }
+            }
+            if (merged.is_null()) {
+                auto removed = hash_map_remove(machine, *object, *key);
+                if (!removed) return std::unexpected(removed.error());
+            } else {
+                auto stored = hash_map_put(machine, *object, *key, merged);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(merged));
         });
     add(registry, "java/util/HashMap", "put",
         "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
@@ -1590,6 +1862,68 @@ void register_hash_set(NativeMethodRegistry& registry) {
     };
     snapshot("iterator", "()Ljava/util/Iterator;", true);
     snapshot("toArray", "()[Ljava/lang/Object;", false);
+    add(registry, "java/util/HashSet", "toArray",
+        "([Ljava/lang/Object;)[Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto supplied = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!supplied) return std::unexpected(supplied.error());
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            auto size = int_field(machine, *map, kHashMapSizeField);
+            auto keys = reference_field(machine, *map, kHashMapKeysField);
+            auto supplied_size = machine.heap().array_length(*supplied);
+            auto supplied_class = machine.heap().class_name(*supplied);
+            if (!size || !keys || keys->is_null() || !supplied_size ||
+                !supplied_class) {
+                return fail(ErrorCode::invalid_state,
+                            "HashSet toArray state is invalid");
+            }
+            ObjectRef result = *supplied;
+            if (*supplied_size < static_cast<usize>(*size)) {
+                auto allocated = machine.heap().allocate_array(
+                    *supplied_class, static_cast<usize>(*size),
+                    Value::from_reference({}));
+                if (!allocated) return std::unexpected(allocated.error());
+                result = *allocated;
+            }
+            if (*size > 0) {
+                auto copied = machine.heap().copy_array_range(
+                    *keys, 0U, result, 0U, static_cast<usize>(*size));
+                if (!copied) return std::unexpected(copied.error());
+            }
+            if (*supplied_size > static_cast<usize>(*size) &&
+                result == *supplied) {
+                auto terminated = machine.heap().set_element(
+                    result, static_cast<usize>(*size),
+                    Value::from_reference({}));
+                if (!terminated) return std::unexpected(terminated.error());
+            }
+            return std::optional<Value>(Value::from_reference(result));
+        });
+    add(registry, "java/util/HashSet", "containsAll",
+        "(Ljava/util/Collection;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto source = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!source) return std::unexpected(source.error());
+            auto elements = collection_elements(machine, *source);
+            if (!elements) return std::unexpected(elements.error());
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            for (const ObjectRef element : *elements) {
+                auto index = map_find_key(machine, *map, element);
+                if (!index) return std::unexpected(index.error());
+                if (*index < 0) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+            }
+            return std::optional<Value>(Value::from_int(1));
+        });
     add(registry, "java/util/HashSet", "addAll",
         "(Ljava/util/Collection;)Z",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1609,6 +1943,76 @@ void register_hash_set(NativeMethodRegistry& registry) {
                 if (*index >= 0) continue;
                 auto stored = hash_map_put(machine, *map, element, element);
                 if (!stored) return std::unexpected(stored.error());
+                changed = true;
+            }
+            return std::optional<Value>(Value::from_int(changed ? 1 : 0));
+        });
+    add(registry, "java/util/HashSet", "removeAll",
+        "(Ljava/util/Collection;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto source = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!source) return std::unexpected(source.error());
+            auto elements = collection_elements(machine, *source);
+            if (!elements) return std::unexpected(elements.error());
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            bool changed = false;
+            for (const ObjectRef element : *elements) {
+                auto index = map_find_key(machine, *map, element);
+                if (!index) return std::unexpected(index.error());
+                if (*index < 0) continue;
+                auto removed = hash_map_remove(machine, *map, element);
+                if (!removed) return std::unexpected(removed.error());
+                changed = true;
+            }
+            return std::optional<Value>(Value::from_int(changed ? 1 : 0));
+        });
+    add(registry, "java/util/HashSet", "retainAll",
+        "(Ljava/util/Collection;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto source = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!source) return std::unexpected(source.error());
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            auto size = int_field(machine, *map, kHashMapSizeField);
+            auto keys = reference_field(machine, *map, kHashMapKeysField);
+            if (!size || !keys || keys->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "HashSet state is invalid");
+            }
+            std::vector<ObjectRef> snapshot_values;
+            snapshot_values.reserve(static_cast<usize>(*size));
+            for (i32 index = 0; index < *size; ++index) {
+                auto value = machine.heap().element(
+                    *keys, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto reference = value->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                snapshot_values.push_back(*reference);
+            }
+            bool changed = false;
+            for (const ObjectRef element : snapshot_values) {
+                const Value argument = Value::from_reference(element);
+                auto contained = invoke_checked(
+                    machine, *source, "java/util/Collection", "contains",
+                    "(Ljava/lang/Object;)Z",
+                    std::span<const Value>(&argument, 1U));
+                if (!contained) return std::unexpected(contained.error());
+                if (!contained->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Collection.contains returned no value");
+                }
+                auto keep = contained->value().as_int();
+                if (!keep) return std::unexpected(keep.error());
+                if (*keep != 0) continue;
+                auto removed = hash_map_remove(machine, *map, element);
+                if (!removed) return std::unexpected(removed.error());
                 changed = true;
             }
             return std::optional<Value>(Value::from_int(changed ? 1 : 0));
@@ -1708,35 +2112,65 @@ void register_arrays(NativeMethodRegistry& registry) {
     equals("([Ljava/lang/Object;[Ljava/lang/Object;)Z", 2);
 
     const auto fill = [&registry](const char* descriptor,
-                                  bool object) {
+                                  bool object,
+                                  bool range) {
         add(registry, "java/util/Arrays", "fill", descriptor,
-            [object](Machine& machine, std::span<const Value> arguments)
+            [object, range](Machine& machine,
+                            std::span<const Value> arguments)
                 -> Result<std::optional<Value>> {
                 auto array = reference_argument(arguments, 0U);
                 if (!array) return std::unexpected(array.error());
                 auto length = machine.heap().array_length(*array);
                 if (!length) return std::unexpected(length.error());
+
+                usize from = 0U;
+                usize count = *length;
+                const usize value_index = range ? 3U : 1U;
+                if (range) {
+                    auto from_index = int_argument(arguments, 1U);
+                    auto to_index = int_argument(arguments, 2U);
+                    if (!from_index) return std::unexpected(from_index.error());
+                    if (!to_index) return std::unexpected(to_index.error());
+                    if (*from_index > *to_index) {
+                        return fail_java("java/lang/IllegalArgumentException",
+                                         "Arrays.fill fromIndex exceeds toIndex");
+                    }
+                    if (*from_index < 0 || *to_index < 0 ||
+                        static_cast<usize>(*to_index) > *length) {
+                        return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                         "Arrays.fill range is outside array bounds");
+                    }
+                    from = static_cast<usize>(*from_index);
+                    count = static_cast<usize>(*to_index - *from_index);
+                }
+
                 Value value;
                 if (object) {
-                    auto reference = reference_argument(arguments, 1U, true);
+                    auto reference = reference_argument(
+                        arguments, value_index, true);
                     if (!reference) return std::unexpected(reference.error());
                     value = Value::from_reference(*reference);
                 } else {
-                    auto integer = int_argument(arguments, 1U);
+                    auto integer = int_argument(arguments, value_index);
                     if (!integer) return std::unexpected(integer.error());
                     value = Value::from_int(*integer);
                 }
-                for (usize index = 0U; index < *length; ++index) {
-                    auto stored = machine.heap().set_element(*array, index,
-                                                            value);
-                    if (!stored) return std::unexpected(stored.error());
-                }
+                auto filled = machine.heap().fill_array_range(
+                    *array, from, count, value);
+                if (!filled) return std::unexpected(filled.error());
                 return std::optional<Value> {};
             });
     };
-    fill("([BB)V", false);
-    fill("([II)V", false);
-    fill("([Ljava/lang/Object;Ljava/lang/Object;)V", true);
+    fill("([BB)V", false, false);
+    fill("([BIIB)V", false, true);
+    fill("([II)V", false, false);
+    fill("([IIII)V", false, true);
+    fill("([SS)V", false, false);
+    fill("([SIIS)V", false, true);
+    fill("([ZZ)V", false, false);
+    fill("([ZIIZ)V", false, true);
+    fill("([Ljava/lang/Object;Ljava/lang/Object;)V", true, false);
+    fill("([Ljava/lang/Object;IILjava/lang/Object;)V", true, true);
 
     const auto copy_of = [&registry](const char* descriptor,
                                      std::string class_name,
@@ -1778,6 +2212,8 @@ void register_arrays(NativeMethodRegistry& registry) {
     };
     copy_of("([BI)[B", "[B", false);
     copy_of("([II)[I", "[I", false);
+    copy_of("([SI)[S", "[S", false);
+    copy_of("([ZI)[Z", "[Z", false);
     copy_of("([Ljava/lang/Object;I)[Ljava/lang/Object;",
             "[Ljava/lang/Object;", true);
 
@@ -1882,6 +2318,77 @@ void register_arrays(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_int(-(low + 1)));
         });
+    const auto primitive_to_string = [&registry](const char* descriptor,
+                                                  int kind) {
+        add(registry, "java/util/Arrays", "toString", descriptor,
+            [kind](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto array = reference_argument(arguments, 0U, true);
+                if (!array) return std::unexpected(array.error());
+                if (array->is_null()) {
+                    auto text = create_string(machine, u"null");
+                    if (!text) return std::unexpected(text.error());
+                    return std::optional<Value>(Value::from_reference(*text));
+                }
+                auto length = machine.heap().array_length(*array);
+                if (!length) return std::unexpected(length.error());
+                std::u16string text(u"[");
+                for (usize index = 0U; index < *length; ++index) {
+                    if (index != 0U) text.append(u", ");
+                    auto value = machine.heap().element(*array, index);
+                    if (!value) return std::unexpected(value.error());
+                    auto integer = value->as_int();
+                    if (!integer) return std::unexpected(integer.error());
+                    i32 number = *integer;
+                    if (kind == 0) number = static_cast<i8>(number);
+                    if (kind == 2) number = static_cast<i16>(number);
+                    const std::string rendered = std::to_string(number);
+                    for (const char character : rendered) {
+                        text.push_back(static_cast<char16_t>(
+                            static_cast<unsigned char>(character)));
+                    }
+                }
+                text.push_back(u']');
+                auto result = create_string(machine, std::move(text));
+                if (!result) return std::unexpected(result.error());
+                return std::optional<Value>(Value::from_reference(*result));
+            });
+    };
+    primitive_to_string("([B)Ljava/lang/String;", 0);
+    primitive_to_string("([I)Ljava/lang/String;", 1);
+    primitive_to_string("([S)Ljava/lang/String;", 2);
+
+    add(registry, "java/util/Arrays", "toString",
+        "([Ljava/lang/Object;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto array = reference_argument(arguments, 0U, true);
+            if (!array) return std::unexpected(array.error());
+            if (array->is_null()) {
+                auto text = create_string(machine, u"null");
+                if (!text) return std::unexpected(text.error());
+                return std::optional<Value>(Value::from_reference(*text));
+            }
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            std::u16string text(u"[");
+            for (usize index = 0U; index < *length; ++index) {
+                if (index != 0U) text.append(u", ");
+                auto value = machine.heap().element(*array, index);
+                if (!value) return std::unexpected(value.error());
+                auto reference = value->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                auto rendered = value_text(
+                    machine, *reference, *array, u"(this Array)");
+                if (!rendered) return std::unexpected(rendered.error());
+                text.append(*rendered);
+            }
+            text.push_back(u']');
+            auto result = create_string(machine, std::move(text));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+
     add(registry, "java/util/Arrays", "asList",
         "([Ljava/lang/Object;)Ljava/util/List;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2020,6 +2527,121 @@ void register_collections(NativeMethodRegistry& registry) {
                 if (!ignored) return std::unexpected(ignored.error());
             }
             return std::optional<Value> {};
+        });
+    const auto identity_collection = [&registry](
+        const char* name, const char* descriptor) {
+        add(registry, "java/util/Collections", name, descriptor,
+            [](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto value = reference_argument(arguments, 0U);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            });
+    };
+    identity_collection("unmodifiableMap",
+                        "(Ljava/util/Map;)Ljava/util/Map;");
+    identity_collection("unmodifiableSet",
+                        "(Ljava/util/Set;)Ljava/util/Set;");
+
+    add(registry, "java/util/Collections", "emptyMap", "()Ljava/util/Map;",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto map = machine.class_states().allocate_instance(
+                machine.heap(), "java/util/HashMap");
+            if (!map) return std::unexpected(map.error());
+            auto pinned = NativeRootScope::pin(machine.native_roots(), *map);
+            if (!pinned) return std::unexpected(pinned.error());
+            auto initialized = initialize_hash_map(machine, *map, 0);
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value>(Value::from_reference(*map));
+        });
+    add(registry, "java/util/Collections", "emptySet", "()Ljava/util/Set;",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto set = create_hash_set(machine, 0);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, "java/util/Collections", "newSetFromMap",
+        "(Ljava/util/Map;)Ljava/util/Set;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = reference_argument(arguments, 0U);
+            if (!source) return std::unexpected(source.error());
+            auto set = create_hash_set(machine, 0);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, "java/util/Collections", "addAll",
+        "(Ljava/util/Collection;[Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto collection = reference_argument(arguments, 0U);
+            auto values = reference_argument(arguments, 1U);
+            if (!collection) return std::unexpected(collection.error());
+            if (!values) return std::unexpected(values.error());
+            auto length = machine.heap().array_length(*values);
+            if (!length) return std::unexpected(length.error());
+            bool changed = false;
+            for (usize index = 0U; index < *length; ++index) {
+                auto value = machine.heap().element(*values, index);
+                if (!value) return std::unexpected(value.error());
+                auto reference = value->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                const Value argument = Value::from_reference(*reference);
+                auto added = invoke_checked(
+                    machine, *collection, "java/util/Collection", "add",
+                    "(Ljava/lang/Object;)Z",
+                    std::span<const Value>(&argument, 1U));
+                if (!added) return std::unexpected(added.error());
+                if (!added->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Collection.add returned no value");
+                }
+                auto result = added->value().as_int();
+                if (!result) return std::unexpected(result.error());
+                changed = changed || *result != 0;
+            }
+            return std::optional<Value>(Value::from_int(changed ? 1 : 0));
+        });
+
+    add(registry, "java/util/List", "of", "()Ljava/util/List;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "List.of() expects no arguments");
+            }
+            auto list = create_array_list(machine, 0);
+            if (!list) return std::unexpected(list.error());
+            auto immutable = set_int_field(
+                machine, *list, kArrayListMutationModeField,
+                kArrayListImmutable);
+            if (!immutable) return std::unexpected(immutable.error());
+            return std::optional<Value>(Value::from_reference(*list));
+        });
+
+    add(registry, "java/util/Collections", "unmodifiableList",
+        "(Ljava/util/List;)Ljava/util/List;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = reference_argument(arguments, 0U);
+            if (!source) return std::unexpected(source.error());
+            auto size = list_size(machine, *source);
+            if (!size) return std::unexpected(size.error());
+            auto list = create_array_list(machine, *size);
+            if (!list) return std::unexpected(list.error());
+            for (i32 index = 0; index < *size; ++index) {
+                auto value = list_get(machine, *source, index);
+                if (!value) return std::unexpected(value.error());
+                auto appended = array_list_append(machine, *list, *value);
+                if (!appended) return std::unexpected(appended.error());
+            }
+            auto immutable = set_int_field(
+                machine, *list, kArrayListMutationModeField,
+                kArrayListImmutable);
+            if (!immutable) return std::unexpected(immutable.error());
+            return std::optional<Value>(Value::from_reference(*list));
         });
     const auto list_factory = [&registry](const char* name, bool singleton) {
         add(registry, "java/util/Collections", name,

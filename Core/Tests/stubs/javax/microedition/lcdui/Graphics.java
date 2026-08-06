@@ -17,6 +17,7 @@ public final class Graphics {
     public void setColor(int rgb) { }
     public void setColor(int red, int green, int blue) { }
     public int getColor() { return 0; }
+    public int getDisplayColor(int color) { return 0; }
     public int getRedComponent() { return 0; }
     public int getGreenComponent() { return 0; }
     public int getBlueComponent() { return 0; }

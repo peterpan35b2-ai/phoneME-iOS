@@ -2,6 +2,7 @@ import SwiftUI
 #if canImport(UIKit)
 import UIKit
 import Photos
+import MetalKit
 #elseif canImport(AppKit)
 import AppKit
 #endif
@@ -1633,36 +1634,221 @@ private final class PhoneMEHardwareKeyboardHostView: UIView {
     }
 }
 
-private final class PhoneMEFrameLayerHostView: UIView {
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = true
-        isUserInteractionEnabled = false
-        backgroundColor = .black
-        layer.contentsGravity = .resize
+private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct PhoneMEFrameVertex {
+        float4 position [[position]];
+        float2 texCoord;
+    };
+
+    vertex PhoneMEFrameVertex phoneMEFrameVertex(uint vertexID [[vertex_id]]) {
+        constexpr float2 positions[] = {
+            float2(-1.0, -1.0),
+            float2( 3.0, -1.0),
+            float2(-1.0,  3.0)
+        };
+        constexpr float2 texCoords[] = {
+            float2(0.0, 1.0),
+            float2(2.0, 1.0),
+            float2(0.0, -1.0)
+        };
+        PhoneMEFrameVertex output;
+        output.position = float4(positions[vertexID], 0.0, 1.0);
+        output.texCoord = texCoords[vertexID];
+        return output;
     }
 
-    required init?(coder: NSCoder) {
+    fragment float4 phoneMEFrameFragment(
+        PhoneMEFrameVertex input [[stage_in]],
+        texture2d<float> frameTexture [[texture(0)]],
+        sampler frameSampler [[sampler(0)]]) {
+        return frameTexture.sample(frameSampler, input.texCoord);
+    }
+    """
+
+    private let fallbackLayer = CALayer()
+    private var commandQueue: MTLCommandQueue?
+    private var pipelineState: MTLRenderPipelineState?
+    private var nearestSampler: MTLSamplerState?
+    private var linearSampler: MTLSamplerState?
+    private var frameTexture: MTLTexture?
+    private var usesLinearFiltering = false
+
+    override init(frame: CGRect, device: MTLDevice?) {
+        super.init(frame: frame, device: device ?? MTLCreateSystemDefaultDevice())
+        configureRenderer()
+    }
+
+    required init(coder: NSCoder) {
         super.init(coder: coder)
-        isOpaque = true
-        isUserInteractionEnabled = false
-        backgroundColor = .black
-        layer.contentsGravity = .resize
+        if device == nil {
+            device = MTLCreateSystemDefaultDevice()
+        }
+        configureRenderer()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        fallbackLayer.frame = bounds
     }
 
     func update(image: CGImage, filtering: Bool) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.magnificationFilter = filtering ? .linear : .nearest
-        layer.minificationFilter = filtering ? .linear : .nearest
-        layer.contents = image
-        CATransaction.commit()
+        usesLinearFiltering = filtering
+        guard upload(image: image) else {
+            showFallback(image: image, filtering: filtering)
+            return
+        }
+        fallbackLayer.isHidden = true
+        setNeedsDisplay()
     }
 
     func clearFrame() {
+        frameTexture = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.contents = nil
+        fallbackLayer.contents = nil
+        CATransaction.commit()
+        setNeedsDisplay()
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+    }
+
+    func draw(in view: MTKView) {
+        guard
+            let frameTexture,
+            let commandQueue,
+            let pipelineState,
+            let renderPassDescriptor = currentRenderPassDescriptor,
+            let drawable = currentDrawable,
+            let commandBuffer = commandQueue.makeCommandBuffer(),
+            let encoder = commandBuffer.makeRenderCommandEncoder(
+                descriptor: renderPassDescriptor
+            )
+        else {
+            return
+        }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentTexture(frameTexture, index: 0)
+        encoder.setFragmentSamplerState(
+            usesLinearFiltering ? linearSampler : nearestSampler,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    private func configureRenderer() {
+        isOpaque = true
+        isUserInteractionEnabled = false
+        backgroundColor = .black
+        colorPixelFormat = .bgra8Unorm
+        framebufferOnly = true
+        autoResizeDrawable = true
+        enableSetNeedsDisplay = true
+        isPaused = true
+        preferredFramesPerSecond = 60
+        clearColor = MTLClearColorMake(0, 0, 0, 1)
+        delegate = self
+
+        fallbackLayer.frame = bounds
+        fallbackLayer.contentsGravity = .resize
+        fallbackLayer.backgroundColor = UIColor.black.cgColor
+        layer.addSublayer(fallbackLayer)
+
+        guard let device else { return }
+        commandQueue = device.makeCommandQueue()
+
+        let nearest = MTLSamplerDescriptor()
+        nearest.minFilter = .nearest
+        nearest.magFilter = .nearest
+        nearest.mipFilter = .notMipmapped
+        nearest.sAddressMode = .clampToEdge
+        nearest.tAddressMode = .clampToEdge
+        nearestSampler = device.makeSamplerState(descriptor: nearest)
+
+        let linear = MTLSamplerDescriptor()
+        linear.minFilter = .linear
+        linear.magFilter = .linear
+        linear.mipFilter = .notMipmapped
+        linear.sAddressMode = .clampToEdge
+        linear.tAddressMode = .clampToEdge
+        linearSampler = device.makeSamplerState(descriptor: linear)
+
+        do {
+            let library = try device.makeLibrary(
+                source: Self.shaderSource,
+                options: nil
+            )
+            guard
+                let vertex = library.makeFunction(name: "phoneMEFrameVertex"),
+                let fragment = library.makeFunction(name: "phoneMEFrameFragment")
+            else {
+                return
+            }
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertex
+            descriptor.fragmentFunction = fragment
+            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            pipelineState = try device.makeRenderPipelineState(
+                descriptor: descriptor
+            )
+        } catch {
+            pipelineState = nil
+        }
+    }
+
+    private func upload(image: CGImage) -> Bool {
+        guard
+            let device,
+            pipelineState != nil,
+            commandQueue != nil,
+            nearestSampler != nil,
+            linearSampler != nil,
+            image.width > 0,
+            image.height > 0,
+            let provider = image.dataProvider,
+            let data = provider.data,
+            let bytes = CFDataGetBytePtr(data)
+        else {
+            return false
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: image.width,
+            height: image.height,
+            mipmapped: false
+        )
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        if frameTexture?.width != image.width ||
+            frameTexture?.height != image.height {
+            frameTexture = device.makeTexture(descriptor: descriptor)
+        }
+        guard let frameTexture else { return false }
+        frameTexture.replace(
+            region: MTLRegionMake2D(0, 0, image.width, image.height),
+            mipmapLevel: 0,
+            withBytes: bytes,
+            bytesPerRow: image.bytesPerRow
+        )
+        return true
+    }
+
+    private func showFallback(image: CGImage, filtering: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fallbackLayer.isHidden = false
+        fallbackLayer.magnificationFilter = filtering ? .linear : .nearest
+        fallbackLayer.minificationFilter = filtering ? .linear : .nearest
+        fallbackLayer.contents = image
         CATransaction.commit()
     }
 }

@@ -70,8 +70,11 @@ namespace phoneme::vm
     [[nodiscard]] bool decoded_execution_requested() noexcept
     {
 #if PHONEME_ENABLE_DECODED_EXECUTION
-      const char* option = std::getenv("PHONEME_USE_DECODED_EXECUTION");
-      return option == nullptr || std::string_view(option) != "0";
+      static const bool requested = [] {
+        const char* option = std::getenv("PHONEME_USE_DECODED_EXECUTION");
+        return option == nullptr || std::string_view(option) != "0";
+      }();
+      return requested;
 #else
       return false;
 #endif
@@ -79,8 +82,11 @@ namespace phoneme::vm
 
     [[nodiscard]] bool specialized_intrinsics_requested() noexcept
     {
-      const char* option = std::getenv("PHONEME_USE_SPECIALIZED_INTRINSICS");
-      return option == nullptr || std::string_view(option) != "0";
+      static const bool requested = [] {
+        const char* option = std::getenv("PHONEME_USE_SPECIALIZED_INTRINSICS");
+        return option == nullptr || std::string_view(option) != "0";
+      }();
+      return requested;
     }
 
     [[nodiscard]] bool should_trace_slow_native(
@@ -3150,44 +3156,138 @@ namespace phoneme::vm
 
   Status Machine::pump_serial_callbacks(usize maximum_callbacks)
   {
-    for (usize delivered = 0U; delivered < maximum_callbacks; ++delivered)
-    {
-      NativeRootScope callback;
-      {
-        std::scoped_lock lock(serial_callbacks_mutex_);
-        if (serial_callbacks_.empty())
-          return {};
-        callback = std::move(serial_callbacks_.front());
-        serial_callbacks_.pop_front();
-      }
+    if (maximum_callbacks == 0U)
+      return {};
 
-      auto runnable = callback.get();
-      if (!runnable)
-        return std::unexpected(runnable.error());
-      // callSerially is commonly used by Gameloft engines for one-time
-      // resource decoding, not only tiny UI closures. The generic 10M budget
-      // aborts valid LZ/range-decoder callbacks before they can finish.
-      constexpr u64 kSerialCallbackInstructionBudget = 200'000'000U;
-      auto result = invoke_instance(*runnable,
-                                    "java/lang/Runnable",
-                                    "run",
-                                    "()V",
-                                    {},
-                                    kSerialCallbackInstructionBudget);
-      if (!result)
-        return std::unexpected(result.error());
-      if (result->completed_normally())
-        continue;
-      if (!result->throwable.has_value())
+    NativeRootScope worker_thread_root;
+    ObjectRef first_runnable {};
+    {
+      std::scoped_lock lock(serial_callbacks_mutex_);
+      if (serial_callback_failure_.has_value())
       {
-        return fail(ErrorCode::internal_error,
-                    "LCDUI serial callback failed without throwable");
+        Error failure = std::move(*serial_callback_failure_);
+        serial_callback_failure_.reset();
+        return std::unexpected(std::move(failure));
       }
-      auto throwable = heap_.class_name(*result->throwable);
-      if (!throwable)
-        return std::unexpected(throwable.error());
-      return fail(ErrorCode::java_exception,
-                  "LCDUI serial callback threw " + *throwable);
+      if (serial_callback_worker_running_ || serial_callbacks_.empty())
+        return {};
+      auto first = serial_callbacks_.front().get();
+      if (!first)
+        return std::unexpected(first.error());
+      first_runnable = *first;
+      serial_callback_worker_running_ = true;
+    }
+
+    auto allocated_thread = allocate_pinned_instance("java/lang/Thread");
+    if (!allocated_thread)
+    {
+      std::scoped_lock lock(serial_callbacks_mutex_);
+      serial_callback_worker_running_ = false;
+      return std::unexpected(allocated_thread.error());
+    }
+    worker_thread_root = std::move(*allocated_thread);
+    auto worker_thread = worker_thread_root.get();
+    if (!worker_thread)
+    {
+      std::scoped_lock lock(serial_callbacks_mutex_);
+      serial_callback_worker_running_ = false;
+      return std::unexpected(worker_thread.error());
+    }
+    auto initialized = initialize_java_thread(*worker_thread, first_runnable);
+    if (!initialized)
+    {
+      std::scoped_lock lock(serial_callbacks_mutex_);
+      serial_callback_worker_running_ = false;
+      return std::unexpected(initialized.error());
+    }
+
+    const ObjectRef worker_thread_object = *worker_thread;
+    auto scheduled = scheduler_.start_native_thread(
+        *this,
+        worker_thread_object,
+        [this, maximum_callbacks](std::stop_token stop_token)
+            -> Result<std::optional<ObjectRef>> {
+          const auto finish_worker = [this](std::optional<Error> failure = {}) {
+            std::scoped_lock lock(serial_callbacks_mutex_);
+            serial_callback_failure_ = std::move(failure);
+            serial_callback_worker_running_ = false;
+          };
+
+          for (usize delivered = 0U;
+               delivered < maximum_callbacks &&
+               !stop_token.stop_requested();
+               ++delivered)
+          {
+            NativeRootScope callback;
+            {
+              std::scoped_lock lock(serial_callbacks_mutex_);
+              if (serial_callbacks_.empty())
+              {
+                serial_callback_worker_running_ = false;
+                return std::optional<ObjectRef> {};
+              }
+              callback = std::move(serial_callbacks_.front());
+              serial_callbacks_.pop_front();
+            }
+
+            auto runnable = callback.get();
+            if (!runnable)
+            {
+              finish_worker(runnable.error());
+              return std::optional<ObjectRef> {};
+            }
+            // Display.callSerially belongs to the LCDUI event thread. Running
+            // the callback inline in the host pump lets a long resource loader
+            // or game loop block frame delivery and the entire native UI. The
+            // scheduler worker preserves callback ordering while allowing the
+            // host to keep pumping Canvas frames and input concurrently.
+            constexpr u64 kSerialCallbackInstructionBudget = 200'000'000U;
+            auto result = invoke_instance(*runnable,
+                                          "java/lang/Runnable",
+                                          "run",
+                                          "()V",
+                                          {},
+                                          kSerialCallbackInstructionBudget);
+            if (!result)
+            {
+              finish_worker(result.error());
+              return std::optional<ObjectRef> {};
+            }
+            if (result->completed_normally())
+              continue;
+            if (!result->throwable.has_value())
+            {
+              finish_worker(Error::make(
+                  ErrorCode::internal_error,
+                  "LCDUI serial callback failed without throwable"));
+              return std::optional<ObjectRef> {};
+            }
+            auto throwable = heap_.class_name(*result->throwable);
+            if (!throwable)
+            {
+              finish_worker(throwable.error());
+              return std::optional<ObjectRef> {};
+            }
+            std::string diagnostic =
+                "LCDUI serial callback threw " + *throwable;
+            if (!result->exception_context.empty())
+            {
+              diagnostic += " from ";
+              diagnostic += result->exception_context;
+            }
+            finish_worker(Error::make_java(*throwable,
+                                           std::move(diagnostic)));
+            return std::optional<ObjectRef> {};
+          }
+
+          finish_worker();
+          return std::optional<ObjectRef> {};
+        });
+    if (!scheduled)
+    {
+      std::scoped_lock lock(serial_callbacks_mutex_);
+      serial_callback_worker_running_ = false;
+      return std::unexpected(scheduled.error());
     }
     return {};
   }
@@ -3195,7 +3295,8 @@ namespace phoneme::vm
   usize Machine::pending_serial_callbacks() const noexcept
   {
     std::scoped_lock lock(serial_callbacks_mutex_);
-    return serial_callbacks_.size();
+    return serial_callbacks_.size() +
+           (serial_callback_worker_running_ ? 1U : 0U);
   }
 
   void Machine::set_serial_callback_coalescing(bool enabled) noexcept
@@ -3582,6 +3683,8 @@ namespace phoneme::vm
       field_bindings_.clear();
       direct_call_bindings_.clear();
       virtual_call_bindings_.clear();
+      operand_resolution_method_id_ = {};
+      operand_resolution_method_.reset();
       metadata_binding_generation_ = metadata_generation;
     }
   }
@@ -3597,7 +3700,18 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "decoded operand resolution requires valid IDs and BCI");
     }
-    auto runtime_method = classes_.metadata().find_method(method_id);
+    std::shared_ptr<const RuntimeMethod> runtime_method;
+    if (operand_resolution_method_ != nullptr &&
+        operand_resolution_method_id_ == method_id)
+    {
+      runtime_method = operand_resolution_method_;
+    }
+    else
+    {
+      runtime_method = classes_.metadata().find_method(method_id);
+      operand_resolution_method_id_ = method_id;
+      operand_resolution_method_ = runtime_method;
+    }
     if (runtime_method == nullptr || runtime_method->decoded == nullptr ||
         runtime_method->operand_resolutions == nullptr)
     {
@@ -6398,6 +6512,39 @@ namespace phoneme::vm
                 frames.back().method().name +
                 frames.back().method().descriptor + " at bytecode " +
                 std::to_string(throw_pc);
+      std::string throwable_message;
+      auto message_value = heap_.field(throwable, 0U);
+      if (message_value)
+      {
+        auto message_reference = message_value->as_reference();
+        if (message_reference && !message_reference->is_null())
+        {
+          auto text = heap_.string_value(*message_reference);
+          if (text)
+          {
+            throwable_message.assign(text->begin(), text->end());
+          }
+        }
+      }
+      vm_trace("exception", "throw %s%s%s from %s",
+               throwable_class->c_str(),
+               throwable_message.empty() ? "" : ": ",
+               throwable_message.c_str(),
+               exception_context.c_str());
+      if (vm_trace_enabled())
+      {
+        for (usize depth = 0U; depth < frames.size(); ++depth)
+        {
+          const ExecutionFrame& trace_frame =
+              frames[frames.size() - 1U - depth];
+          vm_trace("exception-stack", "#%zu %s.%s%s pc=%zu",
+                   depth,
+                   trace_frame.owner().name().c_str(),
+                   trace_frame.method().name.c_str(),
+                   trace_frame.method().descriptor.c_str(),
+                   trace_frame.current_instruction_pc());
+        }
+      }
       usize current_throw_pc = throw_pc;
       while (!frames.empty())
       {
@@ -6573,6 +6720,57 @@ namespace phoneme::vm
             .bytecode_pc = opcode_pc,
             .live_bytecode_pc = &current_heap_access_pc,
         });
+      }
+      if (vm_trace_enabled() && opcode_pc == 0U &&
+          frame.owner().name() == "r" &&
+          frame.method().name == "a" &&
+          frame.method().descriptor == "(Lah;[I)V")
+      {
+        auto value = frame.local(2U);
+        if (value)
+        {
+          auto reference = value->as_reference();
+          if (reference && !reference->is_null())
+          {
+            auto command = heap_.element(*reference, 0U);
+            if (command)
+            {
+              auto command_id = command->as_int();
+              if (command_id && *command_id == 25)
+              {
+                auto length = heap_.array_length(*reference);
+                vm_trace("mansion-command", "command=25 length=%zu frames=%zu",
+                         length ? *length : 0U, frames.size());
+                if (length)
+                {
+                  for (usize index = 0U; index < *length; ++index)
+                  {
+                    auto element = heap_.element(*reference, index);
+                    i32 integer_value = 0;
+                    if (element)
+                    {
+                      auto integer = element->as_int();
+                      if (integer) integer_value = *integer;
+                    }
+                    vm_trace("mansion-command", "arg[%zu]=%d",
+                             index, integer_value);
+                  }
+                }
+                for (usize depth = 0U; depth < frames.size(); ++depth)
+                {
+                  const ExecutionFrame& trace_frame =
+                      frames[frames.size() - 1U - depth];
+                  vm_trace("mansion-command", "#%zu %s.%s%s pc=%zu",
+                           depth,
+                           trace_frame.owner().name().c_str(),
+                           trace_frame.method().name.c_str(),
+                           trace_frame.method().descriptor.c_str(),
+                           trace_frame.current_instruction_pc());
+                }
+              }
+            }
+          }
+        }
       }
       auto opcode_result = frame.read_opcode();
       if (!opcode_result)

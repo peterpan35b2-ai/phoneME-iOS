@@ -27,6 +27,14 @@ constexpr i32 kScreenModeMetadata = -1007;
 constexpr usize kDisplayableIdField = 0;
 constexpr auto kKeyRepeatInitialDelay = std::chrono::milliseconds(400);
 constexpr auto kKeyRepeatInterval = std::chrono::milliseconds(80);
+// MIDP posts the initial expose asynchronously. Give a newly-visible Canvas a
+// brief chance to finish worker-side setup; an explicit repaint cancels this
+// grace period immediately, and Canvases that never repaint still receive the
+// mandatory initial paint shortly afterward.
+constexpr auto kInitialAutomaticPaintGrace =
+    std::chrono::milliseconds(0);
+constexpr auto kWorkerInitialAutomaticPaintGrace =
+    std::chrono::milliseconds(1500);
 constexpr usize kMaximumRepeatsPerPump = 8U;
 constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
 constexpr u64 kCanvasPaintWatchdogInstructionBudget = 5'000'000U;
@@ -422,6 +430,7 @@ Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
     }
     auto clipped = clipped_region(region);
     if (clipped.has_value()) {
+        (*state)->initial_automatic_paint_pending = false;
         merge_region((*state)->repaint_region, *clipped);
     }
     return {};
@@ -947,13 +956,20 @@ Status CanvasRuntime::process_repaints() {
 
     std::vector<u64> pending;
     pending.reserve(canvas_order_.size());
+    const auto now = std::chrono::steady_clock::now();
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
-        if (found != canvases_.end() &&
-            found->second.effectively_visible &&
-            found->second.repaint_region.has_value()) {
-            pending.push_back(key);
+        if (found == canvases_.end() ||
+            !found->second.effectively_visible ||
+            !found->second.repaint_region.has_value()) {
+            continue;
         }
+        if (!found->second.initial_paint_completed &&
+            found->second.initial_automatic_paint_pending &&
+            now < found->second.initial_automatic_paint_deadline) {
+            continue;
+        }
+        pending.push_back(key);
     }
     for (u64 key : pending) {
         auto found = canvases_.find(key);
@@ -965,6 +981,7 @@ Status CanvasRuntime::process_repaints() {
         const vm::ObjectRef canvas = found->second.object;
         const vm::CanvasRect region = *found->second.repaint_region;
         const bool initial_paint = !found->second.initial_paint_completed;
+        found->second.initial_automatic_paint_pending = false;
         found->second.repaint_region.reset();
         found->second.service_requested = false;
 
@@ -1166,6 +1183,20 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     const vm::ObjectRef canvas = state.object;
     if (desired) {
         active_canvas_ = canvas.bits;
+        if (!state.initial_paint_completed) {
+            const auto scheduler = machine_.scheduler().snapshot();
+            const bool has_application_worker = std::any_of(
+                scheduler.threads.begin(), scheduler.threads.end(),
+                [](const vm::JavaThreadSnapshot& thread) {
+                    return thread.id > 1U && thread.alive;
+                });
+            state.initial_automatic_paint_pending = true;
+            state.initial_automatic_paint_deadline =
+                std::chrono::steady_clock::now() +
+                (has_application_worker
+                    ? kWorkerInitialAutomaticPaintGrace
+                    : kInitialAutomaticPaintGrace);
+        }
         auto shown = invoke_void(
             canvas,
             "javax/microedition/lcdui/Canvas",
@@ -1183,6 +1214,7 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     if (active_canvas_.has_value() && *active_canvas_ == canvas.bits) {
         active_canvas_.reset();
     }
+    state.initial_automatic_paint_pending = false;
     state.key_states = 0;
     state.pressed_keys.clear();
     state.next_key_repeat.clear();

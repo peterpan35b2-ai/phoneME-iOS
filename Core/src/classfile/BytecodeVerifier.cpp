@@ -409,17 +409,26 @@ Status verify_code_structure(
     };
 
     for (const StackMapFrame& frame : stack_map_frames) {
+        // CLDC StackMap is optional preverification metadata, not executable
+        // bytecode. Many commercial MIDlets were post-processed or patched
+        // after preverification and therefore contain stale offsets. The full
+        // VM verifier independently performs bytecode data-flow validation and
+        // already retries legacy methods without these hints. Keep validating
+        // each frame's payload and types, but reserve strict offset/alignment
+        // checks for modern StackMapTable metadata.
+        const bool legacy_cldc = frame.kind == StackMapFrameKind::cldc_full;
         const usize offset = static_cast<usize>(frame.bytecode_offset);
-        if (offset >= bytecode.size() || !instruction_starts[offset]) {
+        if (!legacy_cldc &&
+            (offset >= bytecode.size() || !instruction_starts[offset])) {
             return fail(ErrorCode::malformed_class,
                         "stack map frame is not on an instruction boundary");
         }
-        if (previous_stack_map_offset.has_value() &&
+        if (!legacy_cldc && previous_stack_map_offset.has_value() &&
             offset <= *previous_stack_map_offset) {
             return fail(ErrorCode::malformed_class,
                         "stack map frame offsets are not strictly increasing");
         }
-        previous_stack_map_offset = offset;
+        if (!legacy_cldc) previous_stack_map_offset = offset;
 
         switch (frame.kind) {
         case StackMapFrameKind::same:

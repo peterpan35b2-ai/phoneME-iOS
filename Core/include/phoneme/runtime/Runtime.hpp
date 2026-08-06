@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -107,14 +108,14 @@ public:
     [[nodiscard]] Status configure_translation(
         bool enabled,
         translation::TranslationProvider provider =
-            translation::TranslationProvider::google,
+            translation::TranslationProvider::automatic,
         std::string source_language = "auto",
         std::string target_language = "vi");
     [[nodiscard]] Status configure_app_translation(
         AppId app_id,
         bool enabled,
         translation::TranslationProvider provider =
-            translation::TranslationProvider::google,
+            translation::TranslationProvider::automatic,
         std::string source_language = "auto",
         std::string target_language = "vi");
     [[nodiscard]] Status configure_permission_prompt(
@@ -123,6 +124,14 @@ public:
         SuiteId suite_id,
         security::SuiteTrust trust);
     [[nodiscard]] Result<SuiteId> install_jar(const std::string& jar_path);
+    [[nodiscard]] Result<SuiteId> install_jar(
+        const std::string& jar_path,
+        std::string_view identity_scope);
+    [[nodiscard]] std::optional<SuiteId> find_installed_suite(
+        std::string_view vendor,
+        std::string_view name,
+        std::string_view version,
+        std::string_view identity_scope = {}) const noexcept;
     [[nodiscard]] Status uninstall_suite(SuiteId suite_id,
                                          bool remove_data);
     [[nodiscard]] Status start_system();
@@ -179,6 +188,7 @@ public:
     void send_key(i32 key_code, bool pressed);
     void send_pointer(i32 x, i32 y, i32 action);
     void pump_events();
+    [[nodiscard]] bool try_pump_events();
 
     [[nodiscard]] FrameMetadata frame_metadata();
     [[nodiscard]] FrameMetadata copy_current_frame_rgba(
@@ -187,6 +197,7 @@ public:
         i32 component_id,
         std::span<u8> destination);
     [[nodiscard]] FrameSnapshot frame_snapshot();
+    [[nodiscard]] FrameSnapshot frame_snapshot_unpumped() const;
     [[nodiscard]] std::optional<UiEvent> poll_ui_event();
 
     void ui_select_command(i32 command_id);

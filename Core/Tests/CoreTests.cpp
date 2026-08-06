@@ -463,6 +463,15 @@ void test_bytecode_structure_verifier() {
                                                         bad_stack_map)
                  .has_value(),
             "structural verifier rejects unaligned stack map frame");
+
+    auto stale_cldc_stack_map = bad_stack_map;
+    stale_cldc_stack_map.front().kind =
+        phoneme::classfile::StackMapFrameKind::cldc_full;
+    require(phoneme::classfile::verify_code_structure(handler_code,
+                                                       {},
+                                                       stale_cldc_stack_map)
+                .has_value(),
+            "structural verifier ignores stale legacy CLDC StackMap hints");
 }
 
 void test_type_state_verifier() {
@@ -542,6 +551,40 @@ void test_type_state_verifier() {
         {legacy_method});
     require(phoneme::vm::verify_method(legacy_owner, legacy_method).has_value(),
             "legacy CLDC verifier ignores stale StackMap after safe data-flow validation");
+
+    phoneme::classfile::Method shared_finally_method {
+        .access_flags = 0x0009U,
+        .name = "sharedFinally",
+        .descriptor = "()Ljava/lang/Object;",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 1,
+            .max_locals = 2,
+            // The same legacy finally subroutine is called before and after
+            // local 0 becomes a reference. Its merged entry state therefore
+            // contains TOP for local 0, but the second jsr return site must
+            // retain the caller-specific reference type for aload_0.
+            .bytecode = {
+                0xA8, 0x00, 0x0C, // jsr 12; return at 3
+                0x01,             // aconst_null
+                0x4B,             // astore_0
+                0xA8, 0x00, 0x07, // jsr 12; return at 8
+                0x2A,             // aload_0
+                0xB0,             // areturn
+                0x00, 0x00,       // unreachable padding
+                0x4C,             // astore_1 (return address)
+                0xA9, 0x01,       // ret 1
+            },
+        },
+    };
+    const auto shared_finally_owner = phoneme::classfile::ClassFile::builtin(
+        "corefixture/SharedFinallyVerifierFixture",
+        "java/lang/Object",
+        0x0021U,
+        {},
+        {shared_finally_method});
+    require(phoneme::vm::verify_method(shared_finally_owner,
+                                       shared_finally_method).has_value(),
+            "legacy verifier preserves caller locals across shared jsr finally subroutines");
 
     auto modern_method = legacy_method;
     modern_method.name = "modern";
@@ -2042,6 +2085,8 @@ void test_machine_micro3d(const std::string& fixture_jar) {
            "execute Micro3D MTRA and MBAC parser fixture");
     invoke("invalidFormatOps", 1,
            "execute Micro3D invalid-format exception fixture");
+    invoke("primitiveRenderOps", 1,
+           "execute Micro3D primitive rasterization fixture");
     invoke("classAndConstantOps", 77,
            "execute Micro3D class and constant fixture");
 }
@@ -5628,7 +5673,7 @@ void test_machine_m3g() {
                 skinned_constructor_arguments);
     const std::array<phoneme::vm::Value, 4> bone_transform_arguments {
         phoneme::vm::Value::from_reference(*bone),
-        phoneme::vm::Value::from_int(255),
+        phoneme::vm::Value::from_int(321),
         phoneme::vm::Value::from_int(0),
         phoneme::vm::Value::from_int(3),
     };
@@ -5967,6 +6012,48 @@ void test_machine_m3g() {
     invoke_void(*graphics3d_object,
                 "javax/microedition/m3g/Graphics3D", "releaseTarget", "()V");
 
+    auto mutable_image2d = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Image2D");
+    require(mutable_image2d.has_value(),
+            "allocate mutable Image2D render target");
+    const std::array<phoneme::vm::Value, 3> mutable_image_arguments {
+        phoneme::vm::Value::from_int(99),
+        phoneme::vm::Value::from_int(8),
+        phoneme::vm::Value::from_int(8),
+    };
+    invoke_void(*mutable_image2d, "javax/microedition/m3g/Image2D",
+                "<init>", "(III)V", mutable_image_arguments);
+    const phoneme::vm::Value mutable_bind_target =
+        phoneme::vm::Value::from_reference(*mutable_image2d);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "bindTarget",
+                "(Ljava/lang/Object;)V",
+                std::span<const phoneme::vm::Value>(
+                    &mutable_bind_target, 1U));
+    const std::array<phoneme::vm::Value, 4> mutable_viewport {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(8),
+        phoneme::vm::Value::from_int(8),
+    };
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "setViewport",
+                "(IIII)V", mutable_viewport);
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "clear",
+                "(Ljavax/microedition/m3g/Background;)V",
+                std::span<const phoneme::vm::Value>(
+                    &render_background_argument, 1U));
+    auto mutable_payload = machine.graphics().image(mutable_image2d->bits);
+    require(mutable_payload.has_value() &&
+                (*mutable_payload)->pixels().front() == 0xFF112233U,
+            "Graphics3D renders directly into mutable Image2D targets");
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "releaseTarget", "()V");
+    invoke_void(*graphics3d_object,
+                "javax/microedition/m3g/Graphics3D", "setViewport",
+                "(IIII)V", viewport_arguments);
+
     auto light = machine.class_states().allocate_instance(
         machine.heap(), "javax/microedition/m3g/Light");
     auto light_transform = machine.class_states().allocate_instance(
@@ -6154,6 +6241,16 @@ void test_machine_m3g() {
     append_u32(serialized_vertex_buffer, 0U);
     append_object(serialized_objects, 21U, serialized_vertex_buffer);
 
+    std::vector<phoneme::u8> serialized_appearance;
+    append_object3d(serialized_appearance);
+    append_u8(serialized_appearance, 0U);
+    append_u32(serialized_appearance, 0U);
+    append_u32(serialized_appearance, 0U);
+    append_u32(serialized_appearance, 0U);
+    append_u32(serialized_appearance, 0U);
+    append_u32(serialized_appearance, 0U);
+    append_object(serialized_objects, 3U, serialized_appearance);
+
     std::vector<phoneme::u8> serialized_m3g {
         0xABU, 0x4AU, 0x53U, 0x52U, 0x31U, 0x38U,
         0x34U, 0xBBU, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
@@ -6178,10 +6275,11 @@ void test_machine_m3g() {
         machine, serialized_m3g, {});
     require(loaded_m3g.has_value(), "load a serialized M3G geometry graph");
     auto root_count = machine.heap().array_length(*loaded_m3g);
-    require(root_count.has_value() && *root_count == 2U,
+    require(root_count.has_value() && *root_count == 3U,
             "M3G loader returns only unreferenced root objects");
     phoneme::vm::ObjectRef loaded_strip {};
     phoneme::vm::ObjectRef loaded_vertex_buffer {};
+    phoneme::vm::ObjectRef loaded_appearance {};
     for (phoneme::usize index = 0U; index < *root_count; ++index) {
         auto value = machine.heap().element(*loaded_m3g, index);
         require(value.has_value(), "read M3G loaded root");
@@ -6194,10 +6292,13 @@ void test_machine_m3g() {
             loaded_strip = *reference;
         } else if (*class_name == "javax/microedition/m3g/VertexBuffer") {
             loaded_vertex_buffer = *reference;
+        } else if (*class_name == "javax/microedition/m3g/Appearance") {
+            loaded_appearance = *reference;
         }
     }
-    require(!loaded_strip.is_null() && !loaded_vertex_buffer.is_null(),
-            "M3G loader preserves geometry root types");
+    require(!loaded_strip.is_null() && !loaded_vertex_buffer.is_null() &&
+                !loaded_appearance.is_null(),
+            "M3G loader preserves geometry and appearance root types");
     auto loaded_index_count = machine.invoke_instance(
         loaded_strip, "javax/microedition/m3g/IndexBuffer",
         "getIndexCount", "()I");
@@ -6212,6 +6313,18 @@ void test_machine_m3g() {
                 loaded_vertex_count->return_value.has_value() &&
                 loaded_vertex_count->return_value->as_int().value_or(-1) == 3,
             "M3G loader links VertexBuffer positions");
+    const phoneme::vm::Value texture_unit =
+        phoneme::vm::Value::from_int(0);
+    auto loaded_texture = machine.invoke_instance(
+        loaded_appearance, "javax/microedition/m3g/Appearance",
+        "getTexture", "(I)Ljavax/microedition/m3g/Texture2D;",
+        std::span<const phoneme::vm::Value>(&texture_unit, 1U));
+    require(loaded_texture.has_value() &&
+                loaded_texture->completed_normally() &&
+                loaded_texture->return_value.has_value() &&
+                loaded_texture->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef {}).is_null(),
+            "M3G loader preserves empty Appearance texture units as null");
 }
 
 void test_framebuffer_sizes() {

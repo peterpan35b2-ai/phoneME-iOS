@@ -228,6 +228,34 @@ Status Heap::set_element(ObjectRef reference, usize index, Value value) {
     return {};
 }
 
+Status Heap::fill_array_range(ObjectRef reference,
+                              usize index,
+                              usize length,
+                              Value value) {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(),
+                                 "Heap.fill_array_range", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state,
+                    "array range fill requires an array object");
+    }
+    if (index > object.elements.size() ||
+        length > object.elements.size() - index) {
+        return fail(ErrorCode::out_of_range,
+                    "array range fill is outside array bounds");
+    }
+    std::fill_n(
+        object.elements.begin() + static_cast<std::ptrdiff_t>(index),
+        length,
+        value);
+    return {};
+}
+
 Status Heap::copy_array_range(ObjectRef source,
                               usize source_index,
                               ObjectRef destination,

@@ -200,6 +200,19 @@ namespace {
         }
         return std::unexpected(descriptor.error());
     }
+    if (descriptor->identity_key != record.identity_key) {
+        constexpr char kIdentityScopeSeparator = '\x1E';
+        std::string scoped_prefix = descriptor->identity_key;
+        scoped_prefix.push_back(kIdentityScopeSeparator);
+        if (!record.identity_key.starts_with(scoped_prefix)) return false;
+        const std::string_view identity_scope(record.identity_key.data() +
+                                                  scoped_prefix.size(),
+                                              record.identity_key.size() -
+                                                  scoped_prefix.size());
+        auto scoped_identity = SuiteInstaller::scope_identity(
+            *descriptor, identity_scope);
+        if (!scoped_identity) return false;
+    }
     return descriptor->identity_key == record.identity_key &&
            descriptor->version == record.version &&
            digest_equal(descriptor->identity_sha256, record.identity_sha256) &&
@@ -303,23 +316,35 @@ Status SuiteStore::configure(const SuiteStoreConfig& config) {
 }
 
 Result<SuiteId> SuiteStore::install(const std::string& jar_path) {
-    return install_impl(jar_path, std::nullopt, false);
+    return install_impl(jar_path, std::nullopt, false, {});
+}
+
+Result<SuiteId> SuiteStore::install_scoped(
+    const std::string& jar_path,
+    std::string_view identity_scope) {
+    return install_impl(jar_path, std::nullopt, false, identity_scope);
 }
 
 Result<SuiteId> SuiteStore::install(const std::string& jad_path,
                                     const std::string& jar_path,
                                     bool allow_downgrade) {
-    return install_impl(jar_path, jad_path, allow_downgrade);
+    return install_impl(jar_path, jad_path, allow_downgrade, {});
 }
 
 Result<SuiteId> SuiteStore::install_impl(
     const std::string& jar_path,
     const std::optional<std::string>& jad_path,
-    bool allow_downgrade) {
+    bool allow_downgrade,
+    std::string_view identity_scope) {
     auto descriptor = SuiteInstaller::inspect(
         jar_path, jad_path, installer_limits_);
     if (!descriptor) {
         return std::unexpected(descriptor.error());
+    }
+    auto scoped_identity = SuiteInstaller::scope_identity(
+        *descriptor, identity_scope);
+    if (!scoped_identity) {
+        return std::unexpected(scoped_identity.error());
     }
 
     const Suite* existing = nullptr;
@@ -346,8 +371,15 @@ Result<SuiteId> SuiteStore::install_impl(
                              existing->archive_sha256)) {
                 return id;
             }
-            return fail(ErrorCode::invalid_state,
-                        "same-version suite replacement has different JAR content");
+            if (identity_scope.empty()) {
+                return fail(
+                    ErrorCode::invalid_state,
+                    "same-version suite replacement has different JAR content");
+            }
+            // A host-scoped identity represents one explicit application slot.
+            // Reimporting that slot with changed bytes is a legitimate update
+            // even when the producer forgot to bump MIDlet-Version. Keep the
+            // stable suite ID so RMS/files/permissions remain attached.
         }
     } else {
         id = allocate_id(descriptor->identity_sha256,
@@ -799,6 +831,27 @@ Result<Suite> SuiteStore::suite_from_record(
     auto descriptor = SuiteInstaller::inspect(
         jar_path.string(), jad_path, installer_limits_);
     if (!descriptor) return std::unexpected(descriptor.error());
+
+    if (descriptor->identity_key != record.identity_key) {
+        constexpr char kIdentityScopeSeparator = '\x1E';
+        std::string scoped_prefix = descriptor->identity_key;
+        scoped_prefix.push_back(kIdentityScopeSeparator);
+        if (!record.identity_key.starts_with(scoped_prefix)) {
+            return fail(
+                ErrorCode::checksum_mismatch,
+                "managed suite identity does not match the persistent database");
+        }
+        const std::string_view identity_scope(record.identity_key.data() +
+                                                  scoped_prefix.size(),
+                                              record.identity_key.size() -
+                                                  scoped_prefix.size());
+        auto scoped_identity = SuiteInstaller::scope_identity(
+            *descriptor, identity_scope);
+        if (!scoped_identity) {
+            return std::unexpected(scoped_identity.error());
+        }
+    }
+
     if (descriptor->identity_key != record.identity_key ||
         descriptor->version != record.version ||
         !digest_equal(descriptor->identity_sha256, record.identity_sha256) ||

@@ -121,8 +121,36 @@ public final class CldcLibraryOps {
                 !"b".equals(whitespace[2]) ||
                 !"c".equals(whitespace[3])) return 121;
 
+        String[] tsv = "runtime_id\tpet_key\t".split("\\t", -1);
+        if (tsv.length != 3 || !"runtime_id".equals(tsv[0]) ||
+                !"pet_key".equals(tsv[1]) || !"".equals(tsv[2])) return 1221;
+
         String[] unchanged = "plain".split(",");
         if (unchanged.length != 1 || !"plain".equals(unchanged[0])) return 122;
+        if (!" \t\r\n".isBlank() || " x ".isBlank() || !"".isBlank()) {
+            return 1231;
+        }
+        if (java.util.Locale.ROOT == null ||
+                !"gift".equals("GiFt".toLowerCase(java.util.Locale.ROOT)) ||
+                !"GIFT".equals("GiFt".toUpperCase(java.util.Locale.ROOT))) {
+            return 1232;
+        }
+        java.util.List empty = java.util.List.of();
+        if (!empty.isEmpty()) return 1233;
+        try {
+            empty.add("x");
+            return 1234;
+        } catch (UnsupportedOperationException expected) {
+        }
+        java.util.HashSet retained = new java.util.HashSet();
+        retained.add("keep");
+        retained.add("drop");
+        java.util.ArrayList allowed = new java.util.ArrayList();
+        allowed.add("keep");
+        if (!retained.retainAll(allowed) || retained.size() != 1 ||
+                !retained.contains("keep") || retained.contains("drop")) {
+            return 1235;
+        }
         return 0;
     }
 
@@ -153,6 +181,31 @@ public final class CldcLibraryOps {
             return 132;
         } catch (java.io.UTFDataFormatException expectedFailure) {
         }
+        return 0;
+    }
+
+    private static int dataInputPrimitiveSemantics() throws Exception {
+        byte[] encoded = new byte[] {
+            0x12, 0x34, 0x56, 0x78,
+            (byte) 0xFE, (byte) 0xDC,
+            0x01, 0x23, 0x45, 0x67,
+            (byte) 0x89, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF
+        };
+        DataInputStream input = new DataInputStream(
+                new ByteArrayInputStream(encoded));
+        if (input.readInt() != 0x12345678) return 133;
+        if (input.readUnsignedShort() != 0xFEDC) return 134;
+        if (input.readLong() != 0x0123456789ABCDEFL) return 135;
+
+        ByteArrayInputStream truncatedSource = new ByteArrayInputStream(
+                new byte[] {1, 2});
+        DataInputStream truncated = new DataInputStream(truncatedSource);
+        try {
+            truncated.readInt();
+            return 136;
+        } catch (java.io.EOFException expected) {
+        }
+        if (truncatedSource.available() != 0) return 137;
         return 0;
     }
 
@@ -272,6 +325,27 @@ public final class CldcLibraryOps {
         if (!"UTF-8".equals(utf8.name())) return 211;
         if (!"UTF-8".equals(utf8.toString())) return 212;
 
+        java.nio.charset.Charset lookedUp =
+                java.nio.charset.Charset.forName("utf_8");
+        if (!"UTF-8".equals(lookedUp.name())) return 216;
+        java.nio.charset.Charset latin1 =
+                java.nio.charset.Charset.forName("latin1");
+        if (!"ISO-8859-1".equals(latin1.name())) return 217;
+        ByteArrayOutputStream latinBytes = new ByteArrayOutputStream();
+        OutputStreamWriter latinWriter =
+                new OutputStreamWriter(latinBytes, latin1);
+        latinWriter.write("\u00E9\u20AC");
+        latinWriter.close();
+        byte[] latinEncoded = latinBytes.toByteArray();
+        if (latinEncoded.length != 2 ||
+                (latinEncoded[0] & 0xFF) != 0xE9 ||
+                latinEncoded[1] != 63) return 218;
+        try {
+            java.nio.charset.Charset.forName(null);
+            return 219;
+        } catch (NullPointerException expected) {
+        }
+
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         OutputStreamWriter writer = new OutputStreamWriter(bytes, utf8);
         writer.write("Tiếng Việt");
@@ -293,6 +367,39 @@ public final class CldcLibraryOps {
                     (java.nio.charset.Charset)null);
             return 215;
         } catch (NullPointerException expected) {
+        }
+        return 0;
+    }
+
+    private static int messageDigestCompatibility() throws Exception {
+        java.security.MessageDigest digest =
+                java.security.MessageDigest.getInstance("SHA-256");
+        if (!"SHA-256".equals(digest.getAlgorithm()) ||
+                digest.getDigestLength() != 32) return 220;
+        digest.update((byte)'a');
+        digest.update(new byte[] {(byte)'b', (byte)'c'}, 0, 2);
+        byte[] actual = digest.digest();
+        int[] expected = new int[] {
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+            0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+            0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+            0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad
+        };
+        if (actual.length != expected.length) return 221;
+        for (int i = 0; i < expected.length; i++) {
+            if ((actual[i] & 0xFF) != expected[i]) return 222;
+        }
+        byte[] oneShot = java.security.MessageDigest.getInstance("sha_256")
+                .digest(new byte[] {(byte)'a', (byte)'b', (byte)'c'});
+        if (!java.security.MessageDigest.isEqual(actual, oneShot)) return 223;
+        if (java.security.MessageDigest.isEqual(actual, new byte[31])) return 224;
+        digest.update((byte)7);
+        digest.reset();
+        if (digest.digest().length != 32) return 225;
+        try {
+            java.security.MessageDigest.getInstance("MD5");
+            return 226;
+        } catch (java.security.NoSuchAlgorithmException expectedFailure) {
         }
         return 0;
     }
@@ -340,6 +447,8 @@ public final class CldcLibraryOps {
             if (result != 0) return result;
             result = modifiedUtfRoundTrip();
             if (result != 0) return result;
+            result = dataInputPrimitiveSemantics();
+            if (result != 0) return result;
             result = wrapperCompatibility();
             if (result != 0) return result;
             result = objectAndThreadCompatibility();
@@ -349,6 +458,8 @@ public final class CldcLibraryOps {
             result = throwableSemantics();
             if (result != 0) return result;
             result = standardCharsetsCompatibility();
+            if (result != 0) return result;
+            result = messageDigestCompatibility();
             if (result != 0) return result;
             return cldcHierarchyAndTimeZone();
         } catch (Throwable failure) {

@@ -88,7 +88,7 @@ struct SettingsView: View {
             } header: {
                 Text("Translation")
             } footer: {
-                Text("Bing Translator is the default. It uses a web session and may take slightly longer on the first request.")
+                Text("Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked.")
             }
 
             Section("Player") {

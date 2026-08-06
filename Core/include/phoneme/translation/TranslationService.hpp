@@ -17,11 +17,12 @@ namespace phoneme::translation {
 enum class TranslationProvider : i32 {
     google = 0,
     bing = 1,
+    automatic = 2,
 };
 
 struct TranslationConfiguration final {
     bool enabled {false};
-    TranslationProvider provider {TranslationProvider::google};
+    TranslationProvider provider {TranslationProvider::automatic};
     std::string source_language {"auto"};
     std::string target_language {"vi"};
     std::string cache_path;
@@ -79,28 +80,37 @@ private:
 
     static void schedule_pump(const std::shared_ptr<State>& state);
     static void pump_requests(const std::shared_ptr<State>& state);
+    static void perform_google_request(
+        const std::shared_ptr<State>& state,
+        std::vector<std::string> sources,
+        bool allow_provider_fallback);
     static void complete_google_request(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
+        bool allow_provider_fallback,
         Result<network::HttpResponse> response);
     static void start_bing_request(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
         bool force_token_refresh,
-        bool allow_retry);
+        bool allow_token_retry,
+        bool allow_provider_fallback);
     static void complete_bing_home_request(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
-        bool allow_retry,
+        bool allow_token_retry,
+        bool allow_provider_fallback,
         Result<network::HttpResponse> response);
     static void perform_bing_translation(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
-        bool allow_retry);
+        bool allow_token_retry,
+        bool allow_provider_fallback);
     static void complete_bing_request(
         const std::shared_ptr<State>& state,
         std::vector<std::string> sources,
-        bool allow_retry,
+        bool allow_token_retry,
+        bool allow_provider_fallback,
         Result<network::HttpResponse> response);
     static void finish_request(
         const std::shared_ptr<State>& state,

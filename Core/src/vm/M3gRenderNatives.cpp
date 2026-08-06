@@ -203,6 +203,29 @@ std::unordered_map<DepthKey, DepthSurface, DepthKeyHash> g_depth_surfaces;
 
     ObjectRef image_object {};
     if (*class_name == kImage2D) {
+        auto mutable_value = int_field(
+            machine, *target, kImage2D, "mutable", "Z");
+        if (!mutable_value) return std::unexpected(mutable_value.error());
+        if (*mutable_value != 0) {
+            auto image = machine.graphics().image(target->bits);
+            if (!image) {
+                auto width = int_field(machine, *target, kImage2D, "width");
+                auto height = int_field(machine, *target, kImage2D, "height");
+                if (!width) return std::unexpected(width.error());
+                if (!height) return std::unexpected(height.error());
+                auto created = graphics::Image::create_mutable(*width, *height);
+                if (!created) return std::unexpected(created.error());
+                auto attached = machine.graphics().attach_image(
+                    target->bits, std::move(*created));
+                if (!attached) return std::unexpected(attached.error());
+                image = machine.graphics().image(target->bits);
+                if (!image) return std::unexpected(image.error());
+            }
+            graphics::GraphicsContext context {};
+            context.target_key = target->bits;
+            context.clip = graphics::target_bounds(**image);
+            return BoundRenderTarget {.image = *image, .context = context};
+        }
         auto source = reference_field(machine, *target, kImage2D,
                                       "source", "Ljava/lang/Object;");
         if (!source) return std::unexpected(source.error());
@@ -1110,6 +1133,12 @@ struct DeformedGeometry final {
     i32 width,
     i32 height,
     i32 format) {
+    auto render_surface = machine.graphics().image(image2d.bits);
+    if (render_surface) {
+        return std::vector<graphics::Pixel>(
+            (*render_surface)->pixels().begin(),
+            (*render_surface)->pixels().end());
+    }
     auto source = reference_field(machine, image2d, kImage2D,
                                   "source", "Ljava/lang/Object;");
     auto palette = reference_field(machine, image2d, kImage2D,
@@ -1294,8 +1323,13 @@ struct DeformedGeometry final {
     const float aspect = (*projection)[1U];
     const float near_plane = (*projection)[2U];
     const float far_plane = (*projection)[3U];
-    if (!(height_or_fov > 0.0F) || !(aspect > 0.0F) ||
-        !(near_plane > 0.0F) || !(far_plane > near_plane)) {
+    const bool depth_range_valid = *type == 48
+        ? far_plane > near_plane
+        : near_plane > 0.0F && far_plane > near_plane;
+    if (!std::isfinite(height_or_fov) || !std::isfinite(aspect) ||
+        !std::isfinite(near_plane) || !std::isfinite(far_plane) ||
+        !(height_or_fov > 0.0F) || !(aspect > 0.0F) ||
+        !depth_range_valid) {
         return fail_java("java/lang/IllegalStateException",
                          "Camera projection parameters are invalid");
     }

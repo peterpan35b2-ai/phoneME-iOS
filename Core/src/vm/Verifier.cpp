@@ -39,6 +39,7 @@ enum class VerificationValueKind : u8 {
 struct VerificationValue final {
     VerificationValueKind kind {VerificationValueKind::top};
     u16 origin {0};
+    u16 subroutine_target {kUnknownReturnAddress};
 
     [[nodiscard]] friend bool operator==(const VerificationValue&,
                                          const VerificationValue&) = default;
@@ -56,6 +57,9 @@ struct TransferResult final {
     std::vector<usize> successors;
     bool falls_through {true};
 };
+
+using JsrReturnSites =
+    std::unordered_map<usize, std::vector<usize>>;
 
 class Cursor final {
 public:
@@ -410,8 +414,14 @@ void normalize_locals(std::vector<VerificationValue>& locals) {
         }
         if (current.kind == VerificationValueKind::return_address &&
             incoming.kind == VerificationValueKind::return_address) {
-            if (current.origin != kUnknownReturnAddress) {
+            if (current.origin != incoming.origin &&
+                current.origin != kUnknownReturnAddress) {
                 current.origin = kUnknownReturnAddress;
+                changed = true;
+            }
+            if (current.subroutine_target != incoming.subroutine_target &&
+                current.subroutine_target != kUnknownReturnAddress) {
+                current.subroutine_target = kUnknownReturnAddress;
                 changed = true;
             }
             continue;
@@ -430,8 +440,14 @@ void normalize_locals(std::vector<VerificationValue>& locals) {
         }
         if (current.kind == VerificationValueKind::return_address &&
             incoming.kind == VerificationValueKind::return_address) {
-            if (current.origin != kUnknownReturnAddress) {
+            if (current.origin != incoming.origin &&
+                current.origin != kUnknownReturnAddress) {
                 current.origin = kUnknownReturnAddress;
+                changed = true;
+            }
+            if (current.subroutine_target != incoming.subroutine_target &&
+                current.subroutine_target != kUnknownReturnAddress) {
+                current.subroutine_target = kUnknownReturnAddress;
                 changed = true;
             }
             continue;
@@ -754,7 +770,7 @@ void replace_uninitialized(FrameState& state,
     const classfile::CodeAttribute& code,
     usize pc,
     const FrameState& input,
-    std::span<const usize> jsr_return_sites) {
+    const JsrReturnSites& jsr_return_sites) {
     TransferResult result {.state = input};
     Cursor cursor(code.bytecode, pc);
     auto opcode_result = cursor.read_u8("opcode");
@@ -772,6 +788,55 @@ void replace_uninitialized(FrameState& state,
         result.successors.push_back(*target);
         return {};
     };
+    const auto add_ret_successors =
+        [&result, &jsr_return_sites](const VerificationValue& address)
+            -> Status {
+            if (address.origin != kUnknownReturnAddress) {
+                result.successors.push_back(address.origin);
+                return {};
+            }
+            if (address.subroutine_target != kUnknownReturnAddress) {
+                const auto found = jsr_return_sites.find(
+                    address.subroutine_target);
+                if (found == jsr_return_sites.end()) {
+                    return fail(ErrorCode::verification_failed,
+                                "ret subroutine has no jsr return sites");
+                }
+                result.successors.insert(result.successors.end(),
+                                         found->second.begin(),
+                                         found->second.end());
+                return {};
+            }
+            for (const auto& [target, sites] : jsr_return_sites) {
+                (void)target;
+                result.successors.insert(result.successors.end(),
+                                         sites.begin(), sites.end());
+            }
+            return {};
+        };
+    const bool is_jsr_return_site = std::any_of(
+        jsr_return_sites.begin(), jsr_return_sites.end(),
+        [pc](const auto& entry) {
+            return std::find(entry.second.begin(), entry.second.end(), pc) !=
+                   entry.second.end();
+        });
+    const auto push_reference_local =
+        [&result, &code, is_jsr_return_site](usize index) -> Status {
+            if (is_jsr_return_site && index < result.state.locals.size() &&
+                result.state.locals[index].kind ==
+                    VerificationValueKind::top) {
+                // Legacy jsr subroutines are shared by multiple caller
+                // states. A local untouched by the subroutine can merge to
+                // TOP even though each caller has a valid reference at its
+                // own return site. The aload opcode supplies that missing
+                // caller-specific type information.
+                return push(result.state,
+                            {.kind = VerificationValueKind::reference},
+                            code.max_stack);
+            }
+            return push_loaded_reference(result.state, index,
+                                         code.max_stack);
+        };
 
     switch (opcode) {
     case 0x00:
@@ -852,9 +917,7 @@ void replace_uninitialized(FrameState& state,
                                        code.max_stack);
             break;
         default:
-            status = push_loaded_reference(result.state,
-                                           *index,
-                                           code.max_stack);
+            status = push_reference_local(*index);
             break;
         }
         if (!status) return std::unexpected(status.error());
@@ -889,9 +952,7 @@ void replace_uninitialized(FrameState& state,
             !status) return std::unexpected(status.error());
         break;
     case 0x2A: case 0x2B: case 0x2C: case 0x2D:
-        if (auto status = push_loaded_reference(result.state,
-                                                opcode - 0x2AU,
-                                                code.max_stack);
+        if (auto status = push_reference_local(opcode - 0x2AU);
             !status) return std::unexpected(status.error());
         break;
     case 0x2E: case 0x33: case 0x34: case 0x35:
@@ -1362,10 +1423,12 @@ void replace_uninitialized(FrameState& state,
         const usize return_pc = cursor.position();
         auto target = branch_target(pc, *offset, code.bytecode.size());
         if (!target) return std::unexpected(target.error());
-        auto pushed = push(result.state,
-                           {.kind = VerificationValueKind::return_address,
-                            .origin = static_cast<u16>(return_pc)},
-                           code.max_stack);
+        auto pushed = push(
+            result.state,
+            {.kind = VerificationValueKind::return_address,
+             .origin = static_cast<u16>(return_pc),
+             .subroutine_target = static_cast<u16>(*target)},
+            code.max_stack);
         if (!pushed) return std::unexpected(pushed.error());
         result.successors.push_back(*target);
         result.falls_through = false;
@@ -1379,13 +1442,8 @@ void replace_uninitialized(FrameState& state,
             address->kind != VerificationValueKind::return_address) {
             return verify_fail(method, pc, "ret requires return-address local");
         }
-        if (address->origin != kUnknownReturnAddress) {
-            result.successors.push_back(address->origin);
-        } else {
-            result.successors.insert(result.successors.end(),
-                                     jsr_return_sites.begin(),
-                                     jsr_return_sites.end());
-        }
+        auto successors = add_ret_successors(*address);
+        if (!successors) return std::unexpected(successors.error());
         result.falls_through = false;
         break;
     }
@@ -1696,9 +1754,7 @@ void replace_uninitialized(FrameState& state,
                                        code.max_stack);
             break;
         case 0x19:
-            status = push_loaded_reference(result.state,
-                                           *index,
-                                           code.max_stack);
+            status = push_reference_local(*index);
             break;
         case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: {
             Result<VerificationValue> value = *widened == 0x3A
@@ -1733,13 +1789,8 @@ void replace_uninitialized(FrameState& state,
                 address->kind != VerificationValueKind::return_address) {
                 return verify_fail(method, pc, "wide ret type mismatch");
             }
-            if (address->origin != kUnknownReturnAddress) {
-                result.successors.push_back(address->origin);
-            } else {
-                result.successors.insert(result.successors.end(),
-                                         jsr_return_sites.begin(),
-                                         jsr_return_sites.end());
-            }
+            auto successors = add_ret_successors(*address);
+            if (!successors) return std::unexpected(successors.error());
             result.falls_through = false;
             status = {};
             break;
@@ -1786,10 +1837,12 @@ void replace_uninitialized(FrameState& state,
         const usize return_pc = cursor.position();
         auto target = branch_target(pc, *offset, code.bytecode.size());
         if (!target) return std::unexpected(target.error());
-        auto pushed = push(result.state,
-                           {.kind = VerificationValueKind::return_address,
-                            .origin = static_cast<u16>(return_pc)},
-                           code.max_stack);
+        auto pushed = push(
+            result.state,
+            {.kind = VerificationValueKind::return_address,
+             .origin = static_cast<u16>(return_pc),
+             .subroutine_target = static_cast<u16>(*target)},
+            code.max_stack);
         if (!pushed) return std::unexpected(pushed.error());
         result.successors.push_back(*target);
         result.falls_through = false;
@@ -1815,9 +1868,9 @@ void replace_uninitialized(FrameState& state,
     return result;
 }
 
-[[nodiscard]] Result<std::vector<usize>> collect_jsr_return_sites(
+[[nodiscard]] Result<JsrReturnSites> collect_jsr_return_sites(
     std::span<const u8> bytecode) {
-    std::vector<usize> sites;
+    JsrReturnSites sites;
     Cursor cursor(bytecode, 0);
     while (cursor.position() < bytecode.size()) {
         const usize pc = cursor.position();
@@ -1826,13 +1879,17 @@ void replace_uninitialized(FrameState& state,
         if (*opcode == 0xA8U) {
             auto offset = cursor.read_i16("jsr offset");
             if (!offset) return std::unexpected(offset.error());
-            sites.push_back(cursor.position());
+            auto target = branch_target(pc, *offset, bytecode.size());
+            if (!target) return std::unexpected(target.error());
+            sites[*target].push_back(cursor.position());
             continue;
         }
         if (*opcode == 0xC9U) {
             auto offset = cursor.read_i32("jsr_w offset");
             if (!offset) return std::unexpected(offset.error());
-            sites.push_back(cursor.position());
+            auto target = branch_target(pc, *offset, bytecode.size());
+            if (!target) return std::unexpected(target.error());
+            sites[*target].push_back(cursor.position());
             continue;
         }
 
@@ -1923,8 +1980,13 @@ void replace_uninitialized(FrameState& state,
                     "cannot scan bytecode instruction at " +
                         std::to_string(pc));
     }
-    std::sort(sites.begin(), sites.end());
-    sites.erase(std::unique(sites.begin(), sites.end()), sites.end());
+    for (auto& [target, return_sites] : sites) {
+        (void)target;
+        std::sort(return_sites.begin(), return_sites.end());
+        return_sites.erase(
+            std::unique(return_sites.begin(), return_sites.end()),
+            return_sites.end());
+    }
     return sites;
 }
 

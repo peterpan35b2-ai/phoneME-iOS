@@ -984,8 +984,13 @@ struct PickHit final {
     const float aspect = (*projection)[1U];
     const float near_plane = (*projection)[2U];
     const float far_plane = (*projection)[3U];
-    if (!(height_or_fov > 0.0F) || !(aspect > 0.0F) ||
-        !(near_plane > 0.0F) || !(far_plane > near_plane)) {
+    const bool depth_range_valid = *type == 48
+        ? far_plane > near_plane
+        : near_plane > 0.0F && far_plane > near_plane;
+    if (!std::isfinite(height_or_fov) || !std::isfinite(aspect) ||
+        !std::isfinite(near_plane) || !std::isfinite(far_plane) ||
+        !(height_or_fov > 0.0F) || !(aspect > 0.0F) ||
+        !depth_range_valid) {
         return fail_java("java/lang/IllegalStateException",
                          "Camera projection parameters are invalid");
     }
@@ -2390,6 +2395,21 @@ void register_object3d(NativeMethodRegistry& registry) {
             if (!object) return std::unexpected(object.error());
             auto clone = machine.heap().clone_object(*object);
             if (!clone) return std::unexpected(clone.error());
+            auto clone_root = machine.pin_native_root(*clone);
+            if (!clone_root) return std::unexpected(clone_root.error());
+            auto class_name = machine.heap().class_name(*object);
+            if (!class_name) return std::unexpected(class_name.error());
+            auto is_node = machine.classes().is_assignable(*class_name, kNode);
+            if (!is_node) return std::unexpected(is_node.error());
+            if (*is_node) {
+                // A duplicated Node is detached from its original graph. A
+                // shallow heap clone must not retain the source parent or a
+                // subsequent Group.addChild() incorrectly rejects the copy.
+                auto detached = set_reference_field(
+                    machine, *clone, kNode, "parent",
+                    "Ljavax/microedition/m3g/Node;", {});
+                if (!detached) return std::unexpected(detached.error());
+            }
             return std::optional<Value>(Value::from_reference(*clone));
         });
     add(registry, kObject3D, "find",

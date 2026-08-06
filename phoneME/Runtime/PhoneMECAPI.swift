@@ -278,13 +278,65 @@ final class PhoneMECAPI: @unchecked Sendable {
 
     func installJar(
         _ runtime: RuntimeHandle?,
-        jarURL: URL
+        jarURL: URL,
+        identityNamespace: String? = nil
     ) -> (status: Int32, suiteID: Int32?) {
         var suiteID: Int32 = 0
         let status = jarURL.path.withCString { path in
-            phoneme_install_jar(runtime?.rawValue, path, &suiteID)
+            guard let identityNamespace else {
+                return phoneme_install_jar(
+                    runtime?.rawValue,
+                    path,
+                    &suiteID
+                )
+            }
+            return identityNamespace.withCString { scope in
+                phoneme_install_jar_scoped(
+                    runtime?.rawValue,
+                    path,
+                    scope,
+                    &suiteID
+                )
+            }
         }
         return (status, status == 0 ? suiteID : nil)
+    }
+
+    func findInstalledSuite(
+        _ runtime: RuntimeHandle?,
+        vendor: String,
+        name: String,
+        version: String,
+        identityNamespace: String? = nil
+    ) -> Int32? {
+        var suiteID: Int32 = 0
+        let status = vendor.withCString { vendorPointer in
+            name.withCString { namePointer in
+                version.withCString { versionPointer in
+                    guard let identityNamespace else {
+                        return phoneme_find_installed_suite(
+                            runtime?.rawValue,
+                            vendorPointer,
+                            namePointer,
+                            versionPointer,
+                            &suiteID
+                        )
+                    }
+                    return identityNamespace.withCString { scope in
+                        phoneme_find_installed_suite_scoped(
+                            runtime?.rawValue,
+                            vendorPointer,
+                            namePointer,
+                            versionPointer,
+                            scope,
+                            &suiteID
+                        )
+                    }
+                }
+            }
+        }
+        guard status == PHONEME_OK, suiteID > 0 else { return nil }
+        return suiteID
     }
 
     func uninstallSuite(

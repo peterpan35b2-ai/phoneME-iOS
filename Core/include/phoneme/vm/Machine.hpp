@@ -590,6 +590,12 @@ namespace phoneme::vm
     TimerService timers_;
     Scheduler scheduler_;
     MediaEventService media_events_;
+    // Appended to preserve the established layout of every pre-existing
+    // Machine member for mixed-object compatibility validation builds.
+    bool serial_callback_worker_running_ {false};
+    std::optional<Error> serial_callback_failure_;
+    MethodId operand_resolution_method_id_ {};
+    std::shared_ptr<const RuntimeMethod> operand_resolution_method_;
   };
 
 } // namespace phoneme::vm

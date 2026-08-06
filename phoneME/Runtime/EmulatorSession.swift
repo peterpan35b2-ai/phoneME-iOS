@@ -425,6 +425,7 @@ final class EmulatorSession: ObservableObject {
             mainClass: mainClass,
             mediaTitle: game.title,
             mediaArtist: game.vendor,
+            suiteVersion: game.version,
             mediaArtworkPath: artworkURL?.path,
             screenWidth: profile.screenWidth,
             screenHeight: profile.screenHeight,

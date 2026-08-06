@@ -1342,6 +1342,21 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 bound->context->color & 0x00FFFFFFU)));
         });
 
+    add(registry, graphics_owner, "getDisplayColor", "(I)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_graphics(machine, arguments,
+                                        "Graphics.getDisplayColor");
+            auto requested = int_argument(
+                arguments, 1U, "Graphics.getDisplayColor");
+            if (!bound) return std::unexpected(bound.error());
+            if (!requested) return std::unexpected(requested.error());
+            const graphics::Pixel displayed = graphics::rgb565_roundtrip(
+                phone_me_opaque_color(static_cast<u32>(*requested)));
+            return std::optional<Value>(Value::from_int(static_cast<i32>(
+                displayed & 0x00FFFFFFU)));
+        });
+
     const auto component_getter = [&registry](const char* name,
                                               auto getter) {
         add(registry, graphics_owner, name, "()I",

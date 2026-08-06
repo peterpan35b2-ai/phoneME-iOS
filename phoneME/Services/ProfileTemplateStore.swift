@@ -123,12 +123,18 @@ final class ProfileTemplateStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
             return
         }
+        let hasLegacyFrameLimit = stored.templates.contains {
+            $0.profile.framePacingMode == .cap
+        }
         templates = stored.templates.map { template in
             var normalized = template
             normalized.profile = template.profile.normalized()
             return normalized
         }
         defaultTemplateID = stored.defaultTemplateID
+        if hasLegacyFrameLimit {
+            persist()
+        }
 
         let defaults = UserDefaults.standard
         if !defaults.bool(forKey: keyboardLayoutMigrationKey) {

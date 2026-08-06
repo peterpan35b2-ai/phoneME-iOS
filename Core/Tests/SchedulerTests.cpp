@@ -269,6 +269,12 @@ int main(int argc, char** argv) {
             60,
             40,
             12);
+        const auto override_loading_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::override_game_loop,
+            30,
+            0,
+            20);
         const auto capped_elapsed = measure_frame_pacing(
             classes,
             phoneme::vm::FramePacingMode::cap,
@@ -286,10 +292,13 @@ int main(int argc, char** argv) {
 
         require(native_elapsed >= std::chrono::milliseconds(400),
                 "native pacing preserves the game's requested sleeps");
-        require(override_elapsed >= std::chrono::milliseconds(400) &&
-                    override_elapsed <= native_elapsed +
-                        std::chrono::milliseconds(120),
-                "legacy override preserves KPAH-style 40 ms Java sleeps");
+        require(override_elapsed >= std::chrono::milliseconds(180) &&
+                    override_elapsed <= std::chrono::milliseconds(360) &&
+                    override_elapsed + std::chrono::milliseconds(100) <
+                        native_elapsed,
+                "override pacing retargets a stable 40 ms render loop to 60 FPS");
+        require(override_loading_elapsed < std::chrono::milliseconds(180),
+                "override pacing does not throttle loading-style frame publications");
         require(capped_elapsed >= std::chrono::milliseconds(380) &&
                     capped_elapsed <= std::chrono::milliseconds(650),
                 "cap pacing limits actual frame publications without drift");
@@ -540,10 +549,11 @@ int main(int argc, char** argv) {
                     busy->return_value->as_int().value_or(0) == 1,
                 "host-driven main Java thread completes busy workload");
         if (performance_gate_enabled) {
-            require(busy_cpu_seconds < busy_wall_seconds * 0.85,
-                    "main Java thread busy loop yields host CPU");
-            require(busy_cpu_seconds > busy_wall_seconds * 0.70,
-                    "foreground main Java thread is not over-throttled");
+            // Foreground quanta cooperatively release the VM gate, but they
+            // must not impose a CPU duty cycle. Loading and asset parsing are
+            // legitimate sustained workloads and should run near host speed.
+            require(busy_cpu_seconds > busy_wall_seconds * 0.80,
+                    "foreground main Java thread is not duty-cycle throttled");
         }
     }
 
@@ -576,11 +586,11 @@ int main(int argc, char** argv) {
         std::cout << "Busy-loop pacing: wall=" << busy_wall_seconds
                   << "s cpu=" << busy_cpu_seconds << "s\n";
         // Sanitizer instrumentation adds process CPU that is unrelated to the
-        // scheduler's sleep ratio, so keep the performance regression gate on
+        // scheduler's pacing ratio, so keep the performance regression gate on
         // normal builds while still exercising all semantics under sanitizers.
         if (performance_gate_enabled) {
-            require(busy_cpu_seconds < busy_wall_seconds * 0.85,
-                    "sustained busy Java worker yields host CPU");
+            require(busy_cpu_seconds > busy_wall_seconds * 0.75,
+                    "foreground Java worker is not duty-cycle throttled");
         }
 
         auto additional = busy_machine.invoke_static(

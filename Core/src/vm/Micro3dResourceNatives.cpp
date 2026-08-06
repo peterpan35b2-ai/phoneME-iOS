@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Micro3dNativeSupport.hpp"
+#include "Micro3dSoftware.hpp"
 
 namespace phoneme::vm {
 namespace micro3d {
@@ -14,7 +15,12 @@ namespace {
     Machine& machine, ObjectRef self, ObjectRef data, i32 for_model) {
     auto bytes = byte_array(machine, data, "Texture.<init>");
     if (!bytes) return std::unexpected(bytes.error());
-    const auto [width, height] = parse_bmp_size(*bytes);
+    auto cached = software::cache_texture(machine, self, *bytes);
+    if (!cached) return std::unexpected(cached.error());
+    auto texture = software::cached_texture(machine, self);
+    if (!texture) return std::unexpected(texture.error());
+    const i32 width = (*texture)->width;
+    const i32 height = (*texture)->height;
     auto stored_data = set_reference_field(
         machine, self, kTexture, "data", "[B", data);
     auto stored_model = set_int_field(
@@ -68,6 +74,7 @@ void register_texture(NativeMethodRegistry& registry) {
         [](Machine& machine, std::span<const Value> args) -> NativeResult {
             auto self = m3g::receiver(args, "Texture.dispose");
             if (!self) return std::unexpected(self.error());
+            software::erase_resource(machine, *self);
             auto stored_data = set_reference_field(
                 machine, *self, kTexture, "data", "[B", {});
             auto stored_disposed = set_int_field(
@@ -84,9 +91,20 @@ void register_texture(NativeMethodRegistry& registry) {
     Machine& machine, ObjectRef self, ObjectRef data) {
     auto bytes = byte_array(machine, data, "ActionTable.<init>");
     if (!bytes) return std::unexpected(bytes.error());
-    auto frames = parse_mtra_frames(*bytes);
-    if (!frames) return std::unexpected(frames.error());
-    auto frame_array = create_int_array(machine, *frames);
+    auto cached = software::cache_actions(machine, self, *bytes);
+    if (!cached) return std::unexpected(cached.error());
+    auto actions = software::cached_actions(machine, self);
+    if (!actions) return std::unexpected(actions.error());
+    std::vector<i32> frames;
+    frames.reserve((*actions)->actions.size());
+    for (const software::Action& action : (*actions)->actions) {
+        if (action.keyframes > (std::numeric_limits<i32>::max() >> 16)) {
+            return fail(ErrorCode::overflow,
+                        "ActionTable frame count overflows 16.16 fixed point");
+        }
+        frames.push_back(action.keyframes << 16);
+    }
+    auto frame_array = create_int_array(machine, frames);
     if (!frame_array) return std::unexpected(frame_array.error());
     auto stored_data = set_reference_field(
         machine, self, kActionTable, "data", "[B", data);
@@ -128,6 +146,7 @@ void register_action_table(NativeMethodRegistry& registry) {
         [](Machine& machine, std::span<const Value> args) -> NativeResult {
             auto self = m3g::receiver(args, "ActionTable.dispose");
             if (!self) return std::unexpected(self.error());
+            software::erase_resource(machine, *self);
             auto stored_data = set_reference_field(
                 machine, *self, kActionTable, "data", "[B", {});
             auto stored_frames = set_reference_field(
@@ -198,16 +217,25 @@ void register_action_table(NativeMethodRegistry& registry) {
     Machine& machine, ObjectRef self, ObjectRef data) {
     auto bytes = byte_array(machine, data, "Figure.<init>");
     if (!bytes) return std::unexpected(bytes.error());
-    auto metadata = parse_mbac_metadata(*bytes);
-    if (!metadata) return std::unexpected(metadata.error());
+    auto cached = software::cache_model(machine, self, *bytes);
+    if (!cached) return std::unexpected(cached.error());
+    auto model = software::cached_model(machine, self);
+    if (!model) return std::unexpected(model.error());
     auto stored_data = set_reference_field(
         machine, self, kFigure, "data", "[B", data);
     auto stored_texture = set_int_field(
         machine, self, kFigure, "textureIndex", -1);
     auto stored_pattern = set_int_field(
         machine, self, kFigure, "pattern", 0);
+    auto stored_posture_table = set_reference_field(
+        machine, self, kFigure, "postureTable",
+        "Lcom/mascotcapsule/micro3d/v3/ActionTable;", {});
+    auto stored_posture_action = set_int_field(
+        machine, self, kFigure, "postureAction", -1);
+    auto stored_posture_frame = set_int_field(
+        machine, self, kFigure, "postureFrame", 0);
     auto stored_patterns = set_int_field(
-        machine, self, kFigure, "numPatterns", metadata->patterns);
+        machine, self, kFigure, "numPatterns", (*model)->patterns);
     auto stored_textures = set_int_field(
         machine, self, kFigure, "numTextures", 0);
     auto stored_disposed = set_int_field(
@@ -215,6 +243,15 @@ void register_action_table(NativeMethodRegistry& registry) {
     if (!stored_data) return std::unexpected(stored_data.error());
     if (!stored_texture) return std::unexpected(stored_texture.error());
     if (!stored_pattern) return std::unexpected(stored_pattern.error());
+    if (!stored_posture_table) {
+        return std::unexpected(stored_posture_table.error());
+    }
+    if (!stored_posture_action) {
+        return std::unexpected(stored_posture_action.error());
+    }
+    if (!stored_posture_frame) {
+        return std::unexpected(stored_posture_frame.error());
+    }
     if (!stored_patterns) return std::unexpected(stored_patterns.error());
     if (!stored_textures) return std::unexpected(stored_textures.error());
     if (!stored_disposed) {
@@ -249,16 +286,23 @@ void register_figure(NativeMethodRegistry& registry) {
         [](Machine& machine, std::span<const Value> args) -> NativeResult {
             auto self = m3g::receiver(args, "Figure.dispose");
             if (!self) return std::unexpected(self.error());
+            software::erase_resource(machine, *self);
             auto stored_data = set_reference_field(
                 machine, *self, kFigure, "data", "[B", {});
             auto stored_textures = set_reference_field(
                 machine, *self, kFigure, "textures",
                 "[Lcom/mascotcapsule/micro3d/v3/Texture;", {});
+            auto stored_posture = set_reference_field(
+                machine, *self, kFigure, "postureTable",
+                "Lcom/mascotcapsule/micro3d/v3/ActionTable;", {});
             auto stored_disposed = set_int_field(
                 machine, *self, kFigure, "disposed", 1, "Z");
             if (!stored_data) return std::unexpected(stored_data.error());
             if (!stored_textures) {
                 return std::unexpected(stored_textures.error());
+            }
+            if (!stored_posture) {
+                return std::unexpected(stored_posture.error());
             }
             if (!stored_disposed) {
                 return std::unexpected(stored_disposed.error());
@@ -476,16 +520,39 @@ void register_figure(NativeMethodRegistry& registry) {
                 machine, *table, kActionTable, "ActionTable");
             if (!live_figure) return std::unexpected(live_figure.error());
             if (!live_table) return std::unexpected(live_table.error());
-            auto frames = reference_field(
-                machine, *table, kActionTable, "actionFrames", "[I");
-            if (!frames) return std::unexpected(frames.error());
-            auto length = machine.heap().array_length(*frames);
-            if (!length) return std::unexpected(length.error());
-            if (*action < 0 || static_cast<usize>(*action) >= *length) {
+            auto actions = software::cached_actions(machine, *table);
+            auto model = software::cached_model(machine, *self);
+            if (!actions) return std::unexpected(actions.error());
+            if (!model) return std::unexpected(model.error());
+            if (*action < 0 ||
+                static_cast<usize>(*action) >= (*actions)->actions.size()) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "invalid posture action index");
             }
-            static_cast<void>(*frame);
+            const auto& selected =
+                (*actions)->actions[static_cast<usize>(*action)];
+            if (selected.bones.size() != (*model)->bones.size()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "MTRA bone count does not match Figure");
+            }
+            auto pattern = int_field(machine, *self, kFigure, "pattern");
+            if (!pattern) return std::unexpected(pattern.error());
+            const i32 normalized_frame = std::max(*frame, 0);
+            const i32 next_pattern = software::dynamic_pattern(
+                **actions, *action, normalized_frame, *pattern);
+            auto stored_table = set_reference_field(
+                machine, *self, kFigure, "postureTable",
+                "Lcom/mascotcapsule/micro3d/v3/ActionTable;", *table);
+            auto stored_action = set_int_field(
+                machine, *self, kFigure, "postureAction", *action);
+            auto stored_frame = set_int_field(
+                machine, *self, kFigure, "postureFrame", normalized_frame);
+            auto stored_pattern = set_int_field(
+                machine, *self, kFigure, "pattern", next_pattern);
+            if (!stored_table) return std::unexpected(stored_table.error());
+            if (!stored_action) return std::unexpected(stored_action.error());
+            if (!stored_frame) return std::unexpected(stored_frame.error());
+            if (!stored_pattern) return std::unexpected(stored_pattern.error());
             return void_result();
         });
 }

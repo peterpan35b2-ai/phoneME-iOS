@@ -178,6 +178,69 @@ void test_parser() {
                 "reject overlong UTF-8 in JAD");
 }
 
+void test_scoped_same_version_install(
+    const std::filesystem::path& root,
+    const std::filesystem::path& baseline_fixture,
+    const std::filesystem::path& changed_fixture) {
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    error.clear();
+    std::filesystem::create_directories(root, error);
+    check(!error, "create scoped suite test root");
+
+    const auto baseline = root / "baseline.jar";
+    const auto changed = root / "changed.jar";
+    check(copy_fixture_file(baseline_fixture, baseline) &&
+              copy_fixture_file(changed_fixture, changed),
+          "copy valid same-version JARs with different content");
+
+    SuiteStore store;
+    auto configured = store.configure(
+        SuiteStoreConfig {.root_path = (root / "store").string()});
+    check(configured.has_value(), "configure scoped suite store");
+    if (!configured) return;
+
+    auto unscoped = store.install(baseline.string());
+    check(unscoped.has_value(), "install unscoped baseline suite");
+    auto rejected = store.install(changed.string());
+    check_error(rejected, ErrorCode::invalid_state,
+                "retain strict unscoped same-version replacement policy");
+
+    auto first = store.install_scoped(baseline.string(), "game-a");
+    auto second = store.install_scoped(changed.string(), "game-b");
+    check(first.has_value() && second.has_value() && *first != *second,
+          "install duplicate manifest identity in separate host scopes");
+    if (!first || !second) return;
+
+    const auto rms_marker = root / "store" / "rms" /
+        std::to_string(first->value) / "marker.bin";
+    std::filesystem::create_directories(rms_marker.parent_path(), error);
+    check(!error && write_text(rms_marker, "keep"),
+          "create scoped replacement RMS marker");
+
+    auto replaced = store.install_scoped(changed.string(), "game-a");
+    check(replaced.has_value() && *replaced == *first,
+          "replace changed same-version JAR within the same host scope");
+    check(std::filesystem::exists(rms_marker, error) && !error,
+          "scoped same-version replacement preserves RMS");
+
+    const auto* first_suite = store.find(*first);
+    const auto* second_suite = store.find(*second);
+    check(first_suite != nullptr && second_suite != nullptr &&
+              first_suite->archive_sha256 == second_suite->archive_sha256,
+          "scoped replacement activates the changed archive bytes");
+
+    store.clear();
+    auto restarted = store.configure(
+        SuiteStoreConfig {.root_path = (root / "store").string()});
+    check(restarted.has_value(), "reload host-scoped suites after restart");
+    check(store.find(*first) != nullptr && store.find(*second) != nullptr,
+          "persist separate host-scoped suite identities");
+    check(store.load_class(*first, "SuiteApp").has_value() &&
+              store.load_class(*second, "SuiteApp").has_value(),
+          "load classes from host-scoped suites after restart");
+}
+
 void test_install_flow(const std::filesystem::path& root,
                        const std::filesystem::path& jar_v1,
                        const std::filesystem::path& jar_v2) {
@@ -815,20 +878,23 @@ void test_validation(const std::filesystem::path& root,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 7) {
+    if (argc != 8) {
         std::cerr << "usage: SuiteInstallerTests <root> <v1.jar> <v2.jar> "
-                     "<missing.jar> <traversal.jar> <zipbomb.jar>\n";
+                     "<same-version-changed.jar> <missing.jar> "
+                     "<traversal.jar> <zipbomb.jar>\n";
         return 2;
     }
 
     const std::filesystem::path root(argv[1]);
     test_parser();
     test_version_comparison();
+    test_scoped_same_version_install(
+        root / "scoped", argv[2], argv[4]);
     test_install_flow(root / "store", argv[2], argv[3]);
     test_transaction_faults(root / "transaction-faults", argv[2], argv[3]);
     test_database_durability_unknown(
         root / "database-durability", argv[2], argv[3]);
-    test_validation(root / "validation", argv[2], argv[4], argv[5], argv[6]);
+    test_validation(root / "validation", argv[2], argv[5], argv[6], argv[7]);
 
     if (failures != 0) {
         std::cerr << failures << " suite installer test(s) failed\n";

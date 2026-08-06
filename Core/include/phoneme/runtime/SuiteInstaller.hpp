@@ -92,6 +92,13 @@ public:
         std::string_view left,
         std::string_view right);
 
+    // Adds a host-owned namespace to the MIDP vendor/name identity without
+    // changing any manifest property visible to the application. This lets a
+    // multi-application host keep distinct imports of the same suite metadata.
+    [[nodiscard]] static Status scope_identity(
+        SuiteDescriptor& descriptor,
+        std::string_view identity_scope);
+
     [[nodiscard]] static SuiteId stable_suite_id(
         const std::array<u8, 32>& identity_sha256) noexcept;
 

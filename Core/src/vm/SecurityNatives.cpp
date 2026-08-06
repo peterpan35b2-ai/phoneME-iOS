@@ -1,6 +1,10 @@
 #include "SecurityNatives.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <exception>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -10,6 +14,8 @@
 #include "phoneme/security/PermissionSemantics.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
+
+#include "Sha256Support.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -566,6 +572,373 @@ constexpr usize kEnumerationSizeField {2U};
         return std::unexpected(initialized.error());
     }
     return std::optional<Value> {};
+}
+
+constexpr std::string_view kMessageDigestClass =
+    "java/security/MessageDigest";
+
+[[nodiscard]] Result<ObjectRef> byte_array_argument(
+    Machine& machine,
+    std::span<const Value> arguments,
+    usize index,
+    bool allow_null = false) {
+    auto reference = reference_argument(arguments, index, allow_null);
+    if (!reference) return std::unexpected(reference.error());
+    if (reference->is_null()) return *reference;
+    auto class_name = machine.heap().class_name(*reference);
+    if (!class_name) return std::unexpected(class_name.error());
+    if (*class_name != "[B") {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "MessageDigest argument is not byte[]");
+    }
+    return *reference;
+}
+
+[[nodiscard]] Result<std::vector<u8>> read_byte_range(
+    Machine& machine,
+    ObjectRef array,
+    i32 offset,
+    i32 length) {
+    if (array.is_null()) {
+        return fail_java("java/lang/NullPointerException",
+                         "MessageDigest byte array is null");
+    }
+    auto array_length = machine.heap().array_length(array);
+    if (!array_length) return std::unexpected(array_length.error());
+    if (offset < 0 || length < 0 ||
+        static_cast<usize>(offset) > *array_length ||
+        static_cast<usize>(length) >
+            *array_length - static_cast<usize>(offset)) {
+        return fail_java("java/lang/IndexOutOfBoundsException",
+                         "MessageDigest byte range is invalid");
+    }
+    return machine.heap().read_byte_array(
+        array, static_cast<usize>(offset), static_cast<usize>(length));
+}
+
+[[nodiscard]] Result<i32> digest_count(Machine& machine,
+                                       ObjectRef digest) {
+    auto value = instance_field(machine, digest, kMessageDigestClass,
+                                "count", "I");
+    if (!value) return std::unexpected(value.error());
+    auto count = value->as_int();
+    if (!count) return std::unexpected(count.error());
+    if (*count < 0) {
+        return fail(ErrorCode::invalid_state,
+                    "MessageDigest count is negative");
+    }
+    return *count;
+}
+
+[[nodiscard]] Result<ObjectRef> ensure_digest_capacity(
+    Machine& machine,
+    ObjectRef digest,
+    usize count,
+    usize required) {
+    auto value = instance_field(machine, digest, kMessageDigestClass,
+                                "buffer", "[B");
+    if (!value) return std::unexpected(value.error());
+    auto buffer = value->as_reference();
+    if (!buffer) return std::unexpected(buffer.error());
+
+    usize capacity = 0U;
+    if (!buffer->is_null()) {
+        auto length = machine.heap().array_length(*buffer);
+        if (!length) return std::unexpected(length.error());
+        capacity = *length;
+    }
+    if (capacity >= required) return *buffer;
+
+    usize grown_capacity = std::max<usize>(64U, capacity);
+    while (grown_capacity < required) {
+        if (grown_capacity > std::numeric_limits<usize>::max() / 2U) {
+            grown_capacity = required;
+            break;
+        }
+        grown_capacity *= 2U;
+    }
+    auto grown = machine.heap().allocate_array(
+        "[B", grown_capacity, Value::from_int(0));
+    if (!grown) return std::unexpected(grown.error());
+    if (count != 0U && !buffer->is_null()) {
+        auto existing = machine.heap().read_byte_array(*buffer, 0U, count);
+        if (!existing) return std::unexpected(existing.error());
+        auto copied = machine.heap().write_byte_array(*grown, 0U, *existing);
+        if (!copied) return std::unexpected(copied.error());
+    }
+    auto stored = set_instance_field(
+        machine, digest, kMessageDigestClass, "buffer", "[B",
+        Value::from_reference(*grown));
+    if (!stored) return std::unexpected(stored.error());
+    return *grown;
+}
+
+[[nodiscard]] Status append_digest_bytes(Machine& machine,
+                                         ObjectRef digest,
+                                         std::span<const u8> bytes) {
+    if (bytes.empty()) return {};
+    auto count_value = digest_count(machine, digest);
+    if (!count_value) return std::unexpected(count_value.error());
+    const usize count = static_cast<usize>(*count_value);
+    if (bytes.size() > static_cast<usize>(
+                           std::numeric_limits<i32>::max()) - count) {
+        return fail_java("java/lang/OutOfMemoryError",
+                         "MessageDigest input is too large");
+    }
+    const usize required = count + bytes.size();
+    auto buffer = ensure_digest_capacity(machine, digest, count, required);
+    if (!buffer) return std::unexpected(buffer.error());
+    auto written = machine.heap().write_byte_array(*buffer, count, bytes);
+    if (!written) return std::unexpected(written.error());
+    return set_instance_field(
+        machine, digest, kMessageDigestClass, "count", "I",
+        Value::from_int(static_cast<i32>(required)));
+}
+
+[[nodiscard]] Result<ObjectRef> make_byte_array(
+    Machine& machine,
+    std::span<const u8> bytes) {
+    auto array = machine.heap().allocate_array(
+        "[B", bytes.size(), Value::from_int(0));
+    if (!array) return std::unexpected(array.error());
+    auto written = machine.heap().write_byte_array(*array, 0U, bytes);
+    if (!written) return std::unexpected(written.error());
+    return *array;
+}
+
+[[nodiscard]] Result<ObjectRef> finish_digest(Machine& machine,
+                                              ObjectRef digest) {
+    auto count_value = digest_count(machine, digest);
+    if (!count_value) return std::unexpected(count_value.error());
+    const usize count = static_cast<usize>(*count_value);
+    std::vector<u8> bytes;
+    if (count != 0U) {
+        auto value = instance_field(machine, digest, kMessageDigestClass,
+                                    "buffer", "[B");
+        if (!value) return std::unexpected(value.error());
+        auto buffer = value->as_reference();
+        if (!buffer) return std::unexpected(buffer.error());
+        if (buffer->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "MessageDigest buffer is missing");
+        }
+        auto read = machine.heap().read_byte_array(*buffer, 0U, count);
+        if (!read) return std::unexpected(read.error());
+        bytes = std::move(*read);
+    }
+    const auto result = crypto::sha256(bytes);
+    auto reset = set_instance_field(
+        machine, digest, kMessageDigestClass, "count", "I",
+        Value::from_int(0));
+    if (!reset) return std::unexpected(reset.error());
+    return make_byte_array(machine, result);
+}
+
+[[nodiscard]] Result<std::string> normalize_digest_algorithm(
+    Machine& machine,
+    std::span<const Value> arguments) {
+    auto name = string_argument(machine, arguments, 0U, false);
+    if (!name) return std::unexpected(name.error());
+    std::string normalized;
+    normalized.reserve(name->size());
+    for (const char raw_character : *name) {
+        const auto character = static_cast<unsigned char>(raw_character);
+        if (character == '-' || character == '_' ||
+            std::isspace(character) != 0) {
+            continue;
+        }
+        normalized.push_back(static_cast<char>(std::toupper(character)));
+    }
+    return normalized;
+}
+
+void register_message_digest_natives(NativeMethodRegistry& registry) {
+    add(registry, std::string(kMessageDigestClass), "<init>", "()V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kMessageDigestClass), "getInstance",
+        "(Ljava/lang/String;)Ljava/security/MessageDigest;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.getInstance expects one argument");
+            }
+            auto algorithm = normalize_digest_algorithm(machine, arguments);
+            if (!algorithm) return std::unexpected(algorithm.error());
+            if (*algorithm != "SHA256") {
+                return fail_java("java/security/NoSuchAlgorithmException",
+                                 "unsupported message digest algorithm");
+            }
+            auto digest = machine.class_states().allocate_instance(
+                machine.heap(), kMessageDigestClass);
+            if (!digest) return std::unexpected(digest.error());
+            return std::optional<Value>(Value::from_reference(*digest));
+        });
+
+    add(registry, std::string(kMessageDigestClass), "getAlgorithm",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto algorithm = make_string(machine, "SHA-256");
+            if (!algorithm) return std::unexpected(algorithm.error());
+            return std::optional<Value>(Value::from_reference(*algorithm));
+        });
+
+    add(registry, std::string(kMessageDigestClass), "getDigestLength", "()I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.getDigestLength has no receiver");
+            }
+            return std::optional<Value>(Value::from_int(32));
+        });
+
+    add(registry, std::string(kMessageDigestClass), "update", "(B)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.update(byte) expects one argument");
+            }
+            auto value = arguments[1].as_int();
+            if (!value) return std::unexpected(value.error());
+            const std::array<u8, 1> byte {
+                static_cast<u8>(static_cast<i8>(*value)),
+            };
+            auto appended = append_digest_bytes(machine, *receiver, byte);
+            if (!appended) return std::unexpected(appended.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kMessageDigestClass), "update", "([B)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto array = byte_array_argument(machine, arguments, 1U);
+            if (!array) return std::unexpected(array.error());
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            auto bytes = machine.heap().read_byte_array(*array, 0U, *length);
+            if (!bytes) return std::unexpected(bytes.error());
+            auto appended = append_digest_bytes(machine, *receiver, *bytes);
+            if (!appended) return std::unexpected(appended.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kMessageDigestClass), "update", "([BII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto array = byte_array_argument(machine, arguments, 1U);
+            auto offset = arguments[2].as_int();
+            auto length = arguments[3].as_int();
+            if (!array || !offset || !length) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.update range arguments are invalid");
+            }
+            auto bytes = read_byte_range(
+                machine, *array, *offset, *length);
+            if (!bytes) return std::unexpected(bytes.error());
+            auto appended = append_digest_bytes(machine, *receiver, *bytes);
+            if (!appended) return std::unexpected(appended.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kMessageDigestClass), "digest", "()[B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto result = finish_digest(machine, *receiver);
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+
+    add(registry, std::string(kMessageDigestClass), "digest", "([B)[B",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto array = byte_array_argument(machine, arguments, 1U);
+            if (!array) return std::unexpected(array.error());
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            auto bytes = machine.heap().read_byte_array(*array, 0U, *length);
+            if (!bytes) return std::unexpected(bytes.error());
+            auto appended = append_digest_bytes(machine, *receiver, *bytes);
+            if (!appended) return std::unexpected(appended.error());
+            auto result = finish_digest(machine, *receiver);
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+
+    add(registry, std::string(kMessageDigestClass), "reset", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto reset = set_instance_field(
+                machine, *receiver, kMessageDigestClass, "count", "I",
+                Value::from_int(0));
+            if (!reset) return std::unexpected(reset.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kMessageDigestClass), "isEqual", "([B[B)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.isEqual expects two arguments");
+            }
+            auto left = byte_array_argument(machine, arguments, 0U, true);
+            auto right = byte_array_argument(machine, arguments, 1U, true);
+            if (!left || !right) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.isEqual arguments are invalid");
+            }
+            if (*left == *right) return boolean(true);
+            if (left->is_null() || right->is_null()) return boolean(false);
+            auto left_length = machine.heap().array_length(*left);
+            auto right_length = machine.heap().array_length(*right);
+            if (!left_length || !right_length) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.isEqual arrays are invalid");
+            }
+            auto left_bytes = machine.heap().read_byte_array(
+                *left, 0U, *left_length);
+            auto right_bytes = machine.heap().read_byte_array(
+                *right, 0U, *right_length);
+            if (!left_bytes || !right_bytes) {
+                return fail(ErrorCode::invalid_argument,
+                            "MessageDigest.isEqual cannot read arrays");
+            }
+            usize difference = *left_length ^ *right_length;
+            const usize maximum = std::max(*left_length, *right_length);
+            for (usize index = 0U; index < maximum; ++index) {
+                const u8 left_byte = index < *left_length
+                    ? (*left_bytes)[index]
+                    : 0U;
+                const u8 right_byte = index < *right_length
+                    ? (*right_bytes)[index]
+                    : 0U;
+                difference |= static_cast<usize>(left_byte ^ right_byte);
+            }
+            return boolean(difference == 0U);
+        });
 }
 
 void register_permission_natives(NativeMethodRegistry& registry) {
@@ -1243,6 +1616,7 @@ void register_security_natives(NativeMethodRegistry& registry) {
             return std::optional<Value> {};
         });
 
+    register_message_digest_natives(registry);
     register_permission_natives(registry);
 }
 

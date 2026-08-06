@@ -979,6 +979,12 @@ void register_boolean_wrapper(NativeMethodRegistry& registry) {
             if (!value) return std::unexpected(value.error());
             return boolean_string(machine, *value != 0);
         });
+    add(registry, "java/lang/Boolean", "getBoolean",
+        "(Ljava/lang/String;)Z",
+        [](Machine&, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            return std::optional<Value>(Value::from_int(0));
+        });
     add(registry, "java/lang/Boolean", "parseBoolean",
         "(Ljava/lang/String;)Z",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1551,7 +1557,7 @@ constexpr usize kThrowableSuppressedCountField = 4U;
 }
 
 void register_throwable_natives(NativeMethodRegistry& registry) {
-    static constexpr std::array<std::string_view, 46U> classes {{
+    static constexpr std::array<std::string_view, 47U> classes {{
         "java/lang/Throwable",
         "java/lang/Exception",
         "java/lang/RuntimeException",
@@ -1596,6 +1602,7 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
         "java/io/InterruptedIOException",
         "java/io/UTFDataFormatException",
         "java/io/UnsupportedEncodingException",
+        "java/security/NoSuchAlgorithmException",
         "javax/wireless/messaging/SizeExceededException",
         "java/util/NoSuchElementException",
     }};
@@ -1623,6 +1630,26 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 if (!initialized) return std::unexpected(initialized.error());
                 return std::optional<Value> {};
             });
+        if (class_name != "java/lang/Throwable") {
+            add(registry, std::string(class_name), "<init>",
+                "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+                [](Machine& machine, std::span<const Value> arguments)
+                    -> Result<std::optional<Value>> {
+                    auto object = receiver(arguments);
+                    auto message = arguments[1].as_reference();
+                    auto cause = arguments[2].as_reference();
+                    if (!object || !message || !cause) {
+                        return fail(ErrorCode::invalid_argument,
+                                    "Throwable constructor arguments are invalid");
+                    }
+                    auto initialized = initialize_throwable(
+                        machine, *object, *message, *cause, true);
+                    if (!initialized) {
+                        return std::unexpected(initialized.error());
+                    }
+                    return std::optional<Value> {};
+                });
+        }
     }
 
     for (const std::string_view class_name : {

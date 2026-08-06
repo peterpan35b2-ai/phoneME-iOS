@@ -441,15 +441,48 @@ private:
 void apply_legacy_property_defaults(vm::Machine& machine,
                                     const Suite& suite) {
     const auto vendor = suite.properties.find(u"MIDlet-Vendor");
-    if (vendor == suite.properties.end() || !is_glu_vendor(vendor->second)) {
-        return;
+    const bool glu_suite =
+        vendor != suite.properties.end() && is_glu_vendor(vendor->second);
+    if (glu_suite) {
+        if (!suite.properties.contains(u"ClientLogoEnable")) {
+            // Several GLU/Metaflow builds call equals() directly on this
+            // optional property. Reference devices shipped these builds with
+            // the carrier customization defaulted off even when the final JAR
+            // manifest omitted the key.
+            machine.set_app_property(u"ClientLogoEnable", u"false");
+        }
+        if (!suite.properties.contains(u"Glu-Locale")) {
+            // Some multilingual GLU launchers received Glu-Locale from the
+            // JAD, while redistributed archives commonly retain only the JAR.
+            // Only synthesize the deployment property when the archive carries
+            // the matching multi.dat descriptor.
+            auto archive = archive::ZipArchive::open(suite.jar_path);
+            if (archive && archive->find("multi.dat") != nullptr) {
+                machine.set_app_property(u"Glu-Locale", u"multi");
+            }
+        }
     }
-    if (!suite.properties.contains(u"ClientLogoEnable")) {
-        // Several GLU/Metaflow builds call equals() directly on this optional
-        // property. Reference devices shipped these builds with the carrier
-        // customization defaulted off even when the final JAR manifest omitted
-        // the key.
-        machine.set_app_property(u"ClientLogoEnable", u"false");
+
+    const auto title = suite.properties.find(u"MIDlet-Name");
+    if (!suite.properties.contains(u"NOOFPUZZLES") &&
+        title != suite.properties.end() && title->second == u"Real Steel") {
+        // This build was distributed with NOOFPUZZLES in its JAD, but many
+        // preserved copies contain only the JAR. The constructor dereferences
+        // the property unconditionally; tier 3 enables the complete 30-puzzle
+        // data set already present in the archive.
+        machine.set_app_property(u"NOOFPUZZLES", u"3");
+    }
+
+    const auto nokia_platform = suite.properties.find(u"Nokia-Platform");
+    if (!machine.configured_system_property(u"microedition.platform") &&
+        nokia_platform != suite.properties.end() &&
+        nokia_platform->second.find(u"Nokia") != std::u16string::npos) {
+        // Nokia S60 titles commonly validate microedition.platform against the
+        // Nokia-Platform wildcard from their manifest. The generic "j2me"
+        // capability string is correct for vendor-neutral suites but causes
+        // those handset-targeted builds to call System.exit during startup.
+        machine.set_system_property(u"microedition.platform",
+                                    u"NokiaN95-1/30.0.015");
     }
 }
 
@@ -1006,15 +1039,17 @@ Status Runtime::configure_translation(
         return value;
     };
     const std::string provider_name =
-        provider == translation::TranslationProvider::bing
-            ? "bing" : "google";
+        provider == translation::TranslationProvider::automatic
+            ? "automatic"
+            : (provider == translation::TranslationProvider::bing
+                ? "bing" : "google");
     translation::TranslationConfiguration configuration {
         .enabled = true,
         .provider = provider,
         .source_language = std::move(source_language),
         .target_language = std::move(target_language),
         .maximum_pending_requests = 512U,
-        .maximum_concurrent_requests = 4U,
+        .maximum_concurrent_requests = 1U,
         .maximum_source_bytes = 2'048U,
         .maximum_batch_items = 32U,
         .maximum_batch_source_bytes = 8U * 1'024U,
@@ -1080,15 +1115,17 @@ Status Runtime::configure_app_translation(
         return value;
     };
     const std::string provider_name =
-        provider == translation::TranslationProvider::bing
-            ? "bing" : "google";
+        provider == translation::TranslationProvider::automatic
+            ? "automatic"
+            : (provider == translation::TranslationProvider::bing
+                ? "bing" : "google");
     translation::TranslationConfiguration configuration {
         .enabled = true,
         .provider = provider,
         .source_language = std::move(source_language),
         .target_language = std::move(target_language),
         .maximum_pending_requests = 512U,
-        .maximum_concurrent_requests = 4U,
+        .maximum_concurrent_requests = 1U,
         .maximum_source_bytes = 2'048U,
         .maximum_batch_items = 32U,
         .maximum_batch_source_bytes = 8U * 1'024U,
@@ -1162,6 +1199,12 @@ Status Runtime::set_suite_trust(SuiteId suite_id,
 }
 
 Result<SuiteId> Runtime::install_jar(const std::string& jar_path) {
+    return install_jar(jar_path, {});
+}
+
+Result<SuiteId> Runtime::install_jar(
+    const std::string& jar_path,
+    std::string_view identity_scope) {
     if (!is_regular_file(jar_path)) {
         return fail(ErrorCode::invalid_argument,
                     "JAR path is not an accessible regular file");
@@ -1175,7 +1218,44 @@ Result<SuiteId> Runtime::install_jar(const std::string& jar_path) {
     // Suite installation mutates only the persistent SuiteStore. Each live
     // MIDlet owns an immutable copy of its Suite and its own class repository,
     // so adding another JAR is safe while unrelated applications are running.
-    return suite_store_.install(jar_path);
+    return identity_scope.empty()
+        ? suite_store_.install(jar_path)
+        : suite_store_.install_scoped(jar_path, identity_scope);
+}
+
+std::optional<SuiteId> Runtime::find_installed_suite(
+    std::string_view vendor,
+    std::string_view name,
+    std::string_view version,
+    std::string_view identity_scope) const noexcept {
+    // The iOS library already persisted these manifest fields when the JAR was
+    // imported. Reusing the managed suite by its MIDP identity avoids parsing
+    // and hashing the original JAR again on every cold process launch.
+    if (vendor.empty() || name.empty()) return std::nullopt;
+
+    std::string expected_identity;
+    expected_identity.reserve(
+        vendor.size() + name.size() + identity_scope.size() + 2U);
+    expected_identity.append(vendor);
+    expected_identity.push_back('\x1F');
+    expected_identity.append(name);
+    if (!identity_scope.empty()) {
+        expected_identity.push_back('\x1E');
+        expected_identity.append(identity_scope);
+    }
+
+    std::scoped_lock lock(mutex_);
+    if (!configured_) return std::nullopt;
+    for (const SuiteId id : suite_store_.list()) {
+        const Suite* suite = suite_store_.find(id);
+        if (suite == nullptr || suite->identity_key != expected_identity ||
+            suite->vendor != vendor || suite->display_name != name) {
+            continue;
+        }
+        if (!version.empty() && suite->version != version) continue;
+        return id;
+    }
+    return std::nullopt;
 }
 
 Status Runtime::uninstall_suite(SuiteId suite_id,

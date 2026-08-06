@@ -688,11 +688,15 @@ final class WorkspaceStore: ObservableObject {
             return
         }
         var migratedLegacyLayout = false
+        var migratedLegacyFramePacing = false
         workspaces = decoded.map { workspace in
             var workspace = workspace
             workspace.panels = workspace.panels.map { panel in
                 var panel = panel
                 panel.frame = panel.frame.normalized()
+                if panel.profile.framePacingMode == .cap {
+                    migratedLegacyFramePacing = true
+                }
                 panel.profile = panel.profile.normalized()
                 return panel
             }
@@ -707,7 +711,7 @@ final class WorkspaceStore: ObservableObject {
             return workspace
         }
         sortWorkspaces()
-        if migratedLegacyLayout {
+        if migratedLegacyLayout || migratedLegacyFramePacing {
             persist()
         }
     }

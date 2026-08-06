@@ -42,45 +42,49 @@ final class GameProfileStore: ObservableObject {
     }
 
     func profile(for game: Game) -> GameProfile {
-        Self.applyingCompatibilityDefaults(
-            to: profiles[game.id] ?? .default,
-            for: game
-        )
-    }
-
-    private static func applyingCompatibilityDefaults(
-        to storedProfile: GameProfile,
-        for game: Game
-    ) -> GameProfile {
-        var profile = storedProfile
-        guard game.mainClass.caseInsensitiveCompare("CCMIDlet") == .orderedSame else {
+        var profile = profiles[game.id] ?? .default
+        guard Self.requiresNativePacingCompatibility(for: game) else {
             return profile
         }
 
+        let migrationKey =
+            "phoneME.gameProfiles.tankRaidNativePacingV9.\(game.id.uuidString)"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: migrationKey) else { return profile }
+
+        // This MIDlet advances both startup asset loading and gameplay from the
+        // same self-paced CCMIDlet loop. Its patched 3D build flushes after each
+        // loading step and requests Thread.sleep(2), which the generic 30 FPS
+        // loop override can mistake for gameplay pacing. Migrate only the
+        // untouched/default 30 FPS setting once; later user choices are kept.
+        if profile.effectiveFramePacingMode == .overrideGameLoop,
+           profile.frameRateLimit == GameProfile.defaultFrameRate {
+            profile.framePacingMode = .native
+            profiles[game.id] = profile.normalized()
+            persist()
+        }
+        defaults.set(true, forKey: migrationKey)
+        return profile
+    }
+
+    private static func requiresNativePacingCompatibility(for game: Game) -> Bool {
+        guard game.mainClass.caseInsensitiveCompare("CCMIDlet") == .orderedSame else {
+            return false
+        }
+
+        let locale = Locale(identifier: "en_US_POSIX")
         let normalizedTitle = game.title.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
-            locale: Locale(identifier: "en_US_POSIX")
+            locale: locale
         )
         let normalizedFileName = game.fileName.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
-            locale: Locale(identifier: "en_US_POSIX")
+            locale: locale
         )
-        let isTankRaid = normalizedTitle.contains("tank raid")
+        return normalizedTitle.contains("tank raid")
             || normalizedTitle.contains("xe tang 3d")
+            || normalizedFileName.contains("tank raid")
             || normalizedFileName.contains("xe tang 3d")
-        guard isTankRaid else { return profile }
-
-        // Tank Raid advances its asset loader from a self-paced CCMIDlet loop
-        // and flushes the progress screen after each step. A synchronous 30 FPS
-        // publication cap therefore inserts about 33 ms between loading steps
-        // and makes this family several times slower. Migrate both fresh and
-        // previously auto-saved default profiles, while preserving a user-set
-        // non-default frame-rate cap.
-        if profile.effectiveFramePacingMode == .cap,
-           profile.frameRateLimit == GameProfile.defaultFrameRate {
-            profile.framePacingMode = .native
-        }
-        return profile
     }
 
     func save(_ profile: GameProfile, for game: Game) {
@@ -117,17 +121,17 @@ final class GameProfileStore: ObservableObject {
             return
         }
 
-        let hasUnsafeLegacyFrameOverride = stored.values.contains {
-            $0.framePacingMode == .overrideGameLoop
+        let hasLegacyFrameLimit = stored.values.contains {
+            $0.framePacingMode == .cap
         }
         profiles = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in
             guard let id = UUID(uuidString: key) else { return nil }
             return (id, value.normalized())
         })
-        if hasUnsafeLegacyFrameOverride {
-            // Persist the one-way migration immediately. Core also aliases the
-            // legacy numeric mode to a safe cap, but rewriting JSON prevents a
-            // later editor save from reintroducing accelerated Java sleeps.
+        if hasLegacyFrameLimit {
+            // A short-lived build stored the FPS control as `.cap`, which
+            // throttled every framebuffer publication and slowed progress
+            // screens. Persist the corrected render-loop override immediately.
             persist()
         }
 

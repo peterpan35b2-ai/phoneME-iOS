@@ -823,7 +823,9 @@ namespace phoneme::classfile
           auto code = parse_code_attribute(*attribute_bytes, pool);
           if (!code)
           {
-            return std::unexpected(code.error());
+            auto error = code.error();
+            error.message += " in method " + method.name + method.descriptor;
+            return std::unexpected(std::move(error));
           }
           method.code = std::move(*code);
         }
@@ -1065,7 +1067,9 @@ namespace phoneme::classfile
       auto method = parse_method(reader, *pool);
       if (!method)
       {
-        return std::unexpected(method.error());
+        auto error = method.error();
+        error.message += " in class " + result.name_;
+        return std::unexpected(std::move(error));
       }
       result.methods_.push_back(std::move(*method));
     }

@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "M3gNativeSupport.hpp"
+#include "phoneme/graphics/Image.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -21,6 +22,21 @@ constexpr const char* kIndexBuffer = "javax/microedition/m3g/IndexBuffer";
 constexpr const char* kTriangleStrip = "javax/microedition/m3g/TriangleStripArray";
 constexpr const char* kMesh = "javax/microedition/m3g/Mesh";
 constexpr const char* kSprite3D = "javax/microedition/m3g/Sprite3D";
+
+[[nodiscard]] Result<graphics::Image*> ensure_mutable_image_surface(
+    Machine& machine,
+    ObjectRef image,
+    i32 width,
+    i32 height) {
+    auto existing = machine.graphics().image(image.bits);
+    if (existing) return *existing;
+    auto created = graphics::Image::create_mutable(width, height);
+    if (!created) return std::unexpected(created.error());
+    auto attached = machine.graphics().attach_image(
+        image.bits, std::move(*created));
+    if (!attached) return std::unexpected(attached.error());
+    return machine.graphics().image(image.bits);
+}
 
 [[nodiscard]] Result<usize> image_bytes_per_pixel(i32 format) {
     switch (format) {
@@ -396,6 +412,11 @@ void register_image2d(NativeMethodRegistry& registry) {
                 for (const Status& status : stored) {
                     if (!status) return std::unexpected(status.error());
                 }
+                if (mutable_image) {
+                    auto surface = ensure_mutable_image_surface(
+                        machine, *object, *width, *height);
+                    if (!surface) return std::unexpected(surface.error());
+                }
                 return std::optional<Value> {};
             });
     };
@@ -505,6 +526,55 @@ void register_image2d(NativeMethodRegistry& registry) {
                     }
                 }
             }
+
+            auto surface = ensure_mutable_image_surface(
+                machine, *object, *image_width, *image_height);
+            if (!surface) return std::unexpected(surface.error());
+            auto native_pixels = (*surface)->mutable_pixels();
+            for (i32 row = 0; row < *height; ++row) {
+                for (i32 column = 0; column < *width; ++column) {
+                    std::array<u8, 4> component_values {
+                        255U, 255U, 255U, 255U};
+                    for (usize component = 0; component < *components;
+                         ++component) {
+                        const usize input_index =
+                            (static_cast<usize>(row) *
+                                 static_cast<usize>(*width) +
+                             static_cast<usize>(column)) * *components +
+                            component;
+                        auto value = machine.heap().element(
+                            *pixels, input_index);
+                        if (!value) return std::unexpected(value.error());
+                        auto integer = value->as_int();
+                        if (!integer) return std::unexpected(integer.error());
+                        component_values[component] = static_cast<u8>(*integer);
+                    }
+                    u8 red = 255U;
+                    u8 green = 255U;
+                    u8 blue = 255U;
+                    u8 alpha = 255U;
+                    if (*format == 96) {
+                        alpha = component_values[0U];
+                    } else if (*format == 97) {
+                        red = green = blue = component_values[0U];
+                    } else if (*format == 98) {
+                        red = green = blue = component_values[0U];
+                        alpha = component_values[1U];
+                    } else {
+                        red = component_values[0U];
+                        green = component_values[1U];
+                        blue = component_values[2U];
+                        if (*format == 100) alpha = component_values[3U];
+                    }
+                    const usize native_index =
+                        static_cast<usize>(*y + row) *
+                            static_cast<usize>(*image_width) +
+                        static_cast<usize>(*x + column);
+                    native_pixels[native_index] =
+                        graphics::argb(alpha, red, green, blue);
+                }
+            }
+            (*surface)->mark_dirty_region(*x, *y, *width, *height);
             return std::optional<Value> {};
         });
 }
@@ -1661,8 +1731,7 @@ void register_special_meshes(NativeMethodRegistry& registry) {
             if (!weight) return std::unexpected(weight.error());
             if (!first_vertex) return std::unexpected(first_vertex.error());
             if (!vertex_count) return std::unexpected(vertex_count.error());
-            if (*weight <= 0 || *weight > 255 || *first_vertex < 0 ||
-                *vertex_count <= 0) {
+            if (*weight <= 0 || *first_vertex < 0 || *vertex_count <= 0) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "SkinnedMesh transform range is invalid");
             }
@@ -1724,42 +1793,66 @@ void register_special_meshes(NativeMethodRegistry& registry) {
             if (!weights) return std::unexpected(weights.error());
             if (!transforms) return std::unexpected(transforms.error());
 
+            // Each append allocates and may trigger GC. Store the new array
+            // immediately so the SkinnedMesh owns it before the next append;
+            // otherwise large serialized meshes can collect an unrooted
+            // intermediate array and leave a stale ObjectRef behind.
+            auto rest_matrix_root = machine.pin_native_root(*rest_matrix);
+            if (!rest_matrix_root) {
+                return std::unexpected(rest_matrix_root.error());
+            }
+
             auto next_bones = append_array_value(
                 machine, *bones, "[Ljavax/microedition/m3g/Node;",
                 Value::from_reference({}), Value::from_reference(*bone));
+            if (!next_bones) return std::unexpected(next_bones.error());
+            auto bones_stored = set_reference_field(
+                machine, *object, skinned, "bones",
+                "[Ljavax/microedition/m3g/Node;", *next_bones);
+            if (!bones_stored) return std::unexpected(bones_stored.error());
+
             auto next_first = append_array_value(
                 machine, *first_vertices, "[I", Value::from_int(0),
                 Value::from_int(*first_vertex));
+            if (!next_first) return std::unexpected(next_first.error());
+            auto first_stored = set_reference_field(
+                machine, *object, skinned, "boneFirstVertices", "[I",
+                *next_first);
+            if (!first_stored) return std::unexpected(first_stored.error());
+
             auto next_counts = append_array_value(
                 machine, *vertex_counts, "[I", Value::from_int(0),
                 Value::from_int(*vertex_count));
+            if (!next_counts) return std::unexpected(next_counts.error());
+            auto counts_stored = set_reference_field(
+                machine, *object, skinned, "boneVertexCounts", "[I",
+                *next_counts);
+            if (!counts_stored) return std::unexpected(counts_stored.error());
+
             auto next_weights = append_array_value(
                 machine, *weights, "[I", Value::from_int(0),
                 Value::from_int(*weight));
+            if (!next_weights) return std::unexpected(next_weights.error());
+            auto weights_stored = set_reference_field(
+                machine, *object, skinned, "boneWeights", "[I",
+                *next_weights);
+            if (!weights_stored) {
+                return std::unexpected(weights_stored.error());
+            }
+
+            auto rooted_matrix = rest_matrix_root->get();
+            if (!rooted_matrix) return std::unexpected(rooted_matrix.error());
             auto next_transforms = append_array_value(
                 machine, *transforms, "[[F", Value::from_reference({}),
-                Value::from_reference(*rest_matrix));
-            if (!next_bones) return std::unexpected(next_bones.error());
-            if (!next_first) return std::unexpected(next_first.error());
-            if (!next_counts) return std::unexpected(next_counts.error());
-            if (!next_weights) return std::unexpected(next_weights.error());
+                Value::from_reference(*rooted_matrix));
             if (!next_transforms) {
                 return std::unexpected(next_transforms.error());
             }
-            const std::array<Status, 5> stored {
-                set_reference_field(machine, *object, skinned, "bones",
-                    "[Ljavax/microedition/m3g/Node;", *next_bones),
-                set_reference_field(machine, *object, skinned,
-                    "boneFirstVertices", "[I", *next_first),
-                set_reference_field(machine, *object, skinned,
-                    "boneVertexCounts", "[I", *next_counts),
-                set_reference_field(machine, *object, skinned,
-                    "boneWeights", "[I", *next_weights),
-                set_reference_field(machine, *object, skinned,
-                    "boneTransforms", "[[F", *next_transforms),
-            };
-            for (const Status& status : stored) {
-                if (!status) return std::unexpected(status.error());
+            auto transforms_stored = set_reference_field(
+                machine, *object, skinned, "boneTransforms", "[[F",
+                *next_transforms);
+            if (!transforms_stored) {
+                return std::unexpected(transforms_stored.error());
             }
             return std::optional<Value> {};
         });

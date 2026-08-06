@@ -185,7 +185,7 @@ struct GameProfileEditorView: View {
             Toggle("Show FPS", isOn: $profile.showFPS)
 
             Toggle(
-                "Limit FPS",
+                "Override FPS",
                 isOn: Binding(
                     get: { profile.isFrameRateOverrideEnabled },
                     set: { profile.isFrameRateOverrideEnabled = $0 }
@@ -207,7 +207,7 @@ struct GameProfileEditorView: View {
         } header: {
             Text("Display")
         } footer: {
-            Text("FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated.")
+            Text("FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration.")
         }
     }
 

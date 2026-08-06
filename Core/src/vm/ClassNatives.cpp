@@ -232,6 +232,26 @@ void register_class_natives(NativeMethodRegistry& registry) {
             if (!string) return std::unexpected(string.error());
             return std::optional<Value>(Value::from_reference(*string));
         });
+    add(registry, "java/lang/Class", "getSimpleName", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto mirror = receiver(arguments);
+            if (!mirror) return std::unexpected(mirror.error());
+            auto class_name = machine.mirrored_class_name(*mirror);
+            if (!class_name) return std::unexpected(class_name.error());
+            std::string simple = display_class_name(*class_name);
+            const usize package = simple.find_last_of('.');
+            if (package != std::string::npos) {
+                simple.erase(0U, package + 1U);
+            }
+            const usize nested = simple.find_last_of('$');
+            if (nested != std::string::npos) {
+                simple.erase(0U, nested + 1U);
+            }
+            auto string = create_string(machine, ascii_text(simple));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
+        });
     add(registry, "java/lang/Class", "isArray", "()Z",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -420,8 +440,9 @@ void register_class_natives(NativeMethodRegistry& registry) {
                 // unexpected SecurityException in legacy game engines.
                 return std::optional<Value>(Value::from_reference({}));
             }
+            const bool absolute = resource->front() == '/';
             std::string path;
-            if (!resource->empty() && resource->front() == '/') {
+            if (absolute) {
                 path.assign(resource->begin() + 1, resource->end());
             } else {
                 const usize slash = class_name->rfind('/');
@@ -434,6 +455,37 @@ void register_class_natives(NativeMethodRegistry& registry) {
                 path.append(*resource);
             }
             auto bytes = machine.classes().read_resource(path);
+            if (!bytes && bytes.error().code == ErrorCode::class_not_found &&
+                absolute && !class_name->empty() &&
+                class_name->front() != '[') {
+                // Several CLDC/S60 implementations accepted a leading slash
+                // while still resolving the resource beside the MIDlet class.
+                // Commercial games rely on that compatibility quirk (for
+                // example game/SexWG loading "/swg.sse" stored as
+                // game/swg.sse). Preserve the standard archive-root lookup
+                // first, then fall back to the mirror class package only when
+                // the absolute resource does not exist.
+                const usize slash = class_name->rfind('/');
+                if (slash != std::string::npos) {
+                    std::string package_path(
+                        class_name->begin(),
+                        class_name->begin() +
+                            static_cast<std::ptrdiff_t>(slash + 1U));
+                    package_path.append(resource->begin() + 1,
+                                        resource->end());
+                    if (package_path != path) {
+                        auto package_bytes =
+                            machine.classes().read_resource(package_path);
+                        if (package_bytes) {
+                            path = std::move(package_path);
+                            bytes = std::move(package_bytes);
+                        } else if (package_bytes.error().code !=
+                                   ErrorCode::class_not_found) {
+                            bytes = std::move(package_bytes);
+                        }
+                    }
+                }
+            }
             if (!bytes) {
                 if (bytes.error().code == ErrorCode::class_not_found) {
                     if (std::getenv("PHONEME_TRACE_RESOURCE_MISS") != nullptr) {

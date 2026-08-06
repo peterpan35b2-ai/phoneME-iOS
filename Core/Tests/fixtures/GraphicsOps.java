@@ -242,6 +242,10 @@ public final class GraphicsOps {
                 graphics.getBlueComponent() != 0x33) {
             return 2;
         }
+        if (graphics.getDisplayColor(0x112233) != 0x102031 ||
+                graphics.getDisplayColor(0xAA112233) != 0x102031) {
+            return 18;
+        }
 
         graphics.setClip(1, 1, 4, 4);
         graphics.translate(1, 1);

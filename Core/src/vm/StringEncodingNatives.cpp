@@ -54,7 +54,20 @@ void add(NativeMethodRegistry& registry,
         return fail_java("java/lang/NullPointerException",
                          "charset name is null");
     }
-    auto value = machine.heap().string_value(string);
+    auto class_name = machine.heap().class_name(string);
+    if (!class_name) return std::unexpected(class_name.error());
+    ObjectRef name_reference = string;
+    if (*class_name == "java/nio/charset/Charset") {
+        auto field = machine.heap().field(string, 0U);
+        if (!field) return std::unexpected(field.error());
+        auto reference = field->as_reference();
+        if (!reference || reference->is_null()) {
+            return fail(ErrorCode::invalid_state,
+                        "Charset canonical name is missing");
+        }
+        name_reference = *reference;
+    }
+    auto value = machine.heap().string_value(name_reference);
     if (!value) return std::unexpected(value.error());
     std::string normalized;
     normalized.reserve(value->size());
@@ -390,6 +403,8 @@ void register_string_encoding_natives(NativeMethodRegistry& registry) {
     register_constructor(registry, "([BII)V", true, false);
     register_constructor(registry, "([BLjava/lang/String;)V", false, true);
     register_constructor(registry, "([BIILjava/lang/String;)V", true, true);
+    register_constructor(registry, "([BLjava/nio/charset/Charset;)V", false, true);
+    register_constructor(registry, "([BIILjava/nio/charset/Charset;)V", true, true);
 
     const auto get_bytes = [&registry](std::string descriptor,
                                        bool has_charset) {
@@ -420,6 +435,7 @@ void register_string_encoding_natives(NativeMethodRegistry& registry) {
     };
     get_bytes("()[B", false);
     get_bytes("(Ljava/lang/String;)[B", true);
+    get_bytes("(Ljava/nio/charset/Charset;)[B", true);
 }
 
 } // namespace phoneme::vm
