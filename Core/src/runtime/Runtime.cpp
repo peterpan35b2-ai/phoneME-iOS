@@ -142,6 +142,7 @@ public:
         std::array<i32, 7> keymap,
         AppFramePacingConfig frame_pacing,
         AppHeapConfig heap_config,
+        bool jit_enabled,
         Framebuffer& framebuffer,
         std::shared_ptr<translation::TranslationService> translation_service);
     ~ApplicationVM();
@@ -771,6 +772,7 @@ ApplicationVM::ApplicationVM(
     std::array<i32, 7> keymap,
     AppFramePacingConfig frame_pacing,
     AppHeapConfig heap_config,
+    bool jit_enabled,
     Framebuffer& framebuffer,
     std::shared_ptr<translation::TranslationService> translation_service)
     : machine(classes,
@@ -780,6 +782,7 @@ ApplicationVM::ApplicationVM(
     machine.configure_frame_pacing(
         frame_pacing.frames_per_second,
         frame_pacing.mode);
+    machine.configure_jit(jit_enabled);
     machine.configure_translation_service(std::move(translation_service));
     CanvasRenderHooks hooks;
     hooks.acquire_paint_graphics = [this, &framebuffer](
@@ -885,6 +888,7 @@ Status Runtime::configure(std::string runtime_home,
     };
     app_frame_pacing_.clear();
     app_heap_configs_.clear();
+    jit_enabled_by_default_ = true;
     suite_store_.clear();
     auto suite_store_status = suite_store_.configure(SuiteStoreConfig {
         .root_path = runtime_home,
@@ -988,6 +992,28 @@ Status Runtime::configure_app_heap(AppId app_id, i32 heap_megabytes) {
         app_id.value,
         AppHeapConfig {.maximum_bytes = maximum_bytes});
     return {};
+}
+
+Status Runtime::configure_jit(bool enabled) {
+    std::vector<std::shared_ptr<ApplicationVM>> application_vms;
+    {
+        std::scoped_lock lock(mutex_);
+        jit_enabled_by_default_ = enabled;
+        application_vms.reserve(apps_.size());
+        for (const auto& [id, app] : apps_) {
+            (void)id;
+            if (app.vm != nullptr) application_vms.push_back(app.vm);
+        }
+    }
+    for (const auto& application_vm : application_vms) {
+        std::scoped_lock vm_operation(application_vm->operation_mutex);
+        application_vm->machine.configure_jit(enabled);
+    }
+    return {};
+}
+
+vm::JitAvailability Runtime::jit_availability() const noexcept {
+    return vm::BaselineJit::probe_platform();
 }
 
 Status Runtime::configure_input_capabilities(bool pointer_events,
@@ -1328,6 +1354,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
     std::array<i32, 7> keymap {};
     AppFramePacingConfig frame_pacing;
     AppHeapConfig heap_config;
+    bool jit_enabled = true;
     bool pointer_events_supported = true;
     bool pointer_motion_supported = true;
     bool repeat_events_supported = true;
@@ -1366,6 +1393,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
             heap != app_heap_configs_.end()) {
             heap_config = heap->second;
         }
+        jit_enabled = jit_enabled_by_default_;
         pointer_events_supported = pointer_events_supported_;
         pointer_motion_supported = pointer_motion_supported_;
         repeat_events_supported = repeat_events_supported_;
@@ -1453,6 +1481,7 @@ Status Runtime::start_midlet(SuiteId suite_id,
         keymap,
         frame_pacing,
         heap_config,
+        jit_enabled,
         framebuffer_,
         std::move(translation_service));
     application_vm->canvas.set_input_capabilities(
@@ -2834,7 +2863,38 @@ FrameSnapshot Runtime::frame_snapshot() {
     return framebuffer_.snapshot();
 }
 
-std::optional<UiEvent> Runtime::poll_ui_event() { return ui_queue_.pop(); }
+std::optional<UiEvent> Runtime::poll_ui_event() {
+    if (auto event = ui_queue_.pop()) return event;
+
+    std::shared_ptr<ApplicationVM> vm;
+    {
+        std::unique_lock lock(mutex_);
+        const App* app = find_app_unlocked(foreground_app_id_);
+        if (app != nullptr && app->vm != nullptr &&
+            (app->state == AppState::active ||
+             app->state == AppState::paused)) {
+            vm = app->vm;
+        }
+    }
+    if (vm == nullptr || vm->machine.pending_serial_callbacks() == 0U) {
+        return std::nullopt;
+    }
+
+    // Display.callSerially runs on a scheduler worker after the current LCDUI
+    // callback returns. Preserve event ordering at the native bridge boundary:
+    // a temporarily empty queue must not look terminal while that worker is
+    // about to publish setCurrent()/screen events. Keep the wait short so a
+    // genuinely long Runnable cannot stall frame polling or input delivery.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+    do {
+        if (auto event = ui_queue_.pop()) return event;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    } while (vm->machine.pending_serial_callbacks() != 0U &&
+             std::chrono::steady_clock::now() < deadline);
+
+    return ui_queue_.pop();
+}
 
 void Runtime::ui_select_command(i32 command_id) {
     push_ui_action(100, command_id, 0, 0);

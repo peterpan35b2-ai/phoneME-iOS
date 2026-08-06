@@ -621,11 +621,22 @@ private struct LCDUIChoiceCell: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            choiceIcon
+            if let imageKey = choice.imageKey {
+                NativeLCDUIChoiceImage(
+                    imageStore: imageStore,
+                    imageKey: imageKey
+                )
                 .frame(
                     width: LCDUIStyle.rowIconSize,
                     height: LCDUIStyle.rowIconSize
                 )
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: LCDUIStyle.rowIconCornerRadius,
+                        style: .continuous
+                    )
+                )
+            }
 
             Text(choice.text)
                 .font(usesRegularListFont ? choice.swiftUIListFont : choice.swiftUIFont)
@@ -639,33 +650,6 @@ private struct LCDUIChoiceCell: View {
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder
-    private var choiceIcon: some View {
-        if let imageKey = choice.imageKey {
-            NativeLCDUIChoiceImage(
-                imageStore: imageStore,
-                imageKey: imageKey
-            )
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius: LCDUIStyle.rowIconCornerRadius,
-                    style: .continuous
-                )
-            )
-        } else {
-            Image(systemName: "list.bullet")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    Color(uiColor: .tertiarySystemFill),
-                    in: RoundedRectangle(
-                        cornerRadius: LCDUIStyle.rowIconCornerRadius,
-                        style: .continuous
-                    )
-                )
-        }
-    }
 
     @ViewBuilder
     private var accessoryView: some View {
@@ -970,7 +954,7 @@ private struct NativeLCDUIItemView: View {
 
                     if index < choices.count - 1 {
                         Divider()
-                            .padding(.leading, 44)
+                            .padding(.leading, choice.imageKey == nil ? 0 : 44)
                     }
                 }
             }
@@ -1005,7 +989,7 @@ private struct NativeLCDUIItemView: View {
 
                     if index < choices.count - 1 {
                         Divider()
-                            .padding(.leading, 44)
+                            .padding(.leading, choice.imageKey == nil ? 0 : 44)
                     }
                 }
             }
@@ -1050,7 +1034,7 @@ private struct NativeLCDUIItemView: View {
 
                     if index < choices.count - 1 {
                         Divider()
-                            .padding(.leading, 44)
+                            .padding(.leading, choice.imageKey == nil ? 0 : 44)
                     }
                 }
             }
@@ -1259,7 +1243,7 @@ private struct NativeLCDUIPopupChoice: View {
                 )
             ) {
                 ForEach(item.orderedChoices) { choice in
-                    Label(choice.text, systemImage: "list.bullet")
+                    Text(choice.text)
                         .tag(choice.index)
                 }
             }

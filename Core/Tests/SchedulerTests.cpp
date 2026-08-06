@@ -275,6 +275,12 @@ int main(int argc, char** argv) {
             30,
             0,
             20);
+        const auto override_short_sleep_loading_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::override_game_loop,
+            30,
+            2,
+            20);
         const auto capped_elapsed = measure_frame_pacing(
             classes,
             phoneme::vm::FramePacingMode::cap,
@@ -299,6 +305,9 @@ int main(int argc, char** argv) {
                 "override pacing retargets a stable 40 ms render loop to 60 FPS");
         require(override_loading_elapsed < std::chrono::milliseconds(180),
                 "override pacing does not throttle loading-style frame publications");
+        require(override_short_sleep_loading_elapsed <
+                    std::chrono::milliseconds(180),
+                "override pacing never stretches a loader's short Java sleep");
         require(capped_elapsed >= std::chrono::milliseconds(380) &&
                     capped_elapsed <= std::chrono::milliseconds(650),
                 "cap pacing limits actual frame publications without drift");

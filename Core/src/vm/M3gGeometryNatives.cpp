@@ -594,15 +594,15 @@ void register_texture2d(NativeMethodRegistry& registry) {
             auto image_stored = set_reference_field(machine, *object, kTexture2D,
                 "image", "Ljavax/microedition/m3g/Image2D;", *image);
             auto blending = set_int_field(machine, *object, kTexture2D,
-                                          "blending", 228);
+                                          "blending", 227);
             auto level_filter = set_int_field(machine, *object, kTexture2D,
                                               "levelFilter", 208);
             auto image_filter = set_int_field(machine, *object, kTexture2D,
                                               "imageFilter", 210);
             auto wrap_s = set_int_field(machine, *object, kTexture2D,
-                                        "wrapS", 240);
+                                        "wrapS", 241);
             auto wrap_t = set_int_field(machine, *object, kTexture2D,
-                                        "wrapT", 240);
+                                        "wrapT", 241);
             if (!image_stored) return std::unexpected(image_stored.error());
             if (!blending) return std::unexpected(blending.error());
             if (!level_filter) return std::unexpected(level_filter.error());

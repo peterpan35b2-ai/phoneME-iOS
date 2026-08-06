@@ -17,6 +17,7 @@ namespace {
         register_bluetooth_classes(result);
         register_util_classes(result);
         register_headless_compat_classes(result);
+        register_jdk8_compat_classes(result);
         register_midlet_classes(result);
         register_media_classes(result);
         register_push_classes(result);

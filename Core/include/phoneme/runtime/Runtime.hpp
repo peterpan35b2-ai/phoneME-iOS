@@ -15,6 +15,7 @@
 #include "phoneme/runtime/SuiteStore.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/translation/TranslationService.hpp"
+#include "phoneme/vm/BaselineJit.hpp"
 #include "phoneme/vm/NativeMethodRegistry.hpp"
 #include "phoneme/vm/Scheduler.hpp"
 
@@ -101,6 +102,8 @@ public:
         vm::FramePacingMode mode);
     [[nodiscard]] Status configure_app_heap(AppId app_id,
                                             i32 heap_megabytes);
+    [[nodiscard]] Status configure_jit(bool enabled);
+    [[nodiscard]] vm::JitAvailability jit_availability() const noexcept;
     [[nodiscard]] Status configure_input_capabilities(
         bool pointer_events,
         bool pointer_motion,
@@ -240,6 +243,7 @@ private:
     };
     std::unordered_map<i32, AppFramePacingConfig> app_frame_pacing_;
     std::unordered_map<i32, AppHeapConfig> app_heap_configs_;
+    bool jit_enabled_by_default_ {true};
     std::shared_ptr<translation::TranslationService> translation_service_;
     bool translation_enabled_by_default_ {false};
     bool pointer_events_supported_ {true};

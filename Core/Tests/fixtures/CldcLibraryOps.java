@@ -324,6 +324,12 @@ public final class CldcLibraryOps {
         if (utf8 == null) return 210;
         if (!"UTF-8".equals(utf8.name())) return 211;
         if (!"UTF-8".equals(utf8.toString())) return 212;
+        if (!"US-ASCII".equals(
+                java.nio.charset.StandardCharsets.US_ASCII.name())) return 213;
+        if (!"ISO-8859-1".equals(
+                java.nio.charset.StandardCharsets.ISO_8859_1.name())) return 214;
+        if (!"UTF-16BE".equals(
+                java.nio.charset.StandardCharsets.UTF_16BE.name())) return 215;
 
         java.nio.charset.Charset lookedUp =
                 java.nio.charset.Charset.forName("utf_8");

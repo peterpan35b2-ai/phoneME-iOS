@@ -10,6 +10,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <zlib.h>
@@ -747,6 +748,223 @@ void test_integer_interpreter() {
     require(value.has_value() && *value == 5, "2 + 3 returns 5");
 }
 
+void test_baseline_jit(const std::string& fixture_jar) {
+    const char* previous_threshold = std::getenv("PHONEME_JIT_HOT_THRESHOLD");
+    const std::optional<std::string> saved_threshold = previous_threshold == nullptr
+        ? std::nullopt
+        : std::optional<std::string>(previous_threshold);
+    const auto restore_threshold = [&saved_threshold]() {
+        if (saved_threshold.has_value()) {
+            (void)::setenv(
+                "PHONEME_JIT_HOT_THRESHOLD", saved_threshold->c_str(), 1);
+        } else {
+            (void)::unsetenv("PHONEME_JIT_HOT_THRESHOLD");
+        }
+    };
+
+    require(::setenv("PHONEME_JIT_HOT_THRESHOLD", "1", 1) == 0,
+            "configure JIT hot threshold for deterministic tests");
+
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add JIT fixture JAR to VM classpath");
+    phoneme::vm::Machine machine(classes);
+    machine.configure_jit(true);
+
+    if (machine.jit_availability() != phoneme::vm::JitAvailability::ready) {
+        restore_threshold();
+        std::cout << "JIT executable memory unavailable; backend tests skipped\n";
+        return;
+    }
+
+    const auto invoke_one = [&machine](const char* method,
+                                       phoneme::i32 argument,
+                                       phoneme::i32 expected,
+                                       const char* message) {
+        const phoneme::vm::Value value =
+            phoneme::vm::Value::from_int(argument);
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps",
+                method,
+                "(I)I",
+                std::span<const phoneme::vm::Value>(&value, 1U));
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_int().value_or(
+                            std::numeric_limits<phoneme::i32>::min()) == expected,
+                    message);
+        }
+    };
+
+    const auto invoke_two = [&machine](const char* method,
+                                       phoneme::i32 left,
+                                       phoneme::i32 right,
+                                       phoneme::i32 expected,
+                                       const char* message) {
+        const std::array<phoneme::vm::Value, 2> values {
+            phoneme::vm::Value::from_int(left),
+            phoneme::vm::Value::from_int(right),
+        };
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps", method, "(II)I", values);
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_int().value_or(
+                            std::numeric_limits<phoneme::i32>::min()) == expected,
+                    message);
+        }
+    };
+
+    invoke_one("branch", -9, 9, "JIT executes conditional branches");
+    invoke_one("branch", 0, 7, "JIT executes equality branches");
+    invoke_one("sumLoop", 100, 5050, "JIT executes budgeted loops");
+    invoke_one("tableSwitch", 2, 30, "JIT executes tableswitch");
+    invoke_one("tableSwitch", 99, -1, "JIT executes tableswitch default");
+    invoke_one("lookupSwitch", 1000, 3, "JIT executes lookupswitch");
+    invoke_one("lookupSwitch", 18, 4, "JIT executes lookupswitch default");
+    invoke_one("largeConstant", 11, 123456800,
+               "JIT loads integer constants from the constant pool");
+    invoke_two("divide", -81, 9, -9, "JIT executes signed division");
+    invoke_two("remainder", -82, 9, -1, "JIT executes signed remainder");
+
+    const phoneme::i32 mixed =
+        static_cast<phoneme::i32>((0x12345678U << 3U) ^
+                                  (0x12345678U >> 4U));
+    const phoneme::i32 mixed_expected =
+        static_cast<phoneme::i8>(mixed) +
+        static_cast<phoneme::i16>(static_cast<phoneme::u32>(mixed) >> 8U) +
+        static_cast<phoneme::i32>(
+            static_cast<phoneme::u16>(
+                static_cast<phoneme::u32>(mixed) >> 16U));
+    invoke_two("bitMix", 0x12345678, 3, mixed_expected,
+               "JIT executes shifts and integer narrowing");
+    invoke_one("strengthReduce", 9, 72,
+               "optimizing JIT strength-reduces constant arithmetic");
+    invoke_one("propagatedLocal", 10, 22,
+               "optimizing JIT propagates constants through locals");
+    invoke_one("foldedBranch", 4, 15,
+               "optimizing JIT folds constant control flow");
+    invoke_one("constantDivision", 52, 10,
+               "optimizing JIT specializes division by constants");
+
+    auto jit_object = machine.heap().allocate_object("corefixture/JitOps", 0U);
+    require(jit_object.has_value(), "allocate object for JIT reference tests");
+    const phoneme::vm::Value null_reference =
+        phoneme::vm::Value::from_reference({});
+    const phoneme::vm::Value object_reference =
+        phoneme::vm::Value::from_reference(*jit_object);
+
+    for (int pass = 0; pass < 2; ++pass) {
+        auto is_null = machine.invoke_static(
+            "corefixture/JitOps",
+            "isNull",
+            "(Ljava/lang/Object;)I",
+            std::span<const phoneme::vm::Value>(&null_reference, 1U));
+        require(is_null.has_value() && is_null->completed_normally() &&
+                    is_null->return_value.has_value() &&
+                    is_null->return_value->as_int().value_or(-1) == 1,
+                "JIT executes null reference branches");
+
+        const std::array<phoneme::vm::Value, 2> same_values {
+            object_reference,
+            object_reference,
+        };
+        auto same_reference = machine.invoke_static(
+            "corefixture/JitOps",
+            "sameReference",
+            "(Ljava/lang/Object;Ljava/lang/Object;)I",
+            same_values);
+        require(same_reference.has_value() &&
+                    same_reference->completed_normally() &&
+                    same_reference->return_value.has_value() &&
+                    same_reference->return_value->as_int().value_or(-1) == 1,
+                "JIT executes 64-bit object identity branches");
+
+        const std::array<phoneme::vm::Value, 3> choose_values {
+            null_reference,
+            object_reference,
+            phoneme::vm::Value::from_int(0),
+        };
+        auto chosen = machine.invoke_static(
+            "corefixture/JitOps",
+            "chooseReference",
+            "(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;",
+            choose_values);
+        require(chosen.has_value() && chosen->completed_normally() &&
+                    chosen->return_value.has_value() &&
+                    chosen->return_value->as_reference().value_or(
+                        phoneme::vm::ObjectRef {}) == *jit_object,
+                "JIT preserves full-width reference return values");
+
+        auto receiver_compare = machine.invoke_instance(
+            *jit_object,
+            "corefixture/JitOps",
+            "sameAsReceiver",
+            "(Ljava/lang/Object;)I",
+            std::span<const phoneme::vm::Value>(&object_reference, 1U));
+        require(receiver_compare.has_value() &&
+                    receiver_compare->completed_normally() &&
+                    receiver_compare->return_value.has_value() &&
+                    receiver_compare->return_value->as_int().value_or(-1) == 1,
+                "JIT passes the instance receiver into native code");
+    }
+
+    const phoneme::vm::Value loop_limit =
+        phoneme::vm::Value::from_int(100);
+    auto exhausted_budget = machine.invoke_static(
+        "corefixture/JitOps",
+        "sumLoop",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&loop_limit, 1U),
+        8U);
+    require(!exhausted_budget.has_value() &&
+                exhausted_budget.error().code == phoneme::ErrorCode::invalid_state &&
+                exhausted_budget.error().message.find("budget") != std::string::npos,
+            "JIT budget exhaustion stops without replaying the method");
+
+    const std::array<phoneme::vm::Value, 2> zero_divisor {
+        phoneme::vm::Value::from_int(10),
+        phoneme::vm::Value::from_int(0),
+    };
+    auto divide_by_zero = machine.invoke_static(
+        "corefixture/JitOps", "divide", "(II)I", zero_divisor);
+    require(divide_by_zero.has_value() &&
+                !divide_by_zero->completed_normally() &&
+                divide_by_zero->throwable.has_value(),
+            "JIT deoptimizes division by zero to interpreter exception logic");
+    auto throwable_class = machine.heap().class_name(*divide_by_zero->throwable);
+    require(throwable_class.has_value() &&
+                *throwable_class == "java/lang/ArithmeticException",
+            "JIT fallback preserves ArithmeticException semantics");
+
+    const auto statistics = machine.jit_statistics();
+    require(statistics.compiled_methods >= 8U,
+            "JIT compiles representative integer methods");
+    require(statistics.executed_methods >= 8U,
+            "JIT executes representative integer methods natively");
+    require(statistics.deoptimized_executions >= 1U,
+            "JIT records guarded deoptimization");
+    require(statistics.optimized_methods >= 3U,
+            "optimizing JIT records optimized native methods");
+    require(statistics.loop_optimized_methods >= 1U,
+            "optimizing JIT prioritizes hot loops");
+    require(statistics.propagated_constants >= 1U,
+            "optimizing JIT records constant propagation");
+    require(statistics.folded_operations >= 1U,
+            "optimizing JIT records folded operations");
+    require(statistics.strength_reductions >= 3U,
+            "optimizing JIT records arithmetic strength reduction");
+    require(statistics.budget_checks_elided >= 8U,
+            "optimizing JIT coalesces bytecode budget guards by basic block");
+    require(statistics.code_cache_bytes > 0U &&
+                statistics.code_cache_bytes <=
+                    statistics.code_cache_limit_bytes,
+            "JIT keeps generated code inside its configured cache limit");
+    restore_threshold();
+}
+
 void test_machine_heap_memory_reporting() {
     constexpr phoneme::usize heap_bytes = 12U * 1024U * 1024U;
     phoneme::vm::ClassRepository classes;
@@ -1338,6 +1556,18 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute CLDC String construction and search APIs");
     require_jdk8_string_result("nativeStringExceptions", 15,
                                "native String failures unwind through Java catch blocks");
+    require_jdk8_string_result("jdk8CoreCompatApi", 32767,
+                               "execute JDK 8 compatibility APIs implemented by Core");
+    require_jdk8_string_result("arraysRangeSortApi", 1,
+                               "sort bounded int-array ranges with JDK semantics");
+    require_jdk8_string_result("regexApi", 15,
+                               "match VQSV regex patterns in Core");
+    require_jdk8_string_result("streamApi", 3,
+                               "map ArrayList streams to primitive arrays");
+    require_jdk8_string_result("gzipApi", 1,
+                               "round-trip GZIP streams through Core zlib");
+    require_jdk8_string_result("reflectionAndUrlApi", 1,
+                               "resolve static fields and class resource URLs");
     auto list_class = classes.load("javax/microedition/lcdui/List");
     if (!list_class.has_value()) {
         std::cerr << "List class load failed: " << list_class.error().message << '\n';
@@ -1376,6 +1606,10 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute java.lang.Math numeric semantics");
     require_jdk8_string_result("utilApi", 255,
                                "execute CLDC Vector Stack Hashtable and Random APIs");
+    require_jdk8_string_result("arrayDequeApi", 255,
+                               "execute Java 8 ArrayDeque and Deque semantics");
+    require_jdk8_string_result("threadLocalRandomApi", 127,
+                               "execute ThreadLocalRandom singleton and ranged APIs");
     require_jdk8_string_result("headlessCollectionsApi", 255,
                                "execute the bounded Java 8 modding collection profile");
     require_jdk8_string_result("headlessIoApi", 15,
@@ -2901,19 +3135,37 @@ void test_runtime_lcdui(const std::string& fixture_jar) {
     bool context_selection_applied = false;
     bool list_item_callback_applied = false;
     bool context_form_restored = false;
-    while (auto event = runtime.poll_ui_event()) {
-        if (event->kind == 12 && event->component_id == list_choice_id &&
-            event->text == "Two" && event->arguments[0] == 1) {
-            context_selection_applied = true;
+    const auto collect_context_events = [&] {
+        while (auto event = runtime.poll_ui_event()) {
+            if (event->kind == 12 && event->component_id == list_choice_id &&
+                event->text == "Two" && event->arguments[0] == 1) {
+                context_selection_applied = true;
+            }
+            if (event->kind == 8 && event->component_id == status_id &&
+                event->detail == "List item 1") {
+                list_item_callback_applied = true;
+            }
+            if (event->kind == 4 && event->component_type == 23 &&
+                event->text == "Native Form") {
+                context_form_restored = true;
+            }
         }
-        if (event->kind == 8 && event->component_id == status_id &&
-            event->detail == "List item 1") {
-            list_item_callback_applied = true;
-        }
-        if (event->kind == 4 && event->component_type == 23 &&
-            event->text == "Native Form") {
-            context_form_restored = true;
-        }
+    };
+    collect_context_events();
+    const auto context_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while ((!context_selection_applied || !list_item_callback_applied ||
+            !context_form_restored) &&
+           std::chrono::steady_clock::now() < context_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        collect_context_events();
+    }
+    if (!context_selection_applied || !list_item_callback_applied ||
+        !context_form_restored) {
+        std::cerr << "LCDUI Command.ITEM diagnostics: selection="
+                  << context_selection_applied
+                  << " callback=" << list_item_callback_applied
+                  << " restored=" << context_form_restored << '\n';
     }
     require(context_selection_applied && list_item_callback_applied &&
                 context_form_restored,
@@ -4790,8 +5042,11 @@ void test_machine_m3g() {
     for (phoneme::usize vertex = 0U; vertex < 3U; ++vertex) {
         require(machine.heap().set_element(
                     *texture_values_zero, vertex * 2U + 1U,
-                    phoneme::vm::Value::from_int(3)).has_value(),
-                "write M3G texture V coordinate");
+                    phoneme::vm::Value::from_int(1)).has_value() &&
+                    machine.heap().set_element(
+                        *texture_values_one, vertex * 2U + 1U,
+                        phoneme::vm::Value::from_int(1)).has_value(),
+                "write top-row M3G texture V coordinates");
     }
     const std::array<phoneme::vm::Value, 3> texture_array_arguments {
         phoneme::vm::Value::from_int(3),
@@ -4857,6 +5112,43 @@ void test_machine_m3g() {
                 "<init>", "(Ljavax/microedition/m3g/Image2D;)V",
                 std::span<const phoneme::vm::Value>(
                     &checker_texture_argument, 1U));
+    auto default_texture_blending = machine.invoke_instance(
+        *texture_zero, "javax/microedition/m3g/Texture2D",
+        "getBlending", "()I");
+    auto default_texture_wrap_s = machine.invoke_instance(
+        *texture_zero, "javax/microedition/m3g/Texture2D",
+        "getWrappingS", "()I");
+    auto default_texture_wrap_t = machine.invoke_instance(
+        *texture_zero, "javax/microedition/m3g/Texture2D",
+        "getWrappingT", "()I");
+    require(default_texture_blending.has_value() &&
+                default_texture_blending->completed_normally() &&
+                default_texture_blending->return_value.has_value() &&
+                default_texture_blending->return_value->as_int().value_or(0) ==
+                    227 &&
+                default_texture_wrap_s.has_value() &&
+                default_texture_wrap_s->completed_normally() &&
+                default_texture_wrap_s->return_value.has_value() &&
+                default_texture_wrap_s->return_value->as_int().value_or(0) ==
+                    241 &&
+                default_texture_wrap_t.has_value() &&
+                default_texture_wrap_t->completed_normally() &&
+                default_texture_wrap_t->return_value.has_value() &&
+                default_texture_wrap_t->return_value->as_int().value_or(0) ==
+                    241,
+            "Texture2D constructor uses MODULATE and REPEAT defaults");
+    const phoneme::vm::Value replace_texture_function =
+        phoneme::vm::Value::from_int(228);
+    invoke_void(*texture_zero, "javax/microedition/m3g/Texture2D",
+                "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &replace_texture_function, 1U));
+    const std::array<phoneme::vm::Value, 2> clamp_texture_arguments {
+        phoneme::vm::Value::from_int(240),
+        phoneme::vm::Value::from_int(240),
+    };
+    invoke_void(*texture_zero, "javax/microedition/m3g/Texture2D",
+                "setWrapping", "(II)V", clamp_texture_arguments);
     const std::array<phoneme::vm::Value, 2> texture_unit_zero_arguments {
         phoneme::vm::Value::from_int(0),
         phoneme::vm::Value::from_reference(*texture_zero),
@@ -4889,6 +5181,131 @@ void test_machine_m3g() {
     };
     require(render_textured() == 0xFFFF0000U,
             "Texture2D FUNC_REPLACE samples texture unit zero");
+    const phoneme::vm::Value translucent_vertex_color =
+        phoneme::vm::Value::from_int(0x40FFFFFF);
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setDefaultColor",
+                "(I)V", std::span<const phoneme::vm::Value>(
+                    &translucent_vertex_color, 1U));
+    require(render_textured() == 0x40FF0000U,
+            "RGB Texture2D FUNC_REPLACE preserves fragment alpha");
+    const phoneme::vm::Value opaque_vertex_color =
+        phoneme::vm::Value::from_int(static_cast<phoneme::i32>(0xFFFFFFFFU));
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setDefaultColor",
+                "(I)V", std::span<const phoneme::vm::Value>(
+                    &opaque_vertex_color, 1U));
+
+    auto alpha_image = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Image2D");
+    auto alpha_bytes = machine.heap().allocate_array(
+        "[B", 1U, phoneme::vm::Value::from_int(128));
+    auto alpha_texture = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Texture2D");
+    require(alpha_image.has_value() && alpha_bytes.has_value() &&
+                alpha_texture.has_value(),
+            "allocate M3G alpha texture");
+    const std::array<phoneme::vm::Value, 4> alpha_image_arguments {
+        phoneme::vm::Value::from_int(96),
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_reference(*alpha_bytes),
+    };
+    invoke_void(*alpha_image, "javax/microedition/m3g/Image2D",
+                "<init>", "(III[B)V", alpha_image_arguments);
+    const phoneme::vm::Value alpha_image_argument =
+        phoneme::vm::Value::from_reference(*alpha_image);
+    invoke_void(*alpha_texture, "javax/microedition/m3g/Texture2D",
+                "<init>", "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &alpha_image_argument, 1U));
+    invoke_void(*alpha_texture, "javax/microedition/m3g/Texture2D",
+                "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &replace_texture_function, 1U));
+    const std::array<phoneme::vm::Value, 2> alpha_texture_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*alpha_texture),
+    };
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                alpha_texture_arguments);
+    const phoneme::vm::Value colored_vertex =
+        phoneme::vm::Value::from_int(static_cast<phoneme::i32>(0xFF204060U));
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setDefaultColor",
+                "(I)V", std::span<const phoneme::vm::Value>(
+                    &colored_vertex, 1U));
+    require(render_textured() == 0x80204060U,
+            "ALPHA Texture2D FUNC_REPLACE preserves fragment RGB");
+
+    const std::array<phoneme::vm::Value, 2> mutable_image_dimensions {
+        phoneme::vm::Value::from_int(1),
+        phoneme::vm::Value::from_int(1),
+    };
+    auto mutable_lcdui_result = machine.invoke_static(
+        "javax/microedition/lcdui/Image", "createImage",
+        "(II)Ljavax/microedition/lcdui/Image;", mutable_image_dimensions);
+    require(mutable_lcdui_result.has_value() &&
+                mutable_lcdui_result->completed_normally() &&
+                mutable_lcdui_result->return_value.has_value(),
+            "create mutable LCDUI image for M3G conversion");
+    auto mutable_lcdui_image =
+        mutable_lcdui_result->return_value->as_reference();
+    require(mutable_lcdui_image.has_value() &&
+                !mutable_lcdui_image->is_null(),
+            "obtain mutable LCDUI image for M3G conversion");
+    auto mutable_lcdui_payload =
+        machine.graphics().image(mutable_lcdui_image->bits);
+    require(mutable_lcdui_payload.has_value(),
+            "obtain mutable LCDUI image pixels for M3G conversion");
+    (*mutable_lcdui_payload)->mutable_pixels()[0U] = 0x00FF0000U;
+
+    auto converted_alpha_image = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Image2D");
+    auto converted_alpha_texture = machine.class_states().allocate_instance(
+        machine.heap(), "javax/microedition/m3g/Texture2D");
+    require(converted_alpha_image.has_value() &&
+                converted_alpha_texture.has_value(),
+            "allocate LCDUI-backed M3G alpha texture");
+    const std::array<phoneme::vm::Value, 2> converted_alpha_arguments {
+        phoneme::vm::Value::from_int(96),
+        phoneme::vm::Value::from_reference(*mutable_lcdui_image),
+    };
+    invoke_void(*converted_alpha_image,
+                "javax/microedition/m3g/Image2D", "<init>",
+                "(ILjava/lang/Object;)V", converted_alpha_arguments);
+    const phoneme::vm::Value converted_alpha_image_argument =
+        phoneme::vm::Value::from_reference(*converted_alpha_image);
+    invoke_void(*converted_alpha_texture,
+                "javax/microedition/m3g/Texture2D", "<init>",
+                "(Ljavax/microedition/m3g/Image2D;)V",
+                std::span<const phoneme::vm::Value>(
+                    &converted_alpha_image_argument, 1U));
+    invoke_void(*converted_alpha_texture,
+                "javax/microedition/m3g/Texture2D", "setBlending", "(I)V",
+                std::span<const phoneme::vm::Value>(
+                    &replace_texture_function, 1U));
+    const std::array<phoneme::vm::Value, 2> converted_texture_arguments {
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_reference(*converted_alpha_texture),
+    };
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                converted_texture_arguments);
+    require(render_textured() == 0x4D204060U,
+            "mutable LCDUI RGB converts to M3G ALPHA by luminance");
+
+    invoke_void(*render_appearance,
+                "javax/microedition/m3g/Appearance", "setTexture",
+                "(ILjavax/microedition/m3g/Texture2D;)V",
+                texture_unit_zero_arguments);
+    invoke_void(*render_vertex_buffer,
+                "javax/microedition/m3g/VertexBuffer", "setDefaultColor",
+                "(I)V", std::span<const phoneme::vm::Value>(
+                    &opaque_vertex_color, 1U));
 
     const phoneme::vm::Value add_texture_function =
         phoneme::vm::Value::from_int(224);
@@ -5250,7 +5667,7 @@ void test_machine_m3g() {
                 picked_texture_t->completed_normally() &&
                 picked_texture_t->return_value.has_value() &&
                 std::abs(picked_texture_t->return_value->as_float()
-                    .value_or(0.0F) - 0.75F) < 0.001F,
+                    .value_or(0.0F) - 0.25F) < 0.001F,
             "RayIntersection reports all texture coordinate units");
     auto picked_ray = float_array(
         {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F});
@@ -6353,6 +6770,11 @@ int main(int argc, char** argv) {
         std::cout << "Standalone VM invocation tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "jit") {
+        test_baseline_jit(fixture_jar);
+        std::cout << "Standalone baseline JIT tests passed\n";
+        return 0;
+    }
     if (filter != nullptr &&
         std::string_view(filter) == "vm-dispatch") {
         test_machine_dispatch(fixture_jar);
@@ -6443,6 +6865,12 @@ int main(int argc, char** argv) {
         std::cout << "Standalone runtime failure isolation tests passed\n";
         return 0;
     }
+    if (filter != nullptr &&
+        std::string_view(filter) == "runtime-lcdui") {
+        test_runtime_lcdui(fixture_jar);
+        std::cout << "Standalone runtime LCDUI tests passed\n";
+        return 0;
+    }
     test_archive_and_classfile(fixture_jar);
     test_suite_permissions(fixture_jar);
     test_security_policy(fixture_jar);
@@ -6456,6 +6884,7 @@ int main(int argc, char** argv) {
     test_type_state_verifier();
     test_monitor_table();
     test_integer_interpreter();
+    test_baseline_jit(fixture_jar);
     test_machine_heap_memory_reporting();
     test_machine_invocation(fixture_jar);
     test_machine_exceptions(fixture_jar);

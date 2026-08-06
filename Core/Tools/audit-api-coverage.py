@@ -28,6 +28,15 @@ SCRIPT_PATH = pathlib.Path(__file__).resolve()
 CORE_ROOT = SCRIPT_PATH.parent.parent
 PROJECT_ROOT = CORE_ROOT.parent
 DEFAULT_JAR_ROOT = PROJECT_ROOT / "jar_test"
+# These symbols are constant-pool bootstrap metadata for Java 8 lambdas. The
+# interpreter resolves LambdaMetafactory call sites directly; applications do
+# not link or invoke these classes as ordinary runtime APIs.
+VM_BOOTSTRAP_METADATA_CLASSES = {
+    "java/lang/invoke/LambdaMetafactory",
+    "java/lang/invoke/MethodHandles",
+    "java/lang/invoke/MethodHandles$Lookup",
+}
+
 API_PREFIXES = (
     "java/",
     "javax/",
@@ -389,7 +398,8 @@ def main() -> int:
             scan_errors.append({"jar": target.relative_path, "error": error})
             continue
         for name, count in classes.items():
-            if not is_api_reference(name):
+            if (not is_api_reference(name) or
+                    name in VM_BOOTSTRAP_METADATA_CLASSES):
                 continue
             destination = (
                 app_provided_demands if name in provided else external_class_demands
@@ -397,7 +407,8 @@ def main() -> int:
             destination[name].add(count, target.relative_path)
         for reference, count in methods.items():
             owner = reference.partition(".")[0]
-            if is_api_reference(owner) and owner not in provided:
+            if (is_api_reference(owner) and owner not in provided and
+                    owner not in VM_BOOTSTRAP_METADATA_CLASSES):
                 external_method_demands[reference].add(count, target.relative_path)
         for reference, count in fields.items():
             owner = reference.partition(".")[0]

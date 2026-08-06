@@ -1211,6 +1211,54 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    func configureJIT(
+        enabled: Bool,
+        completion: @escaping (Result<PhoneMECAPI.JITStatus, Error>) -> Void
+    ) {
+        let context = runtimeContext
+        let fallbackAPI = api
+        let fallbackRuntime = runtime
+
+        runtimeQueue.async {
+            let activeAPI = context.api ?? fallbackAPI
+            let activeRuntime = context.runtime ?? fallbackRuntime
+            let result: Result<PhoneMECAPI.JITStatus, Error>
+
+            if let activeAPI, let activeRuntime {
+                let status = activeAPI.configureJIT(
+                    activeRuntime,
+                    enabled: enabled
+                )
+                result = status == 0
+                    ? .success(PhoneMECAPI.jitStatus)
+                    : .failure(activeAPI.failure(
+                        status: status,
+                        runtime: activeRuntime
+                    ))
+            } else {
+                // No VM exists yet. The preference is persisted by the caller
+                // and createRuntime() applies it to every subsequently created
+                // application VM.
+                result = .success(PhoneMECAPI.jitStatus)
+            }
+
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    func refreshJITStatus(
+        completion: @escaping (PhoneMECAPI.JITStatus) -> Void
+    ) {
+        // Re-enabling the current preference is intentional: the Core probes
+        // executable memory again and activates already-created VMs after an
+        // external JIT provider attaches to this process.
+        configureJIT(enabled: PhoneMECAPI.jitEnabledByDefault) { result in
+            completion((try? result.get()) ?? PhoneMECAPI.jitStatus)
+        }
+    }
+
     func setApplicationTranslation(
         gameID: UUID,
         enabled: Bool,

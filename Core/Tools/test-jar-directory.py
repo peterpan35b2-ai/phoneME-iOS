@@ -635,11 +635,11 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
                     timeout=120,
                 )
         except subprocess.TimeoutExpired:
-            return None, "PhoneME HTTP bridge build timed out after 120 seconds"
+            return None, "phoneME HTTP bridge build timed out after 120 seconds"
         if completed.returncode != 0 or not bridge_object.is_file():
             stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
             return None, (
-                "PhoneME HTTP bridge build failed: "
+                "phoneME HTTP bridge build failed: "
                 + compact_text(stderr, 2_000)
             )
 

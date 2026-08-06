@@ -28,6 +28,7 @@ void register_connection_classes(BuiltinClassRegistry& registry);
 void register_bluetooth_classes(BuiltinClassRegistry& registry);
 void register_util_classes(BuiltinClassRegistry& registry);
 void register_headless_compat_classes(BuiltinClassRegistry& registry);
+void register_jdk8_compat_classes(BuiltinClassRegistry& registry);
 void register_lcdui_classes(BuiltinClassRegistry& registry);
 void register_game_classes(BuiltinClassRegistry& registry);
 void register_m3g_classes(BuiltinClassRegistry& registry);

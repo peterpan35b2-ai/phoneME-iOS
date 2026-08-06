@@ -115,6 +115,40 @@ final class PhoneMECAPI: @unchecked Sendable {
         case error = 4
     }
 
+    enum JITStatus: Int32, Sendable {
+        case unavailable = 0
+        case ready = 1
+    }
+
+    static let jitPreferenceKey = "enableJIT"
+    static let trollStoreBuildInfoKey = "PhoneMETrollStoreJIT"
+
+    static var jitStatus: JITStatus {
+        JITStatus(rawValue: phoneme_jit_status()) ?? .unavailable
+    }
+
+    static var jitEnabledByDefault: Bool {
+        (UserDefaults.standard.object(forKey: jitPreferenceKey) as? Bool) ?? true
+    }
+
+    static var isTrollStoreJITBuild: Bool {
+        Bundle.main.object(forInfoDictionaryKey: trollStoreBuildInfoKey)
+            as? Bool ?? false
+    }
+
+    static var trollStoreJITURL: URL? {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = "apple-magnifier"
+        components.host = "enable-jit"
+        components.queryItems = [
+            URLQueryItem(name: "bundle-id", value: bundleIdentifier)
+        ]
+        return components.url
+    }
+
     enum PushBackgroundPolicy: Int32, Sendable {
         case foregroundOnly = 0
         case systemManaged = 1
@@ -181,6 +215,15 @@ final class PhoneMECAPI: @unchecked Sendable {
             phoneme_destroy(rawRuntime)
             return nil
         }
+
+        let jitResult = phoneme_configure_jit(
+            rawRuntime,
+            Self.jitEnabledByDefault ? 1 : 0
+        )
+        guard jitResult == 0 else {
+            phoneme_destroy(rawRuntime)
+            return nil
+        }
         return RuntimeHandle(rawValue: rawRuntime)
     }
 
@@ -234,6 +277,13 @@ final class PhoneMECAPI: @unchecked Sendable {
             appID,
             Int32(clamping: heapMegabytes)
         )
+    }
+
+    func configureJIT(
+        _ runtime: RuntimeHandle?,
+        enabled: Bool
+    ) -> Int32 {
+        phoneme_configure_jit(runtime?.rawValue, enabled ? 1 : 0)
     }
 
     func configureTranslation(

@@ -25,6 +25,7 @@
 #include "phoneme/runtime/RecordStoreRegistry.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
 #include "phoneme/translation/TranslationService.hpp"
+#include "phoneme/vm/BaselineJit.hpp"
 #include "phoneme/vm/CanvasBridge.hpp"
 #include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/Interpreter.hpp"
@@ -185,6 +186,14 @@ namespace phoneme::vm
         ObjectRef thread);
     void configure_frame_pacing(i32 frames_per_second,
                                 FramePacingMode mode) noexcept;
+    void configure_jit(bool enabled) noexcept { jit_.set_enabled(enabled); }
+    [[nodiscard]] bool jit_enabled() const noexcept { return jit_.enabled(); }
+    [[nodiscard]] JitAvailability jit_availability() const noexcept {
+      return jit_.availability();
+    }
+    [[nodiscard]] JitStatistics jit_statistics() const noexcept {
+      return jit_.statistics();
+    }
     void pace_frame_publication();
     void note_frame_pacing_boundary() noexcept;
     void break_frame_pacing_sequence() noexcept;
@@ -596,6 +605,7 @@ namespace phoneme::vm
     std::optional<Error> serial_callback_failure_;
     MethodId operand_resolution_method_id_ {};
     std::shared_ptr<const RuntimeMethod> operand_resolution_method_;
+    BaselineJit jit_;
   };
 
 } // namespace phoneme::vm

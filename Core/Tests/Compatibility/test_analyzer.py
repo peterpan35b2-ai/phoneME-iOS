@@ -81,6 +81,15 @@ class FailureTaxonomyTests(unittest.TestCase):
             "uncaught_exception", {failure["kind"] for failure in failures}
         )
 
+    def test_uncaught_worker_thread_exception_is_detected(self) -> None:
+        failures = ANALYZER.classify_failures(
+            "phoneME Java thread 6 terminated with uncaught "
+            "java/lang/ArrayIndexOutOfBoundsException at ad.c(String)V"
+        )
+        self.assertIn(
+            "uncaught_exception", {failure["kind"] for failure in failures}
+        )
+
 
 class ExpectationTests(unittest.TestCase):
     def test_requires_observable_milestones_and_frames(self) -> None:

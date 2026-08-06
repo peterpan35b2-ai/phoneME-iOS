@@ -3770,21 +3770,34 @@ void register_charset_natives(NativeMethodRegistry& registry) {
     add(registry, "java/nio/charset/StandardCharsets", "<clinit>", "()V",
         [](Machine& machine, std::span<const Value>)
             -> Result<std::optional<Value>> {
-            auto charset = machine.class_states().allocate_instance(
-                machine.heap(), "java/nio/charset/Charset");
-            if (!charset) return std::unexpected(charset.error());
-            auto name = create_string(machine, u"UTF-8");
-            if (!name) return std::unexpected(name.error());
-            auto named = set_reference_field(
-                machine, *charset, kCharsetNameField, *name);
-            if (!named) return std::unexpected(named.error());
-            auto field = machine.class_states().resolve_field(
-                "java/nio/charset/StandardCharsets", "UTF_8",
-                "Ljava/nio/charset/Charset;", true);
-            if (!field) return std::unexpected(field.error());
-            auto stored = machine.class_states().set_static_field(
-                *field, Value::from_reference(*charset));
-            if (!stored) return std::unexpected(stored.error());
+            const auto initialize = [&machine](
+                std::string_view field_name,
+                std::u16string canonical_name) -> Status {
+                auto charset = machine.class_states().allocate_instance(
+                    machine.heap(), "java/nio/charset/Charset");
+                if (!charset) return std::unexpected(charset.error());
+                auto name = create_string(machine, std::move(canonical_name));
+                if (!name) return std::unexpected(name.error());
+                auto named = set_reference_field(
+                    machine, *charset, kCharsetNameField, *name);
+                if (!named) return std::unexpected(named.error());
+                auto field = machine.class_states().resolve_field(
+                    "java/nio/charset/StandardCharsets",
+                    std::string(field_name),
+                    "Ljava/nio/charset/Charset;", true);
+                if (!field) return std::unexpected(field.error());
+                return machine.class_states().set_static_field(
+                    *field, Value::from_reference(*charset));
+            };
+
+            auto ascii = initialize("US_ASCII", u"US-ASCII");
+            if (!ascii) return std::unexpected(ascii.error());
+            auto latin1 = initialize("ISO_8859_1", u"ISO-8859-1");
+            if (!latin1) return std::unexpected(latin1.error());
+            auto utf8 = initialize("UTF_8", u"UTF-8");
+            if (!utf8) return std::unexpected(utf8.error());
+            auto utf16be = initialize("UTF_16BE", u"UTF-16BE");
+            if (!utf16be) return std::unexpected(utf16be.error());
             return std::optional<Value> {};
         });
 }

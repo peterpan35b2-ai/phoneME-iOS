@@ -133,6 +133,66 @@ Status NativeMethodRegistry::register_method(
     return {};
 }
 
+Status NativeMethodRegistry::register_alias(
+    std::string_view source_owner,
+    std::string_view source_name,
+    std::string_view source_descriptor,
+    std::string target_owner,
+    std::string target_name,
+    std::string target_descriptor) {
+    if (source_owner.empty() || source_name.empty() ||
+        source_descriptor.empty() || target_owner.empty() ||
+        target_name.empty() || target_descriptor.empty()) {
+        return fail(ErrorCode::invalid_argument,
+                    "native method alias registration is incomplete");
+    }
+
+    PerformanceCounters::record_metadata_key_construction();
+    const std::string source_key = key(source_owner, source_name,
+                                       source_descriptor);
+    const std::string target_key = key(target_owner, target_name,
+                                       target_descriptor);
+    std::scoped_lock lock(mutex_);
+    const auto source = ids_by_key_.find(source_key);
+    if (source == ids_by_key_.end()) {
+        return fail(ErrorCode::class_not_found,
+                    "native method alias source is not registered");
+    }
+    if (ids_by_key_.contains(target_key)) {
+        return fail(ErrorCode::invalid_state,
+                    "native method alias target is already registered");
+    }
+    const usize source_index =
+        static_cast<usize>(source->second.value - 1U);
+    if (source_index >= entries_.size()) {
+        return fail(ErrorCode::invalid_state,
+                    "native method alias source ID is invalid");
+    }
+    if (entries_.size() >= static_cast<usize>(
+            std::numeric_limits<u32>::max() - 1U)) {
+        return fail(ErrorCode::overflow,
+                    "native method ID space is exhausted");
+    }
+    const NativeMethodId method_id {
+        static_cast<u32>(entries_.size() + 1U),
+    };
+    entries_.push_back(Entry {
+        .signature = NativeMethodSignature {
+            .id = method_id,
+            .owner = std::move(target_owner),
+            .name = std::move(target_name),
+            .descriptor = std::move(target_descriptor),
+        },
+        .implementation = entries_[source_index].implementation,
+        .invocation_count = 0U,
+    });
+    ids_by_key_.emplace(target_key, method_id);
+    generation_ = generation_ == std::numeric_limits<u64>::max()
+        ? 1U
+        : generation_ + 1U;
+    return {};
+}
+
 NativeMethodId NativeMethodRegistry::resolve(
     std::string_view owner,
     std::string_view name,

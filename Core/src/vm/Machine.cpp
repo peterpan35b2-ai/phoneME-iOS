@@ -3638,6 +3638,41 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "invoke_instance receiver is not assignable to declared class");
     }
+    const auto lambda = lambda_bindings_.find(receiver.bits);
+    const bool lambda_descriptor_matches =
+        lambda != lambda_bindings_.end() &&
+        (lambda->second.sam_descriptor == descriptor ||
+         std::find(lambda->second.bridge_descriptors.begin(),
+                   lambda->second.bridge_descriptors.end(),
+                   descriptor) != lambda->second.bridge_descriptors.end());
+    if (lambda != lambda_bindings_.end() &&
+        lambda->second.interface_name == declared_class &&
+        lambda->second.sam_name == method_name &&
+        lambda_descriptor_matches)
+    {
+      std::optional<ObjectRef> constructor_receiver;
+      std::optional<NativeRootScope> constructor_receiver_root;
+      if (lambda->second.implementation_kind == 8U)
+      {
+        auto allocated = allocate_pinned_instance(
+            lambda->second.implementation.owner);
+        if (!allocated)
+          return std::unexpected(allocated.error());
+        constructor_receiver_root.emplace(std::move(*allocated));
+        auto reference = constructor_receiver_root->get();
+        if (!reference)
+          return std::unexpected(reference.error());
+        constructor_receiver = *reference;
+      }
+      auto invocation = prepare_lambda_invocation(receiver,
+                                                  lambda->second,
+                                                  arguments,
+                                                  constructor_receiver);
+      if (!invocation)
+        return std::unexpected(invocation.error());
+      return execute(std::move(*invocation), instruction_budget, budget_mode);
+    }
+
     Result<ResolvedMethod> resolved = method_name == "<init>"
                                           ? classes_.resolve_declared_method(declared_class,
                                                                              method_name,
@@ -5673,6 +5708,40 @@ namespace phoneme::vm
       return fail(ErrorCode::internal_error,
                   "VM invocation has no cached descriptor");
     }
+    if (invocation.method.runtime != nullptr &&
+        invocation.method.owner != nullptr &&
+        !invocation.return_override.has_value())
+    {
+      auto jitted = jit_.try_execute(
+          invocation.method.runtime->id,
+          *invocation.method.owner,
+          *invocation.method.method,
+          *invocation.descriptor,
+          invocation.arguments,
+          invocation.has_receiver,
+          instruction_budget);
+      if (!jitted)
+      {
+        auto released = release_synchronized_monitor(*root_monitor);
+        if (!released)
+          return std::unexpected(released.error());
+        return std::unexpected(jitted.error());
+      }
+      if (jitted->has_value())
+      {
+        const u64 jit_instructions =
+            static_cast<u64>((*jitted)->bytecode_instructions);
+        accounted_instructions = jit_instructions;
+        auto released = release_synchronized_monitor(*root_monitor);
+        if (!released)
+          return std::unexpected(released.error());
+        return ExecutionResult{
+            .return_value = (*jitted)->return_value,
+            .throwable = std::nullopt,
+            .executed_instructions = jit_instructions,
+        };
+      }
+    }
     auto root_frame = ExecutionFrame::make(std::move(invocation.method),
                                            invocation.descriptor->descriptor,
                                            invocation.arguments,
@@ -6720,57 +6789,6 @@ namespace phoneme::vm
             .bytecode_pc = opcode_pc,
             .live_bytecode_pc = &current_heap_access_pc,
         });
-      }
-      if (vm_trace_enabled() && opcode_pc == 0U &&
-          frame.owner().name() == "r" &&
-          frame.method().name == "a" &&
-          frame.method().descriptor == "(Lah;[I)V")
-      {
-        auto value = frame.local(2U);
-        if (value)
-        {
-          auto reference = value->as_reference();
-          if (reference && !reference->is_null())
-          {
-            auto command = heap_.element(*reference, 0U);
-            if (command)
-            {
-              auto command_id = command->as_int();
-              if (command_id && *command_id == 25)
-              {
-                auto length = heap_.array_length(*reference);
-                vm_trace("mansion-command", "command=25 length=%zu frames=%zu",
-                         length ? *length : 0U, frames.size());
-                if (length)
-                {
-                  for (usize index = 0U; index < *length; ++index)
-                  {
-                    auto element = heap_.element(*reference, index);
-                    i32 integer_value = 0;
-                    if (element)
-                    {
-                      auto integer = element->as_int();
-                      if (integer) integer_value = *integer;
-                    }
-                    vm_trace("mansion-command", "arg[%zu]=%d",
-                             index, integer_value);
-                  }
-                }
-                for (usize depth = 0U; depth < frames.size(); ++depth)
-                {
-                  const ExecutionFrame& trace_frame =
-                      frames[frames.size() - 1U - depth];
-                  vm_trace("mansion-command", "#%zu %s.%s%s pc=%zu",
-                           depth,
-                           trace_frame.owner().name().c_str(),
-                           trace_frame.method().name.c_str(),
-                           trace_frame.method().descriptor.c_str(),
-                           trace_frame.current_instruction_pc());
-                }
-              }
-            }
-          }
-        }
       }
       auto opcode_result = frame.read_opcode();
       if (!opcode_result)
@@ -9308,6 +9326,48 @@ namespace phoneme::vm
               return std::unexpected(pushed.error());
             break;
           }
+
+          if (nested->method.runtime != nullptr &&
+              nested->method.owner != nullptr &&
+              nested->descriptor != nullptr &&
+              !nested->return_override.has_value())
+          {
+            const u64 remaining_budget = instruction_budget - executed;
+            auto jitted = jit_.try_execute(
+                nested->method.runtime->id,
+                *nested->method.owner,
+                *nested->method.method,
+                *nested->descriptor,
+                nested->arguments,
+                nested->has_receiver,
+                remaining_budget);
+            if (!jitted)
+            {
+              auto released = release_synchronized_monitor(*nested_monitor);
+              if (!released)
+                return std::unexpected(released.error());
+              return std::unexpected(jitted.error());
+            }
+            if (jitted->has_value())
+            {
+              const u64 jit_instructions =
+                  static_cast<u64>((*jitted)->bytecode_instructions);
+              executed += jit_instructions;
+              accounted_instructions = executed;
+              auto released = release_synchronized_monitor(*nested_monitor);
+              if (!released)
+                return std::unexpected(released.error());
+              if (budget_mode == InstructionBudgetMode::progress_watchdog)
+                watchdog_instructions = 0U;
+              if ((*jitted)->return_value.has_value())
+              {
+                auto pushed = frame.push(*(*jitted)->return_value);
+                if (!pushed)
+                  return std::unexpected(pushed.error());
+              }
+              break;
+            }
+          }
         }
         if (nested_is_native)
         {
@@ -9324,7 +9384,7 @@ namespace phoneme::vm
                     std::string_view::npos)
             {
               std::fprintf(stderr,
-                           "[PhoneMENetworkCaller] caller=%s.%s%s bci=%zu "
+                           "[phoneMENetworkCaller] caller=%s.%s%s bci=%zu "
                            "target=%s.%s%s\n",
                            frame.owner().name().c_str(),
                            frame.method().name.c_str(),

@@ -1,7 +1,9 @@
 import SwiftUI
 #if os(iOS)
 import UIKit
+#endif
 
+#if os(iOS)
 @MainActor
 final class PhoneMEAppDelegate: NSObject, UIApplicationDelegate {
     static var supportedOrientationMask: UIInterfaceOrientationMask = .allButUpsideDown
@@ -52,6 +54,9 @@ struct PhoneMEApp: App {
         _backgroundExecution = StateObject(
             wrappedValue: BackgroundExecutionController()
         )
+#if os(iOS)
+        PhoneMEFrameRendererPrewarmer.prewarm()
+#endif
     }
 
     var body: some Scene {
@@ -73,6 +78,8 @@ struct PhoneMEApp: App {
                 .onAppear {
                     updateRunningApplicationCount()
                     updateLifecycle(for: scenePhase)
+                    session.refreshJITStatus()
+                    workspaceRuntime.refreshJITStatus()
 #if DEBUG
                     debugLaunchIfRequested()
 #endif
@@ -95,6 +102,7 @@ struct PhoneMEApp: App {
                 .environmentObject(library)
                 .environmentObject(profiles)
                 .environmentObject(profileTemplates)
+                .environmentObject(workspaceRuntime)
                 .environmentObject(session)
                 .environmentObject(backgroundExecution)
                 .environment(
@@ -289,11 +297,11 @@ struct PhoneMEApp: App {
                     "visibleChoices=\(visibleChoices)"
                 ].joined(separator: "\n")
                 try report.write(to: reportURL, atomically: true, encoding: .utf8)
-                print("[PhoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
+                print("[phoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
             } catch {
                 let report = "source=\(sourceURL.lastPathComponent)\nsetupError=\(String(describing: error))\nlocalized=\(error.localizedDescription)"
                 try? report.write(to: reportURL, atomically: true, encoding: .utf8)
-                print("[PhoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
+                print("[phoneMEDebug] \(report.replacingOccurrences(of: "\n", with: " "))")
             }
         }
     }
@@ -310,6 +318,8 @@ struct PhoneMEApp: App {
         switch phase {
         case .active:
             backgroundExecution.setApplicationPhase(.active)
+            session.refreshJITStatus()
+            workspaceRuntime.refreshJITStatus()
             session.resume()
             workspaceRuntime.resumeVisibleWorkspaces()
         case .inactive:

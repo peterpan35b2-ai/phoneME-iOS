@@ -280,6 +280,19 @@ int32_t phoneme_configure_app_heap(PhoneMERuntimeRef runtime,
             phoneme::AppId {app_id}, heap_megabytes));
 }
 
+int32_t phoneme_configure_jit(PhoneMERuntimeRef runtime, int32_t enabled) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    return status_code(instance, instance->configure_jit(enabled != 0));
+}
+
+int32_t phoneme_jit_status(void) {
+    return static_cast<int32_t>(
+        phoneme::vm::BaselineJit::probe_platform());
+}
+
 int32_t phoneme_configure_translation(PhoneMERuntimeRef runtime,
                                       int32_t enabled,
                                       const char* source_language,

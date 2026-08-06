@@ -116,6 +116,15 @@ public final class FileOps {
                 || !directory.isDirectory()) {
             return 0;
         }
+        File nested = new File("jdk8-file/nested/leaf");
+        if (!nested.mkdirs() || !nested.isDirectory()) {
+            return 0;
+        }
+        File nestedParent = nested.getParentFile();
+        if (nestedParent == null || !nestedParent.isDirectory()
+                || !"jdk8-file/nested".equals(nestedParent.getPath())) {
+            return 0;
+        }
 
         File file = new File("jdk8-file/data.bin");
         FileOutputStream output = new FileOutputStream(file);
@@ -154,7 +163,8 @@ public final class FileOps {
         }
         connection.close();
 
-        if (!renamed.delete() || !directory.delete()) {
+        if (!renamed.delete() || !nested.delete()
+                || !nestedParent.delete() || !directory.delete()) {
             return 0;
         }
         return 1;

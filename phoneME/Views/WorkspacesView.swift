@@ -204,6 +204,7 @@ struct WorkspaceDetailView: View {
     @State private var replacingPanelID: UUID?
     @State private var showResetLayoutConfirmation = false
     @State private var panelViewportSize = CGSize.zero
+    @State private var focusedPanelScrollTask: Task<Void, Never>?
     @State private var errorMessage: String?
 
     private var workspace: EmulatorWorkspace? {
@@ -213,6 +214,15 @@ struct WorkspaceDetailView: View {
     private var focusedPanel: EmulatorWorkspacePanel? {
         guard let focusedPanelID else { return nil }
         return workspace?.panels.first { $0.id == focusedPanelID }
+    }
+
+    private var zoomedPanelID: UUID? {
+        guard !isEditingLayout,
+              let focusedPanelID,
+              runtimeStore.isRunning(panelID: focusedPanelID) else {
+            return nil
+        }
+        return focusedPanelID
     }
 
     var body: some View {
@@ -388,6 +398,8 @@ struct WorkspaceDetailView: View {
             runtimeStore.activateWorkspace(workspaceID)
         }
         .onDisappear {
+            focusedPanelScrollTask?.cancel()
+            focusedPanelScrollTask = nil
             runtimeStore.deactivateWorkspace(workspaceID)
         }
     }
@@ -449,6 +461,9 @@ struct WorkspaceDetailView: View {
                             )
                         } else {
                             ForEach(workspace.panels) { panel in
+                                let isRunning = runtimeStore.isRunning(
+                                    panelID: panel.id
+                                )
                                 WorkspacePanelCard(
                                     panel: panel,
                                     game: game(for: panel),
@@ -459,11 +474,10 @@ struct WorkspaceDetailView: View {
                                         height: viewportSize.height
                                     ),
                                     isFocused: focusedPanelID == panel.id,
-                                    isRunning: runtimeStore.isRunning(
-                                        panelID: panel.id
-                                    ),
+                                    isRunning: isRunning,
                                     isEditingLayout: isEditingLayout,
                                     isZoomed: focusedPanelID == panel.id
+                                        && isRunning
                                         && !isEditingLayout,
                                     onFocus: {
                                         focusedPanelID = panel.id
@@ -519,23 +533,18 @@ struct WorkspaceDetailView: View {
                     .contentShape(Rectangle())
                 }
                 .background(Color.black)
-                .onChange(of: focusedPanelID) { panelID in
-                    guard !isEditingLayout, let panelID else { return }
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        scrollProxy.scrollTo(panelID, anchor: .center)
-                    }
+                .onChange(of: zoomedPanelID) { panelID in
+                    revealZoomedPanel(panelID, using: scrollProxy)
                 }
-                .onChange(of: keyboardIsVisible) { visible in
-                    guard visible, let focusedPanelID else { return }
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        scrollProxy.scrollTo(focusedPanelID, anchor: .center)
-                    }
+                .onChange(of: keyboardIsVisible) { _ in
+                    revealZoomedPanel(zoomedPanelID, using: scrollProxy)
                 }
                 .onAppear {
                     updatePanelViewportSize(availablePanelSize)
                 }
                 .onChange(of: availablePanelSize) { size in
                     updatePanelViewportSize(size)
+                    revealZoomedPanel(zoomedPanelID, using: scrollProxy)
                 }
             }
         }
@@ -563,6 +572,38 @@ struct WorkspaceDetailView: View {
             return
         }
         panelViewportSize = size
+    }
+
+    private func revealZoomedPanel(
+        _ panelID: UUID?,
+        using scrollProxy: ScrollViewProxy
+    ) {
+        focusedPanelScrollTask?.cancel()
+        focusedPanelScrollTask = nil
+
+        guard let panelID else { return }
+        focusedPanelScrollTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  zoomedPanelID == panelID else {
+                return
+            }
+
+            withAnimation(.easeInOut(duration: 0.22)) {
+                scrollProxy.scrollTo(panelID, anchor: .center)
+            }
+
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard !Task.isCancelled,
+                  zoomedPanelID == panelID else {
+                return
+            }
+
+            withAnimation(.easeOut(duration: 0.12)) {
+                scrollProxy.scrollTo(panelID, anchor: .center)
+            }
+            focusedPanelScrollTask = nil
+        }
     }
 
     private var hiddenTabBarContentHeight: CGFloat {
@@ -1625,10 +1666,10 @@ private struct WorkspacePanelSettingsView: View {
             Section {
                 Picker("Resolution", selection: $selectedPresetID) {
                     ForEach(WorkspaceResolutionPreset.all) { preset in
-                        Label(preset.title, systemImage: "rectangle")
+                        Text(preset.title)
                             .tag(preset.id)
                     }
-                    Label("Custom", systemImage: "slider.horizontal.3")
+                    Text("Custom")
                         .tag("custom")
                 }
                 .onChange(of: selectedPresetID) { presetID in
@@ -1664,14 +1705,12 @@ private struct WorkspacePanelSettingsView: View {
 
                 Picker("Scale", selection: $profile.scaleType) {
                     ForEach(GameProfile.ScaleType.allCases) { type in
-                        Label(type.title, systemImage: type.systemImage)
+                        Text(type.title)
                             .tag(type)
                     }
                 }
             } header: {
                 Text("Display")
-            } footer: {
-                Text("Open Screen options, then choose Display Settings. Applying changes restarts only this screen.")
             }
 
             Section("Performance") {
@@ -1712,7 +1751,7 @@ private struct WorkspacePanelSettingsView: View {
                             $0 != .custom
                         }
                     ) { type in
-                        Label(type.title, systemImage: type.systemImage)
+                        Text(type.title)
                             .tag(type)
                     }
                 }

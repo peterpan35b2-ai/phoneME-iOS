@@ -55,7 +55,7 @@ if ! version_is_supported "$IOS_DEPLOYMENT_TARGET"; then
   exit 2
 fi
 
-for command in cmp find sort shasum xcrun awk rg; do
+for command in cmp find sort shasum xcrun awk rg cat mv; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required build command not found: $command" >&2
     exit 1
@@ -106,6 +106,19 @@ OBJECT_LIST="$BUILD_ROOT/archive-members.txt"
     shasum -a 256 "$path"
   done < "$SOURCE_LIST"
 ) > "$SOURCE_HASHES"
+SOURCE_TREE_HASH="$(shasum -a 256 "$SOURCE_HASHES" | awk '{print $1}')"
+PREVIOUS_SOURCE_TREE_HASH=""
+HEADERS_UNCHANGED=false
+if [[ -f "$FINAL_SOURCE_HASHES" ]]; then
+  PREVIOUS_SOURCE_TREE_HASH="$(shasum -a 256 "$FINAL_SOURCE_HASHES" | awk '{print $1}')"
+  CURRENT_HEADER_HASHES="$BUILD_ROOT/header-sha256.txt"
+  PREVIOUS_HEADER_HASHES="$BUILD_ROOT/header-sha256-previous.txt"
+  awk '$2 ~ /\.(h|hpp)$/' "$SOURCE_HASHES" > "$CURRENT_HEADER_HASHES"
+  awk '$2 ~ /\.(h|hpp)$/' "$FINAL_SOURCE_HASHES" > "$PREVIOUS_HEADER_HASHES"
+  if cmp -s "$CURRENT_HEADER_HASHES" "$PREVIOUS_HEADER_HASHES"; then
+    HEADERS_UNCHANGED=true
+  fi
+fi
 
 COMMON_FLAGS=(
   -std=c++23
@@ -136,18 +149,92 @@ COMMON_FLAGS=(
 )
 
 : > "$BUILD_LOG"
-OBJECTS=()
-while IFS= read -r source; do
-  relative="${source#src/}"
-  object="$OBJECT_ROOT/${relative//\//_}"
+BUILD_JOBS="${PHONEME_BUILD_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')}"
+case "$BUILD_JOBS" in
+  ''|*[!0-9]*|0)
+    echo "PHONEME_BUILD_JOBS must be a positive integer." >&2
+    exit 2
+    ;;
+esac
+# Avoid excessive peak memory on machines with many logical cores while still
+# reducing a clean device build from several minutes to well below the Xcode
+# command timeout.
+if (( BUILD_JOBS > 8 )); then
+  BUILD_JOBS=8
+fi
+
+compile_source() {
+  local source="$1"
+  local relative="${source#src/}"
+  local object="$OBJECT_ROOT/${relative//\//_}"
   object="${object%.cpp}.o"
+  local marker="$object.source-sha256"
+
+  if [[ -f "$object" && -f "$marker" ]]; then
+    local marker_hash
+    marker_hash="$(cat "$marker")"
+    if [[ "$marker_hash" == "$SOURCE_TREE_HASH" ]]; then
+      printf 'CACHED %s\n' "$source" | tee -a "$BUILD_LOG"
+      return 0
+    fi
+
+    # A previous complete build can be reused across .cpp-only changes. A
+    # header change invalidates every object; otherwise compare this source's
+    # old and new hashes before promoting its marker to the new tree hash.
+    if [[ "$HEADERS_UNCHANGED" == true &&
+          -n "$PREVIOUS_SOURCE_TREE_HASH" &&
+          "$marker_hash" == "$PREVIOUS_SOURCE_TREE_HASH" ]]; then
+      local current_source_hash
+      local previous_source_hash
+      current_source_hash="$(awk -v path="$source" '$2 == path { print $1; exit }' "$SOURCE_HASHES")"
+      previous_source_hash="$(awk -v path="$source" '$2 == path { print $1; exit }' "$FINAL_SOURCE_HASHES")"
+      if [[ -n "$current_source_hash" &&
+            "$current_source_hash" == "$previous_source_hash" ]]; then
+        printf '%s\n' "$SOURCE_TREE_HASH" > "$marker.tmp"
+        mv "$marker.tmp" "$marker"
+        printf 'CACHED %s\n' "$source" | tee -a "$BUILD_LOG"
+        return 0
+      fi
+    fi
+  fi
+
   printf 'CXX %s\n' "$source" | tee -a "$BUILD_LOG"
   "$CXX" "${COMMON_FLAGS[@]}" \
     -c "$CORE_ROOT/$source" \
     -o "$object" \
     2>&1 | tee -a "$BUILD_LOG"
+  printf '%s\n' "$SOURCE_TREE_HASH" > "$marker.tmp"
+  mv "$marker.tmp" "$marker"
+}
+
+OBJECTS=()
+PENDING_PIDS=()
+COMPILE_STATUS=0
+while IFS= read -r source; do
+  relative="${source#src/}"
+  object="$OBJECT_ROOT/${relative//\//_}"
+  object="${object%.cpp}.o"
   OBJECTS+=("$object")
+
+  compile_source "$source" &
+  PENDING_PIDS+=("$!")
+  if (( ${#PENDING_PIDS[@]} >= BUILD_JOBS )); then
+    if ! wait "${PENDING_PIDS[0]}"; then
+      COMPILE_STATUS=1
+    fi
+    PENDING_PIDS=("${PENDING_PIDS[@]:1}")
+  fi
 done < <(cd "$CORE_ROOT" && find src -type f -name '*.cpp' -print | LC_ALL=C sort)
+
+for pid in "${PENDING_PIDS[@]}"; do
+  if ! wait "$pid"; then
+    COMPILE_STATUS=1
+  fi
+done
+if (( COMPILE_STATUS != 0 )); then
+  echo "phoneME Core compilation failed; see $BUILD_LOG" >&2
+  exit "$COMPILE_STATUS"
+fi
 
 (
   cd "$CORE_ROOT"

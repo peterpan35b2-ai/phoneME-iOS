@@ -43,7 +43,7 @@ inline void vm_trace(const char* category,
     if (!vm_trace_enabled()) return;
     std::scoped_lock lock(vm_trace_output_mutex());
     std::fprintf(stderr,
-                 "[PhoneMETrace][%s][%llu us][host=%llx] ",
+                 "[phoneMETrace][%s][%llu us][host=%llx] ",
                  category,
                  vm_trace_elapsed_microseconds(),
                  vm_trace_host_thread());

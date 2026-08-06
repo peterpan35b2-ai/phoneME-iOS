@@ -860,7 +860,13 @@ Result<SchedulerWaitResult> Scheduler::sleep_current(
                     ? target_interval - active_time
                     : std::chrono::nanoseconds::zero();
                 if (tls_frame_pacing_streak_ >= kOverrideActivationStreak) {
-                    effective_duration = target_sleep;
+                    // Loop override may accelerate a slower self-paced game,
+                    // but it must never lengthen the MIDlet's own sleep. A
+                    // loader that flushes progress then sleeps for 1-2 ms is
+                    // not asking the emulator to cap that publication at the
+                    // configured FPS; stretching it here serializes asset
+                    // loading and was the root cause of per-game pacing hacks.
+                    effective_duration = std::min(duration, target_sleep);
                 }
             }
         } else {

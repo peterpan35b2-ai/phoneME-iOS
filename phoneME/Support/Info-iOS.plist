@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>J2ME Loader</string>
+    <string>phoneME</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -88,11 +88,11 @@
     </array>
 
     <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>Allow J2ME Loader to save game screenshots to your photo library.</string>
+    <string>Allow phoneME to save game screenshots to your photo library.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>J2ME Loader uses low-accuracy location updates only to keep active games and their network connections running when the app is in the background.</string>
+    <string>phoneME uses low-accuracy location updates only to keep active games and their network connections running when the app is in the background.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-    <string>Allow background location access so J2ME Loader can keep active games and their network connections running while the app is not on screen.</string>
+    <string>Allow background location access so phoneME can keep active games and their network connections running while the app is not on screen.</string>
     <key>NSLocationDefaultAccuracyReduced</key>
     <true/>
 
@@ -123,7 +123,7 @@
             <key>NSUbiquitousContainerIsDocumentScopePublic</key>
             <true/>
             <key>NSUbiquitousContainerName</key>
-            <string>J2ME Loader</string>
+            <string>phoneME</string>
             <key>NSUbiquitousContainerSupportedFolderLevels</key>
             <string>Any</string>
         </dict>

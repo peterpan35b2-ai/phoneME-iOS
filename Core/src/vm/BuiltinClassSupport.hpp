@@ -76,6 +76,7 @@ using ClassPtr = std::shared_ptr<const classfile::ClassFile>;
         builder_method("length", "()I"),
         builder_method("capacity", "()I"),
         builder_method("charAt", "(I)C"),
+        builder_method("subSequence", "(II)Ljava/lang/CharSequence;"),
         builder_method("setCharAt", "(IC)V"),
         builder_method("getChars", "(II[CI)V"),
         builder_method("ensureCapacity", "(I)V"),

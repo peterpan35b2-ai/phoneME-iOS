@@ -175,6 +175,7 @@ using namespace builtin;
             method(kPublic | kStatic, "equals",
                    "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
             method(kPublic | kStatic, "hashCode", "(Ljava/lang/Object;)I"),
+            method(kPublic | kStatic, "hash", "([Ljava/lang/Object;)I"),
             method(kPublic | kStatic, "toString",
                    "(Ljava/lang/Object;)Ljava/lang/String;"),
             method(kPublic | kStatic, "toString",
@@ -290,10 +291,66 @@ using namespace builtin;
             method(kPublic, "toArray",
                    "([Ljava/lang/Object;)[Ljava/lang/Object;"),
             method(kPublic, "sort", "(Ljava/util/Comparator;)V"),
+            method(kPublic, "stream", "()Ljava/util/stream/Stream;"),
             method(kPublic, "addAll", "(Ljava/util/Collection;)Z"),
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
         }, {"java/util/List"});
+    }
+    if (name == "java/util/ArrayDeque") {
+        return make_class("java/util/ArrayDeque", "java/lang/Object", kOrdinary, {
+            field(kPrivate, "elements", "[Ljava/lang/Object;"),
+            field(kPrivate, "size", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic, "<init>", "(Ljava/util/Collection;)V"),
+            method(kPublic, "addFirst", "(Ljava/lang/Object;)V"),
+            method(kPublic, "addLast", "(Ljava/lang/Object;)V"),
+            method(kPublic, "offerFirst", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "offerLast", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "removeFirst", "()Ljava/lang/Object;"),
+            method(kPublic, "removeLast", "()Ljava/lang/Object;"),
+            method(kPublic, "pollFirst", "()Ljava/lang/Object;"),
+            method(kPublic, "pollLast", "()Ljava/lang/Object;"),
+            method(kPublic, "getFirst", "()Ljava/lang/Object;"),
+            method(kPublic, "getLast", "()Ljava/lang/Object;"),
+            method(kPublic, "peekFirst", "()Ljava/lang/Object;"),
+            method(kPublic, "peekLast", "()Ljava/lang/Object;"),
+            method(kPublic, "removeFirstOccurrence", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "removeLastOccurrence", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "add", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "offer", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "remove", "()Ljava/lang/Object;"),
+            method(kPublic, "poll", "()Ljava/lang/Object;"),
+            method(kPublic, "element", "()Ljava/lang/Object;"),
+            method(kPublic, "peek", "()Ljava/lang/Object;"),
+            method(kPublic, "push", "(Ljava/lang/Object;)V"),
+            method(kPublic, "pop", "()Ljava/lang/Object;"),
+            method(kPublic, "size", "()I"),
+            method(kPublic, "isEmpty", "()Z"),
+            method(kPublic, "contains", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "remove", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "clear", "()V"),
+            method(kPublic, "iterator", "()Ljava/util/Iterator;"),
+            method(kPublic, "descendingIterator", "()Ljava/util/Iterator;"),
+            method(kPublic, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic, "toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;"),
+            method(kPublic, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic, "clone", "()Ljava/util/ArrayDeque;"),
+        }, {"java/util/Deque", "java/lang/Cloneable", "java/io/Serializable"});
+    }
+    if (name == "java/util/ArrayDequeIterator") {
+        return make_class("java/util/ArrayDequeIterator", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate, "values", "[Ljava/lang/Object;"),
+            field(kPrivate, "index", "I"),
+            field(kPrivate, "size", "I"),
+        }, {
+            method(kPublic, "hasNext", "()Z"),
+            method(kPublic, "next", "()Ljava/lang/Object;"),
+            method(kPublic, "remove", "()V"),
+        }, {"java/util/Iterator"});
     }
     if (name == "java/time/LocalTime") {
         return make_class("java/time/LocalTime", "java/lang/Object",
@@ -402,6 +459,23 @@ using namespace builtin;
             method(kPublic, "nextBoolean", "()Z"),
             method(kPublic, "nextFloat", "()F"),
             method(kPublic, "nextDouble", "()D"),
+        });
+    }
+    if (name == "java/util/concurrent/ThreadLocalRandom") {
+        return make_class("java/util/concurrent/ThreadLocalRandom",
+                          "java/util/Random", kOrdinary | kFinal, {
+            field(kPrivate | kStatic | kFinal, "INSTANCE",
+                  "Ljava/util/concurrent/ThreadLocalRandom;"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kStatic, "<clinit>", "()V"),
+            method(kPublic | kStatic, "current",
+                   "()Ljava/util/concurrent/ThreadLocalRandom;"),
+            method(kPublic, "nextInt", "(II)I"),
+            method(kPublic, "nextLong", "(J)J"),
+            method(kPublic, "nextLong", "(JJ)J"),
+            method(kPublic, "nextDouble", "(D)D"),
+            method(kPublic, "nextDouble", "(DD)D"),
         });
     }
 

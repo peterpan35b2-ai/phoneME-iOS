@@ -183,4 +183,4 @@ For every important compatibility bug, add a minimized source fixture under `fix
 6. Enable the entry only after the runner adapter can produce those observables.
 7. When a failure is found, create a minimized fixture and link its ID in the bug report.
 
-Do not modify a game JAR to hide a Core failure. Any optional compatibility patch must be explicit, separately controlled, and documented as a compatibility rule rather than silently changing the original corpus artifact.
+Do not modify a game JAR to hide a Core failure. The Core runtime must not branch on a MIDlet title, vendor, main class, file name, JAR hash, or class hash. First reduce the failure to a fixture: fix emulator defects with a specification-level rule that applies to every MIDlet; treat defects in modified or localized game bytecode as game repairs outside the VM. Any optional compatibility patch must be explicit, separately controlled, and documented rather than silently changing the original corpus artifact.

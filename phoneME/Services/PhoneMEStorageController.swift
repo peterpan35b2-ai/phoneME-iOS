@@ -115,9 +115,9 @@ final class PhoneMEStorageController: ObservableObject {
     var locationDescription: String {
         switch activeLocation {
         case .local:
-            return L10n.string("Files › On My iPhone › J2ME Loader › phoneME")
+            return L10n.string("Files › On My iPhone › phoneME › phoneME")
         case .iCloud:
-            return L10n.string("Files › iCloud Drive › J2ME Loader › phoneME")
+            return L10n.string("Files › iCloud Drive › phoneME › phoneME")
         }
     }
 

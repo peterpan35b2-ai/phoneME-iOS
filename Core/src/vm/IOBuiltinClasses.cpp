@@ -383,7 +383,13 @@ using namespace builtin;
         return make_class("java/nio/charset/StandardCharsets",
                           "java/lang/Object", kOrdinary | kFinal,
                           {
+                              field(kPublic | kStatic | kFinal, "US_ASCII",
+                                    "Ljava/nio/charset/Charset;"),
+                              field(kPublic | kStatic | kFinal, "ISO_8859_1",
+                                    "Ljava/nio/charset/Charset;"),
                               field(kPublic | kStatic | kFinal, "UTF_8",
+                                    "Ljava/nio/charset/Charset;"),
+                              field(kPublic | kStatic | kFinal, "UTF_16BE",
                                     "Ljava/nio/charset/Charset;"),
                           }, {
                               method(kPrivate, "<init>", "()V"),

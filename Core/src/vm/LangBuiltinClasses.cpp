@@ -42,8 +42,22 @@ using namespace builtin;
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "getResourceAsStream",
                    "(Ljava/lang/String;)Ljava/io/InputStream;"),
+            method(kPublic, "getResource",
+                   "(Ljava/lang/String;)Ljava/net/URL;"),
+            method(kPublic, "getDeclaredField",
+                   "(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
             method(kPublic | kStatic, "forName",
                    "(Ljava/lang/String;)Ljava/lang/Class;"),
+        });
+    }
+    if (name == "java/lang/CharSequence") {
+        return make_class("java/lang/CharSequence", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "length", "()I"),
+            method(kPublic | kAbstract, "charAt", "(I)C"),
+            method(kPublic | kAbstract, "subSequence",
+                   "(II)Ljava/lang/CharSequence;"),
+            method(kPublic | kAbstract, "toString", "()Ljava/lang/String;"),
         });
     }
     if (name == "java/lang/String") {
@@ -88,6 +102,8 @@ using namespace builtin;
             method(kPublic, "lastIndexOf", "(Ljava/lang/String;I)I"),
             method(kPublic, "substring", "(I)Ljava/lang/String;"),
             method(kPublic, "substring", "(II)Ljava/lang/String;"),
+            method(kPublic, "subSequence",
+                   "(II)Ljava/lang/CharSequence;"),
             method(kPublic, "concat", "(Ljava/lang/String;)Ljava/lang/String;"),
             method(kPublic, "contains", "(Ljava/lang/CharSequence;)Z"),
             method(kPublic, "replace", "(CC)Ljava/lang/String;"),
@@ -122,19 +138,22 @@ using namespace builtin;
             method(kPublic | kStatic, "valueOf", "(J)Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(F)Ljava/lang/String;"),
             method(kPublic | kStatic, "valueOf", "(D)Ljava/lang/String;"),
-        }, {"java/lang/Comparable", "java/io/Serializable"});
+        }, {"java/lang/Comparable", "java/io/Serializable",
+             "java/lang/CharSequence"});
     }
     if (name == "java/lang/StringBuilder") {
         return make_class("java/lang/StringBuilder", "java/lang/Object",
                           kOrdinary | kFinal, {
             field(kPrivate, "capacity", "I"),
-        }, text_builder_methods("java/lang/StringBuilder", false));
+        }, text_builder_methods("java/lang/StringBuilder", false),
+        {"java/lang/CharSequence"});
     }
     if (name == "java/lang/StringBuffer") {
         return make_class("java/lang/StringBuffer", "java/lang/Object",
                           kOrdinary | kFinal, {
             field(kPrivate, "capacity", "I"),
-        }, text_builder_methods("java/lang/StringBuffer", true));
+        }, text_builder_methods("java/lang/StringBuffer", true),
+        {"java/lang/CharSequence"});
     }
     if (name == "java/lang/System") {
         return make_class("java/lang/System", "java/lang/Object",
@@ -344,6 +363,8 @@ using namespace builtin;
             method(kPublic | kStatic, "toHexString", "(I)Ljava/lang/String;"),
             method(kPublic | kStatic, "toOctalString", "(I)Ljava/lang/String;"),
             method(kPublic | kStatic, "toBinaryString", "(I)Ljava/lang/String;"),
+            method(kPublic | kStatic, "compare", "(II)I"),
+            method(kPublic | kStatic, "sum", "(II)I"),
         });
     }
     if (name == "java/lang/Long") {
@@ -368,6 +389,8 @@ using namespace builtin;
             method(kPublic | kStatic, "toHexString", "(J)Ljava/lang/String;"),
             method(kPublic | kStatic, "toOctalString", "(J)Ljava/lang/String;"),
             method(kPublic | kStatic, "toBinaryString", "(J)Ljava/lang/String;"),
+            method(kPublic | kStatic, "sum", "(JJ)J"),
+            method(kPublic | kStatic, "remainderUnsigned", "(JJ)J"),
         });
     }
     if (name == "java/lang/Character") {

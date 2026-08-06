@@ -301,7 +301,7 @@ struct LibraryView: View {
             .navigationTitle("Library")
 #else
         librarySurface
-            .navigationTitle("J2ME Loader")
+            .navigationTitle("phoneME")
 #endif
     }
 

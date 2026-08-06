@@ -53,8 +53,46 @@ using namespace builtin;
             method(kPublic | kAbstract, "add", "(Ljava/lang/Object;)Z"),
             method(kPublic | kAbstract, "remove", "(Ljava/lang/Object;)Z"),
             method(kPublic | kAbstract, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic, "removeIf", "(Ljava/util/function/Predicate;)Z"),
+            method(kPublic, "stream", "()Ljava/util/stream/Stream;"),
             method(kPublic | kAbstract, "clear", "()V"),
         }, {"java/lang/Iterable"});
+    }
+    if (name == "java/util/Queue") {
+        return make_class("java/util/Queue", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "add", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "offer", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "remove", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "poll", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "element", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "peek", "()Ljava/lang/Object;"),
+        }, {"java/util/Collection"});
+    }
+    if (name == "java/util/Deque") {
+        return make_class("java/util/Deque", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "addFirst", "(Ljava/lang/Object;)V"),
+            method(kPublic | kAbstract, "addLast", "(Ljava/lang/Object;)V"),
+            method(kPublic | kAbstract, "offerFirst", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "offerLast", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "removeFirst", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "removeLast", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "pollFirst", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "pollLast", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "getFirst", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "getLast", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "peekFirst", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "peekLast", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "removeFirstOccurrence",
+                   "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "removeLastOccurrence",
+                   "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "push", "(Ljava/lang/Object;)V"),
+            method(kPublic | kAbstract, "pop", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "descendingIterator",
+                   "()Ljava/util/Iterator;"),
+        }, {"java/util/Queue"});
     }
     if (name == "java/util/Map") {
         return make_class("java/util/Map", "java/lang/Object",
@@ -64,20 +102,29 @@ using namespace builtin;
             method(kPublic | kAbstract, "containsKey", "(Ljava/lang/Object;)Z"),
             method(kPublic | kAbstract, "containsValue", "(Ljava/lang/Object;)Z"),
             method(kPublic | kAbstract, "get", "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "getOrDefault",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
             method(kPublic | kAbstract, "put",
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "computeIfAbsent",
+                   "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;"),
+            method(kPublic, "merge",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
             method(kPublic | kAbstract, "remove",
                    "(Ljava/lang/Object;)Ljava/lang/Object;"),
             method(kPublic | kAbstract, "putAll", "(Ljava/util/Map;)V"),
             method(kPublic | kAbstract, "clear", "()V"),
             method(kPublic | kAbstract, "keySet", "()Ljava/util/Set;"),
             method(kPublic | kAbstract, "values", "()Ljava/util/Collection;"),
+            method(kPublic | kAbstract, "entrySet", "()Ljava/util/Set;"),
         });
     }
     if (name == "java/util/Set") {
         return make_class("java/util/Set", "java/lang/Object",
-                          kPublic | kInterface | kAbstract, {}, {},
-                          {"java/util/Collection"});
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "hashCode", "()I"),
+        }, {"java/util/Collection"});
     }
     if (name == "java/util/ArrayIterator") {
         return make_class("java/util/ArrayIterator", "java/lang/Object",
@@ -99,6 +146,7 @@ using namespace builtin;
             field(kPrivate, "keys", "[Ljava/lang/Object;"),
             field(kPrivate, "values", "[Ljava/lang/Object;"),
             field(kPrivate, "size", "I"),
+            field(kPrivate, "hashes", "[I"),
         }, {
             method(kPublic, "<init>", "()V"),
             method(kPublic, "<init>", "(I)V"),
@@ -124,6 +172,7 @@ using namespace builtin;
             method(kPublic, "clear", "()V"),
             method(kPublic, "keySet", "()Ljava/util/Set;"),
             method(kPublic, "values", "()Ljava/util/Collection;"),
+            method(kPublic, "entrySet", "()Ljava/util/Set;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
         }, {"java/util/Map", "java/lang/Cloneable", "java/io/Serializable"});
     }
@@ -148,6 +197,8 @@ using namespace builtin;
             method(kPublic, "removeAll", "(Ljava/util/Collection;)Z"),
             method(kPublic, "retainAll", "(Ljava/util/Collection;)Z"),
             method(kPublic, "clear", "()V"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
         }, {"java/util/Set", "java/lang/Cloneable", "java/io/Serializable"});
     }
@@ -176,6 +227,7 @@ using namespace builtin;
             method(kPublic | kStatic, "copyOfRange", "([III)[I"),
             method(kPublic | kStatic, "sort", "([B)V"),
             method(kPublic | kStatic, "sort", "([I)V"),
+            method(kPublic | kStatic, "sort", "([III)V"),
             method(kPublic | kStatic, "binarySearch", "([II)I"),
             method(kPublic | kStatic, "toString", "([B)Ljava/lang/String;"),
             method(kPublic | kStatic, "toString", "([I)Ljava/lang/String;"),

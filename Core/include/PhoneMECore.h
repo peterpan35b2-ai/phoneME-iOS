@@ -10,7 +10,7 @@ extern "C" {
 typedef void* PhoneMERuntimeRef;
 
 #define PHONEME_C_API_VERSION_MAJOR 1u
-#define PHONEME_C_API_VERSION_MINOR 1u
+#define PHONEME_C_API_VERSION_MINOR 2u
 #define PHONEME_C_API_VERSION_PATCH 0u
 #define PHONEME_C_API_VERSION \
     ((PHONEME_C_API_VERSION_MAJOR << 16u) | \
@@ -167,6 +167,11 @@ typedef enum {
     PHONEME_TRANSLATION_PROVIDER_AUTOMATIC = 2,
 } PhoneMETranslationProvider;
 
+typedef enum {
+    PHONEME_JIT_UNAVAILABLE = 0,
+    PHONEME_JIT_READY = 1,
+} PhoneMEJITStatus;
+
 /* Invoked synchronously on the requesting runtime thread. Do not re-enter
  * the same runtime from this callback. String pointers are valid only for
  * the duration of the callback. */
@@ -204,6 +209,13 @@ int32_t phoneme_configure_app_frame_pacing(
 int32_t phoneme_configure_app_heap(PhoneMERuntimeRef runtime,
                                    int32_t app_id,
                                    int32_t heap_megabytes);
+/* Enables the ARM64 optimizing JIT. Hot integer/control-flow methods use
+ * constant propagation, folded branches, strength reduction and block-level
+ * budget guards. Unsupported methods or hosts without JIT permission
+ * automatically use the interpreter. */
+int32_t phoneme_configure_jit(PhoneMERuntimeRef runtime, int32_t enabled);
+/* Probes whether executable JIT memory is available to the current process. */
+int32_t phoneme_jit_status(void);
 /* Selects the translation service for subsequently created MIDlets. Existing
  * MIDlets keep the setting they had at launch. Language pointers may be NULL
  * to use auto detection and Vietnamese output. */

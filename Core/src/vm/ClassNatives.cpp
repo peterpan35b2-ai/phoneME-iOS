@@ -1,6 +1,7 @@
 #include "ClassNatives.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,12 @@ constexpr usize kByteInputBufferField = 0;
 constexpr usize kByteInputPositionField = 1;
 constexpr usize kByteInputMarkField = 2;
 constexpr usize kByteInputCountField = 3;
+constexpr usize kUrlOwnerField = 0;
+constexpr usize kUrlNameField = 1;
+constexpr usize kReflectFieldDeclaringClassField = 0;
+constexpr usize kReflectFieldNameField = 1;
+constexpr usize kReflectFieldDescriptorField = 2;
+constexpr usize kReflectFieldModifiersField = 3;
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -182,6 +189,53 @@ void add(NativeMethodRegistry& registry,
     }
     std::replace(name.begin(), name.end(), '/', '.');
     return name;
+}
+
+[[nodiscard]] Result<ObjectRef> box_reflect_value(
+    Machine& machine,
+    Value value,
+    std::string_view descriptor) {
+    if (!descriptor.empty() &&
+        (descriptor.front() == 'L' || descriptor.front() == '[')) {
+        return value.as_reference();
+    }
+    std::string_view owner;
+    std::string_view factory_descriptor;
+    switch (descriptor.empty() ? '\0' : descriptor.front()) {
+    case 'Z': owner = "java/lang/Boolean";
+              factory_descriptor = "(Z)Ljava/lang/Boolean;"; break;
+    case 'B': owner = "java/lang/Byte";
+              factory_descriptor = "(B)Ljava/lang/Byte;"; break;
+    case 'C': owner = "java/lang/Character";
+              factory_descriptor = "(C)Ljava/lang/Character;"; break;
+    case 'S': owner = "java/lang/Short";
+              factory_descriptor = "(S)Ljava/lang/Short;"; break;
+    case 'I': owner = "java/lang/Integer";
+              factory_descriptor = "(I)Ljava/lang/Integer;"; break;
+    case 'J': owner = "java/lang/Long";
+              factory_descriptor = "(J)Ljava/lang/Long;"; break;
+    case 'F': owner = "java/lang/Float";
+              factory_descriptor = "(F)Ljava/lang/Float;"; break;
+    case 'D': owner = "java/lang/Double";
+              factory_descriptor = "(D)Ljava/lang/Double;"; break;
+    default:
+        return fail(ErrorCode::invalid_argument,
+                    "reflection field has unsupported descriptor");
+    }
+    const std::array<Value, 1> arguments {value};
+    auto boxed = machine.invoke_static(owner, "valueOf", factory_descriptor,
+                                       arguments);
+    if (!boxed) return std::unexpected(boxed.error());
+    if (boxed->throwable.has_value()) {
+        auto throwable = machine.heap().class_name(*boxed->throwable);
+        if (!throwable) return std::unexpected(throwable.error());
+        return fail_java(*throwable, "reflection value boxing failed");
+    }
+    if (!boxed->return_value.has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "wrapper valueOf returned no value");
+    }
+    return boxed->return_value->as_reference();
 }
 
 [[nodiscard]] Result<std::string> array_component_name(
@@ -503,6 +557,334 @@ void register_class_natives(NativeMethodRegistry& registry) {
             auto stream = create_byte_input_stream(machine, *bytes);
             if (!stream) return std::unexpected(stream.error());
             return std::optional<Value>(Value::from_reference(*stream));
+        });
+
+    add(registry, "java/lang/Class", "getResource",
+        "(Ljava/lang/String;)Ljava/net/URL;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto mirror = receiver(arguments);
+            if (!mirror) return std::unexpected(mirror.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Class.getResource name is missing");
+            }
+            auto name = arguments[1].as_reference();
+            if (!name || name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "resource name is null");
+            }
+            const Value name_argument = Value::from_reference(*name);
+            auto stream = machine.invoke_instance(
+                *mirror, "java/lang/Class", "getResourceAsStream",
+                "(Ljava/lang/String;)Ljava/io/InputStream;",
+                std::span<const Value>(&name_argument, 1U));
+            if (!stream) return std::unexpected(stream.error());
+            if (stream->throwable.has_value()) {
+                auto throwable = machine.heap().class_name(*stream->throwable);
+                if (!throwable) return std::unexpected(throwable.error());
+                return fail_java(*throwable,
+                                 "Class.getResource lookup failed");
+            }
+            if (!stream->return_value.has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Class.getResourceAsStream returned no value");
+            }
+            auto stream_ref = stream->return_value->as_reference();
+            if (!stream_ref) return std::unexpected(stream_ref.error());
+            if (stream_ref->is_null()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto url = machine.class_states().allocate_instance(
+                machine.heap(), "java/net/URL");
+            if (!url) return std::unexpected(url.error());
+            auto owner_stored = machine.heap().set_field(
+                *url, kUrlOwnerField, Value::from_reference(*mirror));
+            auto name_stored = machine.heap().set_field(
+                *url, kUrlNameField, Value::from_reference(*name));
+            if (!owner_stored) return std::unexpected(owner_stored.error());
+            if (!name_stored) return std::unexpected(name_stored.error());
+            return std::optional<Value>(Value::from_reference(*url));
+        });
+
+    add(registry, "java/net/URL", "<init>",
+        "(Ljava/lang/Class;Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto url = receiver(arguments);
+            if (!url) return std::unexpected(url.error());
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "resource URL constructor arguments are missing");
+            }
+            auto owner = arguments[1].as_reference();
+            auto name = arguments[2].as_reference();
+            if (!owner || owner->is_null() || !name || name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "resource URL argument is null");
+            }
+            auto owner_stored = machine.heap().set_field(
+                *url, kUrlOwnerField, Value::from_reference(*owner));
+            auto name_stored = machine.heap().set_field(
+                *url, kUrlNameField, Value::from_reference(*name));
+            if (!owner_stored) return std::unexpected(owner_stored.error());
+            if (!name_stored) return std::unexpected(name_stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/net/URL", "openStream", "()Ljava/io/InputStream;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto url = receiver(arguments);
+            if (!url) return std::unexpected(url.error());
+            auto owner_value = machine.heap().field(*url, kUrlOwnerField);
+            auto name_value = machine.heap().field(*url, kUrlNameField);
+            if (!owner_value) return std::unexpected(owner_value.error());
+            if (!name_value) return std::unexpected(name_value.error());
+            auto owner = owner_value->as_reference();
+            auto name = name_value->as_reference();
+            if (!owner) return std::unexpected(owner.error());
+            if (!name) return std::unexpected(name.error());
+            const Value name_argument = Value::from_reference(*name);
+            auto stream = machine.invoke_instance(
+                *owner, "java/lang/Class", "getResourceAsStream",
+                "(Ljava/lang/String;)Ljava/io/InputStream;",
+                std::span<const Value>(&name_argument, 1U));
+            if (!stream) return std::unexpected(stream.error());
+            if (stream->throwable.has_value()) {
+                auto throwable = machine.heap().class_name(*stream->throwable);
+                if (!throwable) return std::unexpected(throwable.error());
+                return fail_java(*throwable, "URL.openStream failed");
+            }
+            return stream->return_value;
+        });
+    add(registry, "java/net/URL", "toString", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto url = receiver(arguments);
+            if (!url) return std::unexpected(url.error());
+            auto name = machine.heap().field(*url, kUrlNameField);
+            if (!name) return std::unexpected(name.error());
+            return std::optional<Value>(*name);
+        });
+
+    add(registry, "java/lang/Class", "getDeclaredField",
+        "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto mirror = receiver(arguments);
+            if (!mirror) return std::unexpected(mirror.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Class.getDeclaredField name is missing");
+            }
+            auto requested_name = arguments[1].as_reference();
+            if (!requested_name || requested_name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "field name is null");
+            }
+            auto class_name = machine.mirrored_class_name(*mirror);
+            auto name = utf8_text(machine, *requested_name);
+            if (!class_name) return std::unexpected(class_name.error());
+            if (!name) return std::unexpected(name.error());
+            auto loaded = machine.classes().load(*class_name);
+            if (!loaded) return std::unexpected(loaded.error());
+            const classfile::Field* matched = nullptr;
+            for (const auto& candidate : (*loaded)->fields()) {
+                if (candidate.name == *name) {
+                    matched = &candidate;
+                    break;
+                }
+            }
+            if (matched == nullptr) {
+                return fail_java("java/lang/NoSuchFieldException", *name);
+            }
+            auto descriptor_string = create_string(
+                machine, ascii_text(matched->descriptor));
+            if (!descriptor_string) {
+                return std::unexpected(descriptor_string.error());
+            }
+            auto descriptor_root = machine.pin_native_root(*descriptor_string);
+            if (!descriptor_root) {
+                return std::unexpected(descriptor_root.error());
+            }
+            auto field = machine.class_states().allocate_instance(
+                machine.heap(), "java/lang/reflect/Field");
+            if (!field) return std::unexpected(field.error());
+            auto declaring_stored = machine.heap().set_field(
+                *field, kReflectFieldDeclaringClassField,
+                Value::from_reference(*mirror));
+            auto name_stored = machine.heap().set_field(
+                *field, kReflectFieldNameField,
+                Value::from_reference(*requested_name));
+            auto descriptor_stored = machine.heap().set_field(
+                *field, kReflectFieldDescriptorField,
+                Value::from_reference(*descriptor_string));
+            auto modifiers_stored = machine.heap().set_field(
+                *field, kReflectFieldModifiersField,
+                Value::from_int(static_cast<i32>(matched->access_flags)));
+            if (!declaring_stored) {
+                return std::unexpected(declaring_stored.error());
+            }
+            if (!name_stored) return std::unexpected(name_stored.error());
+            if (!descriptor_stored) {
+                return std::unexpected(descriptor_stored.error());
+            }
+            if (!modifiers_stored) {
+                return std::unexpected(modifiers_stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*field));
+        });
+
+    add(registry, "java/lang/reflect/Field", "<init>",
+        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto field = receiver(arguments);
+            if (!field) return std::unexpected(field.error());
+            if (arguments.size() < 5U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Field constructor arguments are missing");
+            }
+            for (usize index = 1U; index <= 3U; ++index) {
+                auto reference = arguments[index].as_reference();
+                if (!reference || reference->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "Field constructor argument is null");
+                }
+                auto stored = machine.heap().set_field(
+                    *field, index - 1U, Value::from_reference(*reference));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            auto modifiers = arguments[4].as_int();
+            if (!modifiers) return std::unexpected(modifiers.error());
+            auto stored = machine.heap().set_field(
+                *field, kReflectFieldModifiersField,
+                Value::from_int(*modifiers));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/lang/reflect/Field", "getModifiers", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto field = receiver(arguments);
+            if (!field) return std::unexpected(field.error());
+            auto modifiers = machine.heap().field(
+                *field, kReflectFieldModifiersField);
+            if (!modifiers) return std::unexpected(modifiers.error());
+            return std::optional<Value>(*modifiers);
+        });
+    add(registry, "java/lang/reflect/Field", "getType",
+        "()Ljava/lang/Class;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto field = receiver(arguments);
+            if (!field) return std::unexpected(field.error());
+            auto descriptor_value = machine.heap().field(
+                *field, kReflectFieldDescriptorField);
+            if (!descriptor_value) {
+                return std::unexpected(descriptor_value.error());
+            }
+            auto descriptor_ref = descriptor_value->as_reference();
+            if (!descriptor_ref) {
+                return std::unexpected(descriptor_ref.error());
+            }
+            auto descriptor = utf8_text(machine, *descriptor_ref);
+            if (!descriptor) return std::unexpected(descriptor.error());
+            std::string type_name;
+            if (descriptor->size() >= 2U && descriptor->front() == 'L' &&
+                descriptor->back() == ';') {
+                type_name.assign(descriptor->begin() + 1,
+                                 descriptor->end() - 1);
+            } else {
+                type_name = *descriptor;
+            }
+            auto mirror = machine.class_mirror(type_name);
+            if (!mirror) return std::unexpected(mirror.error());
+            return std::optional<Value>(Value::from_reference(*mirror));
+        });
+    add(registry, "java/lang/reflect/Field", "get",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto field = receiver(arguments);
+            if (!field) return std::unexpected(field.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Field.get target is missing");
+            }
+            auto declaring_value = machine.heap().field(
+                *field, kReflectFieldDeclaringClassField);
+            auto name_value = machine.heap().field(
+                *field, kReflectFieldNameField);
+            auto descriptor_value = machine.heap().field(
+                *field, kReflectFieldDescriptorField);
+            auto modifiers_value = machine.heap().field(
+                *field, kReflectFieldModifiersField);
+            if (!declaring_value) {
+                return std::unexpected(declaring_value.error());
+            }
+            if (!name_value) return std::unexpected(name_value.error());
+            if (!descriptor_value) {
+                return std::unexpected(descriptor_value.error());
+            }
+            if (!modifiers_value) {
+                return std::unexpected(modifiers_value.error());
+            }
+            auto declaring = declaring_value->as_reference();
+            auto name_ref = name_value->as_reference();
+            auto descriptor_ref = descriptor_value->as_reference();
+            auto modifiers = modifiers_value->as_int();
+            if (!declaring) return std::unexpected(declaring.error());
+            if (!name_ref) return std::unexpected(name_ref.error());
+            if (!descriptor_ref) {
+                return std::unexpected(descriptor_ref.error());
+            }
+            if (!modifiers) return std::unexpected(modifiers.error());
+            auto class_name = machine.mirrored_class_name(*declaring);
+            auto name = utf8_text(machine, *name_ref);
+            auto descriptor = utf8_text(machine, *descriptor_ref);
+            if (!class_name) return std::unexpected(class_name.error());
+            if (!name) return std::unexpected(name.error());
+            if (!descriptor) return std::unexpected(descriptor.error());
+            const bool is_static = (*modifiers & 0x0008) != 0;
+            auto location = machine.class_states().resolve_field(
+                *class_name, *name, *descriptor, is_static);
+            if (!location) return std::unexpected(location.error());
+            Result<Value> value = is_static
+                ? machine.class_states().static_field(*location)
+                : Result<Value>(fail(ErrorCode::invalid_state,
+                                     "uninitialized reflection value"));
+            if (!is_static) {
+                auto target = arguments[1].as_reference();
+                if (!target || target->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "instance Field.get target is null");
+                }
+                auto compatible = machine.object_is_instance(
+                    *target, *class_name);
+                if (!compatible) return std::unexpected(compatible.error());
+                if (!*compatible) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Field.get target has wrong class");
+                }
+                value = machine.heap().field(*target, location->index);
+            }
+            if (!value) return std::unexpected(value.error());
+            auto boxed = box_reflect_value(machine, *value, *descriptor);
+            if (!boxed) return std::unexpected(boxed.error());
+            return std::optional<Value>(Value::from_reference(*boxed));
+        });
+    add(registry, "java/lang/reflect/Modifier", "isStatic", "(I)Z",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Modifier.isStatic argument is missing");
+            }
+            auto modifiers = arguments[0].as_int();
+            if (!modifiers) return std::unexpected(modifiers.error());
+            return std::optional<Value>(
+                Value::from_int((*modifiers & 0x0008) != 0 ? 1 : 0));
         });
 }
 

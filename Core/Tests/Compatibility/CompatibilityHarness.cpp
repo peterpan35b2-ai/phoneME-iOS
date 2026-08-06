@@ -834,6 +834,17 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
     result.configured = true;
     add_milestone(result, "runtime-configured");
 
+    const char* enable_jit = std::getenv("PHONEME_HARNESS_JIT");
+    if (enable_jit != nullptr && enable_jit[0] != '\0' &&
+        std::string_view(enable_jit) == "0") {
+        auto jit = runtime.configure_jit(false);
+        if (!jit.has_value()) {
+            capture_error(result, jit.error());
+            return finish(16);
+        }
+        add_milestone(result, "jit-disabled");
+    }
+
     const char* enable_bing = std::getenv("PHONEME_HARNESS_BING_TRANSLATION");
     if (enable_bing != nullptr && enable_bing[0] != '\0' &&
         std::string_view(enable_bing) != "0") {

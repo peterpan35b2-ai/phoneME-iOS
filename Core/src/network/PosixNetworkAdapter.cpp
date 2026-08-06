@@ -320,7 +320,7 @@ void trace_network_wait(const char* event,
                         usize queued = 0U) noexcept {
     if (!network_trace_enabled()) return;
     std::fprintf(stderr,
-                 "[PhoneMENetwork] %s fd=%d requested=%zu queued=%zu\n",
+                 "[phoneMENetwork] %s fd=%d requested=%zu queued=%zu\n",
                  event,
                  descriptor,
                  requested,
@@ -331,7 +331,7 @@ void trace_network_bytes(const char* direction,
                          int descriptor,
                          std::span<const u8> bytes) noexcept {
     if (!network_trace_enabled()) return;
-    std::fprintf(stderr, "[PhoneMENetwork] %s fd=%d bytes=%zu hex=",
+    std::fprintf(stderr, "[phoneMENetwork] %s fd=%d bytes=%zu hex=",
                  direction, descriptor, bytes.size());
     const bool show_full_packet =
         std::getenv("PHONEME_NETWORK_TRACE_FULL") != nullptr;

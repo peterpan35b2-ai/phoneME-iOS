@@ -19,6 +19,7 @@ final class GameProfileStore: ObservableObject {
     private let parallelRedrawMigrationKey = "phoneME.gameProfiles.parallelRedrawV6"
     private let nativeInputDefaultsMigrationKey = "phoneME.gameProfiles.nativeInputDefaultsV7"
     private let frameRate60MigrationKey = "phoneME.gameProfiles.frameRate60V8"
+    private let fpsOverrideOffMigrationKey = "phoneME.gameProfiles.fpsOverrideOffV9"
 
     init(
         storage: PhoneMEStorageController,
@@ -42,49 +43,7 @@ final class GameProfileStore: ObservableObject {
     }
 
     func profile(for game: Game) -> GameProfile {
-        var profile = profiles[game.id] ?? .default
-        guard Self.requiresNativePacingCompatibility(for: game) else {
-            return profile
-        }
-
-        let migrationKey =
-            "phoneME.gameProfiles.tankRaidNativePacingV9.\(game.id.uuidString)"
-        let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: migrationKey) else { return profile }
-
-        // This MIDlet advances both startup asset loading and gameplay from the
-        // same self-paced CCMIDlet loop. Its patched 3D build flushes after each
-        // loading step and requests Thread.sleep(2), which the generic 30 FPS
-        // loop override can mistake for gameplay pacing. Migrate only the
-        // untouched/default 30 FPS setting once; later user choices are kept.
-        if profile.effectiveFramePacingMode == .overrideGameLoop,
-           profile.frameRateLimit == GameProfile.defaultFrameRate {
-            profile.framePacingMode = .native
-            profiles[game.id] = profile.normalized()
-            persist()
-        }
-        defaults.set(true, forKey: migrationKey)
-        return profile
-    }
-
-    private static func requiresNativePacingCompatibility(for game: Game) -> Bool {
-        guard game.mainClass.caseInsensitiveCompare("CCMIDlet") == .orderedSame else {
-            return false
-        }
-
-        let locale = Locale(identifier: "en_US_POSIX")
-        let normalizedTitle = game.title.folding(
-            options: [.caseInsensitive, .diacriticInsensitive],
-            locale: locale
-        )
-        let normalizedFileName = game.fileName.folding(
-            options: [.caseInsensitive, .diacriticInsensitive],
-            locale: locale
-        )
-        return normalizedTitle.contains("tank raid")
-            || normalizedTitle.contains("xe tang 3d")
-            || normalizedFileName.contains("tank raid")
-            || normalizedFileName.contains("xe tang 3d")
+        profiles[game.id] ?? .default
     }
 
     func save(_ profile: GameProfile, for game: Game) {
@@ -112,6 +71,7 @@ final class GameProfileStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
             UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
             UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
+            UserDefaults.standard.set(true, forKey: fpsOverrideOffMigrationKey)
             return
         }
 
@@ -244,6 +204,25 @@ final class GameProfileStore: ObservableObject {
         // existing explicit 60 FPS choice remains untouched.
         if !defaults.bool(forKey: frameRate60MigrationKey) {
             defaults.set(true, forKey: frameRate60MigrationKey)
+        }
+
+        // Earlier builds stored the former 30 FPS default as an explicit game
+        // loop override. Turn only that inherited default off once; custom FPS
+        // values remain untouched.
+        if !defaults.bool(forKey: fpsOverrideOffMigrationKey) {
+            var changed = false
+            for id in profiles.keys {
+                guard profiles[id]?.framePacingMode == .overrideGameLoop,
+                      profiles[id]?.frameRateLimit == GameProfile.defaultFrameRate else {
+                    continue
+                }
+                profiles[id]?.framePacingMode = .native
+                changed = true
+            }
+            defaults.set(true, forKey: fpsOverrideOffMigrationKey)
+            if changed {
+                persist()
+            }
         }
     }
 

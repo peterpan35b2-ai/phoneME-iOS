@@ -463,9 +463,12 @@ extern "C" bool phoneme_metal3d_rasterize(
             .width = width,
             .height = height,
             .texture_count = static_cast<uint32_t>(texture_count),
-            .reserved = 0U,
+            .triangle_count = 1U,
+            .origin_x = 0,
+            .origin_y = 0,
+            .reserved_0 = 0U,
+            .reserved_1 = 0U,
         };
-        [encoder setBytes:&parameters length:sizeof(parameters) atIndex:5];
 
         const NSUInteger executionWidth = std::max<NSUInteger>(
             1U, std::min<NSUInteger>(8U, context.pipeline.threadExecutionWidth));
@@ -484,9 +487,12 @@ extern "C" bool phoneme_metal3d_rasterize(
                 triangle.maximum_x - triangle.minimum_x + 1);
             const NSUInteger regionHeight = static_cast<NSUInteger>(
                 triangle.maximum_y - triangle.minimum_y + 1);
+            parameters.origin_x = triangle.minimum_x;
+            parameters.origin_y = triangle.minimum_y;
             [encoder setBuffer:triangleBuffer
                         offset:index * sizeof(PhoneMEMetal3DTriangle)
                        atIndex:2];
+            [encoder setBytes:&parameters length:sizeof(parameters) atIndex:5];
             [encoder dispatchThreads:MTLSizeMake(regionWidth, regionHeight, 1U)
                threadsPerThreadgroup:threadsPerGroup];
             if (index + 1U < triangle_count) {

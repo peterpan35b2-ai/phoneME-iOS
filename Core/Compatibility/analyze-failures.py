@@ -88,6 +88,8 @@ FAILURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     )),
     ("uncaught_exception", re.compile(
         r"(?:uncaught(?:\s+java)?\s+(?:exception|throwable)|"
+        r"terminated\s+with\s+uncaught\s+(?:java|javax|com)/"
+        r"[A-Za-z0-9_$/]+(?:Exception|Error)|"
         r"application\s+has\s+unexpectedly\s+quit)",
         re.IGNORECASE,
     )),

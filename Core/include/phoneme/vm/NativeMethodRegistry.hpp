@@ -43,6 +43,12 @@ public:
                                          std::string name,
                                          std::string descriptor,
                                          NativeMethod implementation);
+    [[nodiscard]] Status register_alias(std::string_view source_owner,
+                                        std::string_view source_name,
+                                        std::string_view source_descriptor,
+                                        std::string target_owner,
+                                        std::string target_name,
+                                        std::string target_descriptor);
     [[nodiscard]] NativeMethodId resolve(std::string_view owner,
                                          std::string_view name,
                                          std::string_view descriptor) const noexcept;

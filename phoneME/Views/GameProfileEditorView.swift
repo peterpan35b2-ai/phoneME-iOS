@@ -62,7 +62,7 @@ struct GameProfileEditorView: View {
                     Button {
                         profile = .default
                     } label: {
-                        Label("Reset Settings", systemImage: "arrow.counterclockwise")
+                        Text("Reset Settings")
                     }
                     Button {
                         profile.keyLayout = .nokiaSE
@@ -70,7 +70,7 @@ struct GameProfileEditorView: View {
                         profile.virtualKeyboardType = .arrowsNumbers
                         profile.resetKeyboardLayoutCustomization()
                     } label: {
-                        Label("Reset Key Layout", systemImage: "keyboard")
+                        Text("Reset Key Layout")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -82,11 +82,7 @@ struct GameProfileEditorView: View {
                     startAction?()
                     dismiss()
                 } label: {
-                    if game != nil {
-                        Label("Start", systemImage: "play.fill")
-                    } else {
-                        Text("Done")
-                    }
+                    Text(game != nil ? L10n.string("Start") : L10n.string("Done"))
                 }
             }
         }
@@ -153,7 +149,7 @@ struct GameProfileEditorView: View {
             Button {
                 showScreenPresets = true
             } label: {
-                Label("Screen size presets", systemImage: "rectangle.on.rectangle")
+                Text("Screen size presets")
             }
 
             Toggle("Keep Canvas aspect ratio", isOn: $profile.preserveAspectRatio)
@@ -206,8 +202,6 @@ struct GameProfileEditorView: View {
 
         } header: {
             Text("Display")
-        } footer: {
-            Text("FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration.")
         }
     }
 
@@ -231,12 +225,10 @@ struct GameProfileEditorView: View {
             Button {
                 showHeapPresets = true
             } label: {
-                Label("Heap size presets", systemImage: "memorychip")
+                Text("Heap size presets")
             }
         } header: {
             Text("Memory")
-        } footer: {
-            Text("The heap limit is applied separately to this game the next time it starts. Very low values can cause OutOfMemoryError; high values increase memory pressure when several games run together.")
         }
     }
 
@@ -251,7 +243,7 @@ struct GameProfileEditorView: View {
             Button {
                 showFontPresets = true
             } label: {
-                Label("Font size presets", systemImage: "textformat.size")
+                Text("Font size presets")
             }
 
             Toggle(
@@ -260,8 +252,6 @@ struct GameProfileEditorView: View {
             )
         } header: {
             Text("Fonts")
-        } footer: {
-            Text("Font sizes apply to native LCDUI and Canvas text.")
         }
     }
 
@@ -273,7 +263,7 @@ struct GameProfileEditorView: View {
             Button {
                 showKeyMappings = true
             } label: {
-                Label("Key mappings", systemImage: "keyboard.badge.ellipsis")
+                Text("Key mappings")
             }
 
             Toggle("Virtual keyboard", isOn: $profile.showVirtualKeyboard)
@@ -322,8 +312,6 @@ struct GameProfileEditorView: View {
             .disabled(!profile.showVirtualKeyboard)
         } header: {
             Text("Input")
-        } footer: {
-            Text("Configure touch input, MIDP key mappings and virtual controls.")
         }
     }
 
@@ -359,11 +347,8 @@ private struct NativeProfilePicker<Value>: View where
     var body: some View {
         Picker(title, selection: $selection) {
             ForEach(Array(Value.allCases)) { value in
-                Label(
-                    displayTitle(value),
-                    systemImage: displaySystemImage(value)
-                )
-                .tag(value)
+                Text(displayTitle(value))
+                    .tag(value)
             }
         }
     }
@@ -381,18 +366,6 @@ private struct NativeProfilePicker<Value>: View where
         }
     }
 
-    private func displaySystemImage(_ value: Value) -> String {
-        switch value {
-        case let value as GameProfile.Orientation: return value.systemImage
-        case let value as GameProfile.ScreenGravity: return value.systemImage
-        case let value as GameProfile.ScaleType: return value.systemImage
-        case let value as GameProfile.FramePacingMode: return value.systemImage
-        case let value as GameProfile.KeyLayout: return value.systemImage
-        case let value as GameProfile.VirtualKeyboardType: return value.systemImage
-        case let value as GameProfile.ButtonShape: return value.systemImage
-        default: return "slider.horizontal.3"
-        }
-    }
 }
 
 private struct IntegerTextField: View {
@@ -420,7 +393,7 @@ private struct KeyMappingsView: View {
             Section {
                 Picker("Layout", selection: $profile.keyLayout) {
                     ForEach(GameProfile.KeyLayout.allCases) { layout in
-                        Label(layout.title, systemImage: layout.systemImage)
+                        Text(layout.title)
                             .tag(layout)
                     }
                 }
@@ -456,14 +429,6 @@ private struct KeyMappingsView: View {
                 }
             } header: {
                 Text("MIDP Key Codes")
-            } footer: {
-                Text(
-                    profile.keyLayout == .custom
-                        ? L10n.string(
-                            "Enter the Java ME key code for each control."
-                        )
-                        : L10n.string("Choose Custom to edit these values.")
-                )
             }
 
             if profile.keyLayout == .custom {

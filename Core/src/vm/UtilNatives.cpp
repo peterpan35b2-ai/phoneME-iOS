@@ -2747,6 +2747,60 @@ void register_hashtable(NativeMethodRegistry& registry) {
     return static_cast<i32>(static_cast<u32>(updated >> (48 - bits)));
 }
 
+[[nodiscard]] Status seed_random_object(Machine& machine,
+                                        ObjectRef random,
+                                        i64 seed) {
+    const u64 scrambled = (static_cast<u64>(seed) ^
+                           kRandomMultiplier) & kRandomMask;
+    return set_long_field(machine, random, kRandomSeedField,
+                          static_cast<i64>(scrambled));
+}
+
+[[nodiscard]] Result<u64> random_u64(Machine& machine,
+                                     ObjectRef random) {
+    auto high = random_next(machine, random, 32);
+    auto low = random_next(machine, random, 32);
+    if (!high || !low) {
+        return fail(ErrorCode::invalid_state,
+                    "Random state update failed");
+    }
+    return (static_cast<u64>(static_cast<u32>(*high)) << 32U) |
+           static_cast<u32>(*low);
+}
+
+[[nodiscard]] Result<i64> random_bounded_long(Machine& machine,
+                                              ObjectRef random,
+                                              i64 bound) {
+    if (bound <= 0) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "ThreadLocalRandom bound is not positive");
+    }
+    const u64 unsigned_bound = static_cast<u64>(bound);
+    const u64 range = 1ULL << 63U;
+    const u64 limit = range - (range % unsigned_bound);
+    while (true) {
+        auto bits = random_u64(machine, random);
+        if (!bits) return std::unexpected(bits.error());
+        const u64 candidate = *bits >> 1U;
+        if (candidate < limit) {
+            return static_cast<i64>(candidate % unsigned_bound);
+        }
+    }
+}
+
+[[nodiscard]] Result<double> random_unit_double(Machine& machine,
+                                                ObjectRef random) {
+    auto high = random_next(machine, random, 26);
+    auto low = random_next(machine, random, 27);
+    if (!high || !low) {
+        return fail(ErrorCode::invalid_state,
+                    "Random state update failed");
+    }
+    const u64 combined = (static_cast<u64>(static_cast<u32>(*high)) << 27U) +
+                         static_cast<u32>(*low);
+    return static_cast<double>(combined) / 9007199254740992.0;
+}
+
 void register_timer(NativeMethodRegistry& registry) {
     add(registry, "java/util/TimerTask", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -3034,6 +3088,190 @@ void register_random(NativeMethodRegistry& registry) {
         });
 }
 
+void register_thread_local_random(NativeMethodRegistry& registry) {
+    constexpr std::string_view kOwner =
+        "java/util/concurrent/ThreadLocalRandom";
+    constexpr std::string_view kDescriptor =
+        "Ljava/util/concurrent/ThreadLocalRandom;";
+
+    const auto singleton_field = [](Machine& machine)
+        -> Result<FieldLocation> {
+        return machine.class_states().resolve_field(
+            "java/util/concurrent/ThreadLocalRandom",
+            "INSTANCE",
+            "Ljava/util/concurrent/ThreadLocalRandom;",
+            true);
+    };
+    const auto allocate_singleton = [](Machine& machine)
+        -> Result<ObjectRef> {
+        auto object = machine.class_states().allocate_instance(
+            machine.heap(), "java/util/concurrent/ThreadLocalRandom");
+        if (!object) return std::unexpected(object.error());
+        const auto now = std::chrono::high_resolution_clock::now()
+                             .time_since_epoch().count();
+        auto seeded = seed_random_object(
+            machine, *object,
+            static_cast<i64>(now) ^ static_cast<i64>(object->bits));
+        if (!seeded) return std::unexpected(seeded.error());
+        return *object;
+    };
+
+    add(registry, std::string(kOwner), "<clinit>", "()V",
+        [singleton_field, allocate_singleton](
+            Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "ThreadLocalRandom.<clinit> expects no arguments");
+            }
+            auto field = singleton_field(machine);
+            if (!field) return std::unexpected(field.error());
+            auto object = allocate_singleton(machine);
+            if (!object) return std::unexpected(object.error());
+            auto stored = machine.class_states().set_static_field(
+                *field, Value::from_reference(*object));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kOwner), "current", "()" +
+            std::string(kDescriptor),
+        [singleton_field, allocate_singleton](
+            Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "ThreadLocalRandom.current expects no arguments");
+            }
+            auto field = singleton_field(machine);
+            if (!field) return std::unexpected(field.error());
+            auto value = machine.class_states().static_field(*field);
+            if (!value) return std::unexpected(value.error());
+            auto object = value->as_reference();
+            if (!object) return std::unexpected(object.error());
+            if (object->is_null()) {
+                auto allocated = allocate_singleton(machine);
+                if (!allocated) return std::unexpected(allocated.error());
+                auto stored = machine.class_states().set_static_field(
+                    *field, Value::from_reference(*allocated));
+                if (!stored) return std::unexpected(stored.error());
+                return std::optional<Value>(
+                    Value::from_reference(*allocated));
+            }
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+
+    add(registry, std::string(kOwner), "nextInt", "(II)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto origin = int_argument(arguments, 1);
+            auto bound = int_argument(arguments, 2);
+            if (!object) return std::unexpected(object.error());
+            if (!origin) return std::unexpected(origin.error());
+            if (!bound) return std::unexpected(bound.error());
+            if (*origin >= *bound) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "ThreadLocalRandom origin is not below bound");
+            }
+            const i64 range = static_cast<i64>(*bound) -
+                              static_cast<i64>(*origin);
+            auto offset = random_bounded_long(machine, *object, range);
+            if (!offset) return std::unexpected(offset.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(static_cast<i64>(*origin) + *offset)));
+        });
+
+    add(registry, std::string(kOwner), "nextLong", "(J)J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto bound = long_argument(arguments, 1);
+            if (!object) return std::unexpected(object.error());
+            if (!bound) return std::unexpected(bound.error());
+            auto value = random_bounded_long(machine, *object, *bound);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_long(*value));
+        });
+
+    add(registry, std::string(kOwner), "nextLong", "(JJ)J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto origin = long_argument(arguments, 1);
+            auto bound = long_argument(arguments, 2);
+            if (!object) return std::unexpected(object.error());
+            if (!origin) return std::unexpected(origin.error());
+            if (!bound) return std::unexpected(bound.error());
+            if (*origin >= *bound) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "ThreadLocalRandom origin is not below bound");
+            }
+            const u64 width = static_cast<u64>(*bound) -
+                              static_cast<u64>(*origin);
+            if (width <= static_cast<u64>(std::numeric_limits<i64>::max())) {
+                auto offset = random_bounded_long(
+                    machine, *object, static_cast<i64>(width));
+                if (!offset) return std::unexpected(offset.error());
+                return std::optional<Value>(Value::from_long(
+                    static_cast<i64>(static_cast<u64>(*origin) +
+                                     static_cast<u64>(*offset))));
+            }
+            while (true) {
+                auto bits = random_u64(machine, *object);
+                if (!bits) return std::unexpected(bits.error());
+                const i64 candidate = static_cast<i64>(*bits);
+                if (candidate >= *origin && candidate < *bound) {
+                    return std::optional<Value>(
+                        Value::from_long(candidate));
+                }
+            }
+        });
+
+    add(registry, std::string(kOwner), "nextDouble", "(D)D",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto bound = arguments[1].as_double();
+            if (!object) return std::unexpected(object.error());
+            if (!bound) return std::unexpected(bound.error());
+            if (!(*bound > 0.0) || !std::isfinite(*bound)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "ThreadLocalRandom bound is not finite and positive");
+            }
+            auto unit = random_unit_double(machine, *object);
+            if (!unit) return std::unexpected(unit.error());
+            double result = *unit * *bound;
+            if (result >= *bound) {
+                result = std::nextafter(*bound, 0.0);
+            }
+            return std::optional<Value>(Value::from_double(result));
+        });
+
+    add(registry, std::string(kOwner), "nextDouble", "(DD)D",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto origin = arguments[1].as_double();
+            auto bound = arguments[2].as_double();
+            if (!object) return std::unexpected(object.error());
+            if (!origin) return std::unexpected(origin.error());
+            if (!bound) return std::unexpected(bound.error());
+            if (!(*origin < *bound) || !std::isfinite(*origin) ||
+                !std::isfinite(*bound)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "ThreadLocalRandom double range is invalid");
+            }
+            auto unit = random_unit_double(machine, *object);
+            if (!unit) return std::unexpected(unit.error());
+            double result = *origin + (*bound - *origin) * *unit;
+            if (result >= *bound) {
+                result = std::nextafter(*bound, *origin);
+            }
+            return std::optional<Value>(Value::from_double(result));
+        });
+}
+
 void register_locale(NativeMethodRegistry& registry) {
     add(registry, "java/util/Locale", "<clinit>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -3066,6 +3304,7 @@ void register_util_natives(NativeMethodRegistry& registry) {
     register_hashtable(registry);
     register_timer(registry);
     register_random(registry);
+    register_thread_local_random(registry);
 }
 
 } // namespace phoneme::vm

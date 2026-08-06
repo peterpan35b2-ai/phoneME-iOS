@@ -33,10 +33,12 @@ enum AppTheme: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @Environment(\.openURL) private var openURL
     @EnvironmentObject private var storage: PhoneMEStorageController
     @EnvironmentObject private var library: GameLibrary
     @EnvironmentObject private var profiles: GameProfileStore
     @EnvironmentObject private var profileTemplates: ProfileTemplateStore
+    @EnvironmentObject private var workspaceRuntime: WorkspaceRuntimeStore
     @EnvironmentObject private var session: EmulatorSession
     @EnvironmentObject private var backgroundExecution: BackgroundExecutionController
 
@@ -48,6 +50,7 @@ struct SettingsView: View {
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
     @AppStorage("keepScreenOn") private var keepScreenOn = false
+    @AppStorage(PhoneMECAPI.jitPreferenceKey) private var enableJIT = true
     @State private var storageErrorMessage: String?
 
     var body: some View {
@@ -55,40 +58,61 @@ struct SettingsView: View {
             Section {
                 Picker("Language", selection: $appLanguage) {
                     ForEach(AppLanguage.allCases) { language in
-                        Label(language.title, systemImage: language.systemImage)
+                        Text(language.title)
                             .tag(language.rawValue)
                     }
                 }
             } header: {
                 Text("Language")
-            } footer: {
-                Text("Language changes are applied immediately.")
             }
 
             Section {
                 Picker("Appearance", selection: $appTheme) {
                     ForEach(AppTheme.allCases) { theme in
-                        Label(theme.title, systemImage: theme.systemImage)
+                        Text(theme.title)
                             .tag(theme.rawValue)
                     }
                 }
             } header: {
                 Text("Appearance")
-            } footer: {
-                Text("System follows the appearance selected in iOS Settings.")
             }
 
             Section {
                 Picker("Translation service", selection: translationProviderBinding) {
                     ForEach(TranslationProvider.allCases) { provider in
-                        Label(provider.title, systemImage: provider.systemImage)
+                        Text(provider.title)
                             .tag(provider.rawValue)
                     }
                 }
             } header: {
                 Text("Translation")
-            } footer: {
-                Text("Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked.")
+            }
+
+            Section {
+                Toggle("Enable JIT", isOn: jitEnabledBinding)
+
+                HStack {
+                    Text("JIT Status")
+                    Spacer()
+                    Text(jitStatusTitle)
+                        .foregroundStyle(jitStatusForegroundStyle)
+                }
+
+                if enableJIT && session.jitStatus != .ready {
+                    Button("Recheck JIT") {
+                        session.refreshJITStatus()
+                        workspaceRuntime.refreshJITStatus()
+                    }
+
+                    Button("Enable JIT with TrollStore") {
+                        guard let url = PhoneMECAPI.trollStoreJITURL else {
+                            return
+                        }
+                        openURL(url)
+                    }
+                }
+            } header: {
+                Text("JIT")
             }
 
             Section("Player") {
@@ -101,30 +125,21 @@ struct SettingsView: View {
             Section {
                 Toggle("Run in Background", isOn: backgroundExecutionBinding)
 
-                if backgroundExecution.isEnabled {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(backgroundExecution.status.description)
-                            .foregroundStyle(.secondary)
-
-                        if backgroundExecution.status.requiresSystemSettings {
-                            Button("Open Location Settings") {
-                                backgroundExecution.openSystemSettings()
-                            }
-                        }
+                if backgroundExecution.isEnabled,
+                   backgroundExecution.status.requiresSystemSettings {
+                    Button("Open Location Settings") {
+                        backgroundExecution.openSystemSettings()
                     }
-                    .font(.footnote)
                 }
             } header: {
                 Text("Background Execution")
-            } footer: {
-                Text("When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background.")
             }
 #endif
 
             Section {
                 Picker("Data Storage", selection: storageLocationBinding) {
                     ForEach(PhoneMEStorageLocation.allCases) { location in
-                        Label(location.title, systemImage: location.systemImage)
+                        Text(location.title)
                             .tag(location)
                     }
                 }
@@ -140,8 +155,6 @@ struct SettingsView: View {
 
             } header: {
                 Text("Storage")
-            } footer: {
-                Text("Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location.")
             }
 
         }
@@ -154,6 +167,35 @@ struct SettingsView: View {
         } message: {
             Text(storageErrorMessage ?? "")
         }
+        .task {
+            session.refreshJITStatus()
+        }
+    }
+
+    private var jitEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { enableJIT },
+            set: { enabled in
+                enableJIT = enabled
+                session.configureJIT(enabled: enabled)
+                workspaceRuntime.configureJIT(enabled: enabled)
+            }
+        )
+    }
+
+    private var jitStatusTitle: String {
+        guard enableJIT else { return L10n.string("Disabled") }
+        switch session.jitStatus {
+        case .ready:
+            return L10n.string("Ready")
+        case .unavailable:
+            return L10n.string("Permission Required")
+        }
+    }
+
+    private var jitStatusForegroundStyle: Color {
+        guard enableJIT else { return .secondary }
+        return session.jitStatus == .ready ? .green : .orange
     }
 
     private var translationProviderBinding: Binding<String> {

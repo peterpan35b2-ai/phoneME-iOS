@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "ArrayDequeNatives.hpp"
 #include "BluetoothNatives.hpp"
 #include "CanvasNatives.hpp"
 #include "ChoiceNatives.hpp"
@@ -28,6 +29,7 @@
 #include "HeadlessCompatNatives.hpp"
 #include "ImageNatives.hpp"
 #include "IONatives.hpp"
+#include "Jdk8CompatNatives.hpp"
 #include "LcduiNatives.hpp"
 #include "MathNatives.hpp"
 #include "M3gNatives.hpp"
@@ -751,6 +753,34 @@ void register_text_builder(NativeMethodRegistry& registry,
             }
             return std::optional<Value>(Value::from_int(static_cast<i32>(
                 static_cast<u16>((*text)[static_cast<usize>(*index)]))));
+        });
+    add(registry, class_name, "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder subSequence arguments are invalid");
+            }
+            auto receiver = require_receiver(arguments);
+            auto begin = arguments[1].as_int();
+            auto end = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!begin) return std::unexpected(begin.error());
+            if (!end) return std::unexpected(end.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*begin < 0 || *end < *begin ||
+                static_cast<usize>(*end) > text->size()) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "string builder subSequence range is invalid");
+            }
+            auto result = create_java_string(
+                machine,
+                text->substr(static_cast<usize>(*begin),
+                             static_cast<usize>(*end - *begin)));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
         });
     add(registry, class_name, "setCharAt", "(IC)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1969,6 +1999,30 @@ void register_string_extensions(NativeMethodRegistry& registry) {
     };
     register_substring(false);
     register_substring(true);
+    add(registry, "java/lang/String", "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            auto begin = arguments[1].as_int();
+            auto end = arguments[2].as_int();
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!begin) return std::unexpected(begin.error());
+            if (!end) return std::unexpected(end.error());
+            auto text = machine.heap().string_value(*receiver);
+            if (!text) return std::unexpected(text.error());
+            if (*begin < 0 || *end < *begin ||
+                static_cast<usize>(*end) > text->size()) {
+                return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                 "String.subSequence range is invalid");
+            }
+            auto result = create_java_string(
+                machine,
+                text->substr(static_cast<usize>(*begin),
+                             static_cast<usize>(*end - *begin)));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
 
     add(registry, "java/lang/String", "concat",
         "(Ljava/lang/String;)Ljava/lang/String;",
@@ -2648,6 +2702,7 @@ void register_string_extensions(NativeMethodRegistry& registry) {
 } // namespace
 
 void register_core_natives(NativeMethodRegistry& registry) {
+    register_array_deque_natives(registry);
     register_bluetooth_natives(registry);
     register_canvas_natives(registry);
     register_class_natives(registry);
@@ -2673,6 +2728,7 @@ void register_core_natives(NativeMethodRegistry& registry) {
     register_string_encoding_natives(registry);
     register_time_natives(registry);
     register_util_natives(registry);
+    register_jdk8_compat_natives(registry);
     register_wrapper_natives(registry);
     register_xml_natives(registry);
     register_vendor_natives(registry);

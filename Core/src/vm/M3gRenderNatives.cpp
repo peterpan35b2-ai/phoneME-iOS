@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "M3gLoader.hpp"
@@ -114,6 +115,7 @@ struct SceneLight final {
 struct TextureData final {
     i32 width {0};
     i32 height {0};
+    i32 format {100};
     i32 wrap_s {240};
     i32 wrap_t {240};
     i32 blending {227};
@@ -1127,6 +1129,60 @@ struct DeformedGeometry final {
     return result;
 }
 
+[[nodiscard]] u8 image2d_luminance(graphics::Pixel pixel) noexcept {
+    const u32 weighted = 77U * graphics::red(pixel) +
+                         150U * graphics::green(pixel) +
+                         29U * graphics::blue(pixel);
+    return static_cast<u8>((weighted + 128U) >> 8U);
+}
+
+[[nodiscard]] Result<std::vector<graphics::Pixel>> convert_image2d_pixels(
+    std::span<const graphics::Pixel> source,
+    i32 format,
+    bool source_has_alpha) {
+    if (format < 96 || format > 100) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "unsupported Image2D format");
+    }
+    std::vector<graphics::Pixel> result;
+    result.reserve(source.size());
+    for (const graphics::Pixel pixel : source) {
+        const u8 luminance = image2d_luminance(pixel);
+        switch (format) {
+        case 96: {
+            const u8 alpha = source_has_alpha
+                ? graphics::alpha(pixel) : luminance;
+            result.push_back(graphics::argb(
+                alpha, 255U, 255U, 255U));
+            break;
+        }
+        case 97:
+            result.push_back(graphics::argb(
+                255U, luminance, luminance, luminance));
+            break;
+        case 98:
+            result.push_back(graphics::argb(
+                source_has_alpha ? graphics::alpha(pixel) : 255U,
+                luminance, luminance, luminance));
+            break;
+        case 99:
+            result.push_back(graphics::argb(
+                255U, graphics::red(pixel), graphics::green(pixel),
+                graphics::blue(pixel)));
+            break;
+        case 100:
+            result.push_back(graphics::argb(
+                source_has_alpha ? graphics::alpha(pixel) : 255U,
+                graphics::red(pixel), graphics::green(pixel),
+                graphics::blue(pixel)));
+            break;
+        default:
+            break;
+        }
+    }
+    return result;
+}
+
 [[nodiscard]] Result<std::vector<graphics::Pixel>> image2d_pixels(
     Machine& machine,
     ObjectRef image2d,
@@ -1135,9 +1191,10 @@ struct DeformedGeometry final {
     i32 format) {
     auto render_surface = machine.graphics().image(image2d.bits);
     if (render_surface) {
-        return std::vector<graphics::Pixel>(
-            (*render_surface)->pixels().begin(),
-            (*render_surface)->pixels().end());
+        const bool source_has_alpha = format == 96 || format == 98 ||
+                                      format == 100;
+        return convert_image2d_pixels(
+            (*render_surface)->pixels(), format, source_has_alpha);
     }
     auto source = reference_field(machine, image2d, kImage2D,
                                   "source", "Ljava/lang/Object;");
@@ -1151,8 +1208,8 @@ struct DeformedGeometry final {
     if (*source_class == "javax/microedition/lcdui/Image") {
         auto image = machine.graphics().image(source->bits);
         if (!image) return std::unexpected(image.error());
-        return std::vector<graphics::Pixel>(
-            (*image)->pixels().begin(), (*image)->pixels().end());
+        return convert_image2d_pixels(
+            (*image)->pixels(), format, !(*image)->is_mutable());
     }
     if (*source_class != "[B") return std::vector<graphics::Pixel> {};
     auto bytes = read_byte_array(machine, *source, "Image2D pixels");
@@ -1225,6 +1282,7 @@ struct DeformedGeometry final {
     return TextureData {
         .width = *width,
         .height = *height,
+        .format = *format,
         .wrap_s = wrap_s,
         .wrap_t = wrap_t,
         .pixels = std::move(*pixels),
@@ -1282,6 +1340,7 @@ struct DeformedGeometry final {
     return std::optional<TextureData>(TextureData {
         .width = *width,
         .height = *height,
+        .format = *format,
         .wrap_s = *wrap_s,
         .wrap_t = *wrap_t,
         .blending = *blending,
@@ -1420,8 +1479,7 @@ struct DeformedGeometry final {
     u = wrapped_coordinate(u, texture.wrap_s);
     v = wrapped_coordinate(v, texture.wrap_t);
     const float pixel_x = u * static_cast<float>(texture.width) - 0.5F;
-    const float pixel_y = (1.0F - v) * static_cast<float>(texture.height) -
-                          0.5F;
+    const float pixel_y = v * static_cast<float>(texture.height) - 0.5F;
     const auto texel = [&](i32 x, i32 y) {
         if (texture.wrap_s == 241) {
             x %= texture.width;
@@ -1462,35 +1520,55 @@ struct DeformedGeometry final {
     const VertexColor sample = color_from_argb(static_cast<i32>(texel));
     const VertexColor blend = color_from_argb(
         static_cast<i32>(texture.blend_color));
+    const bool has_color = texture.format != 96;
+    const bool has_alpha = texture.format == 96 || texture.format == 98 ||
+                           texture.format == 100;
     VertexColor result = base;
     switch (texture.blending) {
-    case 224:
-        result.r = std::min(1.0F, base.r + sample.r);
-        result.g = std::min(1.0F, base.g + sample.g);
-        result.b = std::min(1.0F, base.b + sample.b);
-        result.a = base.a * sample.a;
+    case 224: // FUNC_ADD
+        if (has_color) {
+            result.r = std::min(1.0F, base.r + sample.r);
+            result.g = std::min(1.0F, base.g + sample.g);
+            result.b = std::min(1.0F, base.b + sample.b);
+        }
+        result.a = has_alpha ? base.a * sample.a : base.a;
         break;
-    case 225:
-        result.r = base.r * (1.0F - sample.r) + blend.r * sample.r;
-        result.g = base.g * (1.0F - sample.g) + blend.g * sample.g;
-        result.b = base.b * (1.0F - sample.b) + blend.b * sample.b;
-        result.a = base.a * sample.a;
+    case 225: // FUNC_BLEND
+        if (has_color) {
+            result.r = base.r * (1.0F - sample.r) + blend.r * sample.r;
+            result.g = base.g * (1.0F - sample.g) + blend.g * sample.g;
+            result.b = base.b * (1.0F - sample.b) + blend.b * sample.b;
+        }
+        result.a = has_alpha ? base.a * sample.a : base.a;
         break;
-    case 226:
-        result.r = base.r * (1.0F - sample.a) + sample.r * sample.a;
-        result.g = base.g * (1.0F - sample.a) + sample.g * sample.a;
-        result.b = base.b * (1.0F - sample.a) + sample.b * sample.a;
+    case 226: // FUNC_DECAL
+        if (texture.format == 99) {
+            result.r = sample.r;
+            result.g = sample.g;
+            result.b = sample.b;
+        } else if (texture.format == 100) {
+            result.r = base.r * (1.0F - sample.a) + sample.r * sample.a;
+            result.g = base.g * (1.0F - sample.a) + sample.g * sample.a;
+            result.b = base.b * (1.0F - sample.a) + sample.b * sample.a;
+        }
         result.a = base.a;
         break;
-    case 228:
-        result = sample;
+    case 228: // FUNC_REPLACE
+        if (has_color) {
+            result.r = sample.r;
+            result.g = sample.g;
+            result.b = sample.b;
+        }
+        result.a = has_alpha ? sample.a : base.a;
         break;
-    case 227:
+    case 227: // FUNC_MODULATE
     default:
-        result.a = base.a * sample.a;
-        result.r = base.r * sample.r;
-        result.g = base.g * sample.g;
-        result.b = base.b * sample.b;
+        if (has_color) {
+            result.r = base.r * sample.r;
+            result.g = base.g * sample.g;
+            result.b = base.b * sample.b;
+        }
+        result.a = has_alpha ? base.a * sample.a : base.a;
         break;
     }
     return color_to_argb(result);
@@ -3874,7 +3952,6 @@ constexpr std::array<u8, 8> kLoaderPngSignature {
     0x89U, 0x50U, 0x4EU, 0x47U, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
 };
 constexpr usize kMaximumLoaderBytes = 64U * 1024U * 1024U;
-constexpr usize kLoaderReadChunk = 8U * 1024U;
 
 [[nodiscard]] LoaderResourceKind loader_resource_kind(
     std::span<const u8> bytes) noexcept {
@@ -4012,84 +4089,136 @@ constexpr usize kLoaderReadChunk = 8U * 1024U;
     return wrap_lcdui_image2d(machine, *image, format);
 }
 
-[[nodiscard]] Result<ObjectRef> load_external_image2d(
+[[nodiscard]] Result<ObjectRef> single_object3d_array(
     Machine& machine,
-    std::string_view resource_name) {
-    std::string java_name {"/"};
-    java_name.append(resource_name);
-    auto name = create_ascii_string(machine, java_name);
-    if (!name) return std::unexpected(name.error());
-    const std::array<Value, 1> image_arguments {
-        Value::from_reference(*name),
-    };
-    auto created = machine.invoke_static(
-        "javax/microedition/lcdui/Image", "createImage",
-        "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;",
-        image_arguments);
-    if (!created) return std::unexpected(created.error());
-    auto image = execution_reference(machine, *created,
-                                     "M3G external image load");
-    if (!image) return std::unexpected(image.error());
-    auto image_root = machine.pin_native_root(*image);
-    if (!image_root) return std::unexpected(image_root.error());
-
-    auto width = int_field(machine, *image,
-                           "javax/microedition/lcdui/Image", "width");
-    auto height = int_field(machine, *image,
-                            "javax/microedition/lcdui/Image", "height");
-    if (!width) return std::unexpected(width.error());
-    if (!height) return std::unexpected(height.error());
-
-    auto image2d = allocate_instance(machine, kImage2D);
-    if (!image2d) return std::unexpected(image2d.error());
-    auto image2d_root = machine.pin_native_root(*image2d);
-    if (!image2d_root) return std::unexpected(image2d_root.error());
-    auto initialized = initialize_object3d(machine, *image2d);
-    if (!initialized) return std::unexpected(initialized.error());
-    i32 image_format = 100;
-    auto decoded = machine.graphics().image(image->bits);
-    if (decoded) {
-        const bool has_alpha = std::any_of(
-            (*decoded)->pixels().begin(), (*decoded)->pixels().end(),
-            [](graphics::Pixel pixel) {
-                return graphics::alpha(pixel) != 255U;
-            });
-        image_format = has_alpha ? 100 : 99;
-    }
-    auto format = set_int_field(machine, *image2d, kImage2D,
-                                "format", image_format);
-    auto width_stored = set_int_field(machine, *image2d, kImage2D,
-                                      "width", *width);
-    auto height_stored = set_int_field(machine, *image2d, kImage2D,
-                                       "height", *height);
-    auto immutable = set_int_field(machine, *image2d, kImage2D,
-                                   "mutable", 0, "Z");
-    auto source = set_reference_field(machine, *image2d, kImage2D,
-                                      "source", "Ljava/lang/Object;", *image);
-    if (!format) return std::unexpected(format.error());
-    if (!width_stored) return std::unexpected(width_stored.error());
-    if (!height_stored) return std::unexpected(height_stored.error());
-    if (!immutable) return std::unexpected(immutable.error());
-    if (!source) return std::unexpected(source.error());
-    return *image2d;
+    ObjectRef object) {
+    auto result = allocate_array(
+        machine, "[Ljavax/microedition/m3g/Object3D;", 1U,
+        Value::from_reference({}));
+    if (!result) return std::unexpected(result.error());
+    auto result_root = machine.pin_native_root(*result);
+    if (!result_root) return std::unexpected(result_root.error());
+    auto stored = machine.heap().set_element(
+        *result, 0U, Value::from_reference(object));
+    if (!stored) return std::unexpected(stored.error());
+    return *result;
 }
+
+struct ExternalLoadState final :
+    std::enable_shared_from_this<ExternalLoadState> {
+    explicit ExternalLoadState(Machine& target) noexcept : machine(target) {}
+
+    [[nodiscard]] ExternalReferenceResolver resolver(std::string owner) {
+        auto self = shared_from_this();
+        return [self = std::move(self), owner = std::move(owner)](
+            std::string_view uri) -> Result<ObjectRef> {
+            auto resource = external_resource_name(owner, uri);
+            if (!resource) return std::unexpected(resource.error());
+            return self->load(*resource);
+        };
+    }
+
+    [[nodiscard]] Result<ObjectRef> load(const std::string& resource) {
+        const auto found = cache.find(resource);
+        if (found != cache.end()) return found->second;
+        if (loading.contains(resource)) {
+            return fail_java("java/io/IOException",
+                             "M3G external reference cycle detected");
+        }
+        loading.insert(resource);
+        struct LoadingGuard final {
+            std::unordered_set<std::string>& resources;
+            const std::string& resource;
+            ~LoadingGuard() { resources.erase(resource); }
+        } guard {loading, resource};
+
+        auto bytes = machine.classes().read_resource(resource);
+        if (!bytes) {
+            return fail_java("java/io/IOException", bytes.error().message);
+        }
+        ObjectRef object {};
+        switch (loader_resource_kind(*bytes)) {
+        case LoaderResourceKind::png: {
+            auto loaded = load_image2d_bytes(
+                machine, *bytes, LoaderResourceKind::png);
+            if (!loaded) return std::unexpected(loaded.error());
+            object = *loaded;
+            break;
+        }
+        case LoaderResourceKind::m3g: {
+            auto objects = load_m3g(
+                machine, *bytes, resolver(resource));
+            if (!objects) return std::unexpected(objects.error());
+            auto objects_root = machine.pin_native_root(*objects);
+            if (!objects_root) return std::unexpected(objects_root.error());
+            auto count = machine.heap().array_length(*objects);
+            if (!count) return std::unexpected(count.error());
+            if (*count == 0U) {
+                return fail_java(
+                    "java/io/IOException",
+                    "external M3G file has no root-level object");
+            }
+            auto first = machine.heap().element(*objects, 0U);
+            if (!first) return std::unexpected(first.error());
+            auto reference = first->as_reference();
+            if (!reference) return std::unexpected(reference.error());
+            if (reference->is_null()) {
+                return fail_java(
+                    "java/io/IOException",
+                    "external M3G root-level object is null");
+            }
+            object = *reference;
+            break;
+        }
+        case LoaderResourceKind::jpeg:
+            return fail_java(
+                "java/io/IOException",
+                "JPEG is not valid for an M3G external reference");
+        case LoaderResourceKind::unknown:
+            return fail_java(
+                "java/io/IOException",
+                "unsupported M3G external reference type");
+        }
+        cache.emplace(resource, object);
+        return object;
+    }
+
+    Machine& machine;
+    std::unordered_map<std::string, ObjectRef> cache;
+    std::unordered_set<std::string> loading;
+};
 
 [[nodiscard]] ExternalReferenceResolver external_resolver(
     Machine& machine,
     std::string owner_resource) {
-    auto cache = std::make_shared<std::unordered_map<std::string, ObjectRef>>();
-    return [&machine, owner_resource = std::move(owner_resource),
-            cache = std::move(cache)](
-        std::string_view uri) -> Result<ObjectRef> {
-        auto resource = external_resource_name(owner_resource, uri);
-        if (!resource) return std::unexpected(resource.error());
-        const auto found = cache->find(*resource);
-        if (found != cache->end()) return found->second;
-        auto loaded = load_external_image2d(machine, *resource);
-        if (!loaded) return std::unexpected(loaded.error());
-        cache->emplace(*resource, *loaded);
-        return *loaded;
-    };
+    auto state = std::make_shared<ExternalLoadState>(machine);
+    if (!owner_resource.empty()) {
+        state->loading.insert(owner_resource);
+    }
+    return state->resolver(std::move(owner_resource));
+}
+
+[[nodiscard]] Result<ObjectRef> load_loader_bytes(
+    Machine& machine,
+    std::span<const u8> bytes,
+    std::string owner_resource) {
+    switch (const LoaderResourceKind kind = loader_resource_kind(bytes)) {
+    case LoaderResourceKind::m3g:
+        return load_m3g(
+            machine, bytes,
+            external_resolver(machine, std::move(owner_resource)));
+    case LoaderResourceKind::png:
+    case LoaderResourceKind::jpeg: {
+        auto image = load_image2d_bytes(machine, bytes, kind);
+        if (!image) return std::unexpected(image.error());
+        return single_object3d_array(machine, *image);
+    }
+    case LoaderResourceKind::unknown:
+        return fail_java("java/io/IOException",
+                         "unsupported M3G Loader resource type");
+    }
+    return fail(ErrorCode::internal_error,
+                "unreachable M3G Loader resource type");
 }
 
 [[nodiscard]] Result<std::vector<u8>> loader_byte_array(
@@ -4136,8 +4265,8 @@ void register_loader(NativeMethodRegistry& registry) {
                 return fail_java("java/io/IOException",
                                  bytes.error().message);
             }
-            auto objects = load_m3g(
-                machine, *bytes, external_resolver(machine, *resource));
+            auto objects = load_loader_bytes(
+                machine, *bytes, std::move(*resource));
             if (!objects) return std::unexpected(objects.error());
             return std::optional<Value>(Value::from_reference(*objects));
         });
@@ -4152,8 +4281,7 @@ void register_loader(NativeMethodRegistry& registry) {
             if (!offset) return std::unexpected(offset.error());
             auto bytes = loader_byte_array(machine, *data, *offset);
             if (!bytes) return std::unexpected(bytes.error());
-            auto objects = load_m3g(
-                machine, *bytes, external_resolver(machine, {}));
+            auto objects = load_loader_bytes(machine, *bytes, {});
             if (!objects) return std::unexpected(objects.error());
             return std::optional<Value>(Value::from_reference(*objects));
         });

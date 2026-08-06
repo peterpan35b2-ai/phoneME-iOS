@@ -131,6 +131,7 @@ final class EmulatorSession: ObservableObject {
     @Published private(set) var lcdUI: LCDUIState = .empty
     @Published private(set) var currentGame: Game?
     @Published private(set) var runningApplications: [UUID: RunningJ2MEApplication] = [:]
+    @Published private(set) var jitStatus = PhoneMECAPI.jitStatus
 
     let frameStore = EmulatorFrameStore()
     let fpsStore = EmulatorFPSStore()
@@ -446,6 +447,26 @@ final class EmulatorSession: ObservableObject {
             keySoftLeft: profile.keyCode(for: .softLeft),
             keySoftRight: profile.keyCode(for: .softRight)
         )
+    }
+
+    func configureJIT(
+        enabled: Bool,
+        completion: ((Result<PhoneMECAPI.JITStatus, Error>) -> Void)? = nil
+    ) {
+        engine.configureJIT(enabled: enabled) { [weak self] result in
+            if case let .success(status) = result {
+                self?.jitStatus = status
+            } else {
+                self?.jitStatus = PhoneMECAPI.jitStatus
+            }
+            completion?(result)
+        }
+    }
+
+    func refreshJITStatus() {
+        engine.refreshJITStatus { [weak self] status in
+            self?.jitStatus = status
+        }
     }
 
     func setAutoTranslationConfiguration(

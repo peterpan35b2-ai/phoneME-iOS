@@ -36,6 +36,7 @@ final class ProfileTemplateStore: ObservableObject {
     private let parallelRedrawMigrationKey = "phoneME.profileTemplates.parallelRedrawV6"
     private let nativeInputDefaultsMigrationKey = "phoneME.profileTemplates.nativeInputDefaultsV7"
     private let frameRate60MigrationKey = "phoneME.profileTemplates.frameRate60V8"
+    private let fpsOverrideOffMigrationKey = "phoneME.profileTemplates.fpsOverrideOffV9"
 
     init(
         storage: PhoneMEStorageController,
@@ -121,6 +122,7 @@ final class ProfileTemplateStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
             UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
             UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
+            UserDefaults.standard.set(true, forKey: fpsOverrideOffMigrationKey)
             return
         }
         let hasLegacyFrameLimit = stored.templates.contains {
@@ -211,6 +213,25 @@ final class ProfileTemplateStore: ObservableObject {
         // newly created profiles default to 30 FPS again.
         if !defaults.bool(forKey: frameRate60MigrationKey) {
             defaults.set(true, forKey: frameRate60MigrationKey)
+        }
+
+        // Earlier builds stored the former 30 FPS default as an explicit game
+        // loop override. Turn only that inherited default off once; custom FPS
+        // values remain untouched.
+        if !defaults.bool(forKey: fpsOverrideOffMigrationKey) {
+            var changed = false
+            for index in templates.indices {
+                guard templates[index].profile.framePacingMode == .overrideGameLoop,
+                      templates[index].profile.frameRateLimit == GameProfile.defaultFrameRate else {
+                    continue
+                }
+                templates[index].profile.framePacingMode = .native
+                changed = true
+            }
+            defaults.set(true, forKey: fpsOverrideOffMigrationKey)
+            if changed {
+                persist()
+            }
         }
         sort()
     }

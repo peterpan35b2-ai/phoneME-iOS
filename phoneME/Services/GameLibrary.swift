@@ -191,7 +191,7 @@ final class GameLibrary: ObservableObject {
 
     func saveLog() throws {
         let lines = [
-            "J2ME Loader",
+            "phoneME",
             "Games: \(games.count)",
             "Date: \(ISO8601DateFormatter().string(from: Date()))"
         ]

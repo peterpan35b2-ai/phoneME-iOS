@@ -910,22 +910,8 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                     Group {
                         if keyboardAdjustmentMode != .none {
                             Menu {
-                            Button(action: beginKeyboardPositionAction) {
-                                Label(
-                                    "Move keys",
-                                    systemImage: keyboardAdjustmentMode == .position
-                                        ? "checkmark.circle.fill"
-                                        : "arrow.up.and.down.and.arrow.left.and.right"
-                                )
-                            }
-                            Button(action: beginKeyboardResizeAction) {
-                                Label(
-                                    "Resize key groups",
-                                    systemImage: keyboardAdjustmentMode == .size
-                                        ? "checkmark.circle.fill"
-                                        : "arrow.up.left.and.arrow.down.right"
-                                )
-                            }
+                            Button("Move keys", action: beginKeyboardPositionAction)
+                            Button("Resize key groups", action: beginKeyboardResizeAction)
                         } label: {
                             Label(
                                 keyboardAdjustmentMode == .position
@@ -979,55 +965,31 @@ private struct EmulatorToolbarAnchor: View, Equatable {
 
                     Menu {
                         Menu {
-                            Button(action: beginKeyboardPositionAction) {
-                                Label(
-                                    "Move keys",
-                                    systemImage: "arrow.up.and.down.and.arrow.left.and.right"
-                                )
-                            }
-                            Button(action: beginKeyboardResizeAction) {
-                                Label(
-                                    "Resize key groups",
-                                    systemImage: "arrow.up.left.and.arrow.down.right"
-                                )
-                            }
+                            Button("Move keys", action: beginKeyboardPositionAction)
+                            Button("Resize key groups", action: beginKeyboardResizeAction)
                             if keyboardAdjustmentMode != .none {
-                                Button(action: finishKeyboardAdjustmentAction) {
-                                    Label("Finish editing", systemImage: "checkmark")
-                                }
+                                Button("Finish editing", action: finishKeyboardAdjustmentAction)
                             }
                             Divider()
-                            Button(action: switchKeyboardLayoutAction) {
-                                Label("Choose layout", systemImage: "keyboard")
-                            }
+                            Button("Choose layout", action: switchKeyboardLayoutAction)
                             .disabled(keyboardAdjustmentMode != .none)
-                            Button(action: hideKeyboardButtonsAction) {
-                                Label("Visible buttons", systemImage: "eye")
-                            }
+                            Button("Visible buttons", action: hideKeyboardButtonsAction)
                             .disabled(keyboardAdjustmentMode != .none)
                             Button(
+                                "Reset keyboard layout",
                                 role: .destructive,
                                 action: resetKeyboardLayoutAction
-                            ) {
-                                Label(
-                                    "Reset keyboard layout",
-                                    systemImage: "arrow.counterclockwise"
-                                )
-                            }
+                            )
                         } label: {
-                            Label("Virtual keyboard", systemImage: "keyboard")
+                            Text("Virtual keyboard")
                         }
                         Divider()
-                        Button(action: toggleRotationLockAction) {
-                            Label(
-                                isRotationLocked
-                                    ? L10n.string("Unlock screen rotation")
-                                    : L10n.string("Lock screen rotation"),
-                                systemImage: isRotationLocked
-                                    ? "lock.rotation.open"
-                                    : "lock.rotation"
-                            )
-                        }
+                        Button(
+                            isRotationLocked
+                                ? L10n.string("Unlock screen rotation")
+                                : L10n.string("Lock screen rotation"),
+                            action: toggleRotationLockAction
+                        )
                         Menu {
                             Button {
                                 setTranslationConfigurationAction(
@@ -1035,12 +997,7 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                     translationSourceLanguage
                                 )
                             } label: {
-                                Label(
-                                    "Off",
-                                    systemImage: !translationEnabled
-                                        ? "checkmark.circle.fill"
-                                        : "nosign"
-                                )
+                                Text("Off")
                             }
                             Divider()
                             ForEach(TranslationSourceLanguage.allCases) { language in
@@ -1050,56 +1007,32 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                         language
                                     )
                                 } label: {
-                                    Label(
-                                        language.title,
-                                        systemImage: translationEnabled &&
-                                            translationSourceLanguage == language
-                                            ? "checkmark.circle.fill"
-                                            : language.systemImage
-                                    )
+                                    Text(language.title)
                                 }
                             }
                         } label: {
-                            Label(
-                                "Auto translate",
-                                systemImage: "character.book.closed.fill"
-                            )
+                            Text("Auto translate")
                         }
                         Menu {
                             Button {
                                 setFrameRateAction(nil)
                             } label: {
-                                Label(
-                                    "Default",
-                                    systemImage: !frameRateOverrideEnabled
-                                        ? "checkmark.circle.fill"
-                                        : "clock"
-                                )
+                                Text("Default")
                             }
                             Divider()
                             ForEach([30, 60], id: \.self) { fps in
                                 Button {
                                     setFrameRateAction(fps)
                                 } label: {
-                                    Label(
-                                        "\(fps) FPS",
-                                        systemImage: frameRateOverrideEnabled &&
-                                            frameRateLimit == fps
-                                            ? "checkmark.circle.fill"
-                                            : "speedometer"
-                                    )
+                                    Text("\(fps) FPS")
                                 }
                             }
                         } label: {
-                            Label("FPS", systemImage: "speedometer")
+                            Text("FPS")
                         }
                         Divider()
-                        Button(action: hideAction) {
-                            Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
-                        }
-                        Button(role: .destructive, action: exitAction) {
-                            Label("Exit", systemImage: "power")
-                        }
+                        Button("Hide application", action: hideAction)
+                        Button("Exit", role: .destructive, action: exitAction)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -1129,8 +1062,6 @@ private struct KeyboardVisibilityEditor: View {
                 }
             } header: {
                 Text("Visible Controls")
-            } footer: {
-                Text("Turn off controls you do not need for this game.")
             }
         }
         .listStyle(.insetGrouped)
@@ -1669,6 +1600,24 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
     }
     """
 
+    private struct RendererResources {
+        let deviceRegistryID: UInt64
+        let commandQueue: MTLCommandQueue
+        let pipelineState: MTLRenderPipelineState
+        let nearestSampler: MTLSamplerState
+        let linearSampler: MTLSamplerState
+    }
+
+    private static let rendererResourceLock = NSLock()
+    private static var cachedRendererResources: RendererResources?
+    private static var isCompilingRendererResources = false
+    private static var rendererCompilationFailed = false
+
+    static func prewarmRenderer() {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        requestRendererResources(for: device)
+    }
+
     private let fallbackLayer = CALayer()
     private var commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?
@@ -1697,6 +1646,7 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
 
     func update(image: CGImage, filtering: Bool) {
         usesLinearFiltering = filtering
+        installRendererResourcesIfAvailable()
         guard upload(image: image) else {
             showFallback(image: image, filtering: filtering)
             return
@@ -1762,8 +1712,77 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         fallbackLayer.backgroundColor = UIColor.black.cgColor
         layer.addSublayer(fallbackLayer)
 
-        guard let device else { return }
-        commandQueue = device.makeCommandQueue()
+        installRendererResourcesIfAvailable()
+    }
+
+    private func installRendererResourcesIfAvailable() {
+        guard pipelineState == nil,
+              let device,
+              let resources = Self.rendererResourcesIfAvailable(for: device) else {
+            return
+        }
+        commandQueue = resources.commandQueue
+        pipelineState = resources.pipelineState
+        nearestSampler = resources.nearestSampler
+        linearSampler = resources.linearSampler
+    }
+
+    private static func rendererResourcesIfAvailable(
+        for device: MTLDevice
+    ) -> RendererResources? {
+        rendererResourceLock.lock()
+        if let cachedRendererResources,
+           cachedRendererResources.deviceRegistryID == device.registryID {
+            rendererResourceLock.unlock()
+            return cachedRendererResources
+        }
+        let shouldCompile = !isCompilingRendererResources
+            && !rendererCompilationFailed
+        if shouldCompile {
+            isCompilingRendererResources = true
+        }
+        rendererResourceLock.unlock()
+
+        if shouldCompile {
+            requestRendererResources(for: device, alreadyReserved: true)
+        }
+        return nil
+    }
+
+    private static func requestRendererResources(
+        for device: MTLDevice,
+        alreadyReserved: Bool = false
+    ) {
+        if !alreadyReserved {
+            rendererResourceLock.lock()
+            if let cachedRendererResources,
+               cachedRendererResources.deviceRegistryID == device.registryID {
+                rendererResourceLock.unlock()
+                return
+            }
+            guard !isCompilingRendererResources,
+                  !rendererCompilationFailed else {
+                rendererResourceLock.unlock()
+                return
+            }
+            isCompilingRendererResources = true
+            rendererResourceLock.unlock()
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resources = buildRendererResources(for: device)
+            rendererResourceLock.lock()
+            cachedRendererResources = resources
+            rendererCompilationFailed = resources == nil
+            isCompilingRendererResources = false
+            rendererResourceLock.unlock()
+        }
+    }
+
+    private static func buildRendererResources(
+        for device: MTLDevice
+    ) -> RendererResources? {
+        guard let commandQueue = device.makeCommandQueue() else { return nil }
 
         let nearest = MTLSamplerDescriptor()
         nearest.minFilter = .nearest
@@ -1771,7 +1790,9 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         nearest.mipFilter = .notMipmapped
         nearest.sAddressMode = .clampToEdge
         nearest.tAddressMode = .clampToEdge
-        nearestSampler = device.makeSamplerState(descriptor: nearest)
+        guard let nearestSampler = device.makeSamplerState(descriptor: nearest) else {
+            return nil
+        }
 
         let linear = MTLSamplerDescriptor()
         linear.minFilter = .linear
@@ -1779,28 +1800,37 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         linear.mipFilter = .notMipmapped
         linear.sAddressMode = .clampToEdge
         linear.tAddressMode = .clampToEdge
-        linearSampler = device.makeSamplerState(descriptor: linear)
+        guard let linearSampler = device.makeSamplerState(descriptor: linear) else {
+            return nil
+        }
 
         do {
             let library = try device.makeLibrary(
-                source: Self.shaderSource,
+                source: shaderSource,
                 options: nil
             )
             guard
                 let vertex = library.makeFunction(name: "phoneMEFrameVertex"),
                 let fragment = library.makeFunction(name: "phoneMEFrameFragment")
             else {
-                return
+                return nil
             }
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertex
             descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
-            pipelineState = try device.makeRenderPipelineState(
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            let pipelineState = try device.makeRenderPipelineState(
                 descriptor: descriptor
             )
+            return RendererResources(
+                deviceRegistryID: device.registryID,
+                commandQueue: commandQueue,
+                pipelineState: pipelineState,
+                nearestSampler: nearestSampler,
+                linearSampler: linearSampler
+            )
         } catch {
-            pipelineState = nil
+            return nil
         }
     }
 
@@ -1850,6 +1880,16 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         fallbackLayer.minificationFilter = filtering ? .linear : .nearest
         fallbackLayer.contents = image
         CATransaction.commit()
+    }
+}
+
+// Starts Metal shader compilation while the library screen is idle. The game
+// view never blocks the main thread waiting for a source shader compilation;
+// until the shared pipeline is ready, it renders through the existing CALayer
+// fallback and switches to Metal on a later frame.
+enum PhoneMEFrameRendererPrewarmer {
+    static func prewarm() {
+        PhoneMEFrameLayerHostView.prewarmRenderer()
     }
 }
 #endif

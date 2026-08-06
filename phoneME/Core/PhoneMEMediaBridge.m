@@ -806,10 +806,10 @@ static void PMPublishNowPlaying(PMMediaEntry *entry) {
         ? gPMMediaApplicationTitle
         : (NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"]
             ?: NSBundle.mainBundle.infoDictionary[@"CFBundleName"]
-            ?: @"J2ME Loader");
+            ?: @"phoneME");
     NSString *applicationArtist = gPMMediaApplicationArtist.length > 0
         ? gPMMediaApplicationArtist
-        : @"J2ME Loader";
+        : @"phoneME";
     NSString *mediaTitle = entry.mediaTitle.length > 0
         ? entry.mediaTitle
         : nil;
@@ -831,7 +831,7 @@ static void PMPublishNowPlaying(PMMediaEntry *entry) {
             [[NSMutableDictionary alloc] init];
         info[MPMediaItemPropertyTitle] = title;
         info[MPMediaItemPropertyArtist] = artist;
-        info[MPMediaItemPropertyAlbumTitle] = @"J2ME Loader";
+        info[MPMediaItemPropertyAlbumTitle] = @"phoneME";
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(elapsed);
         info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? @1.0 : @0.0;
         info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = @1.0;

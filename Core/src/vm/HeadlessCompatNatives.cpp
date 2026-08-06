@@ -36,6 +36,7 @@ constexpr i32 kIteratorRemoveArrayList = 1;
 constexpr usize kHashMapKeysField = 0U;
 constexpr usize kHashMapValuesField = 1U;
 constexpr usize kHashMapSizeField = 2U;
+constexpr usize kHashMapHashesField = 3U;
 constexpr usize kHashSetMapField = 0U;
 
 void add(NativeMethodRegistry& registry,
@@ -131,6 +132,11 @@ void add(NativeMethodRegistry& registry,
     return machine.heap().allocate_array("[B", length, Value::from_int(0));
 }
 
+[[nodiscard]] Result<ObjectRef> allocate_int_array(Machine& machine,
+                                                    usize length) {
+    return machine.heap().allocate_array("[I", length, Value::from_int(0));
+}
+
 [[nodiscard]] Result<ObjectRef> create_string(Machine& machine,
                                               std::u16string text) {
     auto object = machine.class_states().allocate_instance(
@@ -196,7 +202,9 @@ void add(NativeMethodRegistry& registry,
         auto throwable_class = machine.heap().class_name(*invoked->throwable);
         if (!throwable_class) return std::unexpected(throwable_class.error());
         return fail_java(*throwable_class,
-                         "headless compatibility callback threw an exception");
+                         "headless compatibility callback threw from " +
+                             std::string(declared_class) + "." +
+                             std::string(name) + std::string(descriptor));
     }
     return invoked->return_value;
 }
@@ -397,16 +405,53 @@ void add(NativeMethodRegistry& registry,
     return elements;
 }
 
-[[nodiscard]] Result<i32> map_find_key(Machine& machine,
-                                       ObjectRef map,
-                                       ObjectRef key) {
+[[nodiscard]] Result<i32> hash_map_key_hash(Machine& machine,
+                                             ObjectRef key) {
+    if (key.is_null()) return 0;
+
+    auto class_name = machine.heap().class_name(key);
+    if (!class_name) return std::unexpected(class_name.error());
+    if (*class_name == "java/lang/String") {
+        auto text = machine.heap().string_value(key);
+        if (!text) return std::unexpected(text.error());
+        u32 hash = 0U;
+        for (const char16_t character : *text) {
+            hash = hash * 31U + static_cast<u16>(character);
+        }
+        return static_cast<i32>(hash);
+    }
+
+    auto result = invoke_checked(machine, key, "java/lang/Object", "hashCode",
+                                 "()I");
+    if (!result) return std::unexpected(result.error());
+    if (!result->has_value()) {
+        return fail(ErrorCode::internal_error,
+                    "Object.hashCode returned no value");
+    }
+    return result->value().as_int();
+}
+
+[[nodiscard]] Result<i32> map_find_key_with_hash(Machine& machine,
+                                                  ObjectRef map,
+                                                  ObjectRef key,
+                                                  i32 target_hash) {
     auto size = int_field(machine, map, kHashMapSizeField);
     auto keys = reference_field(machine, map, kHashMapKeysField);
-    if (!size || !keys || keys->is_null()) {
+    auto hashes = reference_field(machine, map, kHashMapHashesField);
+    if (!size || !keys || !hashes || keys->is_null() || hashes->is_null()) {
         return fail(ErrorCode::invalid_state,
                     "HashMap state is invalid");
     }
     for (i32 index = 0; index < *size; ++index) {
+        auto cached_hash_value = machine.heap().element(
+            *hashes, static_cast<usize>(index));
+        if (!cached_hash_value) {
+            return std::unexpected(cached_hash_value.error());
+        }
+        auto cached_hash = cached_hash_value->as_int();
+        if (!cached_hash) return std::unexpected(cached_hash.error());
+        if (*cached_hash != target_hash) continue;
+
         auto current_value = machine.heap().element(
             *keys, static_cast<usize>(index));
         if (!current_value) return std::unexpected(current_value.error());
@@ -417,6 +462,14 @@ void add(NativeMethodRegistry& registry,
         if (*equal) return index;
     }
     return -1;
+}
+
+[[nodiscard]] Result<i32> map_find_key(Machine& machine,
+                                       ObjectRef map,
+                                       ObjectRef key) {
+    auto hash = hash_map_key_hash(machine, key);
+    if (!hash) return std::unexpected(hash.error());
+    return map_find_key_with_hash(machine, map, key, *hash);
 }
 
 [[nodiscard]] Status initialize_hash_map(Machine& machine,
@@ -437,8 +490,13 @@ void add(NativeMethodRegistry& registry,
     if (!values) return std::unexpected(values.error());
     auto values_stored = set_reference_field(machine, map,
                                              kHashMapValuesField, *values);
-    auto size_stored = set_int_field(machine, map, kHashMapSizeField, 0);
     if (!values_stored) return values_stored;
+    auto hashes = allocate_int_array(machine, capacity);
+    if (!hashes) return std::unexpected(hashes.error());
+    auto hashes_stored = set_reference_field(machine, map,
+                                             kHashMapHashesField, *hashes);
+    auto size_stored = set_int_field(machine, map, kHashMapSizeField, 0);
+    if (!hashes_stored) return hashes_stored;
     return size_stored;
 }
 
@@ -447,7 +505,9 @@ void add(NativeMethodRegistry& registry,
                                               i32 minimum) {
     auto keys = reference_field(machine, map, kHashMapKeysField);
     auto values = reference_field(machine, map, kHashMapValuesField);
-    if (!keys || !values || keys->is_null() || values->is_null()) {
+    auto hashes = reference_field(machine, map, kHashMapHashesField);
+    if (!keys || !values || !hashes || keys->is_null() ||
+        values->is_null() || hashes->is_null()) {
         return fail(ErrorCode::invalid_state,
                     "HashMap storage is invalid");
     }
@@ -467,6 +527,12 @@ void add(NativeMethodRegistry& registry,
                                                  kHashMapValuesField,
                                                  *new_values);
     if (!new_values_stored) return new_values_stored;
+    auto new_hashes = allocate_int_array(machine, new_capacity);
+    if (!new_hashes) return std::unexpected(new_hashes.error());
+    auto new_hashes_stored = set_reference_field(machine, map,
+                                                 kHashMapHashesField,
+                                                 *new_hashes);
+    if (!new_hashes_stored) return new_hashes_stored;
     auto size = int_field(machine, map, kHashMapSizeField);
     if (!size) return std::unexpected(size.error());
     if (*size > 0) {
@@ -474,8 +540,11 @@ void add(NativeMethodRegistry& registry,
             *keys, 0U, *new_keys, 0U, static_cast<usize>(*size));
         auto copied_values = machine.heap().copy_array_range(
             *values, 0U, *new_values, 0U, static_cast<usize>(*size));
+        auto copied_hashes = machine.heap().copy_array_range(
+            *hashes, 0U, *new_hashes, 0U, static_cast<usize>(*size));
         if (!copied_keys) return copied_keys;
         if (!copied_values) return copied_values;
+        if (!copied_hashes) return copied_hashes;
     }
     return {};
 }
@@ -484,7 +553,9 @@ void add(NativeMethodRegistry& registry,
                                              ObjectRef map,
                                              ObjectRef key,
                                              ObjectRef value) {
-    auto index = map_find_key(machine, map, key);
+    auto hash = hash_map_key_hash(machine, key);
+    if (!hash) return std::unexpected(hash.error());
+    auto index = map_find_key_with_hash(machine, map, key, *hash);
     if (!index) return std::unexpected(index.error());
     auto values = reference_field(machine, map, kHashMapValuesField);
     if (!values || values->is_null()) {
@@ -509,7 +580,9 @@ void add(NativeMethodRegistry& registry,
     if (!ensured) return std::unexpected(ensured.error());
     auto keys = reference_field(machine, map, kHashMapKeysField);
     values = reference_field(machine, map, kHashMapValuesField);
-    if (!keys || !values || keys->is_null() || values->is_null()) {
+    auto hashes = reference_field(machine, map, kHashMapHashesField);
+    if (!keys || !values || !hashes || keys->is_null() ||
+        values->is_null() || hashes->is_null()) {
         return fail(ErrorCode::invalid_state,
                     "HashMap storage is invalid after growth");
     }
@@ -517,10 +590,13 @@ void add(NativeMethodRegistry& registry,
         *keys, static_cast<usize>(*size), Value::from_reference(key));
     auto value_stored = machine.heap().set_element(
         *values, static_cast<usize>(*size), Value::from_reference(value));
+    auto hash_stored = machine.heap().set_element(
+        *hashes, static_cast<usize>(*size), Value::from_int(*hash));
     auto size_stored = set_int_field(machine, map, kHashMapSizeField,
                                      *size + 1);
     if (!key_stored) return std::unexpected(key_stored.error());
     if (!value_stored) return std::unexpected(value_stored.error());
+    if (!hash_stored) return std::unexpected(hash_stored.error());
     if (!size_stored) return std::unexpected(size_stored.error());
     return ObjectRef {};
 }
@@ -533,8 +609,10 @@ void add(NativeMethodRegistry& registry,
     if (*index < 0) return ObjectRef {};
     auto keys = reference_field(machine, map, kHashMapKeysField);
     auto values = reference_field(machine, map, kHashMapValuesField);
+    auto hashes = reference_field(machine, map, kHashMapHashesField);
     auto size = int_field(machine, map, kHashMapSizeField);
-    if (!keys || !values || !size || keys->is_null() || values->is_null()) {
+    if (!keys || !values || !hashes || !size || keys->is_null() ||
+        values->is_null() || hashes->is_null()) {
         return fail(ErrorCode::invalid_state,
                     "HashMap state is invalid");
     }
@@ -548,23 +626,32 @@ void add(NativeMethodRegistry& registry,
             *keys, static_cast<usize>(current + 1));
         auto next_value = machine.heap().element(
             *values, static_cast<usize>(current + 1));
+        auto next_hash = machine.heap().element(
+            *hashes, static_cast<usize>(current + 1));
         if (!next_key) return std::unexpected(next_key.error());
         if (!next_value) return std::unexpected(next_value.error());
+        if (!next_hash) return std::unexpected(next_hash.error());
         auto shifted_key = machine.heap().set_element(
             *keys, static_cast<usize>(current), *next_key);
         auto shifted_value = machine.heap().set_element(
             *values, static_cast<usize>(current), *next_value);
+        auto shifted_hash = machine.heap().set_element(
+            *hashes, static_cast<usize>(current), *next_hash);
         if (!shifted_key) return std::unexpected(shifted_key.error());
         if (!shifted_value) return std::unexpected(shifted_value.error());
+        if (!shifted_hash) return std::unexpected(shifted_hash.error());
     }
     auto cleared_key = machine.heap().set_element(
         *keys, static_cast<usize>(*size - 1), Value::from_reference({}));
     auto cleared_value = machine.heap().set_element(
         *values, static_cast<usize>(*size - 1), Value::from_reference({}));
+    auto cleared_hash = machine.heap().set_element(
+        *hashes, static_cast<usize>(*size - 1), Value::from_int(0));
     auto size_stored = set_int_field(machine, map, kHashMapSizeField,
                                      *size - 1);
     if (!cleared_key) return std::unexpected(cleared_key.error());
     if (!cleared_value) return std::unexpected(cleared_value.error());
+    if (!cleared_hash) return std::unexpected(cleared_hash.error());
     if (!size_stored) return std::unexpected(size_stored.error());
     return *previous;
 }
@@ -1571,8 +1658,11 @@ void register_hash_map(NativeMethodRegistry& registry) {
             auto keys = reference_field(machine, *object, kHashMapKeysField);
             auto values = reference_field(machine, *object,
                                           kHashMapValuesField);
+            auto hashes = reference_field(machine, *object,
+                                          kHashMapHashesField);
             auto size = int_field(machine, *object, kHashMapSizeField);
-            if (!keys || !values || !size || keys->is_null() || values->is_null()) {
+            if (!keys || !values || !hashes || !size || keys->is_null() ||
+                values->is_null() || hashes->is_null()) {
                 return fail(ErrorCode::invalid_state,
                             "HashMap state is invalid");
             }
@@ -1583,8 +1673,11 @@ void register_hash_map(NativeMethodRegistry& registry) {
                 auto value_cleared = machine.heap().set_element(
                     *values, static_cast<usize>(index),
                     Value::from_reference({}));
+                auto hash_cleared = machine.heap().set_element(
+                    *hashes, static_cast<usize>(index), Value::from_int(0));
                 if (!key_cleared) return std::unexpected(key_cleared.error());
                 if (!value_cleared) return std::unexpected(value_cleared.error());
+                if (!hash_cleared) return std::unexpected(hash_cleared.error());
             }
             auto reset = set_int_field(machine, *object, kHashMapSizeField, 0);
             if (!reset) return std::unexpected(reset.error());
@@ -1807,8 +1900,10 @@ void register_hash_set(NativeMethodRegistry& registry) {
             if (!map) return std::unexpected(map.error());
             auto keys = reference_field(machine, *map, kHashMapKeysField);
             auto values = reference_field(machine, *map, kHashMapValuesField);
+            auto hashes = reference_field(machine, *map, kHashMapHashesField);
             auto size = int_field(machine, *map, kHashMapSizeField);
-            if (!keys || !values || !size || keys->is_null() || values->is_null()) {
+            if (!keys || !values || !hashes || !size || keys->is_null() ||
+                values->is_null() || hashes->is_null()) {
                 return fail(ErrorCode::invalid_state,
                             "HashSet state is invalid");
             }
@@ -1819,8 +1914,11 @@ void register_hash_set(NativeMethodRegistry& registry) {
                 auto value_cleared = machine.heap().set_element(
                     *values, static_cast<usize>(index),
                     Value::from_reference({}));
+                auto hash_cleared = machine.heap().set_element(
+                    *hashes, static_cast<usize>(index), Value::from_int(0));
                 if (!key_cleared) return std::unexpected(key_cleared.error());
                 if (!value_cleared) return std::unexpected(value_cleared.error());
+                if (!hash_cleared) return std::unexpected(hash_cleared.error());
             }
             auto reset = set_int_field(machine, *map, kHashMapSizeField, 0);
             if (!reset) return std::unexpected(reset.error());
@@ -2016,6 +2114,97 @@ void register_hash_set(NativeMethodRegistry& registry) {
                 changed = true;
             }
             return std::optional<Value>(Value::from_int(changed ? 1 : 0));
+        });
+    add(registry, "java/util/HashSet", "equals",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "HashSet.equals argument is missing");
+            }
+            auto other = arguments[1].as_reference();
+            if (!other) return std::unexpected(other.error());
+            if (*object == *other) {
+                return std::optional<Value>(Value::from_int(1));
+            }
+            if (other->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto is_set = machine.object_is_instance(*other, "java/util/Set");
+            if (!is_set) return std::unexpected(is_set.error());
+            if (!*is_set) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            auto size = int_field(machine, *map, kHashMapSizeField);
+            if (!size) return std::unexpected(size.error());
+
+            auto other_size_value = invoke_checked(
+                machine, *other, "java/util/Collection", "size", "()I");
+            if (!other_size_value) {
+                return std::unexpected(other_size_value.error());
+            }
+            if (!other_size_value->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Set.size returned no value");
+            }
+            auto other_size = other_size_value->value().as_int();
+            if (!other_size) return std::unexpected(other_size.error());
+            if (*size != *other_size) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            auto elements = collection_elements(machine, *other);
+            if (!elements) return std::unexpected(elements.error());
+            for (const ObjectRef element : *elements) {
+                auto index = map_find_key(machine, *map, element);
+                if (!index) return std::unexpected(index.error());
+                if (*index < 0) {
+                    return std::optional<Value>(Value::from_int(0));
+                }
+            }
+            return std::optional<Value>(Value::from_int(1));
+        });
+    add(registry, "java/util/HashSet", "hashCode", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto map = hash_set_map(machine, *object);
+            if (!map) return std::unexpected(map.error());
+            auto size = int_field(machine, *map, kHashMapSizeField);
+            auto keys = reference_field(machine, *map, kHashMapKeysField);
+            if (!size || !keys || keys->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "HashSet state is invalid");
+            }
+            u32 sum = 0U;
+            for (i32 index = 0; index < *size; ++index) {
+                auto value = machine.heap().element(
+                    *keys, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto element = value->as_reference();
+                if (!element) return std::unexpected(element.error());
+                if (element->is_null()) continue;
+                auto hash = invoke_checked(machine, *element,
+                                           "java/lang/Object", "hashCode",
+                                           "()I");
+                if (!hash) return std::unexpected(hash.error());
+                if (!hash->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Object.hashCode returned no value");
+                }
+                auto code = hash->value().as_int();
+                if (!code) return std::unexpected(code.error());
+                sum += static_cast<u32>(*code);
+            }
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(sum)));
         });
     add(registry, "java/util/HashSet", "toString", "()Ljava/lang/String;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2293,6 +2482,46 @@ void register_arrays(NativeMethodRegistry& registry) {
     };
     sort("([B)V", true);
     sort("([I)V", false);
+    add(registry, "java/util/Arrays", "sort", "([III)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto array = reference_argument(arguments, 0U);
+            auto from = int_argument(arguments, 1U);
+            auto to = int_argument(arguments, 2U);
+            if (!array) return std::unexpected(array.error());
+            if (!from) return std::unexpected(from.error());
+            if (!to) return std::unexpected(to.error());
+            if (*from > *to) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "sort range start exceeds end");
+            }
+            auto length = machine.heap().array_length(*array);
+            if (!length) return std::unexpected(length.error());
+            if (*from < 0 || *to < 0 ||
+                static_cast<usize>(*from) > *length ||
+                static_cast<usize>(*to) > *length) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "sort range is outside array bounds");
+            }
+            std::vector<i32> values;
+            values.reserve(static_cast<usize>(*to - *from));
+            for (i32 index = *from; index < *to; ++index) {
+                auto value = machine.heap().element(
+                    *array, static_cast<usize>(index));
+                if (!value) return std::unexpected(value.error());
+                auto integer = value->as_int();
+                if (!integer) return std::unexpected(integer.error());
+                values.push_back(*integer);
+            }
+            std::sort(values.begin(), values.end());
+            for (usize index = 0U; index < values.size(); ++index) {
+                auto stored = machine.heap().set_element(
+                    *array, static_cast<usize>(*from) + index,
+                    Value::from_int(values[index]));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
 
     add(registry, "java/util/Arrays", "binarySearch", "([II)I",
         [](Machine& machine, std::span<const Value> arguments)

@@ -805,6 +805,31 @@ void register_java_file_natives(NativeMethodRegistry& registry) {
     path_component("getName", false);
     path_component("getParent", true);
 
+    add(registry, "java/io/File", "getParentFile", "()Ljava/io/File;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path = normalized_java_file_path(machine, *object);
+            if (!path) return std::unexpected(path.error());
+            const std::string parent = parent_path(*path);
+            if (parent.empty()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto path_string = create_string(machine, parent);
+            if (!path_string) return std::unexpected(path_string.error());
+            auto path_root = machine.pin_native_root(*path_string);
+            if (!path_root) return std::unexpected(path_root.error());
+            auto file = machine.class_states().allocate_instance(
+                machine.heap(), "java/io/File");
+            if (!file) return std::unexpected(file.error());
+            auto stored = set_reference_field(machine, *file,
+                                               kJavaFilePathField,
+                                               *path_string);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*file));
+        });
+
     add(registry, "java/io/File", "isAbsolute", "()Z",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -908,6 +933,61 @@ void register_java_file_natives(NativeMethodRegistry& registry) {
     };
     mutate("mkdir", true);
     mutate("delete", false);
+
+    add(registry, "java/io/File", "mkdirs", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path = normalized_java_file_path(machine, *object);
+            if (!path) return std::unexpected(path.error());
+            auto permitted = require_file_permissions(
+                machine, false, true, file_resource_uri(*path));
+            if (!permitted) return std::unexpected(permitted.error());
+            auto target_info = machine.filesystem().stat(*path);
+            if (!target_info) return file_error(target_info.error());
+            if (target_info->exists) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+
+            bool created_any = false;
+            std::string current;
+            usize cursor = 0U;
+            if (!path->empty() && path->front() == '/') {
+                current = "/";
+                cursor = 1U;
+            }
+            while (cursor <= path->size()) {
+                const usize slash = path->find('/', cursor);
+                const usize end = slash == std::string::npos
+                    ? path->size() : slash;
+                const std::string_view component(path->data() + cursor,
+                                                 end - cursor);
+                if (!component.empty()) {
+                    if (!current.empty() && current.back() != '/') {
+                        current.push_back('/');
+                    }
+                    current.append(component);
+                    auto info = machine.filesystem().stat(current);
+                    if (!info) return file_error(info.error());
+                    if (info->exists) {
+                        if (!info->directory) {
+                            return std::optional<Value>(Value::from_int(0));
+                        }
+                    } else {
+                        auto created = machine.filesystem().create_directory(current);
+                        if (!created) {
+                            return std::optional<Value>(Value::from_int(0));
+                        }
+                        created_any = true;
+                    }
+                }
+                if (slash == std::string::npos) break;
+                cursor = slash + 1U;
+            }
+            return std::optional<Value>(
+                Value::from_int(created_any ? 1 : 0));
+        });
 
     add(registry, "java/io/File", "renameTo", "(Ljava/io/File;)Z",
         [](Machine& machine, std::span<const Value> arguments)

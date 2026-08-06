@@ -6,6 +6,8 @@ public final class Jdk8Semantics {
     private static final float FLOAT_CONSTANT = 2.0F;
     private static final double DOUBLE_CONSTANT = 3.0;
     private static final String TEXT_CONSTANT = "Việt";
+    private static final Jdk8Semantics REFLECTED_INSTANCE =
+        new Jdk8Semantics();
 
     public static final class Initializer {
         private static int state;
@@ -94,6 +96,12 @@ public final class Jdk8Semantics {
         public int hashCode() {
             return value;
         }
+    }
+
+    private enum CompatColor {
+        RED,
+        GREEN,
+        BLUE
     }
 
     private Jdk8Semantics() {
@@ -490,6 +498,371 @@ public final class Jdk8Semantics {
         return result;
     }
 
+    public static int arrayDequeApi() {
+        int result = 0;
+        java.util.Deque deque = new java.util.ArrayDeque(1);
+        deque.addLast("b");
+        deque.addFirst("a");
+        if (deque.offerLast("c") && deque.size() == 3
+                && deque.getFirst().equals("a")
+                && deque.getLast().equals("c")) result |= 1;
+
+        if (deque.removeFirst().equals("a")
+                && deque.removeLast().equals("c")
+                && deque.peek().equals("b")) result |= 2;
+
+        deque.push("front");
+        if (deque.pop().equals("front")
+                && deque.element().equals("b")) result |= 4;
+
+        deque.addLast("x");
+        deque.addLast("b");
+        if (deque.removeLastOccurrence("b")
+                && deque.size() == 2
+                && deque.contains("b")
+                && deque.contains("x")) result |= 8;
+
+        java.util.Iterator descending = deque.descendingIterator();
+        String reverse = "";
+        while (descending.hasNext()) reverse += descending.next();
+        if (reverse.equals("xb")) result |= 16;
+
+        java.util.Iterator forward = deque.iterator();
+        String ordered = "";
+        while (forward.hasNext()) ordered += forward.next();
+        if (ordered.equals("bx")) result |= 32;
+
+        java.util.ArrayDeque copied = (java.util.ArrayDeque)
+            ((java.util.ArrayDeque)deque).clone();
+        copied.addAll(java.util.Arrays.asList(new String[] {"m", "n"}));
+        Object[] values = copied.toArray();
+        String[] typed = (String[])copied.toArray(new String[5]);
+        if (copied.size() == 4 && deque.size() == 2
+                && values.length == 4
+                && typed[0].equals("b") && typed[3].equals("n")
+                && typed[4] == null) result |= 64;
+
+        copied.clear();
+        boolean emptyMethods = copied.isEmpty()
+            && copied.pollFirst() == null
+            && copied.pollLast() == null
+            && copied.peekFirst() == null
+            && copied.peekLast() == null;
+        boolean emptyThrows = false;
+        boolean nullThrows = false;
+        try {
+            copied.removeFirst();
+        } catch (java.util.NoSuchElementException expected) {
+            emptyThrows = true;
+        }
+        try {
+            copied.add(null);
+        } catch (NullPointerException expected) {
+            nullThrows = true;
+        }
+        if (emptyMethods && emptyThrows && nullThrows) result |= 128;
+        return result;
+    }
+
+    public static int jdk8CoreCompatApi() throws Exception {
+        int result = 0;
+        if (CompatColor.GREEN.name().equals("GREEN")
+                && CompatColor.GREEN.ordinal() == 1
+                && CompatColor.valueOf("BLUE") == CompatColor.BLUE
+                && CompatColor.RED.compareTo(CompatColor.GREEN) < 0) {
+            result |= 1;
+        }
+
+        java.util.LinkedHashMap ordered = new java.util.LinkedHashMap();
+        ordered.put("a", Integer.valueOf(1));
+        ordered.put("b", Integer.valueOf(2));
+        ordered.computeIfAbsent("c", key -> Integer.valueOf(3));
+        ordered.merge("b", Integer.valueOf(4),
+            (left, right) -> Integer.valueOf(
+                ((Integer)left).intValue() + ((Integer)right).intValue()));
+        String entryOrder = "";
+        java.util.Iterator entries = ordered.entrySet().iterator();
+        while (entries.hasNext()) {
+            java.util.Map.Entry entry = (java.util.Map.Entry)entries.next();
+            entryOrder += entry.getKey();
+            if (entry.getKey().equals("a")) entry.setValue(Integer.valueOf(5));
+        }
+        if (entryOrder.equals("abc")
+                && ordered.get("a").equals(Integer.valueOf(5))
+                && ordered.get("b").equals(Integer.valueOf(6))
+                && ordered.getOrDefault("missing", "fallback").equals("fallback")) {
+            result |= 2;
+        }
+
+        java.util.LinkedHashSet linkedSet = new java.util.LinkedHashSet();
+        linkedSet.add("x");
+        linkedSet.add("y");
+        linkedSet.add("x");
+        String setOrder = "";
+        java.util.Iterator setIterator = linkedSet.iterator();
+        while (setIterator.hasNext()) setOrder += setIterator.next();
+        if (linkedSet.size() == 2 && setOrder.equals("xy")) result |= 4;
+
+        java.util.LinkedList linked = new java.util.LinkedList();
+        linked.add("middle");
+        linked.addFirst("first");
+        linked.addLast("last");
+        if (linked.removeFirst().equals("first")
+                && linked.removeLast().equals("last")
+                && linked.size() == 1 && linked.get(0).equals("middle")) {
+            result |= 8;
+        }
+
+        java.util.EnumMap enumMap = new java.util.EnumMap(CompatColor.class);
+        enumMap.put(CompatColor.RED, "r");
+        enumMap.put(CompatColor.BLUE, "b");
+        java.util.EnumSet enumSet = java.util.EnumSet.noneOf(CompatColor.class);
+        enumSet.add(CompatColor.GREEN);
+        java.util.EnumSet enumCopy = java.util.EnumSet.copyOf(enumSet);
+        if (enumMap.size() == 2 && enumMap.get(CompatColor.BLUE).equals("b")
+                && enumSet.contains(CompatColor.GREEN)
+                && enumCopy.equals(enumSet)) result |= 16;
+
+        java.util.TreeSet sorted = new java.util.TreeSet();
+        sorted.add("c");
+        sorted.add("a");
+        sorted.add("b");
+        String treeOrder = "";
+        java.util.Iterator treeIterator = sorted.iterator();
+        while (treeIterator.hasNext()) treeOrder += treeIterator.next();
+        if (treeOrder.equals("abc") && sorted.contains("b")
+                && sorted.remove("b") && !sorted.contains("b")) result |= 32;
+        java.util.Properties properties = new java.util.Properties();
+        properties.load(new java.io.ByteArrayInputStream(
+            "alpha=1\nbeta\\:key=two\n".getBytes("ISO-8859-1")));
+        properties.setProperty("gamma", "3");
+        java.io.ByteArrayOutputStream storedProperties =
+            new java.io.ByteArrayOutputStream();
+        properties.store(storedProperties, "compat");
+        String storedText = new String(storedProperties.toByteArray(),
+            "ISO-8859-1");
+        if (properties.getProperty("alpha").equals("1")
+                && properties.getProperty("beta:key").equals("two")
+                && properties.getProperty("missing", "d").equals("d")
+                && properties.stringPropertyNames().size() == 3
+                && storedText.indexOf("gamma=3") >= 0) result |= 64;
+
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(12);
+        buffer.putInt(0x12345678).put((byte)9).put(new byte[] {10, 11});
+        buffer.position(0);
+        byte[] tail = new byte[3];
+        int restored = buffer.getInt();
+        buffer.get(tail);
+        if (restored == 0x12345678 && tail[0] == 9
+                && tail[1] == 10 && tail[2] == 11
+                && buffer.remaining() == 5 && buffer.array().length == 12) {
+            result |= 128;
+        }
+
+        java.security.SecureRandom secure = new java.security.SecureRandom();
+        byte[] randomBytes = new byte[16];
+        secure.nextBytes(randomBytes);
+        if (randomBytes.length == 16 && secure.nextLong() != secure.nextLong()) {
+            result |= 256;
+        }
+
+        if (java.util.concurrent.TimeUnit.SECONDS.toMillis(3L) == 3000L
+                && java.util.concurrent.TimeUnit.MILLISECONDS.convert(
+                    2L, java.util.concurrent.TimeUnit.SECONDS) == 2000L
+                && java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(
+                    1000000000L) == 1L) result |= 512;
+
+        java.util.List words = new java.util.ArrayList();
+        words.add("bbb");
+        words.add("a");
+        words.add("cc");
+        java.util.Comparator lengthComparator =
+            java.util.Comparator.comparingInt(value -> ((String)value).length());
+        words.sort(lengthComparator.thenComparing(
+            (left, right) -> ((String)left).compareTo((String)right)));
+        if (words.get(0).equals("a") && words.get(2).equals("bbb")) {
+            result |= 1024;
+        }
+
+        java.util.List removable = new java.util.ArrayList(
+            java.util.Arrays.asList(new Integer[] {
+                Integer.valueOf(1), Integer.valueOf(2), Integer.valueOf(3)
+            }));
+        boolean removed = removable.removeIf(value ->
+            ((Integer)value).intValue() % 2 == 1);
+        if (removed && removable.size() == 1
+                && removable.get(0).equals(Integer.valueOf(2))) result |= 2048;
+        EqualKey first = new EqualKey(7);
+        EqualKey equalButDistinct = new EqualKey(7);
+        java.util.IdentityHashMap identity = new java.util.IdentityHashMap();
+        identity.put(first, "first");
+        identity.put(equalButDistinct, "second");
+        if (identity.size() == 2 && identity.get(first).equals("first")
+                && identity.get(equalButDistinct).equals("second")) result |= 4096;
+
+        java.util.WeakHashMap weak = new java.util.WeakHashMap();
+        weak.put(first, "weak");
+        if (weak.get(equalButDistinct).equals("weak")
+                && weak.size() == 1) result |= 8192;
+
+        int objectHash = java.util.Objects.hash("a", Integer.valueOf(2));
+        if (Integer.compare(1, 2) < 0 && Integer.sum(4, 5) == 9
+                && Long.sum(7L, 8L) == 15L
+                && Long.remainderUnsigned(-1L, 2L) == 1L
+                && objectHash != 0) result |= 16384;
+        return result;
+    }
+
+    public static int arraysRangeSortApi() {
+        int[] values = new int[] {9, 4, 3, 2, 8};
+        java.util.Arrays.sort(values, 1, 4);
+        if (values[0] != 9 || values[1] != 2 || values[2] != 3
+                || values[3] != 4 || values[4] != 8) return 0;
+        boolean reversed = false;
+        boolean outOfBounds = false;
+        try {
+            java.util.Arrays.sort(values, 3, 2);
+        } catch (IllegalArgumentException expected) {
+            reversed = true;
+        }
+        try {
+            java.util.Arrays.sort(values, -1, values.length);
+        } catch (ArrayIndexOutOfBoundsException expected) {
+            outOfBounds = true;
+        }
+        return reversed && outOfBounds ? 1 : 0;
+    }
+
+    public static int regexApi() {
+        int result = 0;
+        java.util.regex.Matcher integers = java.util.regex.Pattern.compile(
+            "\\\"([a-z_]+)\\\"\\s*:\\s*(-?\\d+)").matcher(
+                "{\"hp\": 12, \"mp_value\": -7}");
+        if (integers.find() && integers.group(1).equals("hp")
+                && integers.group(2).equals("12") && integers.find()
+                && integers.group(1).equals("mp_value")
+                && integers.group(2).equals("-7")) result |= 1;
+
+        java.util.regex.Matcher asset = java.util.regex.Pattern.compile(
+            "img_(\\d+)\\.mid").matcher("prefix img_321.mid suffix");
+        if (asset.find() && asset.group(0).equals("img_321.mid")
+                && asset.group(1).equals("321")) result |= 2;
+
+        java.util.regex.Matcher bracket = java.util.regex.Pattern.compile(
+            "\\[([^\\]]+)\\]").matcher("task [target_name]");
+        if (bracket.find() && bracket.group(1).equals("target_name")) {
+            result |= 4;
+        }
+
+        java.util.regex.Matcher fixed = java.util.regex.Pattern.compile(
+            "\\\"title\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"").matcher(
+                "{\"title\": \"phoneME\"}");
+        if (fixed.find() && fixed.group(1).equals("phoneME")) result |= 8;
+        return result;
+    }
+
+    public static int streamApi() {
+        int result = 0;
+        java.util.ArrayList values = new java.util.ArrayList();
+        values.add("a");
+        values.add("bbb");
+        values.add("cc");
+        int[] lengths = values.stream().mapToInt(
+            value -> ((String)value).length()).toArray();
+        if (lengths.length == 3 && lengths[0] == 1
+                && lengths[1] == 3 && lengths[2] == 2) result |= 1;
+
+        java.util.LinkedHashSet ordered = new java.util.LinkedHashSet();
+        ordered.add("xx");
+        ordered.add("z");
+        int[] setLengths = ordered.stream().mapToInt(
+            value -> ((String)value).length()).toArray();
+        if (setLengths.length == 2 && setLengths[0] == 2
+                && setLengths[1] == 1) result |= 2;
+        return result;
+    }
+
+    public static int gzipApi() throws Exception {
+        byte[] source = "phoneME gzip round trip".getBytes("UTF-8");
+        java.io.ByteArrayOutputStream compressedOutput =
+            new java.io.ByteArrayOutputStream();
+        java.util.zip.GZIPOutputStream gzipOutput =
+            new java.util.zip.GZIPOutputStream(compressedOutput);
+        gzipOutput.write(source);
+        gzipOutput.close();
+        byte[] compressed = compressedOutput.toByteArray();
+        if (compressed.length < 10 || compressed[0] != (byte)0x1f
+                || compressed[1] != (byte)0x8b) return 0;
+
+        java.util.zip.GZIPInputStream gzipInput =
+            new java.util.zip.GZIPInputStream(
+                new java.io.ByteArrayInputStream(compressed));
+        byte[] restored = new byte[source.length];
+        int count = gzipInput.read(restored, 0, restored.length);
+        int eof = gzipInput.read();
+        gzipInput.close();
+        return count == source.length && eof == -1
+            && java.util.Arrays.equals(source, restored) ? 1 : 0;
+    }
+
+    public static int reflectionAndUrlApi() throws Exception {
+        java.lang.reflect.Field field = Jdk8Semantics.class.getDeclaredField(
+            "REFLECTED_INSTANCE");
+        if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                || field.getType() != Jdk8Semantics.class
+                || field.get(null) != REFLECTED_INSTANCE) return 0;
+        java.net.URL resource = Jdk8Semantics.class.getResource(
+            "Jdk8Semantics.class");
+        if (resource == null || resource.toString().indexOf(
+                "Jdk8Semantics.class") < 0) return 0;
+        java.io.InputStream input = resource.openStream();
+        int first = input.read();
+        int second = input.read();
+        input.close();
+        return first == 0xca && second == 0xfe ? 1 : 0;
+    }
+
+    public static int threadLocalRandomApi() {
+        int result = 0;
+        java.util.concurrent.ThreadLocalRandom first =
+            java.util.concurrent.ThreadLocalRandom.current();
+        java.util.concurrent.ThreadLocalRandom second =
+            java.util.concurrent.ThreadLocalRandom.current();
+        if (first != null && first == second) result |= 1;
+
+        int inherited = first.nextInt(17);
+        if (inherited >= 0 && inherited < 17) result |= 2;
+
+        int rangedInt = first.nextInt(-9, 12);
+        if (rangedInt >= -9 && rangedInt < 12) result |= 4;
+
+        long boundedLong = first.nextLong(100000L);
+        if (boundedLong >= 0L && boundedLong < 100000L) result |= 8;
+
+        long rangedLong = first.nextLong(-5000000000L, 7000000000L);
+        if (rangedLong >= -5000000000L && rangedLong < 7000000000L) {
+            result |= 16;
+        }
+
+        double boundedDouble = first.nextDouble(5.5);
+        double rangedDouble = first.nextDouble(-3.0, 2.0);
+        if (boundedDouble >= 0.0 && boundedDouble < 5.5
+                && rangedDouble >= -3.0 && rangedDouble < 2.0) {
+            result |= 32;
+        }
+
+        try {
+            first.nextInt(4, 4);
+        } catch (IllegalArgumentException expected) {
+            try {
+                first.nextLong(0L);
+            } catch (IllegalArgumentException expectedLong) {
+                result |= 64;
+            }
+        }
+        return result;
+    }
+
     public static int headlessCollectionsApi() throws Exception {
         int result = 0;
 
@@ -564,8 +937,16 @@ public final class Jdk8Semantics {
         mergedMap.putAll(copiedMap);
         java.util.Collection values = mergedMap.values();
         java.util.Set keys = mergedMap.keySet();
+        java.util.Set copiedKeys = copiedMap.keySet();
+        java.util.Set originalKeys = map.keySet();
+        java.util.Set emptyKeysA = new java.util.HashMap().keySet();
+        java.util.Set emptyKeysB = new java.util.HashMap().keySet();
         if (copiedMap.size() == 3 && mergedMap.size() == 3
                 && values.size() == 3 && keys.contains("one")
+                && copiedKeys.equals(originalKeys)
+                && originalKeys.equals(copiedKeys)
+                && copiedKeys.hashCode() == originalKeys.hashCode()
+                && emptyKeysA.equals(emptyKeysB)
                 && mergedMap.remove("one").equals(Integer.valueOf(2))
                 && mergedMap.size() == 2) result |= 128;
         return result;

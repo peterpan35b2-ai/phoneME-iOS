@@ -8,7 +8,7 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
     static let preferenceKey = "translationProvider"
     private static let automaticMigrationKey =
         "translationProviderAutomaticMigrationV1"
-    static let defaultProvider = TranslationProvider.automatic
+    static let defaultProvider = TranslationProvider.bing
 
     var id: String { rawValue }
 
@@ -340,11 +340,9 @@ struct GameProfile: Codable, Equatable {
     var forceFullscreen = false
     var showFPS = false
     var frameRateLimit = Self.defaultFrameRate
-    // Optional keeps older profile JSON decodable. Missing/nil uses the 30 FPS
-    // render-loop override. The core only adjusts sleeps that immediately
-    // follow stable frame publications; unrelated loading, timer and I/O sleeps
-    // keep their original duration.
-    var framePacingMode: FramePacingMode? = .overrideGameLoop
+    // Optional keeps older profile JSON decodable. Missing/nil uses the game's
+    // native pacing, so FPS is not overridden unless the user enables it.
+    var framePacingMode: FramePacingMode? = .native
     // Optional keeps older profile JSON decodable. Missing/nil uses the
     // runtime's 64 MiB default heap limit.
     var heapSizeMegabytes: Int?
@@ -402,9 +400,9 @@ struct GameProfile: Codable, Equatable {
     var effectiveFramePacingMode: FramePacingMode {
         get {
             switch framePacingMode {
-            case .native:
+            case .native, nil:
                 return .native
-            case .cap, .overrideGameLoop, nil:
+            case .cap, .overrideGameLoop:
                 // `.cap` was written by a short-lived build that mislabeled
                 // the FPS override as a publication limit. Treat it as the
                 // intended render-loop override when loading old profiles.

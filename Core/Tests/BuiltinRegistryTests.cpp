@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
@@ -42,6 +43,7 @@ void test_lang_registry() {
     phoneme::vm::register_lang_classes(registry);
 
     const auto object = registry.find("java/lang/Object");
+    const auto char_sequence = registry.find("java/lang/CharSequence");
     const auto string = registry.find("java/lang/String");
     const auto buffer = registry.find("java/lang/StringBuffer");
     const auto system = registry.find("java/lang/System");
@@ -58,8 +60,16 @@ void test_lang_registry() {
     const auto* clone = object->find_method("clone", "()Ljava/lang/Object;");
     require(clone != nullptr && (clone->access_flags & 0x0001U) != 0U,
             "CLDC Object.clone is public");
-    require(string != nullptr && string->super_name() == "java/lang/Object",
-            "lang registry owns String");
+    require(char_sequence != nullptr &&
+                (char_sequence->access_flags() & 0x0200U) != 0U,
+            "CharSequence is exposed as an interface");
+    require_method(char_sequence, "toString", "()Ljava/lang/String;",
+                   "CharSequence exposes interface toString");
+    require(string != nullptr && string->super_name() == "java/lang/Object" &&
+                std::find(string->interfaces().begin(),
+                          string->interfaces().end(),
+                          "java/lang/CharSequence") != string->interfaces().end(),
+            "lang registry owns String and implements CharSequence");
     require_method(string, "<init>", "([BIILjava/lang/String;)V",
                    "String exposes ranged charset constructor");
     require_method(string, "getBytes", "(Ljava/lang/String;)[B",
@@ -151,12 +161,16 @@ void test_util_registry() {
 
     const auto list = registry.find("java/util/List");
     const auto array_list = registry.find("java/util/ArrayList");
+    const auto array_deque = registry.find("java/util/ArrayDeque");
+    const auto deque_iterator = registry.find("java/util/ArrayDequeIterator");
     const auto local_time = registry.find("java/time/LocalTime");
     const auto locale = registry.find("java/util/Locale");
     const auto vector = registry.find("java/util/Vector");
     const auto stack = registry.find("java/util/Stack");
     const auto table = registry.find("java/util/Hashtable");
     const auto random = registry.find("java/util/Random");
+    const auto thread_local_random =
+        registry.find("java/util/concurrent/ThreadLocalRandom");
     const auto calendar = registry.find("java/util/Calendar");
     const auto zone = registry.find("java/util/TimeZone");
     const auto zone_impl =
@@ -179,6 +193,21 @@ void test_util_registry() {
             "ArrayList preserves native storage layout and implements List");
     require_method(array_list, "contains", "(Ljava/lang/Object;)Z",
                    "ArrayList exposes value lookup");
+    require(array_deque != nullptr && array_deque->fields().size() == 2U &&
+                array_deque->fields()[0].name == "elements" &&
+                array_deque->fields()[1].name == "size" &&
+                array_deque->interfaces().size() == 3U &&
+                array_deque->interfaces()[0] == "java/util/Deque",
+            "ArrayDeque preserves compact storage and implements Deque");
+    require_method(array_deque, "push", "(Ljava/lang/Object;)V",
+                   "ArrayDeque exposes stack insertion");
+    require_method(array_deque, "descendingIterator",
+                   "()Ljava/util/Iterator;",
+                   "ArrayDeque exposes descending iteration");
+    require(deque_iterator != nullptr &&
+                deque_iterator->interfaces().size() == 1U &&
+                deque_iterator->interfaces().front() == "java/util/Iterator",
+            "ArrayDeque iterator implements Iterator");
     require_method(local_time, "of", "(II)Ljava/time/LocalTime;",
                    "LocalTime exposes hour/minute factory");
     require(locale != nullptr && !locale->fields().empty() &&
@@ -197,6 +226,14 @@ void test_util_registry() {
                    "Hashtable exposes put");
     require_method(random, "nextInt", "(I)I",
                    "Random exposes bounded nextInt");
+    require(thread_local_random != nullptr &&
+                thread_local_random->super_name() == "java/util/Random",
+            "ThreadLocalRandom extends Random");
+    require_method(thread_local_random, "current",
+                   "()Ljava/util/concurrent/ThreadLocalRandom;",
+                   "ThreadLocalRandom exposes current singleton lookup");
+    require_method(thread_local_random, "nextLong", "(JJ)J",
+                   "ThreadLocalRandom exposes ranged nextLong");
     require_method(calendar, "getInstance",
                    "(Ljava/util/TimeZone;)Ljava/util/Calendar;",
                    "Calendar exposes timezone factory");
@@ -226,6 +263,8 @@ void test_headless_compat_registry() {
     const auto closeable = registry.find("java/io/Closeable");
     const auto collection = registry.find("java/util/Collection");
     const auto iterator = registry.find("java/util/Iterator");
+    const auto queue = registry.find("java/util/Queue");
+    const auto deque = registry.find("java/util/Deque");
     const auto map = registry.find("java/util/Map");
     const auto hash_map = registry.find("java/util/HashMap");
     const auto hash_set = registry.find("java/util/HashSet");
@@ -245,6 +284,16 @@ void test_headless_compat_registry() {
             "Collection extends Iterable");
     require_method(iterator, "next", "()Ljava/lang/Object;",
                    "Iterator exposes next");
+    require(queue != nullptr && queue->interfaces().size() == 1U &&
+                queue->interfaces().front() == "java/util/Collection",
+            "Queue extends Collection");
+    require_method(queue, "poll", "()Ljava/lang/Object;",
+                   "Queue exposes non-throwing removal");
+    require(deque != nullptr && deque->interfaces().size() == 1U &&
+                deque->interfaces().front() == "java/util/Queue",
+            "Deque extends Queue");
+    require_method(deque, "addFirst", "(Ljava/lang/Object;)V",
+                   "Deque exposes front insertion");
     require_method(map, "put",
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
                    "Map exposes put");

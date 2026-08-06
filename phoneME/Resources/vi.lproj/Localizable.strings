@@ -1,6 +1,6 @@
 /* Ngôn ngữ ứng dụng */
 "Language" = "Ngôn ngữ";
-"Language changes are applied immediately." = "Thay đổi ngôn ngữ được áp dụng ngay lập tức.";
+"Changes apply immediately." = "Áp dụng ngay.";
 "Vietnamese" = "Tiếng Việt";
 "English" = "Tiếng Anh";
 
@@ -49,11 +49,11 @@
 "Light" = "Sáng";
 "Dark" = "Tối";
 "System" = "Hệ thống";
-"System follows the appearance selected in iOS Settings." = "Hệ thống sử dụng giao diện đã chọn trong Cài đặt iOS.";
+"Uses the appearance selected in iOS Settings." = "Dùng giao diện đã chọn trong Cài đặt iOS.";
 
 /* Thư viện */
 "Library" = "Thư viện";
-"J2ME Loader" = "J2ME Loader";
+"phoneME" = "phoneME";
 "No Apps" = "Chưa có ứng dụng";
 "Import a J2ME JAR file to add it to your library." = "Nhập một tệp JAR J2ME để thêm vào thư viện.";
 "Import JAR" = "Nhập JAR";
@@ -116,7 +116,7 @@
 "Background Execution" = "Chạy trong nền";
 "Run in Background" = "Chạy trong nền";
 "Open Location Settings" = "Mở cài đặt vị trí";
-"When prompted, allow Location while using the app first, then choose Always Allow. The app uses reduced-accuracy Location only while a J2ME app is entering or running in the background." = "Khi được hỏi, trước tiên hãy cho phép truy cập Vị trí khi dùng ứng dụng, sau đó chọn Luôn cho phép. Ứng dụng chỉ dùng vị trí có độ chính xác thấp khi một ứng dụng J2ME đang chuyển vào hoặc chạy trong nền.";
+"Allow Location, then choose Always Allow." = "Cho phép Vị trí, sau đó chọn Luôn cho phép.";
 "Disabled" = "Đã tắt";
 "Starts when a J2ME application is running" = "Bắt đầu khi có ứng dụng J2ME đang chạy";
 "Ready for background use" = "Sẵn sàng chạy trong nền";
@@ -133,14 +133,14 @@
 "On My iPhone" = "Trên iPhone của tôi";
 "iCloud Drive" = "iCloud Drive";
 "Moving library and game data…" = "Đang di chuyển thư viện và dữ liệu trò chơi…";
-"Includes JAR files, profiles, RMS saves, memory-card files and runtime data. Close all running apps before changing the storage location." = "Bao gồm tệp JAR, hồ sơ, bản lưu RMS, tệp thẻ nhớ và dữ liệu runtime. Hãy đóng mọi ứng dụng đang chạy trước khi đổi nơi lưu trữ.";
+"Stores JAR, profiles, saves and game files. Close running apps before changing." = "Lưu JAR, hồ sơ, bản lưu và tệp game. Đóng ứng dụng đang chạy trước khi đổi.";
 "Keep the library and game data in the Files app on this device." = "Lưu thư viện và dữ liệu trò chơi trong ứng dụng Tệp trên thiết bị này.";
 "Sync the library, profiles, RMS and game files through iCloud Drive." = "Đồng bộ thư viện, hồ sơ, RMS và tệp trò chơi qua iCloud Drive.";
 "Close all running J2ME apps before changing the data location." = "Hãy đóng mọi ứng dụng J2ME đang chạy trước khi đổi nơi lưu dữ liệu.";
 "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive, then try again." = "iCloud Drive không khả dụng. Hãy đăng nhập iCloud, bật iCloud Drive rồi thử lại.";
 "Could not move phoneME data: %@" = "Không thể di chuyển dữ liệu phoneME: %@";
-"Files › On My iPhone › J2ME Loader › phoneME" = "Tệp › Trên iPhone của tôi › J2ME Loader › phoneME";
-"Files › iCloud Drive › J2ME Loader › phoneME" = "Tệp › iCloud Drive › J2ME Loader › phoneME";
+"Files › On My iPhone › phoneME › phoneME" = "Tệp › Trên iPhone của tôi › phoneME › phoneME";
+"Files › iCloud Drive › phoneME › phoneME" = "Tệp › iCloud Drive › phoneME › phoneME";
 
 /* Cấu hình hiển thị */
 "Display" = "Hiển thị";
@@ -161,7 +161,7 @@
 "Override FPS" = "Ghi đè FPS";
 "Limit FPS" = "Giới hạn FPS";
 "FPS" = "FPS";
-"FPS override is off by default. Enable it only for games that need a higher frame rate; frame-based gameplay may run faster." = "Mặc định giới hạn 30 FPS và không tăng tốc bộ đếm thời gian Java.";
+"FPS override may speed up frame-based games." = "Ghi đè FPS có thể làm game chạy theo frame nhanh hơn.";
 "FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated." = "Mặc định giới hạn 30 FPS và không rút ngắn thời gian ngủ Java của game, nên timer và game online không bị tua nhanh.";
 "FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration." = "Ghi đè FPS mặc định là 30 và chỉ điều chỉnh nhịp ngủ ổn định của vòng lặp vẽ sau khi xuất khung hình. Các khoảng chờ khi loading, timer và I/O vẫn giữ nguyên.";
 "Auto (30)" = "Tự động (30)";
@@ -191,7 +191,7 @@
 "Java heap: %d MiB" = "Heap Java: %d MiB";
 "Heap size presets" = "Mức heap có sẵn";
 "MiB" = "MiB";
-"The heap limit is applied separately to this game the next time it starts. Very low values can cause OutOfMemoryError; high values increase memory pressure when several games run together." = "Giới hạn heap được áp dụng riêng cho game này ở lần khởi động tiếp theo. Giá trị quá thấp có thể gây OutOfMemoryError; giá trị cao làm tăng áp lực bộ nhớ khi chạy nhiều game cùng lúc.";
+"Applied on next launch. Low values may cause OutOfMemoryError." = "Áp dụng ở lần chạy sau. Giá trị thấp có thể gây OutOfMemoryError.";
 
 /* Phông chữ */
 "Fonts" = "Phông chữ";
@@ -201,7 +201,7 @@
 "Font size preset" = "Mẫu cỡ chữ";
 "Font size presets" = "Mẫu cỡ chữ";
 "Use Dynamic Type scaling" = "Co giãn theo Dynamic Type";
-"Font sizes apply to native LCDUI and Canvas text." = "Cỡ chữ áp dụng cho LCDUI native và văn bản Canvas.";
+"Applies to native LCDUI and Canvas text." = "Áp dụng cho LCDUI native và chữ trên Canvas.";
 
 /* Cấu hình điều khiển */
 "Input" = "Điều khiển";
@@ -217,7 +217,7 @@
 "Keep off-screen keys fully visible" = "Luôn hiển thị rõ các phím nằm ngoài màn hình";
 "Auto-hide delay" = "Thời gian chờ tự ẩn";
 "ms" = "ms";
-"Configure touch input, MIDP key mappings and virtual controls." = "Cấu hình cảm ứng, gán phím MIDP và các nút điều khiển ảo.";
+"Touch, MIDP keys and virtual controls." = "Cảm ứng, phím MIDP và nút điều khiển ảo.";
 "Layout" = "Bố cục";
 "MIDP Key Codes" = "Mã phím MIDP";
 "Enter the Java ME key code for each control." = "Nhập mã phím Java ME cho từng nút điều khiển.";
@@ -262,7 +262,7 @@
 "Translation" = "Dịch thuật";
 "Translation service" = "Dịch vụ dịch";
 "Automatic" = "Tự động";
-"Automatic batches requests, reuses the translation cache, slows down before rate limits, and switches provider when one service is temporarily blocked." = "Chế độ Tự động gom yêu cầu theo lô, dùng lại bộ nhớ đệm, chủ động giảm nhịp trước khi bị giới hạn và đổi dịch vụ khi một bên tạm thời bị chặn.";
+"Uses batching, cache and automatic fallback." = "Dùng xử lý theo lô, bộ nhớ đệm và tự chuyển dịch vụ.";
 "Auto detect" = "Tự động nhận diện";
 "Chinese (Simplified)" = "Tiếng Trung giản thể";
 "Chinese (Traditional)" = "Tiếng Trung phồn thể";
@@ -390,3 +390,12 @@
 "Show Virtual Keyboard" = "Hiện bàn phím ảo";
 "Keylayout" = "Bố cục phím";
 "Apply" = "Áp dụng";
+
+/* JIT */
+"JIT" = "JIT";
+"JIT Status" = "Trạng thái JIT";
+"Ready" = "Sẵn sàng";
+"Permission Required" = "Cần cấp quyền";
+"Enable JIT" = "Bật JIT";
+"Recheck JIT" = "Kiểm tra lại JIT";
+"Enable JIT with TrollStore" = "Bật JIT bằng TrollStore";

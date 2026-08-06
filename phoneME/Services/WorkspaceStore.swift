@@ -10,6 +10,7 @@ final class WorkspaceStore: ObservableObject {
 
     private let fileManager: FileManager
     private let storage: PhoneMEStorageController
+    private let fpsOverrideOffMigrationKey = "phoneME.workspaces.fpsOverrideOffV9"
 
     private var metadataURL: URL {
         storage.rootURL.appendingPathComponent(
@@ -685,10 +686,16 @@ final class WorkspaceStore: ObservableObject {
                 from: data
               ) else {
             workspaces = []
+            UserDefaults.standard.set(true, forKey: fpsOverrideOffMigrationKey)
             return
         }
+        let defaults = UserDefaults.standard
+        let shouldDisableInheritedFPSOverride = !defaults.bool(
+            forKey: fpsOverrideOffMigrationKey
+        )
         var migratedLegacyLayout = false
         var migratedLegacyFramePacing = false
+        var migratedInheritedFPSOverride = false
         workspaces = decoded.map { workspace in
             var workspace = workspace
             workspace.panels = workspace.panels.map { panel in
@@ -698,6 +705,12 @@ final class WorkspaceStore: ObservableObject {
                     migratedLegacyFramePacing = true
                 }
                 panel.profile = panel.profile.normalized()
+                if shouldDisableInheritedFPSOverride,
+                   panel.profile.framePacingMode == .overrideGameLoop,
+                   panel.profile.frameRateLimit == GameProfile.defaultFrameRate {
+                    panel.profile.framePacingMode = .native
+                    migratedInheritedFPSOverride = true
+                }
                 return panel
             }
             if isUsingLegacyAutomaticLayout(workspace.panels)
@@ -711,7 +724,11 @@ final class WorkspaceStore: ObservableObject {
             return workspace
         }
         sortWorkspaces()
-        if migratedLegacyLayout || migratedLegacyFramePacing {
+        if shouldDisableInheritedFPSOverride {
+            defaults.set(true, forKey: fpsOverrideOffMigrationKey)
+        }
+        if migratedLegacyLayout || migratedLegacyFramePacing
+            || migratedInheritedFPSOverride {
             persist()
         }
     }
@@ -840,6 +857,18 @@ final class WorkspaceRuntimeStore: ObservableObject {
             shutdown(panelID: panel.id, deleteData: deleteData)
         }
         visibleWorkspaceIDs.remove(workspace.id)
+    }
+
+    func configureJIT(enabled: Bool) {
+        for session in sessions.values {
+            session.configureJIT(enabled: enabled)
+        }
+    }
+
+    func refreshJITStatus() {
+        for session in sessions.values {
+            session.refreshJITStatus()
+        }
     }
 
     func suspendAll() {
