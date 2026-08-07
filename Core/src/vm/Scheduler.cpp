@@ -19,6 +19,7 @@ namespace phoneme::vm {
 thread_local Scheduler* Scheduler::tls_scheduler_ = nullptr;
 thread_local JavaThreadId Scheduler::tls_thread_id_ = 0;
 thread_local u32 Scheduler::tls_unblocked_quantum_count_ = 0U;
+thread_local u64 Scheduler::tls_host_foreground_generation_ = 0U;
 thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_quantum_resume_time_ {};
 thread_local bool Scheduler::tls_quantum_timing_valid_ = false;
@@ -55,8 +56,8 @@ constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(4);
 // when a game has several Java threads that would otherwise take turns while
 // each individual thread is sleeping. A blocked socket/timer callback still
 // runs immediately until it reaches the next bounded bytecode scheduler quantum.
-constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(50);
-constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(500);
+constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(200);
+constexpr auto kBackgroundMaximumInterval = std::chrono::seconds(2);
 // Only a short, stable sleep immediately following an actual framebuffer
 // publication may be treated as game-loop pacing. Override mode deliberately
 // requires several matching frames before it may shorten a Java sleep.
@@ -508,8 +509,21 @@ void Scheduler::begin_execution_slice() noexcept {
     // Host-driven main-thread invocations do not own Scheduler TLS, but they
     // execute the same interpreter loop and require identical CPU pacing.
     tls_unblocked_quantum_count_ = 0U;
+    // Re-synchronize foreground ownership at the first maintenance boundary
+    // of every top-level execution. This also makes an invocation that starts
+    // while already backgrounded enter the shared CPU gate immediately.
+    tls_host_foreground_generation_ = 0U;
     tls_quantum_resume_time_ = std::chrono::steady_clock::now();
     tls_quantum_timing_valid_ = true;
+}
+
+bool Scheduler::consume_current_background_transition() noexcept {
+    const u64 generation =
+        host_foreground_generation_.load(std::memory_order_acquire);
+    if (tls_host_foreground_generation_ == generation) return false;
+    tls_host_foreground_generation_ = generation;
+    std::scoped_lock lock(mutex_);
+    return !host_foreground_;
 }
 
 void Scheduler::begin_unpaced_execution() noexcept {
@@ -536,10 +550,11 @@ void Scheduler::set_host_foreground(bool foreground) noexcept {
         if (host_foreground_ == foreground) return;
         host_foreground_ = foreground;
         background_resume_deadline_ = {};
+        host_foreground_generation_.fetch_add(1U, std::memory_order_acq_rel);
         frame_pacing_generation_.fetch_add(1U, std::memory_order_acq_rel);
     }
     // Foregrounding must release every Java thread waiting on the shared
-    // background gate immediately instead of adding up to 25 ms input latency.
+    // background gate immediately instead of waiting for its reserved slot.
     background_condition_.notify_all();
 }
 
@@ -713,10 +728,13 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         ++tls_unblocked_quantum_count_;
     }
     bool deterministic_mode = false;
+    bool foreground_peer_runnable = false;
     std::optional<std::chrono::steady_clock::time_point> background_deadline;
     {
         std::scoped_lock lock(mutex_);
         deterministic_mode = deterministic_;
+        foreground_peer_runnable =
+            !deterministic_mode && host_foreground_ && !runnable_queue_.empty();
         if (!deterministic_mode && !host_foreground_) {
             const auto reservation_time = std::chrono::steady_clock::now();
             if (background_resume_deadline_ < reservation_time) {
@@ -750,14 +768,13 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         // pause so timing-sensitive scheduler tests do not become host-load
         // dependent.
         std::this_thread::sleep_for(backoff);
-    } else if ((tls_unblocked_quantum_count_ & 7U) == 0U) {
-        // Foreground execution must never be duty-cycle throttled. Asset
-        // decompression, table parsing and obfuscated loading loops routinely
-        // cross thousands of VM quanta; sleeping at every boundary stretched
-        // a few seconds of real CPU work into minute-long loading screens.
-        // The execution gate is released at every quantum, while an explicit
-        // host yield every eighth quantum provides fairness without taxing
-        // single-threaded loaders. Frame limiting remains publication-based.
+    } else if (foreground_peer_runnable ||
+               (tls_unblocked_quantum_count_ & 7U) == 0U) {
+        // Foreground execution must never be duty-cycle throttled. When
+        // another Java thread is already runnable, however, an explicit host
+        // yield prevents the current busy loop from immediately reacquiring
+        // the shared VM execution gate and starving the peer. Single-threaded
+        // loaders retain the cheaper every-eighth-quantum yield path.
         std::this_thread::yield();
     }
     machine.resume_execution_after_blocking(depth);

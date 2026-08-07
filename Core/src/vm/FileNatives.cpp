@@ -989,6 +989,49 @@ void register_java_file_natives(NativeMethodRegistry& registry) {
                 Value::from_int(created_any ? 1 : 0));
         });
 
+    add(registry, "java/io/File", "listFiles", "()[Ljava/io/File;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto path = normalized_java_file_path(machine, *object);
+            if (!path) return std::unexpected(path.error());
+            auto permitted = require_file_permissions(
+                machine, true, false, file_resource_uri(*path));
+            if (!permitted) return std::unexpected(permitted.error());
+            auto info = machine.filesystem().stat(*path);
+            if (!info) return file_error(info.error());
+            if (!info->exists || !info->directory) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto names = machine.filesystem().list(*path);
+            if (!names) return file_error(names.error());
+            auto files = machine.heap().allocate_array(
+                "[Ljava/io/File;", names->size(), Value::from_reference({}));
+            if (!files) return std::unexpected(files.error());
+            auto files_root = machine.pin_native_root(*files);
+            if (!files_root) return std::unexpected(files_root.error());
+            for (usize index = 0U; index < names->size(); ++index) {
+                std::string child = *path;
+                if (!child.empty() && child.back() != '/') child.push_back('/');
+                child.append((*names)[index]);
+                auto path_string = create_string(machine, child);
+                if (!path_string) return std::unexpected(path_string.error());
+                auto path_root = machine.pin_native_root(*path_string);
+                if (!path_root) return std::unexpected(path_root.error());
+                auto file = machine.class_states().allocate_instance(
+                    machine.heap(), "java/io/File");
+                if (!file) return std::unexpected(file.error());
+                auto stored_path = set_reference_field(
+                    machine, *file, kJavaFilePathField, *path_string);
+                if (!stored_path) return std::unexpected(stored_path.error());
+                auto stored = machine.heap().set_element(
+                    *files, index, Value::from_reference(*file));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*files));
+        });
+
     add(registry, "java/io/File", "renameTo", "(Ljava/io/File;)Z",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

@@ -137,6 +137,7 @@ private:
         return TypeDescriptor {
             .kind = JavaTypeKind::array,
             .class_name = std::move(class_name),
+            .array_component_kind = component->kind,
             .array_dimensions = static_cast<u8>(dimensions),
         };
     }

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <numbers>
@@ -386,6 +387,86 @@ namespace phoneme::vm
         return false;
       }
       return false;
+    }
+
+    [[nodiscard]] char primitive_descriptor_token(JavaTypeKind kind) noexcept
+    {
+      switch (kind)
+      {
+      case JavaTypeKind::boolean: return 'Z';
+      case JavaTypeKind::byte: return 'B';
+      case JavaTypeKind::character: return 'C';
+      case JavaTypeKind::short_integer: return 'S';
+      case JavaTypeKind::integer: return 'I';
+      case JavaTypeKind::float32: return 'F';
+      case JavaTypeKind::long_integer: return 'J';
+      case JavaTypeKind::float64: return 'D';
+      default: return '\0';
+      }
+    }
+
+    [[nodiscard]] Result<std::string> reference_type_name(
+        const TypeDescriptor& type)
+    {
+      if (type.kind == JavaTypeKind::reference)
+        return type.class_name;
+      if (type.kind != JavaTypeKind::array || type.array_dimensions == 0U)
+      {
+        return fail(ErrorCode::invalid_argument,
+                    "requested type is not a Java reference");
+      }
+      std::string name(static_cast<usize>(type.array_dimensions), '[');
+      if (type.array_component_kind == JavaTypeKind::reference)
+      {
+        if (type.class_name.empty())
+        {
+          return fail(ErrorCode::malformed_class,
+                      "reference array descriptor lost its component class");
+        }
+        name += 'L';
+        name += type.class_name;
+        name += ';';
+        return name;
+      }
+      const char token = primitive_descriptor_token(type.array_component_kind);
+      if (token == '\0')
+      {
+        return fail(ErrorCode::malformed_class,
+                    "array descriptor lost its primitive component type");
+      }
+      name += token;
+      return name;
+    }
+
+    [[nodiscard]] std::string_view primitive_wrapper_class(
+        JavaTypeKind kind) noexcept
+    {
+      switch (kind)
+      {
+      case JavaTypeKind::boolean: return "java/lang/Boolean";
+      case JavaTypeKind::byte: return "java/lang/Byte";
+      case JavaTypeKind::character: return "java/lang/Character";
+      case JavaTypeKind::short_integer: return "java/lang/Short";
+      case JavaTypeKind::integer: return "java/lang/Integer";
+      case JavaTypeKind::float32: return "java/lang/Float";
+      case JavaTypeKind::long_integer: return "java/lang/Long";
+      case JavaTypeKind::float64: return "java/lang/Double";
+      default: return {};
+      }
+    }
+
+    [[nodiscard]] std::optional<JavaTypeKind> wrapper_primitive_kind(
+        std::string_view class_name) noexcept
+    {
+      if (class_name == "java/lang/Boolean") return JavaTypeKind::boolean;
+      if (class_name == "java/lang/Byte") return JavaTypeKind::byte;
+      if (class_name == "java/lang/Character") return JavaTypeKind::character;
+      if (class_name == "java/lang/Short") return JavaTypeKind::short_integer;
+      if (class_name == "java/lang/Integer") return JavaTypeKind::integer;
+      if (class_name == "java/lang/Float") return JavaTypeKind::float32;
+      if (class_name == "java/lang/Long") return JavaTypeKind::long_integer;
+      if (class_name == "java/lang/Double") return JavaTypeKind::float64;
+      return std::nullopt;
     }
 
     [[nodiscard]] bool primitive_widening_allowed(JavaTypeKind source,
@@ -1381,6 +1462,24 @@ namespace phoneme::vm
       {
         return discard_return_value_;
       }
+      void set_return_reference_cast(std::string target)
+      {
+        return_reference_cast_target_ = std::move(target);
+      }
+      [[nodiscard]] const std::optional<std::string>&
+      return_reference_cast_target() const noexcept
+      {
+        return return_reference_cast_target_;
+      }
+      void set_return_unboxing(JavaTypeKind target) noexcept
+      {
+        return_unboxing_target_ = target;
+      }
+      [[nodiscard]] std::optional<JavaTypeKind>
+      return_unboxing_target() const noexcept
+      {
+        return return_unboxing_target_;
+      }
       void set_return_widening(JavaTypeKind source,
                                JavaTypeKind target) noexcept
       {
@@ -1583,6 +1682,8 @@ namespace phoneme::vm
       std::optional<Value> return_override_;
       bool return_override_boxes_result_{false};
       bool discard_return_value_{false};
+      std::optional<std::string> return_reference_cast_target_;
+      std::optional<JavaTypeKind> return_unboxing_target_;
       std::optional<JavaTypeKind> return_widening_source_;
       std::optional<JavaTypeKind> return_widening_target_;
     };
@@ -3435,7 +3536,11 @@ namespace phoneme::vm
         serial_callback_failure_.reset();
         return std::unexpected(std::move(failure));
       }
-      if (serial_callback_worker_running_ || serial_callbacks_.empty())
+      // Hidden MIDlets coalesce callSerially work but do not execute LCDUI
+      // callbacks until they regain foreground ownership. Their timers,
+      // sockets and non-UI Java workers continue independently.
+      if (serial_callback_coalescing_ || serial_callback_worker_running_ ||
+          serial_callbacks_.empty())
         return {};
       auto first = serial_callbacks_.front().get();
       if (!first)
@@ -3547,6 +3652,29 @@ namespace phoneme::vm
           }
 
           finish_worker();
+
+          // A callback may enqueue another callback while this worker is
+          // running. Once the batch limit is reached, hand the remaining queue
+          // to a fresh scheduler worker instead of waiting for an unrelated
+          // Canvas/frame pump to happen to wake it up.
+          if (!stop_token.stop_requested())
+          {
+            bool has_more = false;
+            {
+              std::scoped_lock lock(serial_callbacks_mutex_);
+              has_more = !serial_callbacks_.empty();
+            }
+            if (has_more)
+            {
+              auto continued = pump_serial_callbacks(maximum_callbacks);
+              if (!continued)
+              {
+                std::scoped_lock lock(serial_callbacks_mutex_);
+                serial_callback_failure_ = continued.error();
+                serial_callback_worker_running_ = false;
+              }
+            }
+          }
           return std::optional<ObjectRef> {};
         });
     if (!scheduled)
@@ -7735,8 +7863,215 @@ namespace phoneme::vm
     if (combined_values != implementation_values)
     {
       return fail(ErrorCode::unsupported_feature,
-                  "LambdaMetafactory argument adaptation is unsupported");
+                  "LambdaMetafactory argument adaptation has invalid arity");
     }
+
+    const auto same_type = [](const TypeDescriptor& left,
+                              const TypeDescriptor& right) -> Result<bool>
+    {
+      if (left.kind != right.kind)
+        return false;
+      if (!left.reference_like())
+        return true;
+      auto left_name = reference_type_name(left);
+      auto right_name = reference_type_name(right);
+      if (!left_name)
+        return std::unexpected(left_name.error());
+      if (!right_name)
+        return std::unexpected(right_name.error());
+      return *left_name == *right_name;
+    };
+    const auto reference_assignable = [this](const TypeDescriptor& source,
+                                              const TypeDescriptor& target)
+        -> Result<bool>
+    {
+      if (!source.reference_like() || !target.reference_like())
+        return false;
+      auto source_name = reference_type_name(source);
+      auto target_name = reference_type_name(target);
+      if (!source_name)
+        return std::unexpected(source_name.error());
+      if (!target_name)
+        return std::unexpected(target_name.error());
+      return classes_.is_assignable(*source_name, *target_name);
+    };
+    const auto parameter_adaptable =
+        [this, &reference_assignable](const TypeDescriptor& source,
+                                      const TypeDescriptor& target)
+        -> Result<bool>
+    {
+      if (!source.reference_like() && !target.reference_like())
+        return primitive_widening_allowed(source.kind, target.kind);
+      if (!source.reference_like() && target.reference_like())
+      {
+        if (target.kind == JavaTypeKind::array)
+          return false;
+        const std::string_view wrapper = primitive_wrapper_class(source.kind);
+        if (wrapper.empty())
+          return false;
+        return classes_.is_assignable(wrapper, target.class_name);
+      }
+      if (source.reference_like() && !target.reference_like())
+      {
+        if (source.kind != JavaTypeKind::reference)
+          return false;
+        const auto primitive = wrapper_primitive_kind(source.class_name);
+        return primitive.has_value() &&
+               primitive_widening_allowed(*primitive, target.kind);
+      }
+      return reference_assignable(source, target);
+    };
+    const auto return_adaptable =
+        [this](const TypeDescriptor& source,
+                                      const TypeDescriptor& target)
+        -> Result<bool>
+    {
+      if (target.kind == JavaTypeKind::void_type)
+        return true;
+      if (source.kind == JavaTypeKind::void_type)
+        return false;
+      if (!source.reference_like() && !target.reference_like())
+        return primitive_widening_allowed(source.kind, target.kind);
+      if (!source.reference_like() && target.reference_like())
+      {
+        if (target.kind == JavaTypeKind::array)
+          return false;
+        const std::string_view wrapper = primitive_wrapper_class(source.kind);
+        if (wrapper.empty())
+          return false;
+        return classes_.is_assignable(wrapper, target.class_name);
+      }
+      if (source.reference_like() && !target.reference_like())
+      {
+        if (source.kind == JavaTypeKind::array)
+          return false;
+        const auto primitive = wrapper_primitive_kind(source.class_name);
+        return !primitive.has_value() ||
+               primitive_widening_allowed(*primitive, target.kind);
+      }
+      // Reference returns are invocation-time casts; the implementation return
+      // need not already be a subtype of the instantiated return type.
+      return true;
+    };
+
+    for (usize index = 0; index < sam_type->parameters.size(); ++index)
+    {
+      auto equal = same_type(instantiated_type->parameters[index],
+                             sam_type->parameters[index]);
+      if (!equal)
+        return std::unexpected(equal.error());
+      if (*equal)
+        continue;
+      auto subtype = reference_assignable(instantiated_type->parameters[index],
+                                          sam_type->parameters[index]);
+      if (!subtype)
+        return std::unexpected(subtype.error());
+      if (!*subtype)
+      {
+        return fail(ErrorCode::unsupported_feature,
+                    "LambdaMetafactory instantiated parameter is incompatible with SAM");
+      }
+    }
+    auto return_equal = same_type(instantiated_type->return_type,
+                                  sam_type->return_type);
+    if (!return_equal)
+      return std::unexpected(return_equal.error());
+    if (!*return_equal && instantiated_type->return_type.reference_like() &&
+        sam_type->return_type.reference_like())
+    {
+      auto subtype = reference_assignable(instantiated_type->return_type,
+                                          sam_type->return_type);
+      if (!subtype)
+        return std::unexpected(subtype.error());
+      if (!*subtype)
+      {
+        return fail(ErrorCode::unsupported_feature,
+                    "LambdaMetafactory instantiated return is incompatible with SAM");
+      }
+    }
+    else if (!*return_equal)
+    {
+      return fail(ErrorCode::unsupported_feature,
+                  "LambdaMetafactory instantiated return does not match SAM");
+    }
+
+    std::vector<TypeDescriptor> implementation_inputs;
+    implementation_inputs.reserve(implementation_values);
+    if (implementation->reference_kind == 5U ||
+        implementation->reference_kind == 7U ||
+        implementation->reference_kind == 9U)
+    {
+      implementation_inputs.push_back(TypeDescriptor {
+          .kind = JavaTypeKind::reference,
+          .class_name = implementation->member.owner,
+      });
+    }
+    implementation_inputs.insert(implementation_inputs.end(),
+                                 implementation_type->parameters.begin(),
+                                 implementation_type->parameters.end());
+    for (usize index = 0; index < call_site->parameters.size(); ++index)
+    {
+      auto equal = same_type(call_site->parameters[index],
+                             implementation_inputs[index]);
+      if (!equal)
+        return std::unexpected(equal.error());
+      if (*equal)
+        continue;
+
+      // javac may capture a concrete subtype for a bound reference to a
+      // method declared on its superclass/interface. Only the first capture
+      // can be that instance receiver; every other capture remains exact.
+      const bool captured_instance_receiver =
+          index == 0U &&
+          (implementation->reference_kind == 5U ||
+           implementation->reference_kind == 7U ||
+           implementation->reference_kind == 9U) &&
+          call_site->parameters[index].reference_like() &&
+          implementation_inputs[index].reference_like();
+      if (captured_instance_receiver)
+      {
+        auto compatible = reference_assignable(
+            call_site->parameters[index], implementation_inputs[index]);
+        if (!compatible)
+          return std::unexpected(compatible.error());
+        if (*compatible)
+          continue;
+      }
+      return fail(ErrorCode::unsupported_feature,
+                  "LambdaMetafactory captured argument type does not match implementation");
+    }
+    for (usize index = 0; index < instantiated_type->parameters.size(); ++index)
+    {
+      const usize implementation_index = call_site->parameters.size() + index;
+      auto adaptable = parameter_adaptable(
+          instantiated_type->parameters[index],
+          implementation_inputs[implementation_index]);
+      if (!adaptable)
+        return std::unexpected(adaptable.error());
+      if (!*adaptable)
+      {
+        return fail(ErrorCode::unsupported_feature,
+                    "LambdaMetafactory parameter cannot adapt to implementation");
+      }
+    }
+    TypeDescriptor implementation_return = implementation_type->return_type;
+    if (implementation->reference_kind == 8U)
+    {
+      implementation_return = TypeDescriptor {
+          .kind = JavaTypeKind::reference,
+          .class_name = implementation->member.owner,
+      };
+    }
+    auto adaptable_return = return_adaptable(
+        implementation_return, instantiated_type->return_type);
+    if (!adaptable_return)
+      return std::unexpected(adaptable_return.error());
+    if (!*adaptable_return)
+    {
+      return fail(ErrorCode::unsupported_feature,
+                  "LambdaMetafactory return cannot adapt to instantiated type");
+    }
+
     if (implementation->reference_kind == 8U)
     {
       if (instantiated_type->return_type.kind != JavaTypeKind::reference)
@@ -7797,13 +8132,16 @@ namespace phoneme::vm
       auto reference = invocation_arguments[index].as_reference();
       if (!reference)
         return std::unexpected(reference.error());
-      if (reference->is_null() || target.kind == JavaTypeKind::array)
+      if (reference->is_null())
         continue;
+      auto target_name = reference_type_name(target);
+      if (!target_name)
+        return std::unexpected(target_name.error());
       auto runtime_class = heap_.class_name(*reference);
       if (!runtime_class)
         return std::unexpected(runtime_class.error());
       auto compatible = classes_.is_assignable(*runtime_class,
-                                               target.class_name);
+                                               *target_name);
       if (!compatible)
         return std::unexpected(compatible.error());
       if (!*compatible)
@@ -7859,51 +8197,7 @@ namespace phoneme::vm
         return widen_primitive_value(value, *source_hint, target.kind);
       }
 
-      auto reference = value.as_reference();
-      if (!reference)
-        return std::unexpected(reference.error());
-      if (reference->is_null())
-      {
-        return fail_java("java/lang/NullPointerException",
-                         "lambda primitive argument is null");
-      }
-      auto wrapper_class = heap_.class_name(*reference);
-      if (!wrapper_class)
-        return std::unexpected(wrapper_class.error());
-
-      JavaTypeKind source_kind = JavaTypeKind::void_type;
-      if (*wrapper_class == "java/lang/Boolean")
-        source_kind = JavaTypeKind::boolean;
-      else if (*wrapper_class == "java/lang/Byte")
-        source_kind = JavaTypeKind::byte;
-      else if (*wrapper_class == "java/lang/Character")
-        source_kind = JavaTypeKind::character;
-      else if (*wrapper_class == "java/lang/Short")
-        source_kind = JavaTypeKind::short_integer;
-      else if (*wrapper_class == "java/lang/Integer")
-        source_kind = JavaTypeKind::integer;
-      else if (*wrapper_class == "java/lang/Float")
-        source_kind = JavaTypeKind::float32;
-      else if (*wrapper_class == "java/lang/Long")
-        source_kind = JavaTypeKind::long_integer;
-      else if (*wrapper_class == "java/lang/Double")
-        source_kind = JavaTypeKind::float64;
-      else
-      {
-        return fail(ErrorCode::invalid_argument,
-                    "lambda primitive argument is not a wrapper object");
-      }
-
-      auto payload = heap_.field(*reference, 0U);
-      if (!payload)
-        return std::unexpected(payload.error());
-
-      if (!primitive_widening_allowed(source_kind, target.kind))
-      {
-        return fail(ErrorCode::invalid_argument,
-                    "lambda primitive wrapper cannot adapt to implementation type");
-      }
-      return widen_primitive_value(*payload, source_kind, target.kind);
+      return unbox_lambda_value(value, target.kind);
     };
 
     const bool implementation_has_receiver =
@@ -7917,12 +8211,13 @@ namespace phoneme::vm
       return fail(ErrorCode::invalid_argument,
                   "lambda implementation argument count is invalid");
     }
+    std::vector<NativeRootScope> boxing_roots;
+    boxing_roots.reserve(implementation->parameters.size());
     for (usize index = 0; index < implementation->parameters.size(); ++index)
     {
       const usize combined_index = index + implementation_offset;
       Value& argument = combined[combined_index];
-      if (value_matches(argument, implementation->parameters[index]))
-        continue;
+      const TypeDescriptor& target = implementation->parameters[index];
       std::optional<JavaTypeKind> source_hint;
       if (combined_index >= binding.captured_count)
       {
@@ -7930,8 +8225,73 @@ namespace phoneme::vm
         if (invocation_index < instantiated->parameters.size())
           source_hint = instantiated->parameters[invocation_index].kind;
       }
-      auto adapted = adapt_primitive_argument(
-          argument, implementation->parameters[index], source_hint);
+
+      if (target.reference_like())
+      {
+        if (argument.kind() == ValueKind::reference)
+        {
+          auto reference = argument.as_reference();
+          if (!reference)
+            return std::unexpected(reference.error());
+          if (!reference->is_null())
+          {
+            auto target_name = reference_type_name(target);
+            if (!target_name)
+              return std::unexpected(target_name.error());
+            auto runtime_class = heap_.class_name(*reference);
+            if (!runtime_class)
+              return std::unexpected(runtime_class.error());
+            auto compatible = classes_.is_assignable(*runtime_class,
+                                                     *target_name);
+            if (!compatible)
+              return std::unexpected(compatible.error());
+            if (!*compatible)
+            {
+              return fail_java(
+                  "java/lang/ClassCastException",
+                  "lambda reference argument is incompatible with implementation type");
+            }
+          }
+          continue;
+        }
+        if (!source_hint.has_value() || target.kind == JavaTypeKind::array)
+        {
+          return fail(ErrorCode::invalid_argument,
+                      "lambda primitive argument cannot box to implementation type");
+        }
+        const std::string_view wrapper_class =
+            primitive_wrapper_class(*source_hint);
+        if (wrapper_class.empty())
+        {
+          return fail(ErrorCode::invalid_argument,
+                      "lambda primitive argument has no wrapper class");
+        }
+        auto compatible = classes_.is_assignable(wrapper_class,
+                                                 target.class_name);
+        if (!compatible)
+          return std::unexpected(compatible.error());
+        if (!*compatible)
+        {
+          return fail(ErrorCode::invalid_argument,
+                      "boxed lambda argument is incompatible with implementation type");
+        }
+        auto wrapper_root = allocate_pinned_instance(wrapper_class);
+        if (!wrapper_root)
+          return std::unexpected(wrapper_root.error());
+        auto wrapper = wrapper_root->get();
+        if (!wrapper)
+          return std::unexpected(wrapper.error());
+        auto stored = heap_.set_field(*wrapper, 0U, argument);
+        if (!stored)
+          return std::unexpected(stored.error());
+        argument = Value::from_reference(*wrapper);
+        boxing_roots.push_back(std::move(*wrapper_root));
+        continue;
+      }
+
+      if (value_matches(argument, target))
+        continue;
+      auto adapted = adapt_primitive_argument(argument, target, source_hint);
       if (!adapted)
         return std::unexpected(adapted.error());
       argument = *adapted;
@@ -7956,9 +8316,14 @@ namespace phoneme::vm
       {
         if (!target.reference_like())
         {
-          return fail(ErrorCode::unsupported_feature,
-                      "lambda reference return unboxing is not implemented");
+          invocation.return_unboxing_target = target.kind;
+          return {};
         }
+        auto target_name = reference_type_name(target);
+        if (!target_name)
+          return std::unexpected(target_name.error());
+        if (*target_name != "java/lang/Object")
+          invocation.return_reference_cast_target = std::move(*target_name);
         return {};
       }
       if (!target.reference_like())
@@ -7984,34 +8349,9 @@ namespace phoneme::vm
                     "lambda primitive return cannot box to an array");
       }
 
-      std::string_view wrapper_class;
-      switch (source.kind)
+      const std::string_view wrapper_class = primitive_wrapper_class(source.kind);
+      if (wrapper_class.empty())
       {
-      case JavaTypeKind::boolean:
-        wrapper_class = "java/lang/Boolean";
-        break;
-      case JavaTypeKind::byte:
-        wrapper_class = "java/lang/Byte";
-        break;
-      case JavaTypeKind::character:
-        wrapper_class = "java/lang/Character";
-        break;
-      case JavaTypeKind::short_integer:
-        wrapper_class = "java/lang/Short";
-        break;
-      case JavaTypeKind::integer:
-        wrapper_class = "java/lang/Integer";
-        break;
-      case JavaTypeKind::float32:
-        wrapper_class = "java/lang/Float";
-        break;
-      case JavaTypeKind::long_integer:
-        wrapper_class = "java/lang/Long";
-        break;
-      case JavaTypeKind::float64:
-        wrapper_class = "java/lang/Double";
-        break;
-      default:
         return fail(ErrorCode::unsupported_feature,
                     "lambda return cannot be boxed");
       }
@@ -8126,6 +8466,65 @@ namespace phoneme::vm
     if (!configured)
       return std::unexpected(configured.error());
     return invocation;
+  }
+
+  Result<Value> Machine::cast_lambda_reference(Value value,
+                                                std::string_view target_class)
+  {
+    if (value.kind() != ValueKind::reference)
+    {
+      return fail_java("java/lang/ClassCastException",
+                       "lambda return value is not an object");
+    }
+    auto reference = value.as_reference();
+    if (!reference)
+      return std::unexpected(reference.error());
+    if (reference->is_null() || target_class == "java/lang/Object")
+      return value;
+    auto runtime_class = heap_.class_name(*reference);
+    if (!runtime_class)
+      return std::unexpected(runtime_class.error());
+    auto compatible = classes_.is_assignable(*runtime_class, target_class);
+    if (!compatible)
+      return std::unexpected(compatible.error());
+    if (!*compatible)
+    {
+      return fail_java("java/lang/ClassCastException",
+                       "lambda return value is incompatible with instantiated type");
+    }
+    return value;
+  }
+
+  Result<Value> Machine::unbox_lambda_value(Value value,
+                                             JavaTypeKind target_kind)
+  {
+    if (value.kind() != ValueKind::reference)
+    {
+      return fail_java("java/lang/ClassCastException",
+                       "lambda unboxing value is not an object");
+    }
+    auto reference = value.as_reference();
+    if (!reference)
+      return std::unexpected(reference.error());
+    if (reference->is_null())
+    {
+      return fail_java("java/lang/NullPointerException",
+                       "lambda unboxing value is null");
+    }
+    auto wrapper_class = heap_.class_name(*reference);
+    if (!wrapper_class)
+      return std::unexpected(wrapper_class.error());
+    const auto source_kind = wrapper_primitive_kind(*wrapper_class);
+    if (!source_kind.has_value() ||
+        !primitive_widening_allowed(*source_kind, target_kind))
+    {
+      return fail_java("java/lang/ClassCastException",
+                       "lambda value cannot be unboxed to target primitive");
+    }
+    auto payload = heap_.field(*reference, 0U);
+    if (!payload)
+      return std::unexpected(payload.error());
+    return widen_primitive_value(*payload, *source_kind, target_kind);
   }
 
   void Machine::prune_lambda_bindings()
@@ -8415,6 +8814,32 @@ namespace phoneme::vm
         return std::unexpected(native_result.error());
       }
       std::optional<Value> completed_return = *native_result;
+      if (invocation.return_reference_cast_target.has_value())
+      {
+        if (!completed_return.has_value())
+        {
+          return fail(ErrorCode::invalid_state,
+                      "cast lambda native return has no reference value");
+        }
+        auto casted = cast_lambda_reference(
+            *completed_return, *invocation.return_reference_cast_target);
+        if (!casted)
+          return std::unexpected(casted.error());
+        completed_return = *casted;
+      }
+      if (invocation.return_unboxing_target.has_value())
+      {
+        if (!completed_return.has_value())
+        {
+          return fail(ErrorCode::invalid_state,
+                      "unboxed lambda native return has no reference value");
+        }
+        auto unboxed = unbox_lambda_value(
+            *completed_return, *invocation.return_unboxing_target);
+        if (!unboxed)
+          return std::unexpected(unboxed.error());
+        completed_return = *unboxed;
+      }
       if (invocation.return_widening_source.has_value() &&
           invocation.return_widening_target.has_value())
       {
@@ -8484,6 +8909,8 @@ namespace phoneme::vm
         invocation.method.owner != nullptr &&
         !invocation.return_override.has_value() &&
         !invocation.discard_return_value &&
+        !invocation.return_reference_cast_target.has_value() &&
+        !invocation.return_unboxing_target.has_value() &&
         !invocation.return_widening_target.has_value())
     {
       JitExecutionContext jit_context{
@@ -8626,6 +9053,15 @@ namespace phoneme::vm
                                       invocation.return_override_boxes_result);
     }
     root_frame->set_discard_return_value(invocation.discard_return_value);
+    if (invocation.return_reference_cast_target.has_value())
+    {
+      root_frame->set_return_reference_cast(
+          *invocation.return_reference_cast_target);
+    }
+    if (invocation.return_unboxing_target.has_value())
+    {
+      root_frame->set_return_unboxing(*invocation.return_unboxing_target);
+    }
     if (invocation.return_widening_source.has_value() &&
         invocation.return_widening_target.has_value())
     {
@@ -8685,11 +9121,13 @@ namespace phoneme::vm
 
     const auto publish_active_execution_roots =
         [this, &frames, &safepoint_roots, invocation_depth](
-            std::span<const Value> extra_values = {})
+            std::span<const Value> extra_values = {},
+            std::optional<Value> extra_value = std::nullopt)
     {
       safepoint_roots.clear();
       safepoint_roots.reserve(
-          frames.size() * 8U + extra_values.size() + 8U);
+          frames.size() * 8U + extra_values.size() +
+          (extra_value.has_value() ? 1U : 0U) + 8U);
       for (const ExecutionFrame& active_frame : frames)
         active_frame.append_reference_roots(safepoint_roots);
       for (const Value value : extra_values)
@@ -8697,6 +9135,12 @@ namespace phoneme::vm
         if (value.kind() != ValueKind::reference)
           continue;
         const ObjectRef reference = value.reference_unchecked();
+        if (!reference.is_null()) safepoint_roots.push_back(reference);
+      }
+      if (extra_value.has_value() &&
+          extra_value->kind() == ValueKind::reference)
+      {
+        const ObjectRef reference = extra_value->reference_unchecked();
         if (!reference.is_null()) safepoint_roots.push_back(reference);
       }
       publish_execution_roots(invocation_depth, safepoint_roots);
@@ -9434,10 +9878,79 @@ namespace phoneme::vm
           Value::from_long(std::bit_cast<i64>(accumulated)));
     };
 
-    const auto complete_return = [this, &frames, &executed](
+    std::function<Result<std::optional<ExecutionResult>>(ObjectRef, usize)>
+        dispatch_exception;
+    const auto complete_return = [this, &frames, &executed,
+                                  &dispatch_exception](
                                      std::optional<Value> value)
         -> Result<std::optional<ExecutionResult>>
     {
+      if (frames.back().return_reference_cast_target().has_value())
+      {
+        if (!value.has_value())
+        {
+          return fail(ErrorCode::invalid_state,
+                      "cast lambda return has no reference value");
+        }
+        auto casted = cast_lambda_reference(
+            *value, *frames.back().return_reference_cast_target());
+        if (!casted)
+        {
+          if (casted.error().code != ErrorCode::java_exception ||
+              casted.error().java_exception_class.empty() ||
+              frames.size() < 2U)
+          {
+            return std::unexpected(casted.error());
+          }
+          const Error adaptation_error = casted.error();
+          auto released = release_synchronized_monitor(
+              frames.back().synchronized_monitor());
+          if (!released)
+            return std::unexpected(released.error());
+          frames.pop_back();
+          auto throwable = create_throwable(
+              adaptation_error.java_exception_class,
+              adaptation_error.message);
+          if (!throwable)
+            return std::unexpected(throwable.error());
+          return dispatch_exception(
+              *throwable, frames.back().current_instruction_pc());
+        }
+        value = *casted;
+      }
+      if (frames.back().return_unboxing_target().has_value())
+      {
+        if (!value.has_value())
+        {
+          return fail(ErrorCode::invalid_state,
+                      "unboxed lambda return has no reference value");
+        }
+        auto unboxed = unbox_lambda_value(
+            *value, *frames.back().return_unboxing_target());
+        if (!unboxed)
+        {
+          if (unboxed.error().code != ErrorCode::java_exception ||
+              unboxed.error().java_exception_class.empty() ||
+              frames.size() < 2U)
+          {
+            return std::unexpected(unboxed.error());
+          }
+          const Error adaptation_error = unboxed.error();
+          auto released = release_synchronized_monitor(
+              frames.back().synchronized_monitor());
+          if (!released)
+            return std::unexpected(released.error());
+          frames.pop_back();
+          auto throwable = create_throwable(
+              adaptation_error.java_exception_class,
+              adaptation_error.message);
+          if (!throwable)
+            return std::unexpected(throwable.error());
+          return dispatch_exception(
+              *throwable, frames.back().current_instruction_pc());
+        }
+        value = *unboxed;
+      }
       if (frames.back().return_widening_source().has_value() &&
           frames.back().return_widening_target().has_value())
       {
@@ -9501,7 +10014,7 @@ namespace phoneme::vm
       return std::optional<ExecutionResult>{};
     };
 
-    const auto dispatch_exception =
+    dispatch_exception =
         [this, &frames, &executed](ObjectRef throwable, usize throw_pc)
         -> Result<std::optional<ExecutionResult>>
     {
@@ -9666,6 +10179,9 @@ namespace phoneme::vm
       }
 
       const bool quantum_boundary = executed >= next_scheduler_quantum;
+      const bool background_transition_boundary =
+          maintenance_boundary &&
+          scheduler_.consume_current_background_transition();
       const bool garbage_collection_poll_boundary =
           executed >= next_garbage_collection_poll;
       const bool automatic_collection =
@@ -9694,7 +10210,8 @@ namespace phoneme::vm
           next_garbage_collection_poll += kGarbageCollectionPollInterval;
         } while (next_garbage_collection_poll <= executed);
       }
-      if (quantum_boundary || collect_requested || automatic_collection)
+      if (quantum_boundary || background_transition_boundary ||
+          collect_requested || automatic_collection)
       {
         safepoint_roots.clear();
         safepoint_roots.reserve(frames.size() * 8U + 8U);
@@ -9719,6 +10236,9 @@ namespace phoneme::vm
             }
             next_scheduler_quantum += kSchedulerQuantum;
           } while (next_scheduler_quantum <= executed);
+        }
+        if (quantum_boundary || background_transition_boundary)
+        {
           PerformanceCounters::record_scheduler_quantum();
           scheduler_.cooperative_quantum(*this);
         }
@@ -12409,7 +12929,10 @@ namespace phoneme::vm
         const bool nested_synchronized =
             (nested->method.method->access_flags & kAccSynchronized) != 0U;
         if (nested_synchronized)
-          publish_active_execution_roots(nested->arguments);
+        {
+          publish_active_execution_roots(nested->arguments,
+                                         nested->return_override);
+        }
 
         auto nested_monitor = acquire_synchronized_monitor(*nested);
         if (!nested_monitor)
@@ -12489,6 +13012,8 @@ namespace phoneme::vm
               nested->descriptor != nullptr &&
               !nested->return_override.has_value() &&
               !nested->discard_return_value &&
+              !nested->return_reference_cast_target.has_value() &&
+              !nested->return_unboxing_target.has_value() &&
               !nested->return_widening_target.has_value())
           {
             const u64 remaining_budget = remaining_execution_budget();
@@ -12630,7 +13155,10 @@ namespace phoneme::vm
         if (nested_is_native)
         {
           if (!nested_synchronized)
-            publish_active_execution_roots(nested->arguments);
+          {
+            publish_active_execution_roots(nested->arguments,
+                                           nested->return_override);
+          }
           if (std::getenv("PHONEME_TRACE_NETWORK_CALLERS") != nullptr &&
               nested->method.method != nullptr &&
               (nested->method.method->name == "write" ||
@@ -12712,6 +13240,62 @@ namespace phoneme::vm
           if (budget_mode == InstructionBudgetMode::progress_watchdog)
             watchdog_instructions = 0U;
           std::optional<Value> nested_return = *native_result;
+          if (nested->return_reference_cast_target.has_value())
+          {
+            if (!nested_return.has_value())
+            {
+              return fail(ErrorCode::invalid_state,
+                          "cast lambda native return has no reference value");
+            }
+            auto casted = cast_lambda_reference(
+                *nested_return, *nested->return_reference_cast_target);
+            if (!casted)
+            {
+              if (casted.error().code == ErrorCode::java_exception &&
+                  !casted.error().java_exception_class.empty())
+              {
+                auto raised = raise_implicit(
+                    casted.error().java_exception_class,
+                    opcode_pc,
+                    casted.error().message);
+                if (!raised)
+                  return std::unexpected(raised.error());
+                if (raised->has_value())
+                  return std::move(**raised);
+                break;
+              }
+              return std::unexpected(casted.error());
+            }
+            nested_return = *casted;
+          }
+          if (nested->return_unboxing_target.has_value())
+          {
+            if (!nested_return.has_value())
+            {
+              return fail(ErrorCode::invalid_state,
+                          "unboxed lambda native return has no reference value");
+            }
+            auto unboxed = unbox_lambda_value(
+                *nested_return, *nested->return_unboxing_target);
+            if (!unboxed)
+            {
+              if (unboxed.error().code == ErrorCode::java_exception &&
+                  !unboxed.error().java_exception_class.empty())
+              {
+                auto raised = raise_implicit(
+                    unboxed.error().java_exception_class,
+                    opcode_pc,
+                    unboxed.error().message);
+                if (!raised)
+                  return std::unexpected(raised.error());
+                if (raised->has_value())
+                  return std::move(**raised);
+                break;
+              }
+              return std::unexpected(unboxed.error());
+            }
+            nested_return = *unboxed;
+          }
           if (nested->return_widening_source.has_value() &&
               nested->return_widening_target.has_value())
           {
@@ -12790,6 +13374,15 @@ namespace phoneme::vm
                                       nested->return_override_boxes_result);
           }
           next->set_discard_return_value(nested->discard_return_value);
+          if (nested->return_reference_cast_target.has_value())
+          {
+            next->set_return_reference_cast(
+                *nested->return_reference_cast_target);
+          }
+          if (nested->return_unboxing_target.has_value())
+          {
+            next->set_return_unboxing(*nested->return_unboxing_target);
+          }
           if (nested->return_widening_source.has_value() &&
               nested->return_widening_target.has_value())
           {

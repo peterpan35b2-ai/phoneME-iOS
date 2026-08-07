@@ -25,6 +25,7 @@ constexpr usize kByteInputMarkField = 2;
 constexpr usize kByteInputCountField = 3;
 constexpr usize kUrlOwnerField = 0;
 constexpr usize kUrlNameField = 1;
+constexpr usize kUriPathField = 0;
 constexpr usize kReflectFieldDeclaringClassField = 0;
 constexpr usize kReflectFieldNameField = 1;
 constexpr usize kReflectFieldDescriptorField = 2;
@@ -657,6 +658,23 @@ void register_class_natives(NativeMethodRegistry& registry) {
             }
             return stream->return_value;
         });
+    add(registry, "java/net/URL", "toURI", "()Ljava/net/URI;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto url = receiver(arguments);
+            if (!url) return std::unexpected(url.error());
+            auto name = machine.heap().field(*url, kUrlNameField);
+            if (!name) return std::unexpected(name.error());
+            auto path = name->as_reference();
+            if (!path) return std::unexpected(path.error());
+            auto uri = machine.class_states().allocate_instance(
+                machine.heap(), "java/net/URI");
+            if (!uri) return std::unexpected(uri.error());
+            auto stored = machine.heap().set_field(
+                *uri, kUriPathField, Value::from_reference(*path));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*uri));
+        });
     add(registry, "java/net/URL", "toString", "()Ljava/lang/String;",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -666,6 +684,36 @@ void register_class_natives(NativeMethodRegistry& registry) {
             if (!name) return std::unexpected(name.error());
             return std::optional<Value>(*name);
         });
+    add(registry, "java/net/URI", "<init>", "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto uri = receiver(arguments);
+            if (!uri) return std::unexpected(uri.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "URI constructor path is missing");
+            }
+            auto path = arguments[1].as_reference();
+            if (!path || path->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "URI path is null");
+            }
+            auto stored = machine.heap().set_field(
+                *uri, kUriPathField, Value::from_reference(*path));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    const auto uri_path = [](Machine& machine,
+                             std::span<const Value> arguments)
+        -> Result<std::optional<Value>> {
+        auto uri = receiver(arguments);
+        if (!uri) return std::unexpected(uri.error());
+        auto path = machine.heap().field(*uri, kUriPathField);
+        if (!path) return std::unexpected(path.error());
+        return std::optional<Value>(*path);
+    };
+    add(registry, "java/net/URI", "getPath", "()Ljava/lang/String;", uri_path);
+    add(registry, "java/net/URI", "toString", "()Ljava/lang/String;", uri_path);
 
     add(registry, "java/lang/Class", "getDeclaredField",
         "(Ljava/lang/String;)Ljava/lang/reflect/Field;",

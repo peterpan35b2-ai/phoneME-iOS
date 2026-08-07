@@ -1809,8 +1809,14 @@ Status Runtime::start_midlet(SuiteId suite_id,
 
     if (previous_vm != nullptr) {
         std::scoped_lock previous_operation(previous_vm->operation_mutex);
-        auto hidden = previous_vm->canvas.set_host_rendering_enabled(false);
+        // A real MIDlet-to-MIDlet foreground handoff is an LCDUI visibility
+        // transition, not merely a host presentation detach. Deliver
+        // hideNotify while leaving the isolate, timers, sockets and game logic
+        // running; app_id == 0 below remains the render-only detach path.
+        auto hidden = previous_vm->canvas.set_host_foreground(false);
         if (!hidden) return fail_start(hidden.error());
+        auto pumped = previous_vm->canvas.pump();
+        if (!pumped) return fail_start(pumped.error());
     }
     if (launch_signal == vm::MidletSignal::paused) {
         application_vm->machine.media().suspend();
@@ -2019,8 +2025,10 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     if (previous_vm != nullptr) {
         previous_operation = std::unique_lock<std::recursive_mutex>(
             previous_vm->operation_mutex);
-        auto hidden = previous_vm->canvas.set_host_rendering_enabled(false);
+        auto hidden = previous_vm->canvas.set_host_foreground(false);
         if (!hidden) return finish_failure(hidden.error(), true);
+        auto pumped = previous_vm->canvas.pump();
+        if (!pumped) return finish_failure(pumped.error(), true);
     }
     target_vm->machine.scheduler().set_host_foreground(true);
     if (target_media_active) {

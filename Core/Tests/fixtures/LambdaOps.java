@@ -13,6 +13,18 @@ public final class LambdaOps {
         long apply(int value);
     }
 
+    public interface IntSupplier {
+        int get();
+    }
+
+    public interface LongSupplier {
+        long get();
+    }
+
+    public interface StringSupplier {
+        String get();
+    }
+
     public interface DefaultValue {
         default int value() {
             return 9;
@@ -40,6 +52,15 @@ public final class LambdaOps {
     }
 
     public static final class DefaultImpl implements DefaultValue {
+    }
+
+    public static class ParentAdder {
+        int addInherited(int value) {
+            return value + 40;
+        }
+    }
+
+    public static final class ChildAdder extends ParentAdder {
     }
 
     public static final class BoxedConstructorTarget {
@@ -75,6 +96,32 @@ public final class LambdaOps {
         return value + 5L;
     }
 
+    private static void acceptBoxed(Integer value) {
+        sideEffect = value.intValue();
+    }
+
+    private static Integer boxedValue() {
+        return Integer.valueOf(41);
+    }
+
+    private static Integer boxedLongValue() {
+        return Integer.valueOf(43);
+    }
+
+    private static Integer nullBoxedValue() {
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T genericStringValue() {
+        return (T) "lambda";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T genericWrongValue() {
+        return (T) Integer.valueOf(1);
+    }
+
     public static int staticLambda() {
         IntUnary operation = value -> value + 3;
         return operation.apply(4);
@@ -95,6 +142,12 @@ public final class LambdaOps {
         LambdaOps owner = new LambdaOps(8);
         IntUnary operation = owner::add;
         return operation.apply(5);
+    }
+
+    public static int inheritedBoundMethodReference() {
+        ChildAdder owner = new ChildAdder();
+        IntUnary operation = owner::addInherited;
+        return operation.apply(2);
     }
 
     public static int constructorMethodReference() {
@@ -145,6 +198,48 @@ public final class LambdaOps {
     public static int widenedPrimitiveReturnMethodReference() {
         IntToLong operation = LambdaOps::twice;
         return (int) operation.apply(7);
+    }
+
+    public static int boxedPrimitiveArgumentMethodReference() {
+        sideEffect = 0;
+        IntConsumer consumer = LambdaOps::acceptBoxed;
+        consumer.accept(29);
+        return sideEffect;
+    }
+
+    public static int unboxedReferenceReturnMethodReference() {
+        IntSupplier supplier = LambdaOps::boxedValue;
+        return supplier.get();
+    }
+
+    public static int unboxedWidenedReturnMethodReference() {
+        LongSupplier supplier = LambdaOps::boxedLongValue;
+        return (int) supplier.get();
+    }
+
+    public static int nullReturnUnboxingFailure() {
+        IntSupplier supplier = LambdaOps::nullBoxedValue;
+        try {
+            supplier.get();
+            return 0;
+        } catch (NullPointerException expected) {
+            return 47;
+        }
+    }
+
+    public static int genericReferenceReturnCastSuccess() {
+        StringSupplier supplier = LambdaOps::genericStringValue;
+        return supplier.get().length();
+    }
+
+    public static int genericReferenceReturnCastFailure() {
+        StringSupplier supplier = LambdaOps::genericWrongValue;
+        try {
+            supplier.get();
+            return 0;
+        } catch (ClassCastException expected) {
+            return 53;
+        }
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})

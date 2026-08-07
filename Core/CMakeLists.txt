@@ -118,6 +118,7 @@ if(NOT PHONEME_PGO_MODE_NORMALIZED STREQUAL "OFF")
         endif()
         target_compile_options(phoneMECore PRIVATE
             "$<$<CONFIG:Release>:-fprofile-instr-use=${PHONEME_PGO_PROFILE}>"
+            "$<$<CONFIG:Release>:-Werror=profile-instr-out-of-date>"
         )
         message(STATUS
             "phoneMECore Release PGO profile enabled: ${PHONEME_PGO_PROFILE}")

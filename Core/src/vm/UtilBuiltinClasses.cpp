@@ -352,6 +352,44 @@ using namespace builtin;
             method(kPublic, "remove", "()V"),
         }, {"java/util/Iterator"});
     }
+    if (name == "java/time/temporal/TemporalAccessor") {
+        return make_class("java/time/temporal/TemporalAccessor", "java/lang/Object",
+                          kPublic | kInterface | kAbstract);
+    }
+    if (name == "java/time/Instant") {
+        return make_class("java/time/Instant", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "epochMilli", "J"),
+        }, {
+            method(kPublic | kStatic, "ofEpochMilli", "(J)Ljava/time/Instant;"),
+            method(kPublic, "toEpochMilli", "()J"),
+        }, {"java/time/temporal/TemporalAccessor"});
+    }
+    if (name == "java/time/ZoneId") {
+        return make_class("java/time/ZoneId", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate | kFinal, "id", "Ljava/lang/String;"),
+            field(kPrivate | kFinal, "rawOffset", "I"),
+        }, {
+            method(kPublic | kStatic, "systemDefault", "()Ljava/time/ZoneId;"),
+            method(kPublic, "getId", "()Ljava/lang/String;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/time/format/DateTimeFormatter") {
+        return make_class("java/time/format/DateTimeFormatter", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "pattern", "Ljava/lang/String;"),
+            field(kPrivate | kFinal, "zone", "Ljava/time/ZoneId;"),
+        }, {
+            method(kPublic | kStatic, "ofPattern",
+                   "(Ljava/lang/String;)Ljava/time/format/DateTimeFormatter;"),
+            method(kPublic, "withZone",
+                   "(Ljava/time/ZoneId;)Ljava/time/format/DateTimeFormatter;"),
+            method(kPublic, "format",
+                   "(Ljava/time/temporal/TemporalAccessor;)Ljava/lang/String;"),
+        });
+    }
     if (name == "java/time/LocalTime") {
         return make_class("java/time/LocalTime", "java/lang/Object",
                           kOrdinary | kFinal, {

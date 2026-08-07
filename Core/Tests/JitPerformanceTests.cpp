@@ -220,11 +220,13 @@ int main(int argc, char** argv) {
     require(interpreter_store_run.checksum == expected_store_checksum &&
                 jit_store_run.checksum == expected_store_checksum,
             "JIT and interpreter array-store checksums match");
-    require(jit_store_counters.public_locked_heap_operations <
-                interpreter_store_counters.public_locked_heap_operations &&
-                jit_store_counters.public_locked_heap_operations <=
-                    static_cast<phoneme::u64>(kArrayTimedIterations * 2 + 8),
-            "JIT primitive store lease keeps hot element stores lock-free");
+    if (phoneme::vm::PerformanceCounters::enabled()) {
+        require(jit_store_counters.public_locked_heap_operations <
+                    interpreter_store_counters.public_locked_heap_operations &&
+                    jit_store_counters.public_locked_heap_operations <=
+                        static_cast<phoneme::u64>(kArrayTimedIterations * 2 + 8),
+                "JIT primitive store lease keeps hot element stores lock-free");
+    }
     std::cout << "store_locked_heap_ops interpreter="
               << interpreter_store_counters.public_locked_heap_operations
               << " jit=" << jit_store_counters.public_locked_heap_operations
@@ -234,9 +236,11 @@ int main(int argc, char** argv) {
     require(statistics.array_runtime_calls_eliminated > 0U &&
                 statistics.array_bounds_checks_eliminated > 0U,
             "JIT benchmark exercises proven array-loop lease optimization");
-    require(jit_array_counters.public_locked_heap_operations <
-                interpreter_array_counters.public_locked_heap_operations,
-            "JIT array loop lease reduces public heap lock operations");
+    if (phoneme::vm::PerformanceCounters::enabled()) {
+        require(jit_array_counters.public_locked_heap_operations <
+                    interpreter_array_counters.public_locked_heap_operations,
+                "JIT array loop lease reduces public heap lock operations");
+    }
     require(statistics.compiled_methods > 0U &&
                 statistics.executed_methods > 0U,
             "JIT benchmark executes compiled native code");

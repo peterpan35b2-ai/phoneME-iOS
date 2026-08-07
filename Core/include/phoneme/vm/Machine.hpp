@@ -380,6 +380,8 @@ namespace phoneme::vm
       std::optional<Value> return_override;
       bool return_override_boxes_result{false};
       bool discard_return_value{false};
+      std::optional<std::string> return_reference_cast_target;
+      std::optional<JavaTypeKind> return_unboxing_target;
       std::optional<JavaTypeKind> return_widening_source;
       std::optional<JavaTypeKind> return_widening_target;
       std::optional<JitDeoptState> resume_jit_deopt_state;
@@ -642,6 +644,12 @@ namespace phoneme::vm
         const LambdaBinding &binding,
         std::span<const Value> invocation_arguments,
         std::optional<ObjectRef> constructor_receiver = std::nullopt);
+    [[nodiscard]] Result<Value> cast_lambda_reference(
+        Value value,
+        std::string_view target_class);
+    [[nodiscard]] Result<Value> unbox_lambda_value(
+        Value value,
+        JavaTypeKind target_kind);
     void prune_lambda_bindings();
 
     ClassRepository &classes_;

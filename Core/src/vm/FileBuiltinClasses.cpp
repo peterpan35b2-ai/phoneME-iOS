@@ -29,6 +29,7 @@ using namespace builtin;
                               method(kPublic, "lastModified", "()J"),
                               method(kPublic, "mkdir", "()Z"),
                               method(kPublic, "mkdirs", "()Z"),
+                              method(kPublic, "listFiles", "()[Ljava/io/File;"),
                               method(kPublic, "delete", "()Z"),
                               method(kPublic, "renameTo", "(Ljava/io/File;)Z"),
                               method(kPublic, "toString", "()Ljava/lang/String;"),

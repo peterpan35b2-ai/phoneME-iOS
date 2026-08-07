@@ -899,7 +899,10 @@ void register_console_natives(NativeMethodRegistry& registry) {
                 return fail(ErrorCode::invalid_argument,
                             "System.gc expects no arguments");
             }
-            machine.request_garbage_collection();
+            auto collected = machine.collect_garbage();
+            if (!collected) {
+                return std::unexpected(collected.error());
+            }
             return std::optional<Value> {};
         });
     const auto exit_runtime = [](Machine& machine,

@@ -65,6 +65,8 @@ using ClassPtr = std::shared_ptr<const classfile::ClassFile>;
         builder_method("<init>", "(Ljava/lang/String;)V"),
         builder_method("append", "(Ljava/lang/String;)" + return_descriptor),
         builder_method("append", "(Ljava/lang/Object;)" + return_descriptor),
+        builder_method("append", "(Ljava/lang/CharSequence;)" + return_descriptor),
+        builder_method("append", "(Ljava/lang/CharSequence;II)" + return_descriptor),
         builder_method("append", "(Z)" + return_descriptor),
         builder_method("append", "(C)" + return_descriptor),
         builder_method("append", "(I)" + return_descriptor),

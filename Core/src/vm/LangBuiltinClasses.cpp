@@ -632,6 +632,7 @@ using namespace builtin;
             return make_class(entry.name, entry.super_name, kOrdinary, {}, {
                 method(kPublic, "<init>", "()V"),
                 method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
                 method(kPublic, "<init>",
                        "(Ljava/lang/String;Ljava/lang/Throwable;)V"),
             });
@@ -655,6 +656,7 @@ using namespace builtin;
             return make_class(entry.name, entry.super_name, kOrdinary, {}, {
                 method(kPublic, "<init>", "()V"),
                 method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+                method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
                 method(kPublic, "<init>",
                        "(Ljava/lang/String;Ljava/lang/Throwable;)V"),
             });

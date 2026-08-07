@@ -5,7 +5,7 @@
 
 _Static_assert(PHONEME_C_API_VERSION_MAJOR == 1u,
                "unexpected C API major version");
-_Static_assert(PHONEME_C_API_VERSION == 0x00010100u,
+_Static_assert(PHONEME_C_API_VERSION == 0x00010200u,
                "C API version encoding changed");
 _Static_assert(sizeof(PhoneMERuntimeRef) == sizeof(void*),
                "runtime reference must remain an opaque pointer");

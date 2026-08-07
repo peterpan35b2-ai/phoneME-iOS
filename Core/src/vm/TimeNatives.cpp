@@ -28,6 +28,11 @@ constexpr usize kLocalTimeHourField = 0U;
 constexpr usize kLocalTimeMinuteField = 1U;
 constexpr usize kLocalTimeSecondField = 2U;
 constexpr usize kLocalTimeNanoField = 3U;
+constexpr usize kInstantEpochMilliField = 0U;
+constexpr usize kJavaTimeZoneIdField = 0U;
+constexpr usize kJavaTimeZoneRawOffsetField = 1U;
+constexpr usize kFormatterPatternField = 0U;
+constexpr usize kFormatterZoneField = 1U;
 
 constexpr i64 kMillisPerSecond = 1'000LL;
 constexpr i64 kMillisPerMinute = 60LL * kMillisPerSecond;
@@ -598,6 +603,44 @@ void append_integer(std::string& output, i32 value) {
     return ascii_text(output);
 }
 
+[[nodiscard]] std::string format_datetime_pattern(
+    std::string_view pattern,
+    const CivilFields& fields) {
+    std::string output;
+    output.reserve(pattern.size() + 8U);
+    const auto append_four_digits = [&output](i32 value) {
+        const i32 normalized = value < 0 ? -value : value;
+        output.push_back(static_cast<char>('0' + (normalized / 1000) % 10));
+        output.push_back(static_cast<char>('0' + (normalized / 100) % 10));
+        output.push_back(static_cast<char>('0' + (normalized / 10) % 10));
+        output.push_back(static_cast<char>('0' + normalized % 10));
+    };
+    for (usize index = 0U; index < pattern.size();) {
+        if (pattern.substr(index, 4U) == "yyyy") {
+            append_four_digits(fields.year);
+            index += 4U;
+        } else if (pattern.substr(index, 2U) == "MM") {
+            append_two_digits(output, fields.month + 1);
+            index += 2U;
+        } else if (pattern.substr(index, 2U) == "dd") {
+            append_two_digits(output, fields.day);
+            index += 2U;
+        } else if (pattern.substr(index, 2U) == "HH") {
+            append_two_digits(output, fields.hour);
+            index += 2U;
+        } else if (pattern.substr(index, 2U) == "mm") {
+            append_two_digits(output, fields.minute);
+            index += 2U;
+        } else if (pattern.substr(index, 2U) == "ss") {
+            append_two_digits(output, fields.second);
+            index += 2U;
+        } else {
+            output.push_back(pattern[index++]);
+        }
+    }
+    return output;
+}
+
 [[nodiscard]] Result<bool> is_instance_of(Machine& machine,
                                           ObjectRef object,
                                           std::string_view type) {
@@ -610,6 +653,175 @@ void append_integer(std::string& output, i32 value) {
 } // namespace
 
 void register_time_natives(NativeMethodRegistry& registry) {
+    add(registry, "java/time/Instant", "ofEpochMilli",
+        "(J)Ljava/time/Instant;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "Instant.ofEpochMilli argument is missing");
+            }
+            auto millis = arguments[0].as_long();
+            if (!millis) return std::unexpected(millis.error());
+            auto instant = machine.class_states().allocate_instance(
+                machine.heap(), "java/time/Instant");
+            if (!instant) return std::unexpected(instant.error());
+            auto stored = set_long_field(
+                machine, *instant, kInstantEpochMilliField, *millis);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*instant));
+        });
+    add(registry, "java/time/Instant", "toEpochMilli", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto instant = receiver(arguments);
+            if (!instant) return std::unexpected(instant.error());
+            auto millis = long_field(machine, *instant, kInstantEpochMilliField);
+            if (!millis) return std::unexpected(millis.error());
+            return std::optional<Value>(Value::from_long(*millis));
+        });
+
+    add(registry, "java/time/ZoneId", "systemDefault",
+        "()Ljava/time/ZoneId;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (!arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "ZoneId.systemDefault expects no arguments");
+            }
+            auto local = local_timezone();
+            if (!local) return std::unexpected(local.error());
+            auto zone = machine.class_states().allocate_instance(
+                machine.heap(), "java/time/ZoneId");
+            if (!zone) return std::unexpected(zone.error());
+            auto zone_root = machine.pin_native_root(*zone);
+            if (!zone_root) return std::unexpected(zone_root.error());
+            auto id = create_string(machine, ascii_text(local->first));
+            if (!id) return std::unexpected(id.error());
+            auto stored_id = set_reference_field(
+                machine, *zone, kJavaTimeZoneIdField, *id);
+            auto stored_offset = set_int_field(
+                machine, *zone, kJavaTimeZoneRawOffsetField, local->second);
+            if (!stored_id) return std::unexpected(stored_id.error());
+            if (!stored_offset) return std::unexpected(stored_offset.error());
+            return std::optional<Value>(Value::from_reference(*zone));
+        });
+    const auto zone_id_text = [](Machine& machine,
+                                 std::span<const Value> arguments)
+        -> Result<std::optional<Value>> {
+        auto zone = receiver(arguments);
+        if (!zone) return std::unexpected(zone.error());
+        auto id = reference_field(machine, *zone, kJavaTimeZoneIdField);
+        if (!id) return std::unexpected(id.error());
+        return std::optional<Value>(Value::from_reference(*id));
+    };
+    add(registry, "java/time/ZoneId", "getId", "()Ljava/lang/String;",
+        zone_id_text);
+    add(registry, "java/time/ZoneId", "toString", "()Ljava/lang/String;",
+        zone_id_text);
+
+    add(registry, "java/time/format/DateTimeFormatter", "ofPattern",
+        "(Ljava/lang/String;)Ljava/time/format/DateTimeFormatter;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.empty()) {
+                return fail(ErrorCode::invalid_argument,
+                            "DateTimeFormatter.ofPattern pattern is missing");
+            }
+            auto pattern = arguments[0].as_reference();
+            if (!pattern || pattern->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "DateTimeFormatter pattern is null");
+            }
+            auto formatter = machine.class_states().allocate_instance(
+                machine.heap(), "java/time/format/DateTimeFormatter");
+            if (!formatter) return std::unexpected(formatter.error());
+            auto stored_pattern = set_reference_field(
+                machine, *formatter, kFormatterPatternField, *pattern);
+            auto stored_zone = set_reference_field(
+                machine, *formatter, kFormatterZoneField, {});
+            if (!stored_pattern) return std::unexpected(stored_pattern.error());
+            if (!stored_zone) return std::unexpected(stored_zone.error());
+            return std::optional<Value>(Value::from_reference(*formatter));
+        });
+    add(registry, "java/time/format/DateTimeFormatter", "withZone",
+        "(Ljava/time/ZoneId;)Ljava/time/format/DateTimeFormatter;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto source = receiver(arguments);
+            if (!source) return std::unexpected(source.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "DateTimeFormatter.withZone zone is missing");
+            }
+            auto zone = arguments[1].as_reference();
+            if (!zone || zone->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "DateTimeFormatter zone is null");
+            }
+            auto pattern = reference_field(
+                machine, *source, kFormatterPatternField);
+            if (!pattern) return std::unexpected(pattern.error());
+            auto formatter = machine.class_states().allocate_instance(
+                machine.heap(), "java/time/format/DateTimeFormatter");
+            if (!formatter) return std::unexpected(formatter.error());
+            auto stored_pattern = set_reference_field(
+                machine, *formatter, kFormatterPatternField, *pattern);
+            auto stored_zone = set_reference_field(
+                machine, *formatter, kFormatterZoneField, *zone);
+            if (!stored_pattern) return std::unexpected(stored_pattern.error());
+            if (!stored_zone) return std::unexpected(stored_zone.error());
+            return std::optional<Value>(Value::from_reference(*formatter));
+        });
+    add(registry, "java/time/format/DateTimeFormatter", "format",
+        "(Ljava/time/temporal/TemporalAccessor;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto formatter = receiver(arguments);
+            if (!formatter) return std::unexpected(formatter.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "DateTimeFormatter.format temporal is missing");
+            }
+            auto temporal = arguments[1].as_reference();
+            if (!temporal || temporal->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "DateTimeFormatter temporal is null");
+            }
+            auto instant = is_instance_of(machine, *temporal, "java/time/Instant");
+            if (!instant) return std::unexpected(instant.error());
+            if (!*instant) {
+                return fail_java("java/time/DateTimeException",
+                                 "unsupported TemporalAccessor");
+            }
+            auto millis = long_field(
+                machine, *temporal, kInstantEpochMilliField);
+            if (!millis) return std::unexpected(millis.error());
+            i32 raw_offset = 0;
+            auto zone = reference_field(machine, *formatter, kFormatterZoneField);
+            if (!zone) return std::unexpected(zone.error());
+            if (!zone->is_null()) {
+                auto offset = int_field(
+                    machine, *zone, kJavaTimeZoneRawOffsetField);
+                if (!offset) return std::unexpected(offset.error());
+                raw_offset = *offset;
+            }
+            auto pattern_ref = reference_field(
+                machine, *formatter, kFormatterPatternField);
+            if (!pattern_ref || pattern_ref->is_null()) {
+                return fail_java("java/time/DateTimeException",
+                                 "formatter pattern is unavailable");
+            }
+            auto pattern = ascii_string(machine, *pattern_ref);
+            if (!pattern) return std::unexpected(pattern.error());
+            auto fields = fields_from_epoch(*millis, raw_offset);
+            if (!fields) return std::unexpected(fields.error());
+            auto text = format_datetime_pattern(*pattern, *fields);
+            auto result = create_string(machine, ascii_text(text));
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+
     add(registry, "java/time/LocalTime", "now",
         "()Ljava/time/LocalTime;",
         [](Machine& machine, std::span<const Value>)

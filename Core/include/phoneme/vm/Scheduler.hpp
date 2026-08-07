@@ -65,6 +65,7 @@ public:
         ObjectRef thread_object) const;
 
     void begin_execution_slice() noexcept;
+    [[nodiscard]] bool consume_current_background_transition() noexcept;
     void begin_unpaced_execution() noexcept;
     void end_unpaced_execution() noexcept;
     void set_host_foreground(bool foreground) noexcept;
@@ -141,10 +142,12 @@ private:
         static_cast<i32>(FramePacingMode::native)
     };
     std::atomic<u64> frame_pacing_generation_ {1U};
+    std::atomic<u64> host_foreground_generation_ {1U};
 
     static thread_local Scheduler* tls_scheduler_;
     static thread_local JavaThreadId tls_thread_id_;
     static thread_local u32 tls_unblocked_quantum_count_;
+    static thread_local u64 tls_host_foreground_generation_;
     static thread_local std::chrono::steady_clock::time_point
         tls_quantum_resume_time_;
     static thread_local bool tls_quantum_timing_valid_;

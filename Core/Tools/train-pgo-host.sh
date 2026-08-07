@@ -9,6 +9,7 @@ OUTPUT_ROOT="${PHONEME_PGO_OUTPUT_ROOT:-$CORE_ROOT/build/performance/pgo-trainin
 RAW_ROOT="$OUTPUT_ROOT/raw"
 CORPUS_ROOT="$OUTPUT_ROOT/corpus"
 PROFILE_DATA="$OUTPUT_ROOT/phoneme-core.profdata"
+GENERATE_BUILD_ROOT="${PHONEME_PGO_GENERATE_BUILD_ROOT:-$CORE_ROOT/build/pgo-generate-host}"
 USE_BUILD_ROOT="${PHONEME_PGO_USE_BUILD_ROOT:-$CORE_ROOT/build/pgo-use-host}"
 BENCHMARK_JSON="$OUTPUT_ROOT/jit-performance-pgo.json"
 JOBS="${PHONEME_PGO_CORPUS_JOBS:-1}"
@@ -104,14 +105,26 @@ PY
   exit 2
 }
 
-# Match the production Release optimizer as closely as the host harness permits.
-# The generated profile is source-level IR instrumentation data and is later
-# consumed by the CMake Release build for the same core sources.
+# Build the instrumented core once with the production CMake flags, then link
+# the compatibility harness against that archive. This keeps the profile tied
+# to the exact core sources while avoiding a second monolithic compile of every
+# translation unit in test-jar-directory.py.
+cmake \
+  -S "$CORE_ROOT" \
+  -B "$GENERATE_BUILD_ROOT" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPHONEME_ENABLE_VM_PROFILING=OFF \
+  -DPHONEME_ENABLE_DECODED_EXECUTION=ON \
+  -DPHONEME_ENABLE_LTO=OFF \
+  -DPHONEME_PGO_MODE=GENERATE
+cmake --build "$GENERATE_BUILD_ROOT" --parallel "${PHONEME_TEST_JOBS:-4}"
+
 LLVM_PROFILE_FILE="$RAW_ROOT/phoneme-%m-%p.profraw" \
 PHONEME_ENABLE_VM_PROFILING=0 \
 PHONEME_ENABLE_DECODED_EXECUTION=1 \
-PHONEME_EXTRA_CXXFLAGS="-O3 -DNDEBUG -flto=thin -fprofile-instr-generate" \
-PHONEME_EXTRA_LDFLAGS="-flto=thin -fprofile-instr-generate" \
+PHONEME_PREBUILT_CORE_LIB="$GENERATE_BUILD_ROOT/libphoneMECore.a" \
+PHONEME_EXTRA_CXXFLAGS="-O3 -DNDEBUG" \
+PHONEME_EXTRA_LDFLAGS="-fprofile-instr-generate" \
 python3 "$SCRIPT_DIR/test-jar-directory.py" \
   --jar-dir "$REPO_ROOT/jar_test" \
   --output "$CORPUS_ROOT" \
@@ -142,7 +155,7 @@ cmake \
   -S "$CORE_ROOT" \
   -B "$USE_BUILD_ROOT" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPHONEME_ENABLE_VM_PROFILING=ON \
+  -DPHONEME_ENABLE_VM_PROFILING=OFF \
   -DPHONEME_ENABLE_DECODED_EXECUTION=ON \
   -DPHONEME_ENABLE_LTO=ON \
   -DPHONEME_PGO_MODE=USE \
@@ -151,6 +164,7 @@ cmake --build "$USE_BUILD_ROOT" --parallel "${PHONEME_TEST_JOBS:-4}"
 
 PHONEME_JIT_PERF_BUILD_ROOT="$USE_BUILD_ROOT" \
 PHONEME_ENABLE_LTO=ON \
+PHONEME_ENABLE_VM_PROFILING=OFF \
 PHONEME_PGO_MODE=USE \
 PHONEME_PGO_PROFILE="$PROFILE_DATA" \
   bash "$SCRIPT_DIR/benchmark-jit-host.sh" "$BENCHMARK_JSON"

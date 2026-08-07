@@ -38,6 +38,8 @@ constexpr usize kHashMapValuesField = 1U;
 constexpr usize kHashMapSizeField = 2U;
 constexpr usize kHashMapHashesField = 3U;
 constexpr usize kHashSetMapField = 0U;
+constexpr usize kOptionalValueField = 0U;
+constexpr usize kOptionalPresentField = 1U;
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -2791,6 +2793,21 @@ void register_collections(NativeMethodRegistry& registry) {
             if (!set) return std::unexpected(set.error());
             return std::optional<Value>(Value::from_reference(*set));
         });
+    add(registry, "java/util/Collections", "singleton",
+        "(Ljava/lang/Object;)Ljava/util/Set;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = reference_argument(arguments, 0U, true);
+            if (!value) return std::unexpected(value.error());
+            auto set = create_hash_set(machine, 1);
+            if (!set) return std::unexpected(set.error());
+            const Value argument = Value::from_reference(*value);
+            auto added = invoke_checked(
+                machine, *set, "java/util/Set", "add", "(Ljava/lang/Object;)Z",
+                std::span<const Value>(&argument, 1U));
+            if (!added) return std::unexpected(added.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
     add(registry, "java/util/Collections", "newSetFromMap",
         "(Ljava/util/Map;)Ljava/util/Set;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2898,6 +2915,111 @@ void register_collections(NativeMethodRegistry& registry) {
     list_factory("singletonList", true);
 }
 
+void register_optional(NativeMethodRegistry& registry) {
+    const auto make_optional = [](Machine& machine, ObjectRef value, bool present)
+        -> Result<ObjectRef> {
+        auto optional = machine.class_states().allocate_instance(
+            machine.heap(), "java/util/Optional");
+        if (!optional) return std::unexpected(optional.error());
+        auto pinned = NativeRootScope::pin(machine.native_roots(), *optional);
+        if (!pinned) return std::unexpected(pinned.error());
+        auto stored_value = set_reference_field(
+            machine, *optional, kOptionalValueField, value);
+        auto stored_present = set_int_field(
+            machine, *optional, kOptionalPresentField, present ? 1 : 0);
+        if (!stored_value) return std::unexpected(stored_value.error());
+        if (!stored_present) return std::unexpected(stored_present.error());
+        return *optional;
+    };
+
+    add(registry, "java/util/Optional", "<init>",
+        "(Ljava/lang/Object;Z)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto value = reference_argument(arguments, 1U, true);
+            auto present = int_argument(arguments, 2U);
+            if (!object) return std::unexpected(object.error());
+            if (!value) return std::unexpected(value.error());
+            if (!present) return std::unexpected(present.error());
+            auto stored_value = set_reference_field(
+                machine, *object, kOptionalValueField, *value);
+            auto stored_present = set_int_field(
+                machine, *object, kOptionalPresentField, *present != 0 ? 1 : 0);
+            if (!stored_value) return std::unexpected(stored_value.error());
+            if (!stored_present) return std::unexpected(stored_present.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Optional", "empty", "()Ljava/util/Optional;",
+        [make_optional](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto optional = make_optional(machine, {}, false);
+            if (!optional) return std::unexpected(optional.error());
+            return std::optional<Value>(Value::from_reference(*optional));
+        });
+    add(registry, "java/util/Optional", "of",
+        "(Ljava/lang/Object;)Ljava/util/Optional;",
+        [make_optional](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = reference_argument(arguments, 0U);
+            if (!value) return std::unexpected(value.error());
+            auto optional = make_optional(machine, *value, true);
+            if (!optional) return std::unexpected(optional.error());
+            return std::optional<Value>(Value::from_reference(*optional));
+        });
+    add(registry, "java/util/Optional", "ofNullable",
+        "(Ljava/lang/Object;)Ljava/util/Optional;",
+        [make_optional](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = reference_argument(arguments, 0U, true);
+            if (!value) return std::unexpected(value.error());
+            auto optional = make_optional(machine, *value, !value->is_null());
+            if (!optional) return std::unexpected(optional.error());
+            return std::optional<Value>(Value::from_reference(*optional));
+        });
+    add(registry, "java/util/Optional", "isPresent", "()Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            return std::optional<Value>(Value::from_int(*present != 0 ? 1 : 0));
+        });
+    add(registry, "java/util/Optional", "get", "()Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                return fail_java("java/util/NoSuchElementException",
+                                 "No value present");
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_reference(*value));
+        });
+    add(registry, "java/util/Optional", "orElse",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto fallback = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!fallback) return std::unexpected(fallback.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                return std::optional<Value>(Value::from_reference(*fallback));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_reference(*value));
+        });
+}
+
 void register_base64(NativeMethodRegistry& registry) {
     const auto factory = [&registry](const char* name,
                                      const char* result_class) {
@@ -2997,6 +3119,7 @@ void register_headless_compat_natives(NativeMethodRegistry& registry) {
     register_hash_set(registry);
     register_arrays(registry);
     register_collections(registry);
+    register_optional(registry);
     register_base64(registry);
 }
 

@@ -25,6 +25,7 @@ enum class JavaTypeKind : u8 {
 struct TypeDescriptor final {
     JavaTypeKind kind {JavaTypeKind::void_type};
     std::string class_name;
+    JavaTypeKind array_component_kind {JavaTypeKind::void_type};
     u8 array_dimensions {0};
 
     [[nodiscard]] constexpr usize slot_count() const noexcept {

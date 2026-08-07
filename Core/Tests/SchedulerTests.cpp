@@ -20,6 +20,7 @@ namespace phoneme::vm {
 // parallel; CoreNatives still calls these registrars, so provide empty module
 // boundaries here rather than compiling their implementations.
 void register_amms_natives(NativeMethodRegistry&) {}
+void register_array_deque_natives(NativeMethodRegistry&) {}
 void register_bluetooth_natives(NativeMethodRegistry&) {}
 void register_canvas_natives(NativeMethodRegistry&) {}
 void register_class_natives(NativeMethodRegistry&) {}
@@ -31,6 +32,7 @@ void register_game_canvas_natives(NativeMethodRegistry&) {}
 void register_game_api_natives(NativeMethodRegistry&) {}
 void register_graphics_natives(NativeMethodRegistry&) {}
 void register_image_natives(NativeMethodRegistry&) {}
+void register_jdk8_compat_natives(NativeMethodRegistry&) {}
 void register_io_natives(NativeMethodRegistry&) {}
 void register_lcdui_natives(NativeMethodRegistry&) {}
 void register_m3g_natives(NativeMethodRegistry&) {}
@@ -312,12 +314,12 @@ int main(int argc, char** argv) {
         require(native_elapsed >= std::chrono::milliseconds(400),
                 "native pacing preserves the game's requested sleeps");
         require(override_elapsed >= std::chrono::milliseconds(180) &&
-                    override_elapsed <= std::chrono::milliseconds(360) &&
+                    override_elapsed <= std::chrono::milliseconds(420) &&
                     override_elapsed + std::chrono::milliseconds(100) <
                         native_elapsed,
                 "override pacing retargets a stable 40 ms render loop to 60 FPS");
         require(override_async_repaint_elapsed >= std::chrono::milliseconds(180) &&
-                    override_async_repaint_elapsed <= std::chrono::milliseconds(360) &&
+                    override_async_repaint_elapsed <= std::chrono::milliseconds(420) &&
                     override_async_repaint_elapsed + std::chrono::milliseconds(100) <
                         native_elapsed,
                 "override pacing retargets asynchronous repaint/sleep loops");

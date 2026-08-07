@@ -2702,6 +2702,11 @@ void register_lcdui_natives(NativeMethodRegistry& registry) {
             }
             auto queued = machine.enqueue_serial_callback(*runnable);
             if (!queued) return std::unexpected(queued.error());
+            // Foreground callSerially work must be driven by the LCDUI queue
+            // itself rather than waiting for a later Canvas/frame pump. The
+            // worker gate intentionally stays closed while the host is hidden.
+            auto dispatched = machine.pump_serial_callbacks();
+            if (!dispatched) return std::unexpected(dispatched.error());
             return std::optional<Value> {};
         });
     const auto display_timed_capability = [&registry](const char* name) {

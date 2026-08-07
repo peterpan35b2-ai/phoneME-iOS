@@ -494,6 +494,18 @@ using namespace builtin;
             method(kPrivate, "<init>",
                    "(Ljava/lang/Class;Ljava/lang/String;)V"),
             method(kPublic, "openStream", "()Ljava/io/InputStream;"),
+            method(kPublic, "toURI", "()Ljava/net/URI;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+
+    if (name == "java/net/URI") {
+        return make_class("java/net/URI", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "path", "Ljava/lang/String;"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "getPath", "()Ljava/lang/String;"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
         });
     }

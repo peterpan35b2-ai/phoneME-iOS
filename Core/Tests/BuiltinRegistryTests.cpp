@@ -297,8 +297,16 @@ void test_headless_compat_registry() {
     require_method(map, "put",
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
                    "Map exposes put");
-    require(hash_map != nullptr && hash_map->fields().size() == 3U,
-            "HashMap preserves compact native storage layout");
+    require(hash_map != nullptr && hash_map->fields().size() == 4U &&
+                hash_map->fields()[0].name == "keys" &&
+                hash_map->fields()[0].descriptor == "[Ljava/lang/Object;" &&
+                hash_map->fields()[1].name == "values" &&
+                hash_map->fields()[1].descriptor == "[Ljava/lang/Object;" &&
+                hash_map->fields()[2].name == "size" &&
+                hash_map->fields()[2].descriptor == "I" &&
+                hash_map->fields()[3].name == "hashes" &&
+                hash_map->fields()[3].descriptor == "[I",
+            "HashMap preserves hash-aware native storage layout");
     require_method(hash_map, "keySet", "()Ljava/util/Set;",
                    "HashMap exposes keySet");
     require(hash_set != nullptr && hash_set->fields().size() == 1U,

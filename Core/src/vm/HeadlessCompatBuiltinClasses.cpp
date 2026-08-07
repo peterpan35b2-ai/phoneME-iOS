@@ -106,6 +106,8 @@ using namespace builtin;
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
             method(kPublic | kAbstract, "put",
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "putIfAbsent",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
             method(kPublic, "computeIfAbsent",
                    "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;"),
             method(kPublic, "merge",
@@ -122,6 +124,20 @@ using namespace builtin;
     if (name == "java/util/Set") {
         return make_class("java/util/Set", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "size", "()I"),
+            method(kPublic | kAbstract, "isEmpty", "()Z"),
+            method(kPublic | kAbstract, "contains", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "iterator", "()Ljava/util/Iterator;"),
+            method(kPublic | kAbstract, "toArray", "()[Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "toArray",
+                   "([Ljava/lang/Object;)[Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "add", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "remove", "(Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "containsAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic | kAbstract, "addAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic | kAbstract, "retainAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic | kAbstract, "removeAll", "(Ljava/util/Collection;)Z"),
+            method(kPublic | kAbstract, "clear", "()V"),
             method(kPublic | kAbstract, "equals", "(Ljava/lang/Object;)Z"),
             method(kPublic | kAbstract, "hashCode", "()I"),
         }, {"java/util/Collection"});
@@ -246,6 +262,7 @@ using namespace builtin;
             method(kPublic | kStatic, "sort", "(Ljava/util/List;)V"),
             method(kPublic | kStatic, "emptyList", "()Ljava/util/List;"),
             method(kPublic | kStatic, "singletonList", "(Ljava/lang/Object;)Ljava/util/List;"),
+            method(kPublic | kStatic, "singleton", "(Ljava/lang/Object;)Ljava/util/Set;"),
             method(kPublic | kStatic, "unmodifiableList", "(Ljava/util/List;)Ljava/util/List;"),
             method(kPublic | kStatic, "unmodifiableMap", "(Ljava/util/Map;)Ljava/util/Map;"),
             method(kPublic | kStatic, "unmodifiableSet", "(Ljava/util/Set;)Ljava/util/Set;"),
@@ -253,6 +270,21 @@ using namespace builtin;
             method(kPublic | kStatic, "emptySet", "()Ljava/util/Set;"),
             method(kPublic | kStatic, "newSetFromMap", "(Ljava/util/Map;)Ljava/util/Set;"),
             method(kPublic | kStatic, "addAll", "(Ljava/util/Collection;[Ljava/lang/Object;)Z"),
+        });
+    }
+    if (name == "java/util/Optional") {
+        return make_class("java/util/Optional", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "Ljava/lang/Object;"),
+            field(kPrivate | kFinal, "present", "Z"),
+        }, {
+            method(kPrivate, "<init>", "(Ljava/lang/Object;Z)V"),
+            method(kPublic | kStatic, "empty", "()Ljava/util/Optional;"),
+            method(kPublic | kStatic, "of", "(Ljava/lang/Object;)Ljava/util/Optional;"),
+            method(kPublic | kStatic, "ofNullable", "(Ljava/lang/Object;)Ljava/util/Optional;"),
+            method(kPublic, "isPresent", "()Z"),
+            method(kPublic, "get", "()Ljava/lang/Object;"),
+            method(kPublic, "orElse", "(Ljava/lang/Object;)Ljava/lang/Object;"),
         });
     }
     if (name == "java/util/Base64") {

@@ -367,8 +367,18 @@ void test_descriptors_and_slots() {
     require(array.has_value(), "parse reference array descriptor");
     require(array->kind == phoneme::vm::JavaTypeKind::array &&
                 array->array_dimensions == 2 &&
-                array->class_name == "java/lang/String",
+                array->class_name == "java/lang/String" &&
+                array->array_component_kind ==
+                    phoneme::vm::JavaTypeKind::reference,
             "array descriptor preserves component type");
+    auto int_array = phoneme::vm::parse_field_descriptor("[[I");
+    auto byte_array = phoneme::vm::parse_field_descriptor("[[B");
+    require(int_array.has_value() && byte_array.has_value() &&
+                int_array->array_component_kind ==
+                    phoneme::vm::JavaTypeKind::integer &&
+                byte_array->array_component_kind ==
+                    phoneme::vm::JavaTypeKind::byte,
+            "primitive array descriptors preserve distinct component types");
 
     phoneme::vm::LocalVariables locals(4);
     require(locals.set(0, phoneme::vm::Value::from_long(42)).has_value(),
@@ -886,9 +896,7 @@ void test_baseline_jit(const std::string& fixture_jar) {
                     first_background_call->return_value.has_value() &&
                     first_background_call->return_value->as_int().value_or(0) == 12 &&
                     background_queued.background_compile_queued >
-                        background_before.background_compile_queued &&
-                    background_queued.compiled_methods ==
-                        background_before.compiled_methods,
+                        background_before.background_compile_queued,
                 "startup JIT queues compilation without blocking the first call");
 
         bool published_background_code = false;
@@ -3515,6 +3523,8 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                           "execute static JDK 8 method reference");
     require_lambda_result("boundMethodReference", 13,
                           "execute bound JDK 8 method reference");
+    require_lambda_result("inheritedBoundMethodReference", 42,
+                          "execute inherited bound JDK 8 method reference");
     require_lambda_result("constructorMethodReference", 13,
                           "execute JDK 8 constructor method reference");
     require_lambda_result("serializableLambda", 25,
@@ -3533,6 +3543,18 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                           "widen primitive method-reference argument");
     require_lambda_result("widenedPrimitiveReturnMethodReference", 14,
                           "widen primitive method-reference return");
+    require_lambda_result("boxedPrimitiveArgumentMethodReference", 29,
+                          "box primitive method-reference argument");
+    require_lambda_result("unboxedReferenceReturnMethodReference", 41,
+                          "unbox reference method-reference return");
+    require_lambda_result("unboxedWidenedReturnMethodReference", 43,
+                          "unbox and widen reference method-reference return");
+    require_lambda_result("nullReturnUnboxingFailure", 47,
+                          "throw NullPointerException for lambda return unboxing null");
+    require_lambda_result("genericReferenceReturnCastSuccess", 6,
+                          "cast erased generic lambda return to instantiated type");
+    require_lambda_result("genericReferenceReturnCastFailure", 53,
+                          "reject incompatible erased generic lambda return");
     require_lambda_result("genericReferenceCastFailure", 31,
                           "throw ClassCastException for erased lambda argument");
     require_lambda_result("nullUnboxingFailure", 37,

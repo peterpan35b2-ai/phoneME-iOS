@@ -648,7 +648,11 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
                 + compact_text(stderr, 2_000)
             )
 
-    sources = sorted(
+    prebuilt_core_value = os.environ.get("PHONEME_PREBUILT_CORE_LIB", "").strip()
+    prebuilt_core = pathlib.Path(prebuilt_core_value) if prebuilt_core_value else None
+    if prebuilt_core is not None and not prebuilt_core.is_file():
+        return None, f"prebuilt phoneME core library does not exist: {prebuilt_core}"
+    sources = [] if prebuilt_core is not None else sorted(
         path
         for path in (CORE_ROOT / "src").rglob("*.cpp")
         if path != CORE_ROOT / "src" / "api" / "CAPI.cpp"
@@ -677,6 +681,7 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
         [
             str(CORE_ROOT / "Tests" / "Compatibility" / "CompatibilityHarness.cpp"),
             *(str(path) for path in sources),
+            *([str(prebuilt_core)] if prebuilt_core is not None else []),
             *([str(bridge_object)] if bridge_object is not None else []),
             "-lz",
         ]

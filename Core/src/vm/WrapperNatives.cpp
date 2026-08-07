@@ -1630,7 +1630,8 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                 if (!initialized) return std::unexpected(initialized.error());
                 return std::optional<Value> {};
             });
-        if (class_name != "java/lang/Throwable") {
+        if (class_name != "java/lang/Throwable" &&
+            class_name != "java/lang/ExceptionInInitializerError") {
             add(registry, std::string(class_name), "<init>",
                 "(Ljava/lang/String;Ljava/lang/Throwable;)V",
                 [](Machine& machine, std::span<const Value> arguments)
@@ -1647,6 +1648,29 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
                     if (!initialized) {
                         return std::unexpected(initialized.error());
                     }
+                    return std::optional<Value> {};
+                });
+            add(registry, std::string(class_name), "<init>",
+                "(Ljava/lang/Throwable;)V",
+                [](Machine& machine, std::span<const Value> arguments)
+                    -> Result<std::optional<Value>> {
+                    auto object = receiver(arguments);
+                    auto cause = arguments[1].as_reference();
+                    if (!object || !cause) {
+                        return fail(ErrorCode::invalid_argument,
+                                    "Throwable cause constructor is invalid");
+                    }
+                    ObjectRef message {};
+                    if (!cause->is_null()) {
+                        auto text = throwable_text(machine, *cause);
+                        if (!text) return std::unexpected(text.error());
+                        auto string = create_string(machine, std::move(*text));
+                        if (!string) return std::unexpected(string.error());
+                        message = *string;
+                    }
+                    auto initialized = initialize_throwable(
+                        machine, *object, message, *cause, true);
+                    if (!initialized) return std::unexpected(initialized.error());
                     return std::optional<Value> {};
                 });
         }

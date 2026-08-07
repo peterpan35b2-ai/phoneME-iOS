@@ -241,6 +241,7 @@
 				C00000000000000000000002 /* Sources */,
 				C00000000000000000000001 /* Frameworks */,
 				C00000000000000000000003 /* Resources */,
+				C00000000000000000000005 /* Generate App Icon */,
 			);
 			buildRules = ();
 			dependencies = ();
@@ -305,6 +306,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -eu\ncase \"$PLATFORM_NAME\" in\n  iphoneos|iphonesimulator) ;;\n  *)\n    echo \"phoneME Core does not support platform: $PLATFORM_NAME\" >&2\n    exit 1\n    ;;\nesac\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nCORE_ARCHIVE=\"$DERIVED_FILE_DIR/libphoneMECoreNoMain.a\"\nCORE_BUILD_ROOT=\"$DERIVED_FILE_DIR/phoneMECoreBuild\"\nif [ \"${PHONEME_SKIP_CORE_REBUILD:-0}\" = \"1\" ] && [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  cp \"$SRCROOT/Core/libphoneMECore.a\" \"$CORE_ARCHIVE\"\nelse\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n  PHONEME_ENABLE_DECODED_EXECUTION=1 \\\n    /bin/bash \"$SRCROOT/Core/Tools/build-iphoneos.sh\"\n  PHONEME_CORE_BUILD_DIR=\"$CORE_BUILD_ROOT\" \\\n  PHONEME_CORE_OUTPUT=\"$CORE_ARCHIVE\" \\\n  PHONEME_APPLE_SDK=\"$PLATFORM_NAME\" \\\n  IOS_DEPLOYMENT_TARGET=\"$IPHONEOS_DEPLOYMENT_TARGET\" \\\n  PHONEME_ENABLE_DECODED_EXECUTION=1 \\\n    /bin/bash \"$SRCROOT/Core/Tools/verify-iphoneos.sh\"\nfi\n";
+		};
+		C00000000000000000000005 /* Generate App Icon */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/phoneME/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.svg",
+			);
+			name = "Generate App Icon";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/Scripts/generate-app-icon.sh\"";
 		};
 /* End PBXShellScriptBuildPhase section */
 

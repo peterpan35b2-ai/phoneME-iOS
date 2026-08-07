@@ -562,6 +562,46 @@ void register_text_builder(NativeMethodRegistry& registry,
             }
             return append_builder_text(machine, arguments, std::move(*text));
         });
+    add(registry, class_name, "append",
+        "(Ljava/lang/CharSequence;)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder append(CharSequence) expects one argument");
+            }
+            auto source = arguments[1].as_reference();
+            if (!source) return std::unexpected(source.error());
+            auto text = object_text(machine, *source);
+            if (!text) return std::unexpected(text.error());
+            return append_builder_text(machine, arguments, std::move(*text));
+        });
+    add(registry, class_name, "append",
+        "(Ljava/lang/CharSequence;II)" + return_descriptor,
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 4U) {
+                return fail(ErrorCode::invalid_argument,
+                            "string builder append(CharSequence,int,int) arguments are invalid");
+            }
+            auto source = arguments[1].as_reference();
+            auto start = arguments[2].as_int();
+            auto end = arguments[3].as_int();
+            if (!source) return std::unexpected(source.error());
+            if (!start) return std::unexpected(start.error());
+            if (!end) return std::unexpected(end.error());
+            auto text = object_text(machine, *source);
+            if (!text) return std::unexpected(text.error());
+            if (*start < 0 || *end < *start ||
+                static_cast<usize>(*end) > text->size()) {
+                return fail_java("java/lang/IndexOutOfBoundsException",
+                                 "CharSequence append range is out of bounds");
+            }
+            std::u16string slice = text->substr(
+                static_cast<usize>(*start),
+                static_cast<usize>(*end - *start));
+            return append_builder_text(machine, arguments, std::move(slice));
+        });
     add(registry, class_name, "append", "(Z)" + return_descriptor,
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -3508,15 +3548,16 @@ void register_core_natives(NativeMethodRegistry& registry) {
         "java/lang/Runtime",
         "gc",
         "()V",
-        [](Machine&, std::span<const Value> arguments)
+        [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
             auto receiver = require_receiver(arguments);
             if (!receiver) {
                 return std::unexpected(receiver.error());
             }
-            // Collection is requested at a VM safepoint by the scheduler. The
-            // synchronous native call cannot collect until all frame roots are
-            // published, so this method intentionally only records success.
+            auto collected = machine.collect_garbage();
+            if (!collected) {
+                return std::unexpected(collected.error());
+            }
             return std::optional<Value> {};
         });
 

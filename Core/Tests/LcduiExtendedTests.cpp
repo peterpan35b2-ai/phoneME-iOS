@@ -472,6 +472,16 @@ int main(int argc, char** argv) {
     auto data_callback = machine.pump_serial_callbacks();
     require(data_callback.has_value(),
             "loading data callback runs through Display.callSerially");
+    const auto serial_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (machine.pending_serial_callbacks() != 0U &&
+           std::chrono::steady_clock::now() < serial_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto serial_completion = machine.pump_serial_callbacks();
+    require(serial_completion.has_value() &&
+                machine.pending_serial_callbacks() == 0U,
+            "loading data callback finishes before bridge verification");
     bool loading_hidden = false;
     bool indicator_hidden = false;
     bool data_form_restored = false;
