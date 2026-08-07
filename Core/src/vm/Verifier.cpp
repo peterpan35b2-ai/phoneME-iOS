@@ -145,6 +145,31 @@ private:
         : 1U;
 }
 
+[[nodiscard]] constexpr VerifiedSlotKind verified_slot_kind(
+    VerificationValue value) noexcept {
+    switch (value.kind) {
+    case VerificationValueKind::top:
+        return VerifiedSlotKind::empty;
+    case VerificationValueKind::category2_tail:
+        return VerifiedSlotKind::continuation;
+    case VerificationValueKind::int32:
+        return VerifiedSlotKind::int32;
+    case VerificationValueKind::int64:
+        return VerifiedSlotKind::int64;
+    case VerificationValueKind::float32:
+        return VerifiedSlotKind::float32;
+    case VerificationValueKind::float64:
+        return VerifiedSlotKind::float64;
+    case VerificationValueKind::reference:
+    case VerificationValueKind::uninitialized_this:
+    case VerificationValueKind::uninitialized_object:
+        return VerifiedSlotKind::reference;
+    case VerificationValueKind::return_address:
+        return VerifiedSlotKind::return_address;
+    }
+    return VerifiedSlotKind::empty;
+}
+
 [[nodiscard]] constexpr bool is_reference_like(
     VerificationValue value,
     bool include_uninitialized = false) noexcept {
@@ -1990,12 +2015,58 @@ void replace_uninitialized(FrameState& state,
     return sites;
 }
 
+void build_verified_reference_maps(
+    const classfile::CodeAttribute& code,
+    const std::unordered_map<usize, FrameState>& states,
+    VerifiedMethodReferenceMaps& output) {
+    output.max_locals = code.max_locals;
+    output.max_stack = code.max_stack;
+    output.frames.clear();
+    output.frames.reserve(states.size());
+
+    for (const auto& [bytecode_pc, state] : states) {
+        VerifiedReferenceMap frame {
+            .bytecode_pc = bytecode_pc,
+            .stack_slots = state.stack_slots,
+        };
+        frame.reference_slots.reserve(
+            state.locals.size() + state.stack.size());
+        frame.slot_kinds.reserve(code.max_locals + state.stack_slots);
+        for (usize index = 0U; index < state.locals.size(); ++index) {
+            const VerificationValue value = state.locals[index];
+            frame.slot_kinds.push_back(verified_slot_kind(value));
+            if (is_reference_like(value, true)) {
+                frame.reference_slots.push_back(index);
+            }
+        }
+        usize stack_slot = code.max_locals;
+        for (const VerificationValue value : state.stack) {
+            frame.slot_kinds.push_back(verified_slot_kind(value));
+            if (is_reference_like(value, true)) {
+                frame.reference_slots.push_back(stack_slot);
+            }
+            if (value_width(value) == 2U) {
+                frame.slot_kinds.push_back(VerifiedSlotKind::continuation);
+            }
+            stack_slot += value_width(value);
+        }
+        output.frames.push_back(std::move(frame));
+    }
+    std::sort(output.frames.begin(),
+              output.frames.end(),
+              [](const VerifiedReferenceMap& left,
+                 const VerifiedReferenceMap& right) {
+                  return left.bytecode_pc < right.bytecode_pc;
+              });
+}
+
 } // namespace
 
 [[nodiscard]] Status verify_method_impl(
     const classfile::ClassFile& owner,
     const classfile::Method& method,
-    bool enforce_stack_maps) {
+    bool enforce_stack_maps,
+    VerifiedMethodReferenceMaps* reference_maps = nullptr) {
     auto descriptor = parse_method_descriptor(method.descriptor);
     if (!descriptor) {
         return fail(ErrorCode::verification_failed,
@@ -2011,6 +2082,9 @@ void replace_uninitialized(FrameState& state,
             return fail(ErrorCode::verification_failed,
                         method.name + method.descriptor +
                             ": abstract/native method contains Code");
+        }
+        if (reference_maps != nullptr) {
+            *reference_maps = VerifiedMethodReferenceMaps {};
         }
         return {};
     }
@@ -2164,7 +2238,35 @@ void replace_uninitialized(FrameState& state,
             continue;
         }
     }
+    if (reference_maps != nullptr) {
+        build_verified_reference_maps(code, states, *reference_maps);
+    }
     return {};
+}
+
+Result<VerifiedMethodReferenceMaps> verified_reference_maps(
+    const classfile::ClassFile& owner,
+    const classfile::Method& method) {
+    VerifiedMethodReferenceMaps maps;
+    auto strict = verify_method_impl(owner, method, true, &maps);
+    if (strict) return maps;
+    if (strict.error().code != ErrorCode::verification_failed ||
+        owner.major_version() > 50U || !method.code.has_value()) {
+        return std::unexpected(strict.error());
+    }
+
+    const bool has_cldc_stack_map = std::any_of(
+        method.code->stack_map_frames.begin(),
+        method.code->stack_map_frames.end(),
+        [](const classfile::StackMapFrame& frame) {
+            return frame.kind == classfile::StackMapFrameKind::cldc_full;
+        });
+    if (!has_cldc_stack_map) return std::unexpected(strict.error());
+
+    maps = VerifiedMethodReferenceMaps {};
+    auto relaxed = verify_method_impl(owner, method, false, &maps);
+    if (!relaxed) return std::unexpected(relaxed.error());
+    return maps;
 }
 
 Status verify_method(const classfile::ClassFile& owner,

@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$CORE_ROOT/.." && pwd)"
 RUN_ID="${PHONEME_BENCHMARK_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${PHONEME_BENCHMARK_OUTPUT_ROOT:-$CORE_ROOT/build/performance/$RUN_ID}"
 SYNTHETIC_JSON="$OUTPUT_ROOT/synthetic-vm-performance.json"
+JIT_JSON="$OUTPUT_ROOT/jit-performance.json"
 CORE_PROFILE_JSON="$OUTPUT_ROOT/full-core-profile.json"
 RUN_JSON="$OUTPUT_ROOT/benchmark-run.json"
 CORPUS_MANIFEST="$SCRIPT_DIR/performance-benchmarks.json"
@@ -38,6 +39,7 @@ print(f"Verified {len(manifest.get('benchmarks', []))} benchmark JARs")
 PY
 
 bash "$SCRIPT_DIR/test-performance-host.sh" "$SYNTHETIC_JSON"
+bash "$SCRIPT_DIR/benchmark-jit-host.sh" "$JIT_JSON"
 
 PHONEME_ENABLE_VM_PROFILING=1 \
 PHONEME_ENABLE_DECODED_EXECUTION=1 \
@@ -61,6 +63,7 @@ cat >"$RUN_JSON" <<JSON
   "corpus_manifest": "$CORPUS_MANIFEST",
   "corpus_verified": true,
   "synthetic_result": "$SYNTHETIC_JSON",
+  "jit_result": "$JIT_JSON",
   "full_core_profile": "$CORE_PROFILE_JSON"
 }
 JSON

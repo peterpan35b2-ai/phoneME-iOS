@@ -54,7 +54,7 @@ constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(4);
 // Hidden MIDlets share one execution gate per VM. This caps aggregate CPU even
 // when a game has several Java threads that would otherwise take turns while
 // each individual thread is sleeping. A blocked socket/timer callback still
-// runs immediately until it reaches the next 10K-bytecode scheduler quantum.
+// runs immediately until it reaches the next bounded bytecode scheduler quantum.
 constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(50);
 constexpr auto kBackgroundMaximumInterval = std::chrono::milliseconds(500);
 // Only a short, stable sleep immediately following an actual framebuffer
@@ -662,6 +662,30 @@ void Scheduler::note_current_frame_boundary() noexcept {
     tls_frame_cap_deadline_valid_ = false;
     tls_frame_boundary_pending_ = true;
     tls_frame_boundary_time_ = now;
+}
+
+void Scheduler::note_current_frame_request() noexcept {
+    if (tls_scheduler_ != this || tls_thread_id_ == 0U) return;
+    synchronize_current_frame_pacing_state();
+
+    const auto mode = static_cast<FramePacingMode>(
+        frame_pacing_mode_.load(std::memory_order_acquire));
+    bool host_foreground = false;
+    {
+        std::scoped_lock lock(mutex_);
+        host_foreground = host_foreground_;
+    }
+    if (!host_foreground || mode != FramePacingMode::override_game_loop) {
+        return;
+    }
+
+    // Canvas.repaint() is asynchronous in MIDP: the game loop thread requests
+    // a frame, while the runtime may paint/publish it on another Java thread.
+    // Keep the override detector attached to the requesting thread so a stable
+    // repaint(); sleep(...) loop can be retargeted without changing unrelated
+    // timers. Actual publication still owns cap pacing and FPS accounting.
+    tls_frame_boundary_pending_ = true;
+    tls_frame_boundary_time_ = std::chrono::steady_clock::now();
 }
 
 void Scheduler::break_current_frame_pacing_sequence() noexcept {

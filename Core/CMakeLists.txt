@@ -8,6 +8,14 @@ option(PHONEME_ENABLE_VM_PROFILING
 option(PHONEME_ENABLE_DECODED_EXECUTION
        "Dispatch verified methods through immutable decoded opcode metadata"
        OFF)
+option(PHONEME_ENABLE_LTO
+       "Enable link-time optimization for Release builds when supported"
+       ON)
+set(PHONEME_PGO_MODE "OFF" CACHE STRING
+    "Profile-guided optimization mode: OFF, GENERATE, or USE")
+set_property(CACHE PHONEME_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+set(PHONEME_PGO_PROFILE "" CACHE FILEPATH
+    "Clang .profdata file used when PHONEME_PGO_MODE=USE")
 
 file(GLOB_RECURSE PHONEME_CORE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
@@ -63,6 +71,61 @@ set_target_properties(phoneMECore PROPERTIES
     CXX_EXTENSIONS OFF
     POSITION_INDEPENDENT_CODE ON
 )
+
+if(PHONEME_ENABLE_LTO AND NOT EMSCRIPTEN)
+    include(CheckIPOSupported)
+    check_ipo_supported(
+        RESULT PHONEME_IPO_SUPPORTED
+        OUTPUT PHONEME_IPO_ERROR
+        LANGUAGES CXX
+    )
+    if(PHONEME_IPO_SUPPORTED)
+        set_property(TARGET phoneMECore PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        message(STATUS "phoneMECore Release LTO enabled")
+    else()
+        message(WARNING
+            "phoneMECore Release LTO requested but unsupported: ${PHONEME_IPO_ERROR}")
+    endif()
+endif()
+
+string(TOUPPER "${PHONEME_PGO_MODE}" PHONEME_PGO_MODE_NORMALIZED)
+if(NOT PHONEME_PGO_MODE_NORMALIZED STREQUAL "OFF")
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PHONEME_PGO_MODE requires Clang/AppleClang")
+    endif()
+
+    if(PHONEME_PGO_MODE_NORMALIZED STREQUAL "GENERATE")
+        target_compile_options(phoneMECore PRIVATE
+            "$<$<CONFIG:Release>:-fprofile-instr-generate>"
+        )
+        # Propagate the profile runtime to CMake consumers that perform the
+        # final executable link. Non-CMake/Xcode consumers should mirror this
+        # flag on their final link when collecting a profile.
+        target_link_options(phoneMECore INTERFACE
+            "$<$<CONFIG:Release>:-fprofile-instr-generate>"
+        )
+        message(STATUS "phoneMECore Release PGO instrumentation enabled")
+    elseif(PHONEME_PGO_MODE_NORMALIZED STREQUAL "USE")
+        if(PHONEME_PGO_PROFILE STREQUAL "")
+            message(FATAL_ERROR
+                "PHONEME_PGO_PROFILE is required when PHONEME_PGO_MODE=USE")
+        endif()
+        if(NOT EXISTS "${PHONEME_PGO_PROFILE}")
+            message(FATAL_ERROR
+                "PHONEME_PGO_PROFILE does not exist: ${PHONEME_PGO_PROFILE}")
+        endif()
+        target_compile_options(phoneMECore PRIVATE
+            "$<$<CONFIG:Release>:-fprofile-instr-use=${PHONEME_PGO_PROFILE}>"
+        )
+        message(STATUS
+            "phoneMECore Release PGO profile enabled: ${PHONEME_PGO_PROFILE}")
+    else()
+        message(FATAL_ERROR
+            "Invalid PHONEME_PGO_MODE='${PHONEME_PGO_MODE}'. Use OFF, GENERATE, or USE.")
+    endif()
+endif()
 
 if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set_target_properties(phoneMECore PROPERTIES

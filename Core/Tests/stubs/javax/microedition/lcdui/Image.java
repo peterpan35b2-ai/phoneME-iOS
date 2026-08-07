@@ -8,6 +8,7 @@ public final class Image {
     }
 
     public static Image createImage(int width, int height) { return null; }
+    public static Image createMutableARGB(int width, int height) { return null; }
     public static Image createImage(String name) throws IOException { return null; }
     public static Image createImage(InputStream stream) throws IOException { return null; }
     public static Image createImage(byte[] data, int offset, int length) {
@@ -28,6 +29,9 @@ public final class Image {
     public int getHeight() { return 0; }
     public boolean isMutable() { return false; }
     public void getRGB(int[] rgbData, int offset, int scanlength,
+                       int x, int y, int width, int height) {
+    }
+    public void setRGB(int[] rgbData, int offset, int scanlength,
                        int x, int y, int width, int height) {
     }
 }

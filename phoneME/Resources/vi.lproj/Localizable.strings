@@ -1,6 +1,6 @@
 /* Ngôn ngữ ứng dụng */
 "Language" = "Ngôn ngữ";
-"Changes apply immediately." = "Áp dụng ngay.";
+"Changes apply immediately." = "Thay đổi được áp dụng ngay.";
 "Vietnamese" = "Tiếng Việt";
 "English" = "Tiếng Anh";
 
@@ -14,7 +14,7 @@
 "Delete" = "Xóa";
 "Discard" = "Bỏ thay đổi";
 "Done" = "Xong";
-"Edit" = "Sửa";
+"Edit" = "Chỉnh sửa";
 "Error" = "Lỗi";
 "Exit" = "Thoát";
 "Help" = "Trợ giúp";
@@ -55,7 +55,7 @@
 "Library" = "Thư viện";
 "phoneME" = "phoneME";
 "No Apps" = "Chưa có ứng dụng";
-"Import a J2ME JAR file to add it to your library." = "Nhập một tệp JAR J2ME để thêm vào thư viện.";
+"Import a J2ME JAR file to add it to your library." = "Nhập file JAR J2ME để thêm vào thư viện.";
 "Import JAR" = "Nhập JAR";
 "Search Apps" = "Tìm ứng dụng";
 "Search Running Apps" = "Tìm ứng dụng đang chạy";
@@ -97,7 +97,7 @@
 /* Hồ sơ */
 "Profiles" = "Hồ sơ";
 "No Profiles" = "Chưa có hồ sơ";
-"Create a reusable profile for display, font and input settings." = "Tạo hồ sơ dùng lại cho cài đặt hiển thị, phông chữ và điều khiển.";
+"Create a reusable profile for display, font and input settings." = "Tạo hồ sơ dùng lại cho cài đặt hiển thị, font và điều khiển.";
 "Create Profile" = "Tạo hồ sơ";
 "New Profile" = "Hồ sơ mới";
 "Rename Profile" = "Đổi tên hồ sơ";
@@ -107,33 +107,33 @@
 
 /* Cài đặt */
 "Settings" = "Cài đặt";
-"Player" = "Trình chơi";
-"Action Bar" = "Thanh thao tác";
-"Status Bar" = "Thanh trạng thái";
+"Player" = "Trình giả lập";
+"App Bar" = "App Bar";
+"Status Bar" = "Status Bar";
 "Keep Screen Awake" = "Giữ màn hình luôn sáng";
 
 /* Chạy trong nền */
-"Background Execution" = "Chạy trong nền";
-"Run in Background" = "Chạy trong nền";
+"Background Execution" = "Chạy nền";
+"Run in Background" = "Chạy nền";
 "Open Location Settings" = "Mở cài đặt vị trí";
-"Allow Location, then choose Always Allow." = "Cho phép Vị trí, sau đó chọn Luôn cho phép.";
+"Allow Location, then choose Always Allow." = "Cho phép quyền Vị trí, sau đó chọn Luôn luôn.";
 "Disabled" = "Đã tắt";
-"Starts when a J2ME application is running" = "Bắt đầu khi có ứng dụng J2ME đang chạy";
-"Ready for background use" = "Sẵn sàng chạy trong nền";
-"Allow Location, then choose Always Allow" = "Cho phép Vị trí, sau đó chọn Luôn cho phép";
+"Starts when a J2ME application is running" = "Tự bật khi có ứng dụng J2ME đang chạy";
+"Ready for background use" = "Sẵn sàng chạy nền";
+"Allow Location, then choose Always Allow" = "Cho phép quyền Vị trí, sau đó chọn Luôn luôn";
 "Choose Always in Location Services" = "Chọn Luôn luôn trong Dịch vụ định vị";
-"Background execution is active" = "Đang duy trì chạy trong nền";
+"Background execution is active" = "Chạy nền đang hoạt động";
 "Location access is denied" = "Quyền truy cập vị trí bị từ chối";
 "Location access is restricted" = "Quyền truy cập vị trí bị hạn chế";
 "Location Services are turned off" = "Dịch vụ định vị đang tắt";
 
 /* Lưu trữ */
 "Storage" = "Lưu trữ";
-"Data Storage" = "Nơi lưu dữ liệu";
+"Data Storage" = "Vị trí lưu dữ liệu";
 "On My iPhone" = "Trên iPhone của tôi";
 "iCloud Drive" = "iCloud Drive";
 "Moving library and game data…" = "Đang di chuyển thư viện và dữ liệu trò chơi…";
-"Stores JAR, profiles, saves and game files. Close running apps before changing." = "Lưu JAR, hồ sơ, bản lưu và tệp game. Đóng ứng dụng đang chạy trước khi đổi.";
+"Stores JAR, profiles, saves and game files. Close running apps before changing." = "Lưu JAR, hồ sơ, save và file game. Hãy đóng các ứng dụng đang chạy trước khi đổi vị trí lưu.";
 "Keep the library and game data in the Files app on this device." = "Lưu thư viện và dữ liệu trò chơi trong ứng dụng Tệp trên thiết bị này.";
 "Sync the library, profiles, RMS and game files through iCloud Drive." = "Đồng bộ thư viện, hồ sơ, RMS và tệp trò chơi qua iCloud Drive.";
 "Close all running J2ME apps before changing the data location." = "Hãy đóng mọi ứng dụng J2ME đang chạy trước khi đổi nơi lưu dữ liệu.";
@@ -145,33 +145,33 @@
 /* Cấu hình hiển thị */
 "Display" = "Hiển thị";
 "Screen size" = "Kích thước màn hình";
-"Screen size presets" = "Mẫu kích thước màn hình";
+"Screen size presets" = "Preset kích thước màn hình";
 "Width" = "Chiều rộng";
 "Height" = "Chiều cao";
 "Swap width and height" = "Hoán đổi chiều rộng và chiều cao";
-"Keep Canvas aspect ratio" = "Giữ tỷ lệ Canvas";
-"Canvas scale" = "Tỷ lệ Canvas";
+"Keep Canvas aspect ratio" = "Giữ tỷ lệ khung hình Canvas";
+"Canvas scale" = "Scale Canvas";
 "Screen orientation" = "Hướng màn hình";
-"Canvas gravity" = "Vị trí Canvas";
-"Canvas scale type" = "Kiểu co giãn Canvas";
-"Image filtering" = "Lọc ảnh";
+"Canvas gravity" = "Căn Canvas";
+"Canvas scale type" = "Chế độ scale Canvas";
+"Image filtering" = "Bộ lọc hình ảnh";
 "Force Canvas fullscreen" = "Buộc Canvas toàn màn hình";
 "Show FPS" = "Hiển thị FPS";
-"Frame rate limit" = "Giới hạn tốc độ khung hình";
-"Override FPS" = "Ghi đè FPS";
+"Frame rate limit" = "Giới hạn FPS";
+"Override FPS" = "Override FPS";
 "Limit FPS" = "Giới hạn FPS";
 "FPS" = "FPS";
-"FPS override may speed up frame-based games." = "Ghi đè FPS có thể làm game chạy theo frame nhanh hơn.";
-"FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated." = "Mặc định giới hạn 30 FPS và không rút ngắn thời gian ngủ Java của game, nên timer và game online không bị tua nhanh.";
-"FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration." = "Ghi đè FPS mặc định là 30 và chỉ điều chỉnh nhịp ngủ ổn định của vòng lặp vẽ sau khi xuất khung hình. Các khoảng chờ khi loading, timer và I/O vẫn giữ nguyên.";
+"FPS override may speed up frame-based games." = "Override FPS có thể tăng tốc các game phụ thuộc vào frame.";
+"FPS limiting defaults to 30 and never shortens the game's own Java sleeps, so timers and online gameplay are not accelerated." = "Giới hạn FPS mặc định là 30 và không rút ngắn Java sleep của game, nên timer và gameplay online không bị tăng tốc.";
+"FPS override defaults to 30 and only adjusts stable render-loop sleeps after a frame is published. Loading, timer and I/O sleeps keep their original duration." = "Override FPS mặc định là 30 và chỉ điều chỉnh các sleep ổn định trong render loop sau khi frame được xuất. Các sleep khi loading, timer và I/O vẫn giữ nguyên thời lượng.";
 "Auto (30)" = "Tự động (30)";
-"Frame pacing" = "Điều khiển nhịp khung hình";
-"Native game timing" = "Giữ nhịp gốc của game";
-"Limit only" = "Chỉ giới hạn";
-"Override game loop" = "Ghi đè vòng lặp game";
-"Native preserves the game's timing. Limit only may lower FPS but never speeds the game up. Override game loop can raise FPS for compatible games and may change frame-based gameplay speed." = "Giữ nhịp gốc sẽ không thay đổi tốc độ game. Chỉ giới hạn có thể hạ FPS nhưng không bao giờ làm game chạy nhanh hơn. Ghi đè vòng lặp có thể tăng FPS cho game tương thích nhưng có thể làm thay đổi tốc độ logic tính theo frame.";
-"Native preserves the game's timing. Limit only caps actual published frames without changing Java sleeps. Override game loop can raise FPS for compatible games and may change frame-based gameplay speed." = "Giữ nhịp gốc sẽ không thay đổi tốc độ game. Chỉ giới hạn chặn trực tiếp các khung hình được xuất mà không sửa thời gian ngủ Java. Ghi đè vòng lặp có thể tăng FPS cho game tương thích nhưng có thể làm thay đổi tốc độ logic tính theo frame.";
-"Configure Canvas size, scaling and rendering. Frame rate supports 1–60 FPS; enter 0 to use the 30 FPS default." = "Cấu hình kích thước, tỷ lệ và kết xuất Canvas. Tốc độ khung hình hỗ trợ 1–60 FPS; nhập 0 để dùng mặc định 30 FPS.";
+"Frame pacing" = "Frame pacing";
+"Native game timing" = "Timing gốc của game";
+"Limit only" = "Chỉ giới hạn FPS";
+"Override game loop" = "Override game loop";
+"Native preserves the game's timing. Limit only may lower FPS but never speeds the game up. Override game loop can raise FPS for compatible games and may change frame-based gameplay speed." = "Native giữ nguyên timing của game. Chỉ giới hạn FPS có thể hạ FPS nhưng không làm game chạy nhanh hơn. Override game loop có thể tăng FPS trên game tương thích nhưng cũng có thể thay đổi tốc độ gameplay phụ thuộc vào frame.";
+"Native preserves the game's timing. Limit only caps actual published frames without changing Java sleeps. Override game loop can raise FPS for compatible games and may change frame-based gameplay speed." = "Native giữ nguyên timing của game. Chế độ Chỉ giới hạn FPS cap số frame thực tế được xuất mà không thay đổi Java sleep. Override game loop có thể tăng FPS trên game tương thích nhưng cũng có thể thay đổi tốc độ gameplay phụ thuộc vào frame.";
+"Configure Canvas size, scaling and rendering. Frame rate supports 1–60 FPS; enter 0 to use the 30 FPS default." = "Cấu hình kích thước, scale và render Canvas. FPS hỗ trợ 1–60; nhập 0 để dùng mặc định 30 FPS.";
 "Auto" = "Tự động";
 "Portrait" = "Dọc";
 "Landscape" = "Ngang";
@@ -187,21 +187,21 @@
 /* Bộ nhớ */
 "Memory" = "Bộ nhớ";
 "Heap size" = "Dung lượng heap";
-"Java heap" = "Heap Java";
-"Java heap: %d MiB" = "Heap Java: %d MiB";
-"Heap size presets" = "Mức heap có sẵn";
+"Java heap" = "Heap size";
+"Java heap: %d MiB" = "Heap size: %d MiB";
+"Heap size presets" = "Preset heap";
 "MiB" = "MiB";
-"Applied on next launch. Low values may cause OutOfMemoryError." = "Áp dụng ở lần chạy sau. Giá trị thấp có thể gây OutOfMemoryError.";
+"Applied on next launch. Low values may cause OutOfMemoryError." = "Áp dụng ở lần chạy tiếp theo. Heap quá thấp có thể gây OutOfMemoryError.";
 
 /* Phông chữ */
-"Fonts" = "Phông chữ";
+"Fonts" = "Font";
 "Small" = "Nhỏ";
 "Medium" = "Vừa";
 "Large" = "Lớn";
-"Font size preset" = "Mẫu cỡ chữ";
-"Font size presets" = "Mẫu cỡ chữ";
-"Use Dynamic Type scaling" = "Co giãn theo Dynamic Type";
-"Applies to native LCDUI and Canvas text." = "Áp dụng cho LCDUI native và chữ trên Canvas.";
+"Font size preset" = "Preset cỡ font";
+"Font size presets" = "Preset cỡ font";
+"Use Dynamic Type scaling" = "Scale theo Dynamic Type";
+"Applies to native LCDUI and Canvas text." = "Áp dụng cho LCDUI native và text trên Canvas.";
 
 /* Cấu hình điều khiển */
 "Input" = "Điều khiển";
@@ -212,15 +212,15 @@
 "Virtual keyboard" = "Bàn phím ảo";
 "Virtual keyboard layout" = "Bố cục bàn phím ảo";
 "Button shape" = "Hình dạng nút";
-"Haptic feedback" = "Phản hồi xúc giác";
-"Keyboard opacity" = "Độ trong suốt bàn phím";
-"Keep off-screen keys fully visible" = "Luôn hiển thị rõ các phím nằm ngoài màn hình";
-"Auto-hide delay" = "Thời gian chờ tự ẩn";
+"Haptic feedback" = "Phản hồi haptic";
+"Keyboard opacity" = "Opacity bàn phím";
+"Keep off-screen keys fully visible" = "Giữ phím ngoài màn hình ở 100% opacity";
+"Auto-hide delay" = "Độ trễ tự ẩn";
 "ms" = "ms";
 "Touch, MIDP keys and virtual controls." = "Cảm ứng, phím MIDP và nút điều khiển ảo.";
 "Layout" = "Bố cục";
-"MIDP Key Codes" = "Mã phím MIDP";
-"Enter the Java ME key code for each control." = "Nhập mã phím Java ME cho từng nút điều khiển.";
+"MIDP Key Codes" = "Key code MIDP";
+"Enter the Java ME key code for each control." = "Nhập key code Java ME cho từng nút điều khiển.";
 "Choose Custom to edit these values." = "Chọn Tùy chỉnh để sửa các giá trị này.";
 "Reset custom mappings" = "Đặt lại gán phím tùy chỉnh";
 "Reset Settings" = "Đặt lại cài đặt";
@@ -241,12 +241,12 @@
 /* Trình giả lập */
 "Move Virtual Keys" = "Di chuyển phím ảo";
 "Resize Key Groups" = "Đổi kích thước nhóm phím";
-"Keyboard edit mode" = "Chế độ chỉnh bàn phím";
-"Keys snap to a 4-point grid." = "Các phím bám theo lưới 4 điểm.";
-"Drag horizontally or vertically in 5% steps." = "Kéo ngang hoặc dọc theo từng bước 5%.";
+"Keyboard edit mode" = "Chế độ chỉnh sửa bàn phím";
+"Keys snap to a 4-point grid." = "Phím tự căn theo lưới 4 pt.";
+"Drag horizontally or vertically in 5% steps." = "Kéo ngang hoặc dọc theo bước 5%.";
 "Starting %@" = "Đang khởi động %@";
 "Switch keylayout" = "Chuyển bố cục phím";
-"Screenshot saved" = "Đã lưu ảnh chụp";
+"Screenshot saved" = "Đã lưu ảnh chụp màn hình";
 "The screenshot was added to Photos." = "Ảnh chụp màn hình đã được thêm vào Ảnh.";
 "Exit application?" = "Thoát ứng dụng?";
 "Unsaved progress may be lost." = "Tiến trình chưa lưu có thể bị mất.";
@@ -260,10 +260,10 @@
 "Lock screen rotation" = "Khóa xoay màn hình";
 "Auto translate" = "Tự động dịch";
 "Translation" = "Dịch thuật";
-"Translation service" = "Dịch vụ dịch";
+"Translation service" = "Dịch vụ dịch thuật";
 "Automatic" = "Tự động";
-"Uses batching, cache and automatic fallback." = "Dùng xử lý theo lô, bộ nhớ đệm và tự chuyển dịch vụ.";
-"Auto detect" = "Tự động nhận diện";
+"Uses batching, cache and automatic fallback." = "Dùng batching, cache và tự động fallback.";
+"Auto detect" = "Tự nhận diện";
 "Chinese (Simplified)" = "Tiếng Trung giản thể";
 "Chinese (Traditional)" = "Tiếng Trung phồn thể";
 "Japanese" = "Tiếng Nhật";
@@ -283,7 +283,7 @@
 "Reset keyboard layout" = "Đặt lại bố cục bàn phím";
 "Visible Controls" = "Nút đang hiển thị";
 "Virtual Buttons" = "Nút ảo";
-"Turn off controls you do not need for this game." = "Tắt những nút không cần dùng cho trò chơi này.";
+"Turn off controls you do not need for this game." = "Tắt các control không cần dùng cho game này.";
 "J2ME display" = "Màn hình J2ME";
 
 /* Trợ năng bàn phím ảo */
@@ -312,8 +312,8 @@
 "The RMS backup is too large." = "Bản sao lưu RMS quá lớn.";
 "Runtime is not available." = "Runtime không khả dụng.";
 "The bundled phoneME runtime resources are missing." = "Thiếu tài nguyên runtime phoneME đi kèm.";
-"Failed to create runtime." = "Không thể tạo runtime.";
-"The JAR manifest does not contain a valid MIDlet-1 class." = "Manifest của JAR không chứa lớp MIDlet-1 hợp lệ.";
+"Failed to create runtime." = "Không thể khởi tạo runtime.";
+"The JAR manifest does not contain a valid MIDlet-1 class." = "Manifest của JAR không chứa class MIDlet-1 hợp lệ.";
 "The JAR does not contain META-INF/MANIFEST.MF." = "JAR không chứa tệp META-INF/MANIFEST.MF.";
 "The JAR manifest cannot be read." = "Không thể đọc manifest của JAR.";
 "The JAR manifest is missing the required %@ attribute." = "Manifest của JAR thiếu thuộc tính bắt buộc %@.";
@@ -322,23 +322,23 @@
 "The JAR requires an unsupported %@ value: %@." = "JAR yêu cầu giá trị %@ chưa được hỗ trợ: %@.";
 "The JAR manifest contains an invalid %@ declaration." = "Manifest của JAR chứa khai báo %@ không hợp lệ.";
 "MIDlet declarations must start at MIDlet-1 and use consecutive numbers." = "Các khai báo MIDlet phải bắt đầu từ MIDlet-1 và đánh số liên tiếp.";
-"The JAR does not contain the declared MIDlet class %@." = "JAR không chứa lớp MIDlet đã khai báo %@.";
-"The declared MIDlet class %@ is not a valid Java class file." = "Lớp MIDlet đã khai báo %@ không phải tệp lớp Java hợp lệ.";
-"The selected file is not a valid JAR archive." = "Tệp đã chọn không phải kho lưu trữ JAR hợp lệ.";
+"The JAR does not contain the declared MIDlet class %@." = "JAR không chứa class MIDlet %@ đã khai báo.";
+"The declared MIDlet class %@ is not a valid Java class file." = "Class MIDlet %@ đã khai báo không có file .class Java hợp lệ.";
+"The selected file is not a valid JAR archive." = "Tệp đã chọn không phải JAR hợp lệ.";
 "The JAR uses a compression method that is not supported." = "JAR sử dụng phương thức nén chưa được hỗ trợ.";
 "The JAR could not be decompressed." = "Không thể giải nén JAR.";
-"This application was imported after multitasking started. Close the running applications once so it can be prepared." = "Ứng dụng này được nhập sau khi chế độ đa nhiệm đã bắt đầu. Hãy đóng các ứng dụng đang chạy một lần để chuẩn bị ứng dụng.";
+"This application was imported after multitasking started. Close the running applications once so it can be prepared." = "Ứng dụng này được import sau khi phiên đa nhiệm đã khởi chạy. Hãy đóng toàn bộ ứng dụng đang chạy một lần để hoàn tất chuẩn bị.";
 "The maximum of 64 simultaneous J2ME applications has been reached." = "Đã đạt giới hạn tối đa 64 ứng dụng J2ME chạy đồng thời.";
-"The J2ME application could not become active in the foreground." = "Ứng dụng J2ME không thể chuyển sang hoạt động ở tiền cảnh.";
+"The J2ME application could not become active in the foreground." = "Ứng dụng J2ME không thể chuyển sang foreground.";
 "Failed to start application (error %d)." = "Không thể khởi động ứng dụng (lỗi %d).";
 
 /* Đa nhiệm */
 "Workspaces" = "Đa nhiệm";
 "Workspace" = "Đa nhiệm";
-"Workspace %d" = "Đa nhiệm %d";
+"Workspace %d" = "Phiên đa nhiệm %d";
 "No Workspaces" = "Chưa có phiên đa nhiệm";
 "Create Workspace" = "Tạo phiên đa nhiệm";
-"Create a workspace, then add multiple J2ME screens and control the focused screen with one virtual keyboard." = "Tạo một phiên đa nhiệm, thêm nhiều màn hình J2ME và dùng một bàn phím ảo để điều khiển màn hình đang được chọn.";
+"Create a workspace, then add multiple J2ME screens and control the focused screen with one virtual keyboard." = "Tạo phiên đa nhiệm, thêm nhiều màn hình J2ME và dùng chung một bàn phím ảo để điều khiển màn hình đang focus.";
 "Workspace name" = "Tên phiên đa nhiệm";
 "Rename Workspace" = "Đổi tên phiên đa nhiệm";
 "Delete Workspace" = "Xóa phiên đa nhiệm";
@@ -363,9 +363,9 @@
 "Add a screen, choose a J2ME app, then drag and resize it here." = "Thêm màn hình, chọn ứng dụng J2ME rồi kéo và thay đổi kích thước tại đây.";
 "A workspace can contain up to %d screens." = "Mỗi phiên đa nhiệm có thể chứa tối đa %d màn hình.";
 "Reset screen layout?" = "Đặt lại bố cục màn hình?";
-"All screens will return to an evenly arranged layout." = "Các màn hình sẽ được xếp theo tỷ lệ và độ phân giải của từng ứng dụng.";
+"All screens will return to an evenly arranged layout." = "Tất cả màn hình sẽ được sắp xếp lại đồng đều.";
 "Unavailable screen" = "Màn hình không khả dụng";
-"Focused" = "Đang được chọn";
+"Focused" = "Đang focus";
 "Show All Screens" = "Hiện tất cả màn hình";
 "Resize screen" = "Đổi kích thước màn hình";
 "Display Settings" = "Cài đặt hiển thị";
@@ -378,15 +378,15 @@
 "App Unavailable" = "Ứng dụng không khả dụng";
 "Stopped" = "Đã dừng";
 "Controlling %@" = "Đang điều khiển %@";
-"Import a J2ME JAR file in Library before adding a screen." = "Hãy nhập tệp JAR J2ME trong Thư viện trước khi thêm màn hình.";
+"Import a J2ME JAR file in Library before adding a screen." = "Hãy import file JAR J2ME vào Thư viện trước khi thêm màn hình.";
 "Choose App" = "Chọn ứng dụng";
 "Resolution" = "Độ phân giải";
 "Preserve Aspect Ratio" = "Giữ tỷ lệ khung hình";
-"Scale" = "Kiểu co giãn";
+"Scale" = "Scale";
 "Open Screen options, then choose Display Settings. Applying changes restarts only this screen." = "Mở tùy chọn màn hình rồi chọn Cài đặt hiển thị. Áp dụng thay đổi chỉ khởi động lại màn hình đó.";
 "Performance" = "Hiệu năng";
 "Frame rate: %d FPS" = "Tốc độ khung hình: %d FPS";
-"Image Filtering" = "Lọc hình ảnh";
+"Image Filtering" = "Bộ lọc hình ảnh";
 "Show Virtual Keyboard" = "Hiện bàn phím ảo";
 "Keylayout" = "Bố cục phím";
 "Apply" = "Áp dụng";

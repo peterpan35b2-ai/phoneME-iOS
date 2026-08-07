@@ -27,6 +27,34 @@ struct HeapStats final {
     usize failed_allocations {0};
 };
 
+enum class HeapArrayKind : u8 {
+    boolean,
+    byte,
+    character,
+    short_integer,
+    integer,
+    long_integer,
+    float32,
+    float64,
+    reference,
+};
+
+struct HeapArrayInfo final {
+    HeapArrayKind kind {HeapArrayKind::integer};
+    usize length {0};
+    std::string reference_component;
+};
+
+struct HeapArrayElementSnapshot final {
+    HeapArrayKind kind {HeapArrayKind::integer};
+    Value value;
+};
+
+struct HeapArrayPayloadLease final {
+    u64* first_payload {nullptr};
+    usize length {0};
+};
+
 struct HeapAccessContext final {
     std::string_view owner;
     std::string_view method;
@@ -58,6 +86,20 @@ public:
     [[nodiscard]] Status set_field(ObjectRef reference, usize index, Value value);
     [[nodiscard]] Result<Value> element(ObjectRef reference, usize index) const;
     [[nodiscard]] Status set_element(ObjectRef reference, usize index, Value value);
+    [[nodiscard]] Result<HeapArrayInfo> array_info(ObjectRef reference) const;
+    [[nodiscard]] Result<HeapArrayElementSnapshot> array_element_snapshot(
+        ObjectRef reference,
+        usize index) const;
+    [[nodiscard]] Status set_element_checked(ObjectRef reference,
+                                             usize index,
+                                             HeapArrayKind expected_kind,
+                                             Value value);
+    // Returns a stable pointer to the first Value payload for a fixed-size
+    // Java array. The caller must keep `reference` rooted for the entire lease
+    // lifetime and must not retain the pointer beyond such a rooted region.
+    [[nodiscard]] Result<HeapArrayPayloadLease> array_payload_lease(
+        ObjectRef reference,
+        HeapArrayKind expected_kind);
     [[nodiscard]] Status fill_array_range(ObjectRef reference,
                                            usize index,
                                            usize length,
@@ -99,6 +141,7 @@ private:
         std::vector<Value> elements;
         std::u16string string_payload;
         std::optional<ObjectRef> weak_referent;
+        std::optional<HeapArrayKind> array_kind;
         bool is_array {false};
         bool is_string {false};
         bool marked {false};

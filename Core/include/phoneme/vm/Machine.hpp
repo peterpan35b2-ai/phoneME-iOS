@@ -187,7 +187,17 @@ namespace phoneme::vm
     void configure_frame_pacing(i32 frames_per_second,
                                 FramePacingMode mode) noexcept;
     void configure_jit(bool enabled) noexcept { jit_.set_enabled(enabled); }
+    void configure_jit_startup(bool enabled) noexcept {
+      jit_.set_startup_mode(enabled);
+    }
+    [[nodiscard]] Status configure_jit_profile(std::string path) {
+      return jit_.configure_profile(std::move(path));
+    }
+    [[nodiscard]] Status flush_jit_profile() { return jit_.flush_profile(); }
     [[nodiscard]] bool jit_enabled() const noexcept { return jit_.enabled(); }
+    [[nodiscard]] bool jit_startup_mode() const noexcept {
+      return jit_.startup_mode();
+    }
     [[nodiscard]] JitAvailability jit_availability() const noexcept {
       return jit_.availability();
     }
@@ -196,6 +206,7 @@ namespace phoneme::vm
     }
     void pace_frame_publication();
     void note_frame_pacing_boundary() noexcept;
+    void note_frame_pacing_request() noexcept;
     void break_frame_pacing_sequence() noexcept;
     [[nodiscard]] Result<SchedulerWaitResult> sleep_current_thread(i64 millis);
     [[nodiscard]] Result<SchedulerWaitResult> join_java_thread(
@@ -367,6 +378,13 @@ namespace phoneme::vm
       std::vector<Value> arguments;
       bool has_receiver{false};
       std::optional<Value> return_override;
+      bool return_override_boxes_result{false};
+      bool discard_return_value{false};
+      std::optional<JavaTypeKind> return_widening_source;
+      std::optional<JavaTypeKind> return_widening_target;
+      std::optional<JitDeoptState> resume_jit_deopt_state;
+      u64 resume_jit_instructions{0U};
+      u64 resume_jit_nested_instructions{0U};
     };
 
     struct CharacterDrawSample final
@@ -431,11 +449,89 @@ namespace phoneme::vm
       bool valid{false};
     };
 
-    struct VirtualCallCache final
+    struct VirtualCallCacheEntry final
     {
       ClassId receiver_class;
       MethodId target_method;
       bool valid{false};
+    };
+
+    struct VirtualCallCache final
+    {
+      static constexpr usize kCapacity = 4U;
+      std::array<VirtualCallCacheEntry, kCapacity> entries{};
+      u8 next_replace{0U};
+
+      [[nodiscard]] std::optional<MethodId> lookup(
+          ClassId receiver_class) const noexcept
+      {
+        for (const VirtualCallCacheEntry& entry : entries)
+        {
+          if (entry.valid && entry.receiver_class == receiver_class)
+            return entry.target_method;
+        }
+        return std::nullopt;
+      }
+
+      void invalidate(ClassId receiver_class) noexcept
+      {
+        for (VirtualCallCacheEntry& entry : entries)
+        {
+          if (entry.valid && entry.receiver_class == receiver_class)
+          {
+            entry = {};
+            return;
+          }
+        }
+      }
+
+      void update(ClassId receiver_class, MethodId target_method) noexcept
+      {
+        for (VirtualCallCacheEntry& entry : entries)
+        {
+          if (entry.valid && entry.receiver_class == receiver_class)
+          {
+            entry.target_method = target_method;
+            return;
+          }
+        }
+        for (VirtualCallCacheEntry& entry : entries)
+        {
+          if (!entry.valid)
+          {
+            entry = VirtualCallCacheEntry {
+                .receiver_class = receiver_class,
+                .target_method = target_method,
+                .valid = true,
+            };
+            return;
+          }
+        }
+        const usize slot = static_cast<usize>(next_replace) % kCapacity;
+        entries[slot] = VirtualCallCacheEntry {
+            .receiver_class = receiver_class,
+            .target_method = target_method,
+            .valid = true,
+        };
+        next_replace = static_cast<u8>((slot + 1U) % kCapacity);
+      }
+    };
+
+    struct JitExecutionContext final
+    {
+      using AppendOuterRoots = void (*)(void*, std::vector<ObjectRef>&) noexcept;
+
+      Machine* machine{nullptr};
+      const classfile::ClassFile* owner{nullptr};
+      const classfile::Method* method{nullptr};
+      u32 invocation_depth{0U};
+      std::span<const ObjectRef> base_roots;
+      void* outer_roots_context{nullptr};
+      AppendOuterRoots append_outer_roots{nullptr};
+      std::span<const Value> extra_root_values;
+      std::vector<ObjectRef> published_roots;
+      std::optional<ObjectRef> pending_throwable;
+      u64 nested_instructions{0U};
     };
 
     struct LambdaBinding final
@@ -488,6 +584,32 @@ namespace phoneme::vm
         u64 instruction_budget);
     [[nodiscard]] Result<std::optional<Value>> invoke_native(
         const Invocation &invocation);
+    [[nodiscard]] static u32 jit_runtime_dispatch_callback(
+        void* context,
+        JitRuntimeOperation operation,
+        u64 operand,
+        u64 first,
+        u64 second,
+        u64 third,
+        const u64* frame_base,
+        u64* result_bits) noexcept;
+    static void jit_publish_roots_callback(void* context,
+                                           const u64* roots,
+                                           usize root_count) noexcept;
+    [[nodiscard]] u32 dispatch_jit_runtime(
+        JitExecutionContext* parent_context,
+        const classfile::ClassFile& owner,
+        JitRuntimeOperation operation,
+        u32 operand,
+        u64 first,
+        u64 second,
+        u64 third,
+        const u64* frame_base,
+        u32* consumed_instructions,
+        u64* result_bits) noexcept;
+    [[nodiscard]] std::optional<u64> bounded_jit_invocation_cost(
+        const ResolvedMethod& target,
+        u32 recursion_depth);
     [[nodiscard]] Result<ObjectRef> intern_string(
         std::string_view modified_utf8);
     [[nodiscard]] Result<ObjectRef> create_throwable(

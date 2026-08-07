@@ -977,6 +977,26 @@ public final class Jdk8Semantics {
         } catch (IllegalArgumentException expected) {
             result |= 8;
         }
+
+        java.io.BufferedReader utf8Lines = new java.io.BufferedReader(
+            new java.io.InputStreamReader(
+                new java.io.ByteArrayInputStream(
+                    "một\r\nhai\nba\rbon".getBytes("UTF-8")),
+                "UTF-8"));
+        if ("một".equals(utf8Lines.readLine())
+                && "hai".equals(utf8Lines.readLine())
+                && "ba".equals(utf8Lines.readLine())
+                && "bon".equals(utf8Lines.readLine())
+                && utf8Lines.readLine() == null) result |= 16;
+
+        java.io.BufferedReader utf16Lines = new java.io.BufferedReader(
+            new java.io.InputStreamReader(
+                new java.io.ByteArrayInputStream(new byte[] {
+                    0, 65, 0, 13, 0, 10, 1, 16, 0, 10
+                }), "UTF-16BE"));
+        if ("A".equals(utf16Lines.readLine())
+                && "Đ".equals(utf16Lines.readLine())
+                && utf16Lines.readLine() == null) result |= 32;
         return result;
     }
 

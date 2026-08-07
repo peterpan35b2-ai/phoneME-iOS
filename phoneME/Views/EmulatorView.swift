@@ -59,6 +59,14 @@ struct EmulatorView: View {
         _showKeypad = State(initialValue: profile.showVirtualKeyboard)
     }
 
+    private var isAppBarVisible: Bool {
+        runtimeProfile.showAppBar ?? enableActionBar
+    }
+
+    private var isStatusBarVisible: Bool {
+        runtimeProfile.showStatusBar ?? enableStatusBar
+    }
+
     private var navigationTitle: String {
         guard session.isPresentingNativeLCDUI,
               session.lcdUI.screenKind != .alert,
@@ -83,7 +91,7 @@ struct EmulatorView: View {
     // MIDP fullscreen controls the emulated Canvas chrome only. It must not
     // override the user's native ActionBar/status-bar preferences.
     private var presentsEdgeToEdgeSurface: Bool {
-        presentsFullscreenSurface && !enableActionBar && !enableStatusBar
+        presentsFullscreenSurface && !isAppBarVisible && !isStatusBarVisible
     }
 
     var body: some View {
@@ -136,7 +144,7 @@ struct EmulatorView: View {
                         NativeLCDUIScreenView(
                             imageStore: session.lcdUIImageStore,
                             state: session.lcdUI,
-                            showsTitleInContent: !enableActionBar
+                            showsTitleInContent: !isAppBarVisible
                                 || runtimeProfile.forceFullscreen
                         )
                             .environmentObject(session)
@@ -225,7 +233,7 @@ struct EmulatorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .phoneMENavigationBarBackgroundVisible()
             .phoneMENavigationBarVisible(
-                enableActionBar || keyboardAdjustmentMode != .none
+                isAppBarVisible || keyboardAdjustmentMode != .none
             )
 #else
             .navigationTitle(navigationTitle)
@@ -233,7 +241,7 @@ struct EmulatorView: View {
         }
         .coordinateSpace(name: "emulatorCaptureWindow")
 #if os(iOS)
-        .statusBarHidden(!enableStatusBar)
+        .statusBarHidden(!isStatusBarVisible)
 #endif
         .onAppear {
             if !playNativeChromeDefaultApplied {
@@ -910,8 +918,22 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                     Group {
                         if keyboardAdjustmentMode != .none {
                             Menu {
-                            Button("Move keys", action: beginKeyboardPositionAction)
-                            Button("Resize key groups", action: beginKeyboardResizeAction)
+                            Button(action: beginKeyboardPositionAction) {
+                                Label(
+                                    "Move keys",
+                                    systemImage: keyboardAdjustmentMode == .position
+                                        ? "checkmark.circle.fill"
+                                        : "arrow.up.and.down.and.arrow.left.and.right"
+                                )
+                            }
+                            Button(action: beginKeyboardResizeAction) {
+                                Label(
+                                    "Resize key groups",
+                                    systemImage: keyboardAdjustmentMode == .size
+                                        ? "checkmark.circle.fill"
+                                        : "arrow.up.left.and.arrow.down.right"
+                                )
+                            }
                         } label: {
                             Label(
                                 keyboardAdjustmentMode == .position
@@ -965,31 +987,55 @@ private struct EmulatorToolbarAnchor: View, Equatable {
 
                     Menu {
                         Menu {
-                            Button("Move keys", action: beginKeyboardPositionAction)
-                            Button("Resize key groups", action: beginKeyboardResizeAction)
+                            Button(action: beginKeyboardPositionAction) {
+                                Label(
+                                    "Move keys",
+                                    systemImage: "arrow.up.and.down.and.arrow.left.and.right"
+                                )
+                            }
+                            Button(action: beginKeyboardResizeAction) {
+                                Label(
+                                    "Resize key groups",
+                                    systemImage: "arrow.up.left.and.arrow.down.right"
+                                )
+                            }
                             if keyboardAdjustmentMode != .none {
-                                Button("Finish editing", action: finishKeyboardAdjustmentAction)
+                                Button(action: finishKeyboardAdjustmentAction) {
+                                    Label("Finish editing", systemImage: "checkmark")
+                                }
                             }
                             Divider()
-                            Button("Choose layout", action: switchKeyboardLayoutAction)
+                            Button(action: switchKeyboardLayoutAction) {
+                                Label("Choose layout", systemImage: "keyboard")
+                            }
                             .disabled(keyboardAdjustmentMode != .none)
-                            Button("Visible buttons", action: hideKeyboardButtonsAction)
+                            Button(action: hideKeyboardButtonsAction) {
+                                Label("Visible buttons", systemImage: "eye")
+                            }
                             .disabled(keyboardAdjustmentMode != .none)
                             Button(
-                                "Reset keyboard layout",
                                 role: .destructive,
                                 action: resetKeyboardLayoutAction
-                            )
+                            ) {
+                                Label(
+                                    "Reset keyboard layout",
+                                    systemImage: "arrow.counterclockwise"
+                                )
+                            }
                         } label: {
-                            Text("Virtual keyboard")
+                            Label("Virtual keyboard", systemImage: "keyboard")
                         }
                         Divider()
-                        Button(
-                            isRotationLocked
-                                ? L10n.string("Unlock screen rotation")
-                                : L10n.string("Lock screen rotation"),
-                            action: toggleRotationLockAction
-                        )
+                        Button(action: toggleRotationLockAction) {
+                            Label(
+                                isRotationLocked
+                                    ? L10n.string("Unlock screen rotation")
+                                    : L10n.string("Lock screen rotation"),
+                                systemImage: isRotationLocked
+                                    ? "lock.rotation.open"
+                                    : "lock.rotation"
+                            )
+                        }
                         Menu {
                             Button {
                                 setTranslationConfigurationAction(
@@ -997,7 +1043,12 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                     translationSourceLanguage
                                 )
                             } label: {
-                                Text("Off")
+                                Label(
+                                    "Off",
+                                    systemImage: !translationEnabled
+                                        ? "checkmark.circle.fill"
+                                        : "nosign"
+                                )
                             }
                             Divider()
                             ForEach(TranslationSourceLanguage.allCases) { language in
@@ -1007,32 +1058,56 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                         language
                                     )
                                 } label: {
-                                    Text(language.title)
+                                    Label(
+                                        language.title,
+                                        systemImage: translationEnabled &&
+                                            translationSourceLanguage == language
+                                            ? "checkmark.circle.fill"
+                                            : language.systemImage
+                                    )
                                 }
                             }
                         } label: {
-                            Text("Auto translate")
+                            Label(
+                                "Auto translate",
+                                systemImage: "character.book.closed.fill"
+                            )
                         }
                         Menu {
                             Button {
                                 setFrameRateAction(nil)
                             } label: {
-                                Text("Default")
+                                Label(
+                                    "Default",
+                                    systemImage: !frameRateOverrideEnabled
+                                        ? "checkmark.circle.fill"
+                                        : "clock"
+                                )
                             }
                             Divider()
                             ForEach([30, 60], id: \.self) { fps in
                                 Button {
                                     setFrameRateAction(fps)
                                 } label: {
-                                    Text("\(fps) FPS")
+                                    Label(
+                                        "\(fps) FPS",
+                                        systemImage: frameRateOverrideEnabled &&
+                                            frameRateLimit == fps
+                                            ? "checkmark.circle.fill"
+                                            : "speedometer"
+                                    )
                                 }
                             }
                         } label: {
-                            Text("FPS")
+                            Label("FPS", systemImage: "speedometer")
                         }
                         Divider()
-                        Button("Hide application", action: hideAction)
-                        Button("Exit", role: .destructive, action: exitAction)
+                        Button(action: hideAction) {
+                            Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                        Button(role: .destructive, action: exitAction) {
+                            Label("Exit", systemImage: "power")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }

@@ -12,7 +12,7 @@ using namespace jdk8compat;
 
 constexpr usize kMapKeysField = 0U;
 constexpr usize kMapSizeField = 2U;
-constexpr usize kEnumMapTypeField = 3U;
+constexpr usize kEnumMapTypeField = 4U;
 constexpr usize kEntryOwnerField = 0U;
 constexpr usize kEntryKeyField = 1U;
 

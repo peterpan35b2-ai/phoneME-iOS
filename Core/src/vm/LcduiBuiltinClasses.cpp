@@ -84,6 +84,8 @@ using namespace builtin;
         }, {
             method(kPublic | kStatic, "createImage",
                    "(II)Ljavax/microedition/lcdui/Image;"),
+            method(kPublic | kStatic, "createMutableARGB",
+                   "(II)Ljavax/microedition/lcdui/Image;"),
             method(kPublic | kStatic, "createImage",
                    "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;"),
             method(kPublic | kStatic, "createImage",
@@ -104,6 +106,7 @@ using namespace builtin;
             method(kPublic, "getHeight", "()I"),
             method(kPublic, "isMutable", "()Z"),
             method(kPublic, "getRGB", "([IIIIIII)V"),
+            method(kPublic, "setRGB", "([IIIIIII)V"),
         });
     }
     if (name == "com/nokia/mid/ui/DirectGraphics") {
@@ -331,6 +334,7 @@ using namespace builtin;
             method(kPublic, "getFont", "()Ljavax/microedition/lcdui/Font;"),
             method(kPublic, "drawLine", "(IIII)V"),
             method(kPublic, "fillRect", "(IIII)V"),
+            method(kPublic, "clearARGBRect", "(IIII)V"),
             method(kPublic, "drawRect", "(IIII)V"),
             method(kPublic, "drawRoundRect", "(IIIIII)V"),
             method(kPublic, "fillRoundRect", "(IIIIII)V"),

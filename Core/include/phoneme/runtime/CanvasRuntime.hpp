@@ -62,6 +62,7 @@ public:
         std::function<std::chrono::steady_clock::time_point()> clock);
     [[nodiscard]] Status set_dimensions(Dimensions dimensions);
     [[nodiscard]] Status set_host_foreground(bool foreground);
+    [[nodiscard]] Status set_host_rendering_enabled(bool enabled);
     void enqueue_key(i32 key_code, bool pressed, u64 sequence);
     void enqueue_host_key(i32 key_code, bool pressed, u64 sequence);
     void enqueue_pointer(i32 x, i32 y, i32 action, u64 sequence);
@@ -185,6 +186,9 @@ private:
                                                  i32 x,
                                                  i32 y);
     [[nodiscard]] Status update_effective_visibility(CanvasState& state);
+    [[nodiscard]] bool host_rendering_active() const noexcept {
+        return host_foreground_ && host_rendering_enabled_;
+    }
     void set_game_rendering_enabled(CanvasState& state,
                                     bool enabled) noexcept;
     [[nodiscard]] bool suppresses_key_callback(
@@ -204,6 +208,7 @@ private:
     std::deque<PendingInput> inputs_;
     std::deque<VisibilityChange> visibility_changes_;
     bool host_foreground_ {false};
+    bool host_rendering_enabled_ {true};
     bool pointer_events_supported_ {true};
     bool pointer_motion_supported_ {true};
     bool repeat_events_supported_ {true};

@@ -405,6 +405,25 @@ void test_install_flow(const std::filesystem::path& root,
     check(reinstalled.has_value() && *reinstalled == id,
           "reinstall derives the same stable suite ID");
 
+    check(copy_fixture_file(jar_v1, final_directory / "app.jar"),
+          "simulate external managed JAR modification");
+    store.clear();
+    auto recovered_tampered_suite =
+        store.configure(SuiteStoreConfig {.root_path = root.string()});
+    check(recovered_tampered_suite.has_value(),
+          "recover runtime when a managed suite no longer matches its database record");
+    check(store.find(id) == nullptr,
+          "drop only the damaged managed suite registration during recovery");
+    check(std::filesystem::exists(rms_marker, error) && !error,
+          "damaged suite recovery preserves RMS data");
+    check(!std::filesystem::exists(final_directory, error) && !error,
+          "remove unreferenced damaged managed suite files after recovery");
+    auto reinstalled_after_recovery =
+        store.install(jad_v2.string(), imported_v2.string());
+    check(reinstalled_after_recovery.has_value() &&
+              *reinstalled_after_recovery == id,
+          "reinstall after damaged suite recovery restores stable suite ID");
+
     const std::filesystem::path files_marker =
         root / "files" / std::to_string(id.value) / "marker.bin";
     const std::filesystem::path permission_marker =

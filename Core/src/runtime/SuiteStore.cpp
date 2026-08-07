@@ -931,12 +931,14 @@ SuiteId SuiteStore::allocate_id(
 }
 
 Status SuiteStore::recover_transactions(
-    const SuiteDatabaseSnapshot& snapshot) {
+    SuiteDatabaseSnapshot& snapshot) {
     bool directory_changed = false;
+    bool database_changed = false;
     std::vector<i32> referenced_ids;
     referenced_ids.reserve(snapshot.records.size());
+    std::vector<SuiteDatabaseRecord> recovered_records;
+    recovered_records.reserve(snapshot.records.size());
     for (const SuiteDatabaseRecord& record : snapshot.records) {
-        referenced_ids.push_back(record.id.value);
         const std::filesystem::path final_path =
             suite_directory(root_path_, record.id);
         const std::filesystem::path stage_path =
@@ -983,9 +985,17 @@ Status SuiteStore::recover_transactions(
             selected = &tombstone_path;
         }
         if (selected == nullptr) {
-            return fail(ErrorCode::checksum_mismatch,
-                        "no suite transaction candidate matches the persistent database");
+            // A managed JAR may be missing or have been modified outside the
+            // transactional installer. Do not let one damaged suite brick the
+            // entire runtime. Forget only its managed registration; the
+            // unreferenced suite directory is removed below while RMS/files
+            // remain untouched so reinstalling the same scoped suite recovers
+            // its stable suite ID and application data.
+            database_changed = true;
+            continue;
         }
+
+        referenced_ids.push_back(record.id.value);
 
         if (*selected != final_path) {
             if (*final_exists) {
@@ -1012,6 +1022,19 @@ Status SuiteStore::recover_transactions(
         auto removed_stage = remove_tree(stage_path);
         if (!removed_stage) return removed_stage;
         directory_changed = directory_changed || *stage_exists;
+        recovered_records.push_back(record);
+    }
+
+    if (database_changed) {
+        if (snapshot.generation == std::numeric_limits<u64>::max()) {
+            return fail(ErrorCode::out_of_range,
+                        "suite database generation exhausted during recovery");
+        }
+        snapshot.records = std::move(recovered_records);
+        ++snapshot.generation;
+        snapshot.recovered_from_backup = false;
+        auto committed = database_.commit(snapshot);
+        if (!committed) return std::unexpected(committed.error());
     }
 
     std::error_code error;

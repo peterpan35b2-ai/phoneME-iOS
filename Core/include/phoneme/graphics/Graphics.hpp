@@ -67,6 +67,12 @@ void translate(GraphicsContext& context, i32 x, i32 y) noexcept;
                                i32 y,
                                i32 width,
                                i32 height);
+[[nodiscard]] Status clear_rect(Image& target,
+                                const GraphicsContext& context,
+                                i32 x,
+                                i32 y,
+                                i32 width,
+                                i32 height);
 [[nodiscard]] Status draw_rect(Image& target,
                                const GraphicsContext& context,
                                i32 x,

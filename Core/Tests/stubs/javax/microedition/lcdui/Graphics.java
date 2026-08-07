@@ -16,6 +16,8 @@ public final class Graphics {
 
     public void setColor(int rgb) { }
     public void setColor(int red, int green, int blue) { }
+    public void setARGBColor(int argb) { }
+    public int getAlphaComponent() { return 255; }
     public int getColor() { return 0; }
     public int getDisplayColor(int color) { return 0; }
     public int getRedComponent() { return 0; }
@@ -38,6 +40,7 @@ public final class Graphics {
     public Font getFont() { return null; }
     public void drawLine(int x1, int y1, int x2, int y2) { }
     public void fillRect(int x, int y, int width, int height) { }
+    public void clearARGBRect(int x, int y, int width, int height) { }
     public void drawRect(int x, int y, int width, int height) { }
     public void drawRoundRect(int x, int y, int width, int height,
                               int arcWidth, int arcHeight) { }

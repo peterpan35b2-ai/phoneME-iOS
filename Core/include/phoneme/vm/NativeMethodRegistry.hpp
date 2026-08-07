@@ -20,6 +20,11 @@ using NativeMethod = std::function<Result<std::optional<Value>>(
     Machine& machine,
     std::span<const Value> arguments)>;
 
+enum class NativeJitPolicy : u8 {
+    conservative,
+    synchronous_bounded,
+};
+
 struct NativeMethodSignature final {
     NativeMethodId id;
     std::string owner;
@@ -39,10 +44,12 @@ struct NativeMethodBinding final {
 
 class NativeMethodRegistry final {
 public:
-    [[nodiscard]] Status register_method(std::string owner,
-                                         std::string name,
-                                         std::string descriptor,
-                                         NativeMethod implementation);
+    [[nodiscard]] Status register_method(
+        std::string owner,
+        std::string name,
+        std::string descriptor,
+        NativeMethod implementation,
+        NativeJitPolicy jit_policy = NativeJitPolicy::conservative);
     [[nodiscard]] Status register_alias(std::string_view source_owner,
                                         std::string_view source_name,
                                         std::string_view source_descriptor,
@@ -59,6 +66,8 @@ public:
     [[nodiscard]] bool contains(std::string_view owner,
                                 std::string_view name,
                                 std::string_view descriptor) const noexcept;
+    [[nodiscard]] NativeJitPolicy jit_policy(
+        NativeMethodId method_id) const noexcept;
     [[nodiscard]] Result<std::optional<Value>> invoke(
         Machine& machine,
         NativeMethodId method_id,
@@ -81,6 +90,7 @@ private:
     struct Entry final {
         NativeMethodSignature signature;
         NativeMethod implementation;
+        NativeJitPolicy jit_policy {NativeJitPolicy::conservative};
         std::size_t invocation_count {0};
     };
 

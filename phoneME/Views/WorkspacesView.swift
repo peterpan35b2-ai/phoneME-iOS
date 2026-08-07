@@ -204,7 +204,7 @@ struct WorkspaceDetailView: View {
     @State private var replacingPanelID: UUID?
     @State private var showResetLayoutConfirmation = false
     @State private var panelViewportSize = CGSize.zero
-    @State private var focusedPanelScrollTask: Task<Void, Never>?
+    @State private var workspaceVisibleOriginX: CGFloat = 0
     @State private var errorMessage: String?
 
     private var workspace: EmulatorWorkspace? {
@@ -214,15 +214,6 @@ struct WorkspaceDetailView: View {
     private var focusedPanel: EmulatorWorkspacePanel? {
         guard let focusedPanelID else { return nil }
         return workspace?.panels.first { $0.id == focusedPanelID }
-    }
-
-    private var zoomedPanelID: UUID? {
-        guard !isEditingLayout,
-              let focusedPanelID,
-              runtimeStore.isRunning(panelID: focusedPanelID) else {
-            return nil
-        }
-        return focusedPanelID
     }
 
     var body: some View {
@@ -244,7 +235,6 @@ struct WorkspaceDetailView: View {
                     VStack(spacing: 0) {
                         workspaceCanvas(
                             workspace,
-                            keyboardIsVisible: keypadHeight > 0,
                             bottomScrollStripHeight: tabBarGap
                         )
 
@@ -398,8 +388,6 @@ struct WorkspaceDetailView: View {
             runtimeStore.activateWorkspace(workspaceID)
         }
         .onDisappear {
-            focusedPanelScrollTask?.cancel()
-            focusedPanelScrollTask = nil
             runtimeStore.deactivateWorkspace(workspaceID)
         }
     }
@@ -407,7 +395,6 @@ struct WorkspaceDetailView: View {
     @ViewBuilder
     private func workspaceCanvas(
         _ workspace: EmulatorWorkspace,
-        keyboardIsVisible: Bool,
         bottomScrollStripHeight: CGFloat
     ) -> some View {
         GeometryReader { geometry in
@@ -424,8 +411,7 @@ struct WorkspaceDetailView: View {
                 viewportWidth: viewportSize.width
             )
 
-            ScrollViewReader { scrollProxy in
-                ScrollView(.horizontal, showsIndicators: isEditingLayout) {
+            ScrollView(.horizontal, showsIndicators: isEditingLayout) {
                     ZStack(alignment: .topLeading) {
                         Color.black
                             .contentShape(Rectangle())
@@ -469,9 +455,11 @@ struct WorkspaceDetailView: View {
                                     game: game(for: panel),
                                     session: runtimeStore.session(for: panel.id),
                                     canvasSize: availablePanelSize,
-                                    contentSize: CGSize(
-                                        width: contentWidth,
-                                        height: viewportSize.height
+                                    visibleBounds: CGRect(
+                                        x: workspaceVisibleOriginX,
+                                        y: 0,
+                                        width: availablePanelSize.width,
+                                        height: availablePanelSize.height
                                     ),
                                     isFocused: focusedPanelID == panel.id,
                                     isRunning: isRunning,
@@ -531,22 +519,43 @@ struct WorkspaceDetailView: View {
                         alignment: .topLeading
                     )
                     .contentShape(Rectangle())
+                    .background(
+                        GeometryReader { contentGeometry in
+                            Color.clear.preference(
+                                key: WorkspaceScrollOffsetPreferenceKey.self,
+                                value: -contentGeometry.frame(
+                                    in: .named("workspace-canvas-scroll")
+                                ).minX
+                            )
+                        }
+                    )
                 }
                 .background(Color.black)
-                .onChange(of: zoomedPanelID) { panelID in
-                    revealZoomedPanel(panelID, using: scrollProxy)
-                }
-                .onChange(of: keyboardIsVisible) { _ in
-                    revealZoomedPanel(zoomedPanelID, using: scrollProxy)
+                .coordinateSpace(name: "workspace-canvas-scroll")
+                .onPreferenceChange(
+                    WorkspaceScrollOffsetPreferenceKey.self
+                ) { offset in
+                    let maximumOffset = max(
+                        contentWidth - viewportSize.width,
+                        0
+                    )
+                    let visibleOriginX = min(
+                        max(offset, 0),
+                        maximumOffset
+                    )
+                    guard abs(
+                        workspaceVisibleOriginX - visibleOriginX
+                    ) > 0.5 else {
+                        return
+                    }
+                    workspaceVisibleOriginX = visibleOriginX
                 }
                 .onAppear {
                     updatePanelViewportSize(availablePanelSize)
                 }
                 .onChange(of: availablePanelSize) { size in
                     updatePanelViewportSize(size)
-                    revealZoomedPanel(zoomedPanelID, using: scrollProxy)
                 }
-            }
         }
     }
 
@@ -572,38 +581,6 @@ struct WorkspaceDetailView: View {
             return
         }
         panelViewportSize = size
-    }
-
-    private func revealZoomedPanel(
-        _ panelID: UUID?,
-        using scrollProxy: ScrollViewProxy
-    ) {
-        focusedPanelScrollTask?.cancel()
-        focusedPanelScrollTask = nil
-
-        guard let panelID else { return }
-        focusedPanelScrollTask = Task { @MainActor in
-            await Task.yield()
-            guard !Task.isCancelled,
-                  zoomedPanelID == panelID else {
-                return
-            }
-
-            withAnimation(.easeInOut(duration: 0.22)) {
-                scrollProxy.scrollTo(panelID, anchor: .center)
-            }
-
-            try? await Task.sleep(nanoseconds: 320_000_000)
-            guard !Task.isCancelled,
-                  zoomedPanelID == panelID else {
-                return
-            }
-
-            withAnimation(.easeOut(duration: 0.12)) {
-                scrollProxy.scrollTo(panelID, anchor: .center)
-            }
-            focusedPanelScrollTask = nil
-        }
     }
 
     private var hiddenTabBarContentHeight: CGFloat {
@@ -835,12 +812,20 @@ struct WorkspaceDetailView: View {
     }
 }
 
+private struct WorkspaceScrollOffsetPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct WorkspacePanelCard: View {
     let panel: EmulatorWorkspacePanel
     let game: Game?
     let session: EmulatorSession?
     let canvasSize: CGSize
-    let contentSize: CGSize
+    let visibleBounds: CGRect
     let isFocused: Bool
     let isRunning: Bool
     let isEditingLayout: Bool
@@ -858,6 +843,7 @@ private struct WorkspacePanelCard: View {
 
     @GestureState private var moveTranslation = CGSize.zero
     @GestureState private var resizeTranslation = CGSize.zero
+    @State private var animatedCenter: CGPoint?
 
     private let titleBarHeight: CGFloat = 36
 
@@ -922,13 +908,33 @@ private struct WorkspacePanelCard: View {
             y: resizeScale.height,
             anchor: .topLeading
         )
-        .position(x: presentedRect.midX, y: presentedRect.midY)
+        .position(
+            x: animatedCenter?.x ?? presentedRect.midX,
+            y: animatedCenter?.y ?? presentedRect.midY
+        )
         .offset(isZoomed ? .zero : moveOffset)
         .zIndex(isZoomed ? 20 : (isFocused ? 5 : 0))
-        .animation(
-            .spring(response: 0.28, dampingFraction: 0.86),
-            value: isZoomed
-        )
+        .onAppear {
+            animatedCenter = CGPoint(
+                x: presentedRect.midX,
+                y: presentedRect.midY
+            )
+        }
+        .onChange(of: presentedRect) { newRect in
+            let targetCenter = CGPoint(
+                x: newRect.midX,
+                y: newRect.midY
+            )
+            guard animatedCenter != targetCenter else { return }
+
+            if isEditingLayout {
+                animatedCenter = targetCenter
+            } else {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    animatedCenter = targetCenter
+                }
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(game?.title ?? L10n.string("Unavailable screen"))
         .accessibilityValue(isFocused ? L10n.string("Focused") : "")
@@ -1104,29 +1110,34 @@ private struct WorkspacePanelCard: View {
             max(min(canvasSize.width, canvasSize.height) * 0.018, 4),
             10
         )
-        let availableWidth = max(canvasSize.width - margin * 2, 1)
-        let availableHeight = max(canvasSize.height - margin * 2, 1)
         let availableRect = CGRect(
-            x: margin,
-            y: margin,
-            width: availableWidth,
-            height: availableHeight
+            x: visibleBounds.minX + margin,
+            y: visibleBounds.minY + margin,
+            width: max(visibleBounds.width - margin * 2, 1),
+            height: max(visibleBounds.height - margin * 2, 1)
         )
         let targetRect = panel.profile.preserveAspectRatio
             ? aspectFittedWindowRect(in: availableRect)
             : availableRect
         let targetSize = targetRect.size
-
-        let minimumX = margin
+        let minimumX = availableRect.minX
         let maximumX = max(
-            contentSize.width - targetSize.width - margin,
+            availableRect.maxX - targetSize.width,
             minimumX
+        )
+        let minimumY = availableRect.minY
+        let maximumY = max(
+            availableRect.maxY - targetSize.height,
+            minimumY
         )
         let x = min(
             max(baseRect.midX - targetSize.width / 2, minimumX),
             maximumX
         )
-        let y = targetRect.minY
+        let y = min(
+            max(baseRect.midY - targetSize.height / 2, minimumY),
+            maximumY
+        )
 
         return CGRect(origin: CGPoint(x: x, y: y), size: targetSize)
     }

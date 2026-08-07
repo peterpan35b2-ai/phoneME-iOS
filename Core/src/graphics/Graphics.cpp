@@ -577,6 +577,42 @@ Status fill_rect(Image& target,
     return {};
 }
 
+Status clear_rect(Image& target,
+                  const GraphicsContext& context,
+                  i32 x,
+                  i32 y,
+                  i32 width,
+                  i32 height) {
+    auto mutable_target = require_mutable(target);
+    if (!mutable_target) {
+        return mutable_target;
+    }
+    if (width <= 0 || height <= 0 || !context.rendering_enabled) {
+        return {};
+    }
+    const Rect clear = intersect(
+        Rect {.x = saturated_add(x, context.translate_x),
+              .y = saturated_add(y, context.translate_y),
+              .width = width,
+              .height = height},
+        context.clip);
+    if (empty(clear)) {
+        return {};
+    }
+    auto pixels = target.mutable_pixels();
+    for (i32 row = 0; row < clear.height; ++row) {
+        const usize offset =
+            static_cast<usize>(clear.y + row) *
+                static_cast<usize>(target.width()) +
+            static_cast<usize>(clear.x);
+        std::fill_n(pixels.begin() + static_cast<std::ptrdiff_t>(offset),
+                    clear.width,
+                    0U);
+    }
+    target.mark_dirty_region(clear.x, clear.y, clear.width, clear.height);
+    return {};
+}
+
 Status draw_rect(Image& target,
                  const GraphicsContext& context,
                  i32 x,

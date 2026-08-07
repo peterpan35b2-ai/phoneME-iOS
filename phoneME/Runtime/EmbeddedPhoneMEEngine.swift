@@ -1819,14 +1819,12 @@ final class EmbeddedPhoneMEEngine: NSObject {
     func enterBackground() {
         shouldRunInForeground = false
 
-        // Suspend the host-facing runtime state, not the MIDlet lifecycle.
-        // Core's Runtime::suspend() never invokes pauseApp() and never closes
-        // sockets. It marks Canvas as detached (discarding repaint/flush work),
-        // coalesces duplicate callSerially callbacks, throttles Java execution,
-        // and suspends media while the optional background keeper can preserve
-        // an online connection. Merely stopping the Swift poll timer leaves the
-        // core believing the screen is visible, so callbacks accumulate and are
-        // replayed in a burst when the scene becomes active again.
+        // Suspend host presentation only, not the MIDlet lifecycle or VM.
+        // Core keeps Java workers, timers, sockets, callSerially callbacks and
+        // media running normally while Canvas/GameCanvas rendering is dropped.
+        // No hideNotify() is exposed to the game. The optional iOS background
+        // keeper is still required to stop iOS itself from suspending the whole
+        // process after the app leaves the foreground.
         suspendRuntimeIfNeeded()
     }
 

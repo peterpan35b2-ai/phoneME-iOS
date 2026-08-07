@@ -255,6 +255,7 @@ using namespace builtin;
             field(kPrivate, "keys", "[Ljava/lang/Object;"),
             field(kPrivate, "values", "[Ljava/lang/Object;"),
             field(kPrivate, "size", "I"),
+            field(kPrivate, "hashes", "[I"),
             field(kPrivate, "keyType", "Ljava/lang/Class;"),
         }, {
             method(kPublic, "<init>", "(Ljava/lang/Class;)V"),

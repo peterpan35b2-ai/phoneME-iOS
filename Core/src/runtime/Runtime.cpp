@@ -152,6 +152,9 @@ public:
     vm::Machine machine;
     CanvasRuntime canvas;
     vm::NativeRootScope paint_graphics;
+    u64 paint_graphics_generation {0U};
+    bool paint_graphics_published {false};
+    std::vector<u8> frame_rgba_scratch;
     vm::ObjectRef midlet;
     std::atomic<u64> ui_event_count {0U};
     std::mutex lifecycle_state_mutex;
@@ -426,6 +429,24 @@ private:
     vm::Scheduler& scheduler_;
 };
 
+class ScopedJitStartup final {
+public:
+    explicit ScopedJitStartup(vm::Machine& machine) noexcept
+        : machine_(machine) {
+        machine_.configure_jit_startup(true);
+    }
+
+    ~ScopedJitStartup() {
+        machine_.configure_jit_startup(false);
+    }
+
+    ScopedJitStartup(const ScopedJitStartup&) = delete;
+    ScopedJitStartup& operator=(const ScopedJitStartup&) = delete;
+
+private:
+    vm::Machine& machine_;
+};
+
 [[nodiscard]] bool is_glu_vendor(std::u16string_view vendor) noexcept {
     constexpr std::u16string_view kPrefix = u"glu";
     if (vendor.size() < kPrefix.size()) return false;
@@ -514,7 +535,8 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     vm::ObjectRef graphics_object,
     Dimensions dimensions,
     vm::CanvasRect clip,
-    bool display_target) {
+    bool display_target,
+    bool synchronize_pixels) {
     auto target_value = machine.heap().field(graphics_object,
                                              kGraphicsTargetField);
     if (!target_value) return std::unexpected(target_value.error());
@@ -528,8 +550,10 @@ void apply_legacy_property_defaults(vm::Machine& machine,
         return fail(ErrorCode::invalid_state,
                     "cached Canvas graphics dimensions changed");
     }
-    auto copied = copy_framebuffer_to_image(framebuffer, **target);
-    if (!copied) return copied;
+    if (synchronize_pixels) {
+        auto copied = copy_framebuffer_to_image(framebuffer, **target);
+        if (!copied) return copied;
+    }
 
     auto context = machine.graphics().context(graphics_object.bits);
     if (!context) return std::unexpected(context.error());
@@ -551,7 +575,8 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     Dimensions dimensions,
     vm::CanvasRect clip,
     bool display_target,
-    vm::NativeRootScope* persistent_cache = nullptr) {
+    vm::NativeRootScope* persistent_cache = nullptr,
+    bool synchronize_cached_pixels = true) {
     if (persistent_cache != nullptr && persistent_cache->active()) {
         auto cached = persistent_cache->get();
         if (cached) {
@@ -560,7 +585,8 @@ void apply_legacy_property_defaults(vm::Machine& machine,
                                                *cached,
                                                dimensions,
                                                clip,
-                                               display_target);
+                                               display_target,
+                                               synchronize_cached_pixels);
             if (reset) {
                 return machine.pin_native_root(*cached);
             }
@@ -571,8 +597,6 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     auto image = graphics::Image::create_mutable(dimensions.width,
                                                   dimensions.height);
     if (!image) return std::unexpected(image.error());
-    auto copied = copy_framebuffer_to_image(framebuffer, *image);
-    if (!copied) return std::unexpected(copied.error());
 
     auto image_root = machine.allocate_pinned_instance(
         "javax/microedition/lcdui/Image");
@@ -611,7 +635,8 @@ void apply_legacy_property_defaults(vm::Machine& machine,
                                        *graphics_object,
                                        dimensions,
                                        clip,
-                                       display_target);
+                                       display_target,
+                                       true);
     if (!reset) return std::unexpected(reset.error());
 
     if (persistent_cache != nullptr) {
@@ -622,9 +647,11 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     return std::move(*graphics_root);
 }
 
-[[nodiscard]] Status publish_canvas_graphics(vm::Machine& machine,
-                                             Framebuffer& framebuffer,
-                                             vm::ObjectRef graphics_object) {
+[[nodiscard]] Status publish_canvas_graphics(
+    vm::Machine& machine,
+    Framebuffer& framebuffer,
+    vm::ObjectRef graphics_object,
+    std::vector<u8>* reusable_rgba = nullptr) {
     if (graphics_object.is_null()) return {};
     auto target_value = machine.heap().field(graphics_object,
                                              kGraphicsTargetField);
@@ -634,7 +661,11 @@ void apply_legacy_property_defaults(vm::Machine& machine,
     auto image = machine.graphics().image(image_object->bits);
     if (!image) return std::unexpected(image.error());
 
-    std::vector<u8> rgba((*image)->pixels().size() * 4U);
+    std::vector<u8> local_rgba;
+    std::vector<u8>& rgba = reusable_rgba != nullptr
+        ? *reusable_rgba
+        : local_rgba;
+    rgba.resize((*image)->pixels().size() * 4U);
     usize offset = 0;
     for (graphics::Pixel pixel : (*image)->pixels()) {
         const graphics::Pixel display_pixel =
@@ -644,7 +675,7 @@ void apply_legacy_property_defaults(vm::Machine& machine,
         rgba[offset++] = graphics::blue(display_pixel);
         rgba[offset++] = graphics::alpha(display_pixel);
     }
-    return framebuffer.replace(
+    return framebuffer.replace_exchange(
         Dimensions {(*image)->width(), (*image)->height()}, rgba);
 }
 
@@ -790,14 +821,18 @@ ApplicationVM::ApplicationVM(
         vm::ObjectRef,
         Dimensions target_dimensions,
         vm::CanvasRect repaint_region) {
+        const auto current = framebuffer.metadata();
+        const bool synchronize = !paint_graphics_published ||
+            current.generation != paint_graphics_generation;
         return prepare_canvas_graphics(target_machine,
                                        framebuffer,
                                        target_dimensions,
                                        repaint_region,
                                        true,
-                                       &paint_graphics);
+                                       &paint_graphics,
+                                       synchronize);
     };
-    hooks.commit_paint = [&framebuffer](
+    hooks.commit_paint = [this, &framebuffer](
         vm::Machine& target_machine,
         vm::ObjectRef,
         vm::ObjectRef graphics,
@@ -805,8 +840,13 @@ ApplicationVM::ApplicationVM(
         target_machine.pace_frame_publication();
         auto published = publish_canvas_graphics(target_machine,
                                                  framebuffer,
-                                                 graphics);
-        if (published) target_machine.note_frame_pacing_boundary();
+                                                 graphics,
+                                                 &frame_rgba_scratch);
+        if (published) {
+            paint_graphics_generation = framebuffer.metadata().generation;
+            paint_graphics_published = true;
+            target_machine.note_frame_pacing_boundary();
+        }
         return published;
     };
     hooks.acquire_game_graphics = [&framebuffer](
@@ -822,7 +862,7 @@ ApplicationVM::ApplicationVM(
                             target_dimensions.height},
             false);
     };
-    hooks.flush_game_graphics = [&framebuffer](
+    hooks.flush_game_graphics = [this, &framebuffer](
         vm::Machine& target_machine,
         vm::ObjectRef,
         vm::ObjectRef graphics,
@@ -830,7 +870,8 @@ ApplicationVM::ApplicationVM(
         target_machine.pace_frame_publication();
         auto published = publish_canvas_graphics(target_machine,
                                                  framebuffer,
-                                                 graphics);
+                                                 graphics,
+                                                 &frame_rgba_scratch);
         if (published) target_machine.note_frame_pacing_boundary();
         return published;
     };
@@ -1484,6 +1525,18 @@ Status Runtime::start_midlet(SuiteId suite_id,
         jit_enabled,
         framebuffer_,
         std::move(translation_service));
+    // Persist only stable hot method signatures per installed suite. Profile
+    // I/O is opportunistic: a missing/unwritable profile must never prevent a
+    // MIDlet from launching, while a valid profile lets the next run compile
+    // previously hot methods on their first invocation.
+    (void)application_vm->machine.configure_jit_profile(
+        runtime_home + "/jit/" + std::to_string(suite_id.value) + ".hot");
+    // Launch is latency-sensitive: avoid eagerly decoding/compiling every
+    // one-shot helper while still allowing sufficiently large loop-heavy
+    // constructor/startApp work to benefit from native execution. The guard
+    // switches back to the normal gameplay tier as soon as start_midlet
+    // returns (including the first-observable-frame deferred startApp path).
+    ScopedJitStartup jit_startup(application_vm->machine);
     application_vm->canvas.set_input_capabilities(
         pointer_events_supported,
         pointer_motion_supported,
@@ -1756,12 +1809,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
 
     if (previous_vm != nullptr) {
         std::scoped_lock previous_operation(previous_vm->operation_mutex);
-        auto hidden = previous_vm->canvas.set_host_foreground(false);
+        auto hidden = previous_vm->canvas.set_host_rendering_enabled(false);
         if (!hidden) return fail_start(hidden.error());
-        auto pumped = previous_vm->canvas.pump();
-        if (!pumped) return fail_start(pumped.error());
-        previous_vm->machine.media().suspend();
-        previous_vm->machine.scheduler().set_host_foreground(false);
     }
     if (launch_signal == vm::MidletSignal::paused) {
         application_vm->machine.media().suspend();
@@ -1829,9 +1878,9 @@ Status Runtime::start_midlet(SuiteId suite_id,
 
 Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     // app_id == 0 is the host-level "detach visible application" operation.
-    // It is intentionally not MIDlet.pauseApp(): sockets, timers and audio may
-    // remain alive, but Canvas rendering is disabled and the VM scheduler moves
-    // to its shared low-duty background gate.
+    // It is intentionally presentation-only: the MIDlet stays ACTIVE, Java
+    // workers/timers/sockets/media keep running at their normal rate, and no
+    // hideNotify()/showNotify() lifecycle edge is exposed to the game.
     if (!app_id.valid()) {
         std::shared_ptr<ApplicationVM> hidden_vm;
         AppId hidden_id;
@@ -1876,12 +1925,8 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
 
         {
             std::scoped_lock hidden_operation(hidden_vm->operation_mutex);
-            auto hidden = hidden_vm->canvas.set_host_foreground(false);
+            auto hidden = hidden_vm->canvas.set_host_rendering_enabled(false);
             if (!hidden) return fail_hide(hidden.error());
-            auto pumped = hidden_vm->canvas.pump();
-            if (!pumped) return fail_hide(pumped.error());
-            hidden_vm->machine.media().suspend();
-            hidden_vm->machine.scheduler().set_host_foreground(false);
         }
 
         std::unique_lock lock(mutex_);
@@ -1974,12 +2019,8 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     if (previous_vm != nullptr) {
         previous_operation = std::unique_lock<std::recursive_mutex>(
             previous_vm->operation_mutex);
-        auto hidden = previous_vm->canvas.set_host_foreground(false);
+        auto hidden = previous_vm->canvas.set_host_rendering_enabled(false);
         if (!hidden) return finish_failure(hidden.error(), true);
-        auto pumped = previous_vm->canvas.pump();
-        if (!pumped) return finish_failure(pumped.error(), true);
-        previous_vm->machine.media().suspend();
-        previous_vm->machine.scheduler().set_host_foreground(false);
     }
     target_vm->machine.scheduler().set_host_foreground(true);
     if (target_media_active) {
@@ -1995,6 +2036,8 @@ Status Runtime::set_foreground(AppId app_id, Dimensions dimensions) {
     if (!resized) return finish_failure(resized.error(), false);
     auto foregrounded = target_vm->canvas.set_host_foreground(true);
     if (!foregrounded) return finish_failure(foregrounded.error(), false);
+    auto rendering = target_vm->canvas.set_host_rendering_enabled(true);
+    if (!rendering) return finish_failure(rendering.error(), false);
     auto pumped = target_vm->canvas.pump();
     if (!pumped) return finish_failure(pumped.error(), false);
     auto replayed = vm::replay_current_lcdui(target_vm->machine);
@@ -2623,7 +2666,6 @@ void Runtime::stop() noexcept {
 }
 
 void Runtime::suspend() noexcept {
-    std::vector<std::shared_ptr<ApplicationVM>> application_vms;
     std::shared_ptr<ApplicationVM> foreground_vm;
     AppId foreground_id;
     {
@@ -2633,50 +2675,32 @@ void Runtime::suspend() noexcept {
         foreground_id = foreground_app_id_;
         const App* foreground = find_app_unlocked(foreground_id);
         if (foreground != nullptr) foreground_vm = foreground->vm;
-        application_vms.reserve(apps_.size());
-        for (const auto& [id, app] : apps_) {
-            (void)id;
-            if (app.vm != nullptr && app.state != AppState::destroyed) {
-                application_vms.push_back(app.vm);
-            }
-        }
     }
 
+    // Host suspension is presentation-only. iOS may keep the process alive
+    // through its background execution policy, so Java workers, sockets,
+    // timers and media must keep their normal scheduling semantics. Suppress
+    // only graphics work; do not expose hideNotify() to the MIDlet.
     if (foreground_vm != nullptr) {
         std::scoped_lock foreground_operation(foreground_vm->operation_mutex);
-        auto hidden = foreground_vm->canvas.set_host_foreground(false);
-        auto pumped = hidden ? foreground_vm->canvas.pump()
-                             : Status(std::unexpected(hidden.error()));
-        if (!pumped) {
+        auto hidden = foreground_vm->canvas.set_host_rendering_enabled(false);
+        if (!hidden) {
             std::unique_lock lock(mutex_);
             App* foreground = find_app_unlocked(foreground_id);
             if (foreground != nullptr && foreground->vm == foreground_vm) {
-                mark_canvas_failure_unlocked(*foreground, pumped.error());
+                mark_canvas_failure_unlocked(*foreground, hidden.error());
             }
         }
-    }
-    for (const auto& vm : application_vms) {
-        std::scoped_lock vm_operation(vm->operation_mutex);
-        vm->machine.scheduler().set_host_foreground(false);
-        vm->machine.media().suspend();
     }
 }
 
 void Runtime::resume() noexcept {
-    std::vector<std::shared_ptr<ApplicationVM>> active_vms;
     std::shared_ptr<ApplicationVM> foreground_vm;
     AppId foreground_id;
     {
         std::unique_lock lock(mutex_);
         if (!running_ || !suspended_) return;
         suspended_ = false;
-        active_vms.reserve(apps_.size());
-        for (const auto& [id, app] : apps_) {
-            (void)id;
-            if (app.vm != nullptr && app.state == AppState::active) {
-                active_vms.push_back(app.vm);
-            }
-        }
         foreground_id = foreground_app_id_;
         const App* foreground = find_app_unlocked(foreground_id);
         if (foreground != nullptr && foreground->vm != nullptr &&
@@ -2686,18 +2710,9 @@ void Runtime::resume() noexcept {
         }
     }
 
-    for (const auto& vm : active_vms) {
-        std::scoped_lock vm_operation(vm->operation_mutex);
-        if (vm == foreground_vm) {
-            vm->machine.media().resume();
-        } else {
-            vm->machine.media().suspend();
-        }
-    }
     if (foreground_vm != nullptr) {
         std::scoped_lock foreground_operation(foreground_vm->operation_mutex);
-        foreground_vm->machine.scheduler().set_host_foreground(true);
-        auto shown = foreground_vm->canvas.set_host_foreground(true);
+        auto shown = foreground_vm->canvas.set_host_rendering_enabled(true);
         auto pumped = shown ? foreground_vm->canvas.pump()
                             : Status(std::unexpected(shown.error()));
         if (!pumped) {

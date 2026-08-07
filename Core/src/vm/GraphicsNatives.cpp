@@ -315,11 +315,21 @@ void add(NativeMethodRegistry& registry,
          std::string owner,
          std::string name,
          std::string descriptor,
-         NativeMethod method) {
+         NativeMethod method,
+         NativeJitPolicy jit_policy = NativeJitPolicy::conservative) {
+    // MIDP Graphics operations are synchronous, in-memory drawing/state
+    // updates. They never wait on external I/O, so compiled Java renderers can
+    // invoke them exactly once without pre-deoptimizing back to the
+    // interpreter at every draw call.
+    if (jit_policy == NativeJitPolicy::conservative &&
+        owner == "javax/microedition/lcdui/Graphics") {
+        jit_policy = NativeJitPolicy::synchronous_bounded;
+    }
     auto registered = registry.register_method(std::move(owner),
                                                std::move(name),
                                                std::move(descriptor),
-                                               std::move(method));
+                                               std::move(method),
+                                               jit_policy);
     if (!registered) {
         std::terminate();
     }
@@ -1593,6 +1603,25 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
     };
     rectangle_operation("fillRect", true);
     rectangle_operation("drawRect", false);
+    add(registry, graphics_owner, "clearARGBRect", "(IIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto bound = bound_graphics(machine, arguments,
+                                        "Graphics.clearARGBRect");
+            auto x = int_argument(arguments, 1U, "Graphics.clearARGBRect");
+            auto y = int_argument(arguments, 2U, "Graphics.clearARGBRect");
+            auto width = int_argument(arguments, 3U,
+                                      "Graphics.clearARGBRect");
+            auto height = int_argument(arguments, 4U,
+                                       "Graphics.clearARGBRect");
+            if (!bound) return std::unexpected(bound.error());
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            return status_result(graphics::clear_rect(
+                *bound->target, *bound->context, *x, *y, *width, *height));
+        });
 
     const auto round_rectangle_operation = [&registry](const char* name,
                                                         bool fill) {
@@ -2005,7 +2034,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 machine, graphics::Font::default_font());
             if (!object) return std::unexpected(object.error());
             return std::optional<Value>(Value::from_reference(*object));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
 
     add(registry, font_owner, "getFont",
         "(I)Ljavax/microedition/lcdui/Font;",
@@ -2021,7 +2050,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 machine, graphics::Font::default_font());
             if (!object) return std::unexpected(object.error());
             return std::optional<Value>(Value::from_reference(*object));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
 
     add(registry, font_owner, "getFont",
         "(III)Ljavax/microedition/lcdui/Font;",
@@ -2038,7 +2067,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             auto object = create_font_object(machine, *font);
             if (!object) return std::unexpected(object.error());
             return std::optional<Value>(Value::from_reference(*object));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
 
     const auto font_int_getter = [&registry](const char* name, auto getter) {
         add(registry, font_owner, name, "()I",
@@ -2050,7 +2079,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 auto font = font_payload(machine, *object);
                 if (!font) return std::unexpected(font.error());
                 return std::optional<Value>(Value::from_int(getter(*font)));
-            });
+            }, NativeJitPolicy::synchronous_bounded);
     };
     font_int_getter("getFace", [](const graphics::Font& font) {
         return font.face();
@@ -2078,7 +2107,7 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
                 auto font = font_payload(machine, *object);
                 if (!font) return std::unexpected(font.error());
                 return font_boolean(getter(*font));
-            });
+            }, NativeJitPolicy::synchronous_bounded);
     };
     font_flag_getter("isPlain", [](const graphics::Font& font) {
         return font.is_plain();

@@ -33,12 +33,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
-    @Environment(\.openURL) private var openURL
     @EnvironmentObject private var storage: PhoneMEStorageController
     @EnvironmentObject private var library: GameLibrary
     @EnvironmentObject private var profiles: GameProfileStore
     @EnvironmentObject private var profileTemplates: ProfileTemplateStore
-    @EnvironmentObject private var workspaceRuntime: WorkspaceRuntimeStore
     @EnvironmentObject private var session: EmulatorSession
     @EnvironmentObject private var backgroundExecution: BackgroundExecutionController
 
@@ -50,7 +48,6 @@ struct SettingsView: View {
     @AppStorage("enableActionBar") private var enableActionBar = true
     @AppStorage("enableStatusBar") private var enableStatusBar = false
     @AppStorage("keepScreenOn") private var keepScreenOn = false
-    @AppStorage(PhoneMECAPI.jitPreferenceKey) private var enableJIT = true
     @State private var storageErrorMessage: String?
 
     var body: some View {
@@ -89,34 +86,18 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Enable JIT", isOn: jitEnabledBinding)
-
                 HStack {
                     Text("JIT Status")
                     Spacer()
-                    Text(jitStatusTitle)
+                    Label(jitStatusTitle, systemImage: jitStatusSystemImage)
                         .foregroundStyle(jitStatusForegroundStyle)
-                }
-
-                if enableJIT && session.jitStatus != .ready {
-                    Button("Recheck JIT") {
-                        session.refreshJITStatus()
-                        workspaceRuntime.refreshJITStatus()
-                    }
-
-                    Button("Enable JIT with TrollStore") {
-                        guard let url = PhoneMECAPI.trollStoreJITURL else {
-                            return
-                        }
-                        openURL(url)
-                    }
                 }
             } header: {
                 Text("JIT")
             }
 
             Section("Player") {
-                Toggle("Action Bar", isOn: $enableActionBar)
+                Toggle("App Bar", isOn: $enableActionBar)
                 Toggle("Status Bar", isOn: $enableStatusBar)
                 Toggle("Keep Screen Awake", isOn: $keepScreenOn)
             }
@@ -172,19 +153,7 @@ struct SettingsView: View {
         }
     }
 
-    private var jitEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { enableJIT },
-            set: { enabled in
-                enableJIT = enabled
-                session.configureJIT(enabled: enabled)
-                workspaceRuntime.configureJIT(enabled: enabled)
-            }
-        )
-    }
-
     private var jitStatusTitle: String {
-        guard enableJIT else { return L10n.string("Disabled") }
         switch session.jitStatus {
         case .ready:
             return L10n.string("Ready")
@@ -193,9 +162,14 @@ struct SettingsView: View {
         }
     }
 
+    private var jitStatusSystemImage: String {
+        session.jitStatus == .ready
+            ? "checkmark.circle.fill"
+            : "exclamationmark.triangle.fill"
+    }
+
     private var jitStatusForegroundStyle: Color {
-        guard enableJIT else { return .secondary }
-        return session.jitStatus == .ready ? .green : .orange
+        session.jitStatus == .ready ? .green : .orange
     }
 
     private var translationProviderBinding: Binding<String> {

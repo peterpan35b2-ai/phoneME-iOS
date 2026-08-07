@@ -95,7 +95,8 @@ Status NativeMethodRegistry::register_method(
     std::string owner,
     std::string name,
     std::string descriptor,
-    NativeMethod implementation) {
+    NativeMethod implementation,
+    NativeJitPolicy jit_policy) {
     if (owner.empty() || name.empty() || descriptor.empty() || !implementation) {
         return fail(ErrorCode::invalid_argument,
                     "native method registration is incomplete");
@@ -124,6 +125,7 @@ Status NativeMethodRegistry::register_method(
             .descriptor = std::move(descriptor),
         },
         .implementation = std::move(implementation),
+        .jit_policy = jit_policy,
         .invocation_count = 0U,
     });
     ids_by_key_.emplace(method_key, method_id);
@@ -184,6 +186,7 @@ Status NativeMethodRegistry::register_alias(
             .descriptor = std::move(target_descriptor),
         },
         .implementation = entries_[source_index].implementation,
+        .jit_policy = entries_[source_index].jit_policy,
         .invocation_count = 0U,
     });
     ids_by_key_.emplace(target_key, method_id);
@@ -218,6 +221,17 @@ bool NativeMethodRegistry::contains(std::string_view owner,
                                     std::string_view name,
                                     std::string_view descriptor) const noexcept {
     return resolve(owner, name, descriptor).valid();
+}
+
+NativeJitPolicy NativeMethodRegistry::jit_policy(
+    NativeMethodId method_id) const noexcept {
+    if (!method_id.valid()) return NativeJitPolicy::conservative;
+    std::scoped_lock lock(mutex_);
+    const usize index = static_cast<usize>(method_id.value - 1U);
+    if (index >= entries_.size() || entries_[index].signature.id != method_id) {
+        return NativeJitPolicy::conservative;
+    }
+    return entries_[index].jit_policy;
 }
 
 Result<std::optional<Value>> NativeMethodRegistry::invoke(

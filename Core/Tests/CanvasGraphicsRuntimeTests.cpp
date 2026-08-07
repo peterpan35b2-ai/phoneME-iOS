@@ -344,6 +344,25 @@ int main(int argc, char** argv) {
     }
     require(resized_event, "active Canvas receives sizeChanged after resize");
 
+    runtime.suspend();
+    require(runtime.is_suspended(),
+            "host presentation enters suspended state");
+    require(runtime.app_state(event_app_id) ==
+                phoneme::runtime::AppState::active,
+            "host presentation suspension keeps MIDlet active");
+    runtime.resume();
+    require(!runtime.is_suspended(),
+            "host presentation resumes without MIDlet lifecycle change");
+    bool host_suspend_hide = false;
+    bool host_resume_show = false;
+    while (auto event = runtime.poll_ui_event()) {
+        if (event->kind != 3 || event->component_type != 22) continue;
+        host_suspend_hide = host_suspend_hide || event->text == "eventHide";
+        host_resume_show = host_resume_show || event->text == "eventShow";
+    }
+    require(!host_suspend_hide && !host_resume_show,
+            "host presentation suspension emits no hide/show lifecycle edge");
+
     require(runtime.pause_midlet(event_app_id).has_value(),
             "pause deterministic Canvas event fixture");
     bool hidden_event = false;
@@ -477,13 +496,13 @@ int main(int argc, char** argv) {
     while (runtime.poll_ui_event()) { }
     require(runtime.set_foreground(phoneme::AppId {},
                                    phoneme::Dimensions {1, 1}).has_value(),
-            "hideNotify exceptions do not fail host foreground detach");
+            "host render detach ignores MIDlet hideNotify");
     require(runtime.app_state(throw_app_id) ==
                 phoneme::runtime::AppState::active,
-            "hideNotify exceptions remain recoverable like phoneME LCDUI");
+            "host render detach leaves the MIDlet active");
     require(runtime.set_foreground(throw_app_id,
                                    phoneme::Dimensions {320, 240}).has_value(),
-            "restore a MIDlet after a throwing hideNotify callback");
+            "restore a MIDlet after presentation-only detach");
     require(runtime.app_state(throw_app_id) ==
                 phoneme::runtime::AppState::active,
             "restored MIDlet remains active after hide and reopen");

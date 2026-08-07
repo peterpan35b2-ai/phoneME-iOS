@@ -33,12 +33,14 @@ public:
 
     void erase_image(u64 object_key) noexcept;
     void erase_context(u64 object_key) noexcept;
+    [[nodiscard]] bool automatic_collection_due() const noexcept;
     void prune(const std::function<bool(u64)>& is_live);
     void clear() noexcept;
 
 private:
     std::unordered_map<u64, Image> images_;
     std::unordered_map<u64, GraphicsContext> contexts_;
+    usize image_allocation_bytes_since_prune_ {0};
 };
 
 } // namespace phoneme::graphics

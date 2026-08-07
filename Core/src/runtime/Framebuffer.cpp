@@ -75,6 +75,27 @@ namespace phoneme::runtime
     return {};
   }
 
+  Status Framebuffer::replace_exchange(Dimensions dimensions,
+                                       std::vector<u8>& rgba)
+  {
+    auto required = rgba_size(dimensions);
+    if (!required)
+    {
+      return std::unexpected(required.error());
+    }
+    if (rgba.size() != *required)
+    {
+      return fail(ErrorCode::invalid_argument,
+                  "RGBA frame size does not match its dimensions");
+    }
+
+    std::scoped_lock lock(mutex_);
+    dimensions_ = dimensions;
+    rgba_.swap(rgba);
+    ++generation_;
+    return {};
+  }
+
   FrameMetadata Framebuffer::metadata() const noexcept
   {
     std::scoped_lock lock(mutex_);

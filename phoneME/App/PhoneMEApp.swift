@@ -168,6 +168,14 @@ struct PhoneMEApp: App {
         let listSelectionIndex = Int(
             environment["PHONEME_DEBUG_LIST_INDEX"] ?? ""
         )
+        var debugProfile = GameProfile.default
+        if let debugFPS = Int(environment["PHONEME_DEBUG_FPS"] ?? ""),
+           debugFPS > 0 {
+            debugProfile.frameRateLimit = debugFPS
+        }
+        if environment["PHONEME_DEBUG_FPS_OVERRIDE"] == "1" {
+            debugProfile.effectiveFramePacingMode = .overrideGameLoop
+        }
         let debugTaps: [(x: Int32, y: Int32)] =
             (environment["PHONEME_DEBUG_TAPS"] ?? "")
                 .split(separator: ";")
@@ -194,7 +202,7 @@ struct PhoneMEApp: App {
                     game: game,
                     jarURL: jarURL,
                     artworkURL: library.iconURL(for: game),
-                    profile: .default
+                    profile: debugProfile
                 )
 
                 for _ in 0..<400 where session.state != .running {
@@ -211,7 +219,7 @@ struct PhoneMEApp: App {
                         game: game,
                         jarURL: jarURL,
                         artworkURL: library.iconURL(for: game),
-                        profile: .default
+                        profile: debugProfile
                     )
                 }
 
@@ -287,6 +295,8 @@ struct PhoneMEApp: App {
                     "keyStartDelayMilliseconds=\(keyStartDelayMilliseconds)",
                     "listSelectionIndex=\(listSelectionIndex.map(String.init) ?? "")",
                     "observeMilliseconds=\(observeMilliseconds)",
+                    "framePacingMode=\(debugProfile.effectiveFramePacingMode.rawValue)",
+                    "frameRateLimit=\(debugProfile.frameRateLimit)",
                     "state=\(String(describing: session.state))",
                     "application=\(appState)",
                     "frame=\(session.frame != nil)",

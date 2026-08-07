@@ -120,16 +120,13 @@ final class PhoneMECAPI: @unchecked Sendable {
         case ready = 1
     }
 
-    static let jitPreferenceKey = "enableJIT"
     static let trollStoreBuildInfoKey = "PhoneMETrollStoreJIT"
 
     static var jitStatus: JITStatus {
         JITStatus(rawValue: phoneme_jit_status()) ?? .unavailable
     }
 
-    static var jitEnabledByDefault: Bool {
-        (UserDefaults.standard.object(forKey: jitPreferenceKey) as? Bool) ?? true
-    }
+    static var jitEnabledByDefault: Bool { true }
 
     static var isTrollStoreJITBuild: Bool {
         Bundle.main.object(forInfoDictionaryKey: trollStoreBuildInfoKey)
@@ -204,14 +201,23 @@ final class PhoneMECAPI: @unchecked Sendable {
 
     func createRuntime() -> RuntimeHandle? {
         guard let rawRuntime = phoneme_create() else {
+            NSLog("[phoneMECore] phoneme_create failed home=%@", layout.homeURL.path)
             return nil
         }
 
+        let handle = RuntimeHandle(rawValue: rawRuntime)
         let result = layout.homeURL.path.withCString { homePath in
             phoneme_configure(rawRuntime, homePath, nil)
         }
 
         guard result == 0 else {
+            let detail = lastErrorMessage(handle) ?? "unknown configure error"
+            NSLog(
+                "[phoneMECore] phoneme_configure failed status=%d home=%@ detail=%@",
+                result,
+                layout.homeURL.path,
+                detail
+            )
             phoneme_destroy(rawRuntime)
             return nil
         }
@@ -221,10 +227,17 @@ final class PhoneMECAPI: @unchecked Sendable {
             Self.jitEnabledByDefault ? 1 : 0
         )
         guard jitResult == 0 else {
+            let detail = lastErrorMessage(handle) ?? "unknown JIT configure error"
+            NSLog(
+                "[phoneMECore] phoneme_configure_jit failed status=%d home=%@ detail=%@",
+                jitResult,
+                layout.homeURL.path,
+                detail
+            )
             phoneme_destroy(rawRuntime)
             return nil
         }
-        return RuntimeHandle(rawValue: rawRuntime)
+        return handle
     }
 
     func destroyRuntime(_ runtime: RuntimeHandle?) {

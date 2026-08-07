@@ -126,7 +126,7 @@ private:
         const std::array<u8, 32>& identity_sha256,
         std::string_view identity_key) const noexcept;
     [[nodiscard]] Status recover_transactions(
-        const SuiteDatabaseSnapshot& snapshot);
+        SuiteDatabaseSnapshot& snapshot);
     [[nodiscard]] Status remove_policy_data(
         SuiteId id,
         const SuiteUninstallPolicy& policy) const;

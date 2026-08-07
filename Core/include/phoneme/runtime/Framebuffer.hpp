@@ -27,6 +27,8 @@ public:
     [[nodiscard]] Status resize(Dimensions dimensions);
     [[nodiscard]] Status replace(Dimensions dimensions,
                                  std::span<const u8> rgba);
+    [[nodiscard]] Status replace_exchange(Dimensions dimensions,
+                                          std::vector<u8>& rgba);
     [[nodiscard]] FrameMetadata metadata() const noexcept;
     [[nodiscard]] FrameMetadata copy_rgba(std::span<u8> destination) const noexcept;
     [[nodiscard]] FrameSnapshot snapshot() const;

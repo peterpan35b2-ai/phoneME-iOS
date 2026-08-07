@@ -9,6 +9,7 @@ private enum LCDUIStyle {
     static let cardCornerRadius: CGFloat = 18
     static let controlCornerRadius: CGFloat = 10
     static let contentInset: CGFloat = 16
+    static let listRowMinimumHeight: CGFloat = 48
     static let maximumContentWidth: CGFloat = 560
 }
 
@@ -529,8 +530,7 @@ private struct NativeLCDUIFormView: View {
                             )
                         )
                         .padding(.horizontal, LCDUIStyle.contentInset)
-                        .padding(.top, 4)
-                        .padding(.bottom, LCDUIStyle.contentInset)
+                        .padding(.vertical, LCDUIStyle.contentInset)
                     }
                     .coordinateSpace(name: "lcdui-scroll")
                     .phoneMEScrollDismissesKeyboardInteractively()
@@ -699,6 +699,7 @@ private struct NativeLCDUIListView: View {
                 List(choices) { choice in
                     choiceRow(choice)
                 }
+                .environment(\.defaultMinListRowHeight, LCDUIStyle.listRowMinimumHeight)
                 .listStyle(.insetGrouped)
             }
         }

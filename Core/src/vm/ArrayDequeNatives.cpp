@@ -24,11 +24,13 @@ void add(NativeMethodRegistry& registry,
          std::string owner,
          std::string name,
          std::string descriptor,
-         NativeMethod method) {
+         NativeMethod method,
+         NativeJitPolicy jit_policy = NativeJitPolicy::conservative) {
     auto registered = registry.register_method(std::move(owner),
                                                std::move(name),
                                                std::move(descriptor),
-                                               std::move(method));
+                                               std::move(method),
+                                               jit_policy);
     if (!registered) {
         std::terminate();
     }
@@ -643,12 +645,18 @@ void register_array_deque_natives(NativeMethodRegistry& registry) {
         if (!object) return std::unexpected(object.error());
         return return_reference(peek_at(machine, *object, false, false));
     };
-    add(registry, std::string(kOwner), "getFirst", "()Ljava/lang/Object;", get_first);
-    add(registry, std::string(kOwner), "element", "()Ljava/lang/Object;", get_first);
-    add(registry, std::string(kOwner), "getLast", "()Ljava/lang/Object;", get_last);
-    add(registry, std::string(kOwner), "peekFirst", "()Ljava/lang/Object;", peek_first);
-    add(registry, std::string(kOwner), "peek", "()Ljava/lang/Object;", peek_first);
-    add(registry, std::string(kOwner), "peekLast", "()Ljava/lang/Object;", peek_last);
+    add(registry, std::string(kOwner), "getFirst", "()Ljava/lang/Object;", get_first,
+        NativeJitPolicy::synchronous_bounded);
+    add(registry, std::string(kOwner), "element", "()Ljava/lang/Object;", get_first,
+        NativeJitPolicy::synchronous_bounded);
+    add(registry, std::string(kOwner), "getLast", "()Ljava/lang/Object;", get_last,
+        NativeJitPolicy::synchronous_bounded);
+    add(registry, std::string(kOwner), "peekFirst", "()Ljava/lang/Object;", peek_first,
+        NativeJitPolicy::synchronous_bounded);
+    add(registry, std::string(kOwner), "peek", "()Ljava/lang/Object;", peek_first,
+        NativeJitPolicy::synchronous_bounded);
+    add(registry, std::string(kOwner), "peekLast", "()Ljava/lang/Object;", peek_last,
+        NativeJitPolicy::synchronous_bounded);
 
     const auto occurrence = [](bool reverse) {
         return [reverse](Machine& machine, std::span<const Value> arguments)

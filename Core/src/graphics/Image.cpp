@@ -77,6 +77,12 @@ Result<usize> validated_pixel_count(i32 width, i32 height) {
 }
 
 Result<Image> Image::create_mutable(i32 width, i32 height) {
+    return create_mutable_argb(width, height, 0xFFFFFFFFU);
+}
+
+Result<Image> Image::create_mutable_argb(i32 width,
+                                         i32 height,
+                                         Pixel initial_pixel) {
     auto count = validated_pixel_count(width, height);
     if (!count) {
         return std::unexpected(count.error());
@@ -84,7 +90,7 @@ Result<Image> Image::create_mutable(i32 width, i32 height) {
     Image image(width,
                 height,
                 true,
-                std::vector<Pixel>(*count, 0xFFFFFFFFU));
+                std::vector<Pixel>(*count, initial_pixel));
     image.mark_dirty_region(0, 0, width, height);
     return image;
 }
@@ -104,6 +110,20 @@ Result<Image> Image::create_immutable(i32 width,
                  height,
                  false,
                  std::vector<Pixel>(pixels.begin(), pixels.end()));
+}
+
+Result<Image> Image::create_immutable_owned(i32 width,
+                                            i32 height,
+                                            std::vector<Pixel> pixels) {
+    auto count = validated_pixel_count(width, height);
+    if (!count) {
+        return std::unexpected(count.error());
+    }
+    if (pixels.size() != *count) {
+        return fail(ErrorCode::invalid_argument,
+                    "immutable image pixel count does not match dimensions");
+    }
+    return Image(width, height, false, std::move(pixels));
 }
 
 Result<Image> Image::transformed_region(const Image& source,

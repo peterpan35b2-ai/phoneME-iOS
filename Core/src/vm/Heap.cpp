@@ -27,6 +27,34 @@ thread_local HeapAccessContext g_heap_access_context {};
     return left + right;
 }
 
+[[nodiscard]] std::optional<HeapArrayKind> heap_array_kind(
+    std::string_view class_name) noexcept {
+    if (class_name == "[Z") return HeapArrayKind::boolean;
+    if (class_name == "[B") return HeapArrayKind::byte;
+    if (class_name == "[C") return HeapArrayKind::character;
+    if (class_name == "[S") return HeapArrayKind::short_integer;
+    if (class_name == "[I") return HeapArrayKind::integer;
+    if (class_name == "[J") return HeapArrayKind::long_integer;
+    if (class_name == "[F") return HeapArrayKind::float32;
+    if (class_name == "[D") return HeapArrayKind::float64;
+    if (class_name.starts_with("[L") || class_name.starts_with("[[")) {
+        return HeapArrayKind::reference;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string reference_array_component(
+    std::string_view class_name) {
+    if (class_name.starts_with("[L") && class_name.ends_with(';') &&
+        class_name.size() >= 4U) {
+        return std::string(class_name.substr(2U, class_name.size() - 3U));
+    }
+    if (class_name.starts_with("[[")) {
+        return std::string(class_name.substr(1U));
+    }
+    return {};
+}
+
 [[nodiscard]] std::unexpected<Error> heap_access_error(
     Error error,
     std::string_view operation,
@@ -94,6 +122,7 @@ Result<ObjectRef> Heap::allocate_object(std::string class_name,
         .elements = {},
         .string_payload = {},
         .weak_referent = std::nullopt,
+        .array_kind = std::nullopt,
         .is_array = false,
         .is_string = false,
         .marked = false,
@@ -127,12 +156,14 @@ Result<ObjectRef> Heap::allocate_array(std::string class_name,
         return std::unexpected(capacity.error());
     }
 
+    const auto array_kind = heap_array_kind(class_name);
     Object object {
         .class_name = std::move(class_name),
         .fields = {},
         .elements = std::vector<Value>(length, initial_value),
         .string_payload = {},
         .weak_referent = std::nullopt,
+        .array_kind = array_kind,
         .is_array = true,
         .is_string = false,
         .marked = false,
@@ -226,6 +257,116 @@ Status Heap::set_element(ObjectRef reference, usize index, Value value) {
     }
     object.elements[index] = value;
     return {};
+}
+
+Result<HeapArrayInfo> Heap::array_info(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.array_info", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    const auto kind = object.array_kind;
+    if (!kind.has_value()) {
+        return fail(ErrorCode::invalid_state, "array has an invalid class descriptor");
+    }
+    HeapArrayInfo info {
+        .kind = *kind,
+        .length = object.elements.size(),
+    };
+    if (*kind == HeapArrayKind::reference) {
+        info.reference_component = reference_array_component(object.class_name);
+        if (info.reference_component.empty()) {
+            return fail(ErrorCode::invalid_state,
+                        "reference array has an invalid component descriptor");
+        }
+    }
+    return info;
+}
+
+Result<HeapArrayElementSnapshot> Heap::array_element_snapshot(
+    ObjectRef reference,
+    usize index) const {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(
+            slot.error(), "Heap.array_element_snapshot", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    if (index >= object.elements.size()) {
+        return fail(ErrorCode::out_of_range, "array index is out of range");
+    }
+    const auto kind = object.array_kind;
+    if (!kind.has_value()) {
+        return fail(ErrorCode::invalid_state, "array has an invalid class descriptor");
+    }
+    return HeapArrayElementSnapshot {
+        .kind = *kind,
+        .value = object.elements[index],
+    };
+}
+
+Status Heap::set_element_checked(ObjectRef reference,
+                                 usize index,
+                                 HeapArrayKind expected_kind,
+                                 Value value) {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(
+            slot.error(), "Heap.set_element_checked", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    if (index >= object.elements.size()) {
+        return fail(ErrorCode::out_of_range, "array index is out of range");
+    }
+    const auto actual_kind = object.array_kind;
+    if (!actual_kind.has_value() || *actual_kind != expected_kind) {
+        return fail(ErrorCode::invalid_state,
+                    "array element kind does not match requested store");
+    }
+    object.elements[index] = value;
+    return {};
+}
+
+Result<HeapArrayPayloadLease> Heap::array_payload_lease(
+    ObjectRef reference,
+    HeapArrayKind expected_kind) {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(
+            slot.error(), "Heap.array_payload_lease", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    if (!object.array_kind.has_value() ||
+        *object.array_kind != expected_kind) {
+        return fail(ErrorCode::invalid_state,
+                    "array payload kind does not match requested lease");
+    }
+    return HeapArrayPayloadLease {
+        .first_payload = object.elements.empty()
+            ? nullptr
+            : object.elements.front().raw_bits_address_unchecked(),
+        .length = object.elements.size(),
+    };
 }
 
 Status Heap::fill_array_range(ObjectRef reference,

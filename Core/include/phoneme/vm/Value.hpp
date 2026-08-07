@@ -110,12 +110,32 @@ public:
         return std::bit_cast<double>(bits_);
     }
 
+    [[nodiscard]] constexpr u64 raw_bits_unchecked() const noexcept {
+        return bits_;
+    }
+
+    // JIT-only payload access. Heap array payload leases use this address while
+    // the owning array remains rooted. Value objects are fixed-size and Java
+    // arrays never resize after allocation, so the payload address is stable
+    // for the lifetime of the array object.
+    [[nodiscard]] constexpr const u64* raw_bits_address_unchecked() const noexcept {
+        return &bits_;
+    }
+
+    [[nodiscard]] constexpr u64* raw_bits_address_unchecked() noexcept {
+        return &bits_;
+    }
+
+    [[nodiscard]] constexpr ObjectRef reference_unchecked() const noexcept {
+        return ObjectRef {bits_};
+    }
+
     [[nodiscard]] Result<ObjectRef> as_reference() const {
         if (kind_ != ValueKind::reference) {
             return fail(ErrorCode::invalid_state,
                         "value is not a Java object reference");
         }
-        return ObjectRef {bits_};
+        return reference_unchecked();
     }
 
     [[nodiscard]] Result<usize> as_return_address() const {

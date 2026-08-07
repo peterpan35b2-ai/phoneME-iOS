@@ -236,6 +236,21 @@ void register_image_natives(NativeMethodRegistry& registry) {
             return std::optional<Value>(Value::from_reference(*object));
         });
 
+    add(registry, owner, "createMutableARGB",
+        "(II)Ljavax/microedition/lcdui/Image;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto width = int_argument(arguments, 0U, "Image.createMutableARGB");
+            auto height = int_argument(arguments, 1U, "Image.createMutableARGB");
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            auto image = graphics::Image::create_mutable_argb(*width, *height, 0U);
+            if (!image) return graphics_error(image.error());
+            auto object = create_image_object(machine, std::move(*image));
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+
     add(registry, owner, "createImage",
         "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -391,8 +406,8 @@ void register_image_natives(NativeMethodRegistry& registry) {
                     pixel = graphics::opaque(pixel);
                 }
             }
-            auto image = graphics::Image::create_immutable(
-                *width, *height, *pixels);
+            auto image = graphics::Image::create_immutable_owned(
+                *width, *height, std::move(*pixels));
             if (!image) return graphics_error(image.error());
             auto object = create_image_object(machine, std::move(*image));
             if (!object) return std::unexpected(object.error());
@@ -544,6 +559,80 @@ void register_image_natives(NativeMethodRegistry& registry) {
                     if (!stored) return std::unexpected(stored.error());
                 }
             }
+            return std::optional<Value> {};
+        });
+
+    add(registry, owner, "setRGB", "([IIIIIII)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto image_reference = receiver(arguments, "Image.setRGB");
+            auto source_reference = reference_argument(arguments, 1U,
+                                                       "Image.setRGB");
+            auto offset = int_argument(arguments, 2U, "Image.setRGB");
+            auto scan_length = int_argument(arguments, 3U, "Image.setRGB");
+            auto x = int_argument(arguments, 4U, "Image.setRGB");
+            auto y = int_argument(arguments, 5U, "Image.setRGB");
+            auto width = int_argument(arguments, 6U, "Image.setRGB");
+            auto height = int_argument(arguments, 7U, "Image.setRGB");
+            if (!image_reference) return std::unexpected(image_reference.error());
+            if (!source_reference) return std::unexpected(source_reference.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (!scan_length) return std::unexpected(scan_length.error());
+            if (!x) return std::unexpected(x.error());
+            if (!y) return std::unexpected(y.error());
+            if (!width) return std::unexpected(width.error());
+            if (!height) return std::unexpected(height.error());
+            auto image = image_payload(machine, *image_reference);
+            if (!image) return std::unexpected(image.error());
+            if (!(*image)->is_mutable()) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Image.setRGB requires a mutable image");
+            }
+            if (*width < 0 || *height < 0 || *x < 0 || *y < 0 ||
+                static_cast<i64>(*x) + *width > (*image)->width() ||
+                static_cast<i64>(*y) + *height > (*image)->height()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "setRGB destination region is outside the image");
+            }
+            if (*width == 0 || *height == 0) {
+                return std::optional<Value> {};
+            }
+            if (*scan_length >= 0 && *scan_length < *width) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "setRGB scanlength overlaps source rows");
+            }
+            if (*scan_length < 0 &&
+                -static_cast<i64>(*scan_length) < *width) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "setRGB scanlength overlaps source rows");
+            }
+            auto pixels = int_array(machine, *source_reference, "Image.setRGB");
+            if (!pixels) return std::unexpected(pixels.error());
+            const i64 first = *offset;
+            const i64 last_row = static_cast<i64>(*offset) +
+                (static_cast<i64>(*height) - 1) * *scan_length;
+            const i64 minimum = std::min(first, last_row);
+            const i64 maximum = std::max(first, last_row) + *width - 1;
+            if (minimum < 0 || maximum < 0 ||
+                maximum >= static_cast<i64>(pixels->size())) {
+                return fail_java("java/lang/ArrayIndexOutOfBoundsException",
+                                 "setRGB source slice exceeds int[]");
+            }
+            auto destination_pixels = (*image)->mutable_pixels();
+            const usize image_width = static_cast<usize>((*image)->width());
+            for (i32 row = 0; row < *height; ++row) {
+                const i64 source_row = static_cast<i64>(*offset) +
+                    static_cast<i64>(row) * *scan_length;
+                const usize destination_row =
+                    static_cast<usize>(*y + row) * image_width +
+                    static_cast<usize>(*x);
+                for (i32 column = 0; column < *width; ++column) {
+                    destination_pixels[destination_row +
+                                       static_cast<usize>(column)] =
+                        (*pixels)[static_cast<usize>(source_row + column)];
+                }
+            }
+            (*image)->mark_dirty_region(*x, *y, *width, *height);
             return std::optional<Value> {};
         });
 }

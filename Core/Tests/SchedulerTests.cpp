@@ -75,7 +75,8 @@ std::chrono::milliseconds measure_frame_pacing(
     phoneme::vm::FramePacingMode mode,
     int frames_per_second,
     int requested_sleep_millis,
-    int iterations) {
+    int iterations,
+    bool asynchronous_repaint_request = false) {
     phoneme::vm::Machine machine(classes);
     machine.configure_frame_pacing(frames_per_second, mode);
 
@@ -98,13 +99,18 @@ std::chrono::milliseconds measure_frame_pacing(
                 [&machine,
                  completion,
                  requested_sleep_millis,
-                 iterations](std::stop_token)
+                 iterations,
+                 asynchronous_repaint_request](std::stop_token)
                     -> phoneme::Result<
                         std::optional<phoneme::vm::ObjectRef>> {
                     const auto started = std::chrono::steady_clock::now();
                     for (int index = 0; index < iterations; ++index) {
-                        machine.pace_frame_publication();
-                        machine.note_frame_pacing_boundary();
+                        if (asynchronous_repaint_request) {
+                            machine.note_frame_pacing_request();
+                        } else {
+                            machine.pace_frame_publication();
+                            machine.note_frame_pacing_boundary();
+                        }
                         if (requested_sleep_millis > 0) {
                             auto slept = machine.sleep_current_thread(
                                 requested_sleep_millis);
@@ -269,6 +275,13 @@ int main(int argc, char** argv) {
             60,
             40,
             12);
+        const auto override_async_repaint_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::override_game_loop,
+            60,
+            40,
+            12,
+            true);
         const auto override_loading_elapsed = measure_frame_pacing(
             classes,
             phoneme::vm::FramePacingMode::override_game_loop,
@@ -303,6 +316,11 @@ int main(int argc, char** argv) {
                     override_elapsed + std::chrono::milliseconds(100) <
                         native_elapsed,
                 "override pacing retargets a stable 40 ms render loop to 60 FPS");
+        require(override_async_repaint_elapsed >= std::chrono::milliseconds(180) &&
+                    override_async_repaint_elapsed <= std::chrono::milliseconds(360) &&
+                    override_async_repaint_elapsed + std::chrono::milliseconds(100) <
+                        native_elapsed,
+                "override pacing retargets asynchronous repaint/sleep loops");
         require(override_loading_elapsed < std::chrono::milliseconds(180),
                 "override pacing does not throttle loading-style frame publications");
         require(override_short_sleep_loading_elapsed <

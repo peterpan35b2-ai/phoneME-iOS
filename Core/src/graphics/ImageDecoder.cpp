@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -185,7 +186,8 @@ constexpr std::array<u8, 8> kPngSignature {
             unpremultiply(rgba[offset + 1U], alpha_value),
             unpremultiply(rgba[offset + 2U], alpha_value)));
     }
-    return Image::create_immutable(*width, *height, pixels);
+    return Image::create_immutable_owned(
+        *width, *height, std::move(pixels));
 }
 #endif
 

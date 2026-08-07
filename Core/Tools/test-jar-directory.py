@@ -580,6 +580,11 @@ def compile_time_feature(name: str) -> str:
     return "1" if value in {"1", "true", "yes", "on"} else "0"
 
 
+def extra_build_flags(name: str) -> list[str]:
+    value = os.environ.get(name, "").strip()
+    return shlex.split(value) if value else []
+
+
 def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Path | None, str]:
     build_root = output_root / "harness-build"
     build_root.mkdir(parents=True, exist_ok=True)
@@ -652,6 +657,7 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
         *compiler,
         "-std=c++23",
         *sdk_flags,
+        *extra_build_flags("PHONEME_EXTRA_CXXFLAGS"),
         f"-DPHONEME_ENABLE_VM_PROFILING={compile_time_feature('PHONEME_ENABLE_VM_PROFILING')}",
         f"-DPHONEME_ENABLE_DECODED_EXECUTION={compile_time_feature('PHONEME_ENABLE_DECODED_EXECUTION')}",
         f"-I{CORE_ROOT / 'include'}",
@@ -675,6 +681,7 @@ def build_harness(output_root: pathlib.Path, sanitize: bool) -> tuple[pathlib.Pa
             "-lz",
         ]
     )
+    command.extend(extra_build_flags("PHONEME_EXTRA_LDFLAGS"))
     if sys.platform == "darwin":
         command.extend(
             [

@@ -197,6 +197,24 @@ u64 image_hash(const Image& image) {
 }
 
 void test_clip_translate_alpha_and_dirty_region() {
+    auto transparent = Image::create_mutable_argb(2, 2);
+    require(transparent.has_value(), "create transparent mutable ARGB image");
+    require(transparent->is_mutable(), "transparent ARGB image is mutable");
+    require(transparent->pixel(0, 0).value() == 0x00000000U &&
+                transparent->pixel(1, 1).value() == 0x00000000U,
+            "mutable ARGB image starts transparent instead of MIDP white");
+    phoneme::graphics::GraphicsContext transparent_context;
+    transparent_context.clip = target_bounds(*transparent);
+    transparent_context.color = 0xFFFF0000U;
+    require(fill_rect(*transparent, transparent_context, 0, 0, 2, 2).has_value(),
+            "fill transparent ARGB image before clear");
+    require(clear_rect(*transparent, transparent_context, 1, 0, 1, 2).has_value(),
+            "clear ARGB rectangle");
+    require(transparent->pixel(0, 0).value() != 0x00000000U &&
+                transparent->pixel(1, 0).value() == 0x00000000U &&
+                transparent->pixel(1, 1).value() == 0x00000000U,
+            "clear rectangle replaces destination alpha with transparent black");
+
     auto image = Image::create_mutable(8, 8);
     require(image.has_value(), "create mutable image");
     require(image->has_dirty_region(), "new mutable image starts dirty");
@@ -1170,6 +1188,23 @@ void test_dirty_update_contract() {
     }
 }
 
+void test_graphics_allocation_requests_gc() {
+    phoneme::graphics::GraphicsStore store;
+    require(!store.automatic_collection_due(),
+            "fresh graphics store does not request collection");
+
+    auto image = Image::create_mutable(2048, 2048);
+    require(image.has_value(), "create graphics-GC threshold image");
+    require(store.attach_image(303U, std::move(*image)).has_value(),
+            "attach graphics-GC threshold image");
+    require(store.automatic_collection_due(),
+            "16 MiB of native image allocation requests Java GC pruning");
+
+    store.prune([](u64) { return true; });
+    require(!store.automatic_collection_due(),
+            "graphics allocation counter resets after pruning");
+}
+
 void test_hidden_render_suppression() {
     auto target = Image::create_mutable(16, 16);
     const std::array<Pixel, 4> source_pixels {
@@ -1294,6 +1329,7 @@ int main() {
     test_jpeg_gif_and_format_dispatch();
     test_font_unicode_and_measurement();
     test_dirty_update_contract();
+    test_graphics_allocation_requests_gc();
     test_hidden_render_suppression();
     test_sprite_heavy_benchmark();
     std::cout << "Graphics module tests passed\n";

@@ -163,7 +163,7 @@ Status CanvasRuntime::set_dimensions(Dimensions dimensions) {
         if (found == canvases_.end()) continue;
         found->second.size_change_pending = true;
         found->second.game_graphics = {};
-        if (host_foreground_ && found->second.display_visible) {
+        if (host_rendering_active() && found->second.display_visible) {
             merge_region(found->second.repaint_region, full_region());
         } else {
             found->second.repaint_region.reset();
@@ -195,8 +195,10 @@ Status CanvasRuntime::set_host_foreground(bool foreground) {
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
         if (found == canvases_.end()) continue;
-        set_game_rendering_enabled(found->second,
-                                   foreground && found->second.display_visible);
+        set_game_rendering_enabled(
+            found->second,
+            foreground && host_rendering_enabled_ &&
+                found->second.display_visible);
         // Render work is disposable while the host surface is detached. Never
         // retain dirty regions or serviceRepaints state to replay later; showing
         // the Canvas will schedule exactly one fresh full repaint instead.
@@ -207,6 +209,48 @@ Status CanvasRuntime::set_host_foreground(bool foreground) {
             .object = found->second.object,
             .visible = found->second.display_visible,
         });
+    }
+    return {};
+}
+
+Status CanvasRuntime::set_host_rendering_enabled(bool enabled) {
+    if (host_rendering_enabled_ == enabled) {
+        return {};
+    }
+    auto entered = machine_.enter_external_execution();
+    if (!entered) return entered;
+    const auto leave_execution = [](vm::Machine* machine) noexcept {
+        machine->leave_external_execution();
+    };
+    std::unique_ptr<vm::Machine, decltype(leave_execution)> execution_scope(
+        &machine_, leave_execution);
+
+    host_rendering_enabled_ = enabled;
+    bool scheduled_repaint = false;
+    for (u64 key : canvas_order_) {
+        const auto found = canvases_.find(key);
+        if (found == canvases_.end()) continue;
+        CanvasState& state = found->second;
+        const bool renderable =
+            host_rendering_active() && state.display_visible;
+        set_game_rendering_enabled(state, renderable);
+        state.repaint_region.reset();
+        state.flush_region.reset();
+        state.service_requested = false;
+        if (!enabled) {
+            // Presentation detachment must behave like releasing every host
+            // input edge without exposing a Canvas hideNotify lifecycle event.
+            state.key_states = 0;
+            state.pressed_keys.clear();
+            state.next_key_repeat.clear();
+        }
+        if (renderable && state.effectively_visible) {
+            merge_region(state.repaint_region, full_region());
+            scheduled_repaint = true;
+        }
+    }
+    if (scheduled_repaint) {
+        machine_.note_frame_pacing_request();
     }
     return {};
 }
@@ -401,7 +445,7 @@ Status CanvasRuntime::set_display_visible(vm::ObjectRef displayable,
                *active_canvas_ == displayable.bits) {
         active_canvas_.reset();
     }
-    set_game_rendering_enabled(*state, host_foreground_ && visible);
+    set_game_rendering_enabled(*state, host_rendering_active() && visible);
     if (!host_foreground_) {
         state->repaint_region.reset();
         state->flush_region.reset();
@@ -423,7 +467,7 @@ Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
                                       vm::CanvasRect region) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
-    if (!host_foreground_ || !(*state)->display_visible) {
+    if (!host_rendering_active() || !(*state)->display_visible) {
         (*state)->repaint_region.reset();
         (*state)->service_requested = false;
         return {};
@@ -432,6 +476,7 @@ Status CanvasRuntime::request_repaint(vm::ObjectRef canvas,
     if (clipped.has_value()) {
         (*state)->initial_automatic_paint_pending = false;
         merge_region((*state)->repaint_region, *clipped);
+        machine_.note_frame_pacing_request();
     }
     return {};
 }
@@ -447,7 +492,7 @@ Status CanvasRuntime::pump_blocking_wait_work() {
 Status CanvasRuntime::request_service_repaints(vm::ObjectRef canvas) {
     auto state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
-    if (!host_foreground_ || !(*state)->display_visible) {
+    if (!host_rendering_active() || !(*state)->display_visible) {
         (*state)->repaint_region.reset();
         (*state)->service_requested = false;
         return {};
@@ -473,7 +518,7 @@ Status CanvasRuntime::request_service_repaints(vm::ObjectRef canvas) {
     state = require_state(canvas);
     if (!state) return std::unexpected(state.error());
     if ((*state)->repaint_region.has_value() &&
-        host_foreground_ && (*state)->display_visible) {
+        host_rendering_active() && (*state)->display_visible) {
         return pump();
     }
     return {};
@@ -486,7 +531,7 @@ Status CanvasRuntime::set_fullscreen(vm::ObjectRef canvas, bool fullscreen) {
         return {};
     }
     (*state)->fullscreen = fullscreen;
-    if (host_foreground_ && (*state)->display_visible) {
+    if (host_rendering_active() && (*state)->display_visible) {
         merge_region((*state)->repaint_region, full_region());
     }
 
@@ -576,7 +621,7 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
     }
     if (!(*state)->game_graphics.is_null()) {
         set_game_rendering_enabled(**state,
-                                   host_foreground_ &&
+                                   host_rendering_active() &&
                                        (*state)->display_visible);
         return (*state)->game_graphics;
     }
@@ -590,7 +635,7 @@ Result<vm::ObjectRef> CanvasRuntime::game_graphics(vm::ObjectRef canvas) {
     if (!graphics) return std::unexpected(graphics.error());
     (*state)->game_graphics = *graphics;
     set_game_rendering_enabled(**state,
-                               host_foreground_ &&
+                               host_rendering_active() &&
                                    (*state)->display_visible);
     machine_.begin_character_translation_frame();
     return *graphics;
@@ -604,7 +649,7 @@ Status CanvasRuntime::request_game_flush(vm::ObjectRef canvas,
         return fail_java("java/lang/IllegalStateException",
                          "Canvas is not a GameCanvas");
     }
-    if (!host_foreground_ || !(*state)->display_visible) {
+    if (!host_rendering_active() || !(*state)->display_visible) {
         (*state)->flush_region.reset();
         return {};
     }
@@ -898,7 +943,7 @@ Status CanvasRuntime::process_key_repeats() {
 }
 
 Status CanvasRuntime::process_flushes() {
-    if (!host_foreground_) {
+    if (!host_rendering_active()) {
         for (auto& [key, state] : canvases_) {
             (void)key;
             state.flush_region.reset();
@@ -945,7 +990,7 @@ Status CanvasRuntime::process_flushes() {
 }
 
 Status CanvasRuntime::process_repaints() {
-    if (!host_foreground_) {
+    if (!host_rendering_active()) {
         for (auto& [key, state] : canvases_) {
             (void)key;
             state.repaint_region.reset();
@@ -1176,7 +1221,8 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
     const bool desired = host_foreground_ && state.display_visible;
     if (desired == state.effectively_visible) return {};
     state.effectively_visible = desired;
-    set_game_rendering_enabled(state, desired);
+    set_game_rendering_enabled(
+        state, desired && host_rendering_enabled_);
     state.repaint_region.reset();
     state.flush_region.reset();
     state.service_requested = false;
@@ -1206,7 +1252,7 @@ Status CanvasRuntime::update_effective_visibility(CanvasState& state) {
             CallbackExceptionPolicy::report_and_continue);
         if (!shown) return shown;
         CanvasState* current = find_state(canvas);
-        if (current != nullptr) {
+        if (current != nullptr && host_rendering_enabled_) {
             merge_region(current->repaint_region, full_region());
         }
         return {};

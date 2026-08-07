@@ -1,15 +1,38 @@
 #include "phoneme/graphics/GraphicsStore.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace phoneme::graphics {
+namespace {
+
+constexpr usize kGraphicsGcAllocationInterval = 16U * 1024U * 1024U;
+
+[[nodiscard]] usize image_storage_bytes(const Image& image) noexcept {
+    const usize pixel_count = image.pixels().size();
+    if (pixel_count > std::numeric_limits<usize>::max() / sizeof(Pixel)) {
+        return std::numeric_limits<usize>::max();
+    }
+    return pixel_count * sizeof(Pixel);
+}
+
+[[nodiscard]] usize saturated_add(usize left, usize right) noexcept {
+    if (right > std::numeric_limits<usize>::max() - left) {
+        return std::numeric_limits<usize>::max();
+    }
+    return left + right;
+}
+
+} // namespace
 
 Status GraphicsStore::attach_image(u64 object_key, Image image_value) {
     if (object_key == 0U) {
         return fail(ErrorCode::invalid_argument,
                     "cannot attach an image to a null object key");
     }
+    image_allocation_bytes_since_prune_ = saturated_add(
+        image_allocation_bytes_since_prune_, image_storage_bytes(image_value));
     images_.insert_or_assign(object_key, std::move(image_value));
     return {};
 }
@@ -130,6 +153,10 @@ void GraphicsStore::erase_context(u64 object_key) noexcept {
     contexts_.erase(object_key);
 }
 
+bool GraphicsStore::automatic_collection_due() const noexcept {
+    return image_allocation_bytes_since_prune_ >= kGraphicsGcAllocationInterval;
+}
+
 void GraphicsStore::prune(const std::function<bool(u64)>& is_live) {
     for (auto iterator = images_.begin(); iterator != images_.end();) {
         if (!is_live(iterator->first)) {
@@ -146,11 +173,13 @@ void GraphicsStore::prune(const std::function<bool(u64)>& is_live) {
             ++iterator;
         }
     }
+    image_allocation_bytes_since_prune_ = 0U;
 }
 
 void GraphicsStore::clear() noexcept {
     contexts_.clear();
     images_.clear();
+    image_allocation_bytes_since_prune_ = 0U;
 }
 
 } // namespace phoneme::graphics

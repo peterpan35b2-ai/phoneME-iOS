@@ -3,6 +3,8 @@ import SwiftUI
 struct GameProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var profiles: GameProfileStore
+    @AppStorage("enableActionBar") private var enableActionBar = true
+    @AppStorage("enableStatusBar") private var enableStatusBar = true
 
     let title: String
     let game: Game?
@@ -178,6 +180,20 @@ struct GameProfileEditorView: View {
 
             Toggle("Image filtering", isOn: $profile.filtering)
             Toggle("Force Canvas fullscreen", isOn: $profile.forceFullscreen)
+            Toggle(
+                "App Bar",
+                isOn: Binding(
+                    get: { profile.showAppBar ?? enableActionBar },
+                    set: { profile.showAppBar = $0 }
+                )
+            )
+            Toggle(
+                "Status Bar",
+                isOn: Binding(
+                    get: { profile.showStatusBar ?? enableStatusBar },
+                    set: { profile.showStatusBar = $0 }
+                )
+            )
             Toggle("Show FPS", isOn: $profile.showFPS)
 
             Toggle(

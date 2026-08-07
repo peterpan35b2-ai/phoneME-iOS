@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <zlib.h>
@@ -664,7 +665,8 @@ Result<Image> decode_png(std::span<const u8> bytes) {
         return fail(ErrorCode::malformed_archive,
                     "PNG decompressed stream has trailing row data");
     }
-    return Image::create_immutable(header.width, header.height, output);
+    return Image::create_immutable_owned(
+        header.width, header.height, std::move(output));
 }
 
 } // namespace phoneme::graphics

@@ -293,26 +293,28 @@ void add(NativeMethodRegistry& registry,
     return u"UTF-8";
 }
 
-[[nodiscard]] Result<std::u16string> decode_byte_array(
+[[nodiscard]] Result<std::u16string> decode_byte_range(
     Machine& machine,
     ObjectRef buffer,
+    i32 offset,
     i32 count,
     StreamCharset charset) {
-    if (count < 0) {
+    if (offset < 0 || count < 0) {
         return fail(ErrorCode::invalid_state,
-                    "encoded byte count is negative");
+                    "encoded byte range is negative");
     }
     auto length = byte_array_length(machine, buffer);
     if (!length) return std::unexpected(length.error());
-    if (static_cast<usize>(count) > *length) {
+    if (static_cast<usize>(offset) > *length ||
+        static_cast<usize>(count) > *length - static_cast<usize>(offset)) {
         return fail(ErrorCode::invalid_state,
-                    "encoded byte count exceeds buffer length");
+                    "encoded byte range exceeds buffer length");
     }
     std::vector<u8> bytes;
     bytes.reserve(static_cast<usize>(count));
     for (i32 index = 0; index < count; ++index) {
-        auto value = byte_array_value(machine, buffer,
-                                      static_cast<usize>(index));
+        auto value = byte_array_value(
+            machine, buffer, static_cast<usize>(offset + index));
         if (!value) return std::unexpected(value.error());
         bytes.push_back(*value);
     }
@@ -402,6 +404,14 @@ void add(NativeMethodRegistry& registry,
         }
     }
     return decoded;
+}
+
+[[nodiscard]] Result<std::u16string> decode_byte_array(
+    Machine& machine,
+    ObjectRef buffer,
+    i32 count,
+    StreamCharset charset) {
+    return decode_byte_range(machine, buffer, 0, count, charset);
 }
 
 [[nodiscard]] Result<i32> stream_read_one(Machine& machine,
@@ -2189,6 +2199,124 @@ void register_data_input(NativeMethodRegistry& registry) {
     return high;
 }
 
+struct FastBufferedLine final {
+    bool handled {false};
+    bool eof {false};
+    std::u16string text;
+};
+
+[[nodiscard]] Result<FastBufferedLine> try_read_buffered_line_fast(
+    Machine& machine,
+    ObjectRef reader) {
+    auto runtime_class = machine.heap().class_name(reader);
+    if (!runtime_class) return std::unexpected(runtime_class.error());
+    if (*runtime_class != "java/io/InputStreamReader") return FastBufferedLine {};
+
+    auto opened = require_open(machine, reader, kReaderClosedField,
+                               "InputStreamReader");
+    if (!opened) return std::unexpected(opened.error());
+    auto pending = int_field(machine, reader, kReaderPendingField);
+    if (!pending) return std::unexpected(pending.error());
+    if (*pending >= 0) return FastBufferedLine {};
+
+    auto input = reference_field(machine, reader, kReaderInputField);
+    auto charset = object_charset(machine, reader, kReaderCharsetField);
+    if (!input) return std::unexpected(input.error());
+    if (!charset) return std::unexpected(charset.error());
+    auto input_class = machine.heap().class_name(*input);
+    if (!input_class) return std::unexpected(input_class.error());
+    if (*input_class != "java/io/ByteArrayInputStream") {
+        return FastBufferedLine {};
+    }
+
+    auto position = int_field(machine, *input, kByteInputPositionField);
+    auto count = int_field(machine, *input, kByteInputCountField);
+    auto buffer = reference_field(machine, *input, kByteInputBufferField);
+    if (!position || !count || !buffer || buffer->is_null() ||
+        *position < 0 || *count < *position) {
+        return fail(ErrorCode::invalid_state,
+                    "ByteArrayInputStream state is invalid");
+    }
+    auto buffer_length = byte_array_length(machine, *buffer);
+    if (!buffer_length) return std::unexpected(buffer_length.error());
+    if (static_cast<usize>(*count) > *buffer_length) {
+        return fail(ErrorCode::invalid_state,
+                    "ByteArrayInputStream count exceeds buffer length");
+    }
+    if (*position >= *count) {
+        return FastBufferedLine {.handled = true, .eof = true};
+    }
+
+    i32 line_end = *count;
+    i32 next_position = *count;
+    if (*charset == StreamCharset::utf16be) {
+        for (i32 index = *position; index + 1 < *count; index += 2) {
+            auto high = byte_array_value(machine, *buffer,
+                                         static_cast<usize>(index));
+            auto low = byte_array_value(machine, *buffer,
+                                        static_cast<usize>(index + 1));
+            if (!high) return std::unexpected(high.error());
+            if (!low) return std::unexpected(low.error());
+            const u16 character = static_cast<u16>(
+                (static_cast<u16>(*high) << 8U) | static_cast<u16>(*low));
+            if (character != static_cast<u16>(u'\r') &&
+                character != static_cast<u16>(u'\n')) {
+                continue;
+            }
+            line_end = index;
+            next_position = index + 2;
+            if (character == static_cast<u16>(u'\r') &&
+                next_position + 1 < *count) {
+                auto next_high = byte_array_value(
+                    machine, *buffer, static_cast<usize>(next_position));
+                auto next_low = byte_array_value(
+                    machine, *buffer, static_cast<usize>(next_position + 1));
+                if (!next_high) return std::unexpected(next_high.error());
+                if (!next_low) return std::unexpected(next_low.error());
+                const u16 next_character = static_cast<u16>(
+                    (static_cast<u16>(*next_high) << 8U) |
+                    static_cast<u16>(*next_low));
+                if (next_character == static_cast<u16>(u'\n')) {
+                    next_position += 2;
+                }
+            }
+            break;
+        }
+    } else {
+        for (i32 index = *position; index < *count; ++index) {
+            auto byte = byte_array_value(machine, *buffer,
+                                         static_cast<usize>(index));
+            if (!byte) return std::unexpected(byte.error());
+            if (*byte != static_cast<u8>('\r') &&
+                *byte != static_cast<u8>('\n')) {
+                continue;
+            }
+            line_end = index;
+            next_position = index + 1;
+            if (*byte == static_cast<u8>('\r') &&
+                next_position < *count) {
+                auto next = byte_array_value(
+                    machine, *buffer, static_cast<usize>(next_position));
+                if (!next) return std::unexpected(next.error());
+                if (*next == static_cast<u8>('\n')) ++next_position;
+            }
+            break;
+        }
+    }
+
+    auto decoded = decode_byte_range(
+        machine, *buffer, *position, line_end - *position, *charset);
+    if (!decoded) return std::unexpected(decoded.error());
+    auto updated = set_int_field(machine, *input,
+                                 kByteInputPositionField, next_position);
+    if (!updated) return std::unexpected(updated.error());
+    return FastBufferedLine {
+        .handled = true,
+        .eof = false,
+        .text = std::move(*decoded),
+    };
+}
+
 [[nodiscard]] Status write_utf8_code_point(Machine& machine,
                                            ObjectRef output,
                                            u32 code_point) {
@@ -2802,6 +2930,16 @@ void register_reader_writer(NativeMethodRegistry& registry) {
             auto input = reference_field(machine, *object,
                                          kBufferedReaderInputField);
             if (!input) return std::unexpected(input.error());
+            auto fast = try_read_buffered_line_fast(machine, *input);
+            if (!fast) return std::unexpected(fast.error());
+            if (fast->handled) {
+                if (fast->eof) {
+                    return std::optional<Value>(Value::from_reference({}));
+                }
+                auto string = create_string(machine, std::move(fast->text));
+                if (!string) return std::unexpected(string.error());
+                return std::optional<Value>(Value::from_reference(*string));
+            }
             std::u16string line;
             bool received = false;
             while (true) {

@@ -382,6 +382,40 @@ void test_descriptors_and_slots() {
             "Java double consumes two operand slots");
     require(!stack.push(phoneme::vm::Value::from_int(1)).has_value(),
             "max_stack is measured in Java slots");
+
+    const auto first_reference = phoneme::vm::ObjectRef::make(7U, 3U);
+    const auto second_reference = phoneme::vm::ObjectRef::make(9U, 4U);
+    require(locals.set(0, phoneme::vm::Value::from_reference(first_reference))
+                .has_value(),
+            "store reference local for root tracking");
+    require(locals.set(3, phoneme::vm::Value::from_reference(second_reference))
+                .has_value(),
+            "track multiple reference locals");
+    std::vector<phoneme::vm::ObjectRef> local_roots;
+    locals.append_reference_roots(local_roots);
+    require(local_roots.size() == 2U &&
+                std::find(local_roots.begin(), local_roots.end(),
+                          first_reference) != local_roots.end() &&
+                std::find(local_roots.begin(), local_roots.end(),
+                          second_reference) != local_roots.end(),
+            "local root tracking reports live references only");
+    require(locals.set(0, phoneme::vm::Value::from_long(99)).has_value(),
+            "overwrite a tracked reference with category-two data");
+    local_roots.clear();
+    locals.append_reference_roots(local_roots);
+    require(local_roots.size() == 1U && local_roots.front() == second_reference,
+            "overwriting a reference removes it from the compact root index");
+
+    phoneme::vm::OperandStack root_stack(3);
+    require(root_stack.push(
+                phoneme::vm::Value::from_reference(first_reference)).has_value(),
+            "push a reference operand");
+    require(root_stack.push(phoneme::vm::Value::from_int(11)).has_value(),
+            "push a non-reference operand");
+    std::vector<phoneme::vm::ObjectRef> stack_roots;
+    root_stack.append_reference_roots(stack_roots);
+    require(stack_roots.size() == 1U && stack_roots.front() == first_reference,
+            "operand root scan extracts references without checked conversions");
 }
 
 void test_bytecode_structure_verifier() {
@@ -777,6 +811,187 @@ void test_baseline_jit(const std::string& fixture_jar) {
         return;
     }
 
+    phoneme::vm::ClassRepository startup_classes;
+    require(startup_classes.add_archive(fixture_jar).has_value(),
+            "add JIT fixture archive for startup-tier policy test");
+    phoneme::vm::Machine startup_machine(startup_classes);
+    startup_machine.configure_jit(true);
+    startup_machine.configure_jit_startup(true);
+    require(startup_machine.jit_startup_mode(),
+            "enable latency-sensitive JIT startup tier");
+    const phoneme::vm::Value startup_argument =
+        phoneme::vm::Value::from_int(9);
+    const auto startup_statistics_before = startup_machine.jit_statistics();
+    for (int pass = 0; pass < 4; ++pass) {
+        auto startup_result = startup_machine.invoke_static(
+            "corefixture/JitOps",
+            "branch",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&startup_argument, 1U));
+        require(startup_result.has_value() &&
+                    startup_result->completed_normally() &&
+                    startup_result->return_value.has_value() &&
+                    startup_result->return_value->as_int().value_or(0) == 12,
+                "startup tier interprets small one-shot methods correctly");
+    }
+    const auto startup_statistics_during = startup_machine.jit_statistics();
+    require(startup_statistics_during.compiled_methods ==
+                startup_statistics_before.compiled_methods &&
+                startup_statistics_during.startup_loop_analysis_deferred >
+                    startup_statistics_before.startup_loop_analysis_deferred,
+            "startup tier defers small-method loop analysis and compilation");
+    startup_machine.configure_jit_startup(false);
+    require(!startup_machine.jit_startup_mode(),
+            "leave latency-sensitive JIT startup tier");
+    auto post_startup_result = startup_machine.invoke_static(
+        "corefixture/JitOps",
+        "branch",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&startup_argument, 1U));
+    const auto startup_statistics_after = startup_machine.jit_statistics();
+    require(post_startup_result.has_value() &&
+                post_startup_result->completed_normally() &&
+                post_startup_result->return_value.has_value() &&
+                post_startup_result->return_value->as_int().value_or(0) == 12 &&
+                startup_statistics_after.compiled_methods >=
+                    startup_statistics_during.compiled_methods + 1U,
+            "normal tier immediately compiles methods warmed during startup");
+
+    const char* previous_startup_threshold =
+        std::getenv("PHONEME_JIT_STARTUP_HOT_THRESHOLD");
+    const std::optional<std::string> saved_startup_threshold =
+        previous_startup_threshold == nullptr
+            ? std::nullopt
+            : std::optional<std::string>(previous_startup_threshold);
+    require(::setenv("PHONEME_JIT_STARTUP_HOT_THRESHOLD", "1", 1) == 0,
+            "configure deterministic background JIT startup threshold");
+    {
+        phoneme::vm::ClassRepository background_classes;
+        require(background_classes.add_archive(fixture_jar).has_value(),
+                "add JIT fixture archive for background compile test");
+        phoneme::vm::Machine background_machine(background_classes);
+        background_machine.configure_jit(true);
+        background_machine.configure_jit_startup(true);
+        const auto background_before = background_machine.jit_statistics();
+        const phoneme::vm::Value background_argument =
+            phoneme::vm::Value::from_int(9);
+        auto first_background_call = background_machine.invoke_static(
+            "corefixture/JitOps",
+            "branch",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&background_argument, 1U));
+        const auto background_queued = background_machine.jit_statistics();
+        require(first_background_call.has_value() &&
+                    first_background_call->completed_normally() &&
+                    first_background_call->return_value.has_value() &&
+                    first_background_call->return_value->as_int().value_or(0) == 12 &&
+                    background_queued.background_compile_queued >
+                        background_before.background_compile_queued &&
+                    background_queued.compiled_methods ==
+                        background_before.compiled_methods,
+                "startup JIT queues compilation without blocking the first call");
+
+        bool published_background_code = false;
+        for (int poll = 0; poll < 200 && !published_background_code; ++poll) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            auto result = background_machine.invoke_static(
+                "corefixture/JitOps",
+                "branch",
+                "(I)I",
+                std::span<const phoneme::vm::Value>(&background_argument, 1U));
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_int().value_or(0) == 12,
+                    "background-compiled method preserves interpreter result");
+            const auto statistics = background_machine.jit_statistics();
+            published_background_code =
+                statistics.background_compile_completed >
+                    background_queued.background_compile_completed &&
+                statistics.background_compile_published >
+                    background_queued.background_compile_published &&
+                statistics.compiled_methods > background_queued.compiled_methods &&
+                statistics.executed_methods > background_queued.executed_methods;
+        }
+        require(published_background_code,
+                "background JIT publishes completed native code on the VM thread");
+    }
+    if (saved_startup_threshold.has_value()) {
+        (void)::setenv("PHONEME_JIT_STARTUP_HOT_THRESHOLD",
+                       saved_startup_threshold->c_str(),
+                       1);
+    } else {
+        (void)::unsetenv("PHONEME_JIT_STARTUP_HOT_THRESHOLD");
+    }
+
+    const std::filesystem::path jit_profile_path =
+        std::filesystem::temp_directory_path() /
+        "phoneme-core-jit-hot-profile-test.txt";
+    {
+        std::error_code remove_error;
+        std::filesystem::remove(jit_profile_path, remove_error);
+        std::filesystem::remove(jit_profile_path.string() + ".tmp", remove_error);
+    }
+    {
+        phoneme::vm::ClassRepository profile_classes;
+        require(profile_classes.add_archive(fixture_jar).has_value(),
+                "add JIT fixture archive for hot-profile training");
+        phoneme::vm::Machine profile_machine(profile_classes);
+        profile_machine.configure_jit(true);
+        require(profile_machine.configure_jit_profile(
+                    jit_profile_path.string()).has_value(),
+                "configure persistent JIT hot profile");
+        const phoneme::vm::Value profile_argument =
+            phoneme::vm::Value::from_int(9);
+        auto trained = profile_machine.invoke_static(
+            "corefixture/JitOps",
+            "branch",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&profile_argument, 1U));
+        require(trained.has_value() && trained->completed_normally() &&
+                    trained->return_value.has_value() &&
+                    trained->return_value->as_int().value_or(0) == 12,
+                "train persistent JIT hot profile");
+        require(profile_machine.flush_jit_profile().has_value() &&
+                    profile_machine.jit_statistics().profile_saved_methods >= 1U,
+                "persist stable hot JIT method signatures");
+    }
+    require(::setenv("PHONEME_JIT_HOT_THRESHOLD", "100", 1) == 0,
+            "raise JIT threshold to prove persistent prewarm");
+    {
+        phoneme::vm::ClassRepository prewarm_classes;
+        require(prewarm_classes.add_archive(fixture_jar).has_value(),
+                "add JIT fixture archive for persistent prewarm");
+        phoneme::vm::Machine prewarm_machine(prewarm_classes);
+        prewarm_machine.configure_jit(true);
+        require(prewarm_machine.configure_jit_profile(
+                    jit_profile_path.string()).has_value(),
+                "load persistent JIT hot profile");
+        const auto before = prewarm_machine.jit_statistics();
+        const phoneme::vm::Value profile_argument =
+            phoneme::vm::Value::from_int(9);
+        auto prewarmed = prewarm_machine.invoke_static(
+            "corefixture/JitOps",
+            "branch",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&profile_argument, 1U));
+        const auto after = prewarm_machine.jit_statistics();
+        require(prewarmed.has_value() && prewarmed->completed_normally() &&
+                    prewarmed->return_value.has_value() &&
+                    prewarmed->return_value->as_int().value_or(0) == 12 &&
+                    after.profile_loaded_methods >= 1U &&
+                    after.profile_prewarm_hits > before.profile_prewarm_hits &&
+                    after.compiled_methods > before.compiled_methods &&
+                    after.executed_methods > before.executed_methods,
+                "persistent hot profile prewarms method on first call");
+    }
+    require(::setenv("PHONEME_JIT_HOT_THRESHOLD", "1", 1) == 0,
+            "restore deterministic JIT threshold after prewarm test");
+    {
+        std::error_code remove_error;
+        std::filesystem::remove(jit_profile_path, remove_error);
+        std::filesystem::remove(jit_profile_path.string() + ".tmp", remove_error);
+    }
+
     const auto invoke_one = [&machine](const char* method,
                                        phoneme::i32 argument,
                                        phoneme::i32 expected,
@@ -817,9 +1032,66 @@ void test_baseline_jit(const std::string& fixture_jar) {
         }
     };
 
+    const auto invoke_three = [&machine](const char* method,
+                                         phoneme::i32 first,
+                                         phoneme::i32 second,
+                                         phoneme::i32 third,
+                                         phoneme::i32 expected,
+                                         const char* message) {
+        const std::array<phoneme::vm::Value, 3> values {
+            phoneme::vm::Value::from_int(first),
+            phoneme::vm::Value::from_int(second),
+            phoneme::vm::Value::from_int(third),
+        };
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps", method, "(III)I", values);
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_int().value_or(
+                            std::numeric_limits<phoneme::i32>::min()) == expected,
+                    message);
+        }
+    };
+
+    const auto invoke_long_two = [&machine](const char* method,
+                                            phoneme::i64 left,
+                                            phoneme::i64 right,
+                                            phoneme::i64 expected,
+                                            const char* message) {
+        const std::array<phoneme::vm::Value, 2> values {
+            phoneme::vm::Value::from_long(left),
+            phoneme::vm::Value::from_long(right),
+        };
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps", method, "(JJ)J", values);
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_long().value_or(
+                            std::numeric_limits<phoneme::i64>::min()) == expected,
+                    message);
+        }
+    };
+
     invoke_one("branch", -9, 9, "JIT executes conditional branches");
     invoke_one("branch", 0, 7, "JIT executes equality branches");
     invoke_one("sumLoop", 100, 5050, "JIT executes budgeted loops");
+    const auto cfg_optimization_before = machine.jit_statistics();
+    invoke_one("cfgConstantLoop", 10, 360,
+               "optimizing JIT propagates loop-invariant locals through CFG backedges");
+    const auto cfg_optimization_after = machine.jit_statistics();
+    require(cfg_optimization_after.propagated_constants >
+                cfg_optimization_before.propagated_constants &&
+                cfg_optimization_after.strength_reductions >
+                    cfg_optimization_before.strength_reductions,
+            "CFG dataflow enables constant propagation and loop strength reduction");
+    const auto licm_before = machine.jit_statistics();
+    invoke_three("loopInvariantMath", 7, 9, 32, 2016,
+                 "optimizing JIT preserves loop-invariant integer expressions");
+    const auto licm_after = machine.jit_statistics();
+    require(licm_after.loop_invariants_hoisted > licm_before.loop_invariants_hoisted,
+            "optimizing JIT hoists invariant integer expressions out of loops");
     invoke_one("tableSwitch", 2, 30, "JIT executes tableswitch");
     invoke_one("tableSwitch", 99, -1, "JIT executes tableswitch default");
     invoke_one("lookupSwitch", 1000, 3, "JIT executes lookupswitch");
@@ -844,10 +1116,356 @@ void test_baseline_jit(const std::string& fixture_jar) {
                "optimizing JIT strength-reduces constant arithmetic");
     invoke_one("propagatedLocal", 10, 22,
                "optimizing JIT propagates constants through locals");
+    const auto dce_before = machine.jit_statistics();
+    invoke_one("deadLocalWrites", 10, 30,
+               "optimizing JIT preserves results while eliminating dead local writes");
+    const auto dce_after = machine.jit_statistics();
+    require(dce_after.dead_local_writes_eliminated >
+                dce_before.dead_local_writes_eliminated,
+            "optimizing JIT records dead local write elimination");
+    const auto cse_before = machine.jit_statistics();
+    invoke_two("commonExpression", 17, 25, 84,
+               "optimizing JIT preserves repeated integer expressions");
+    const auto cse_after = machine.jit_statistics();
+    require(cse_after.common_subexpressions_eliminated >
+                cse_before.common_subexpressions_eliminated,
+            "optimizing JIT eliminates common scalar subexpressions");
+    const auto cross_block_cse_before = machine.jit_statistics();
+    invoke_three("crossBlockCommonExpression", 17, 25, 1, 84,
+                 "optimizing JIT preserves CSE across a single-predecessor CFG edge");
+    const auto cross_block_cse_after = machine.jit_statistics();
+    require(cross_block_cse_after.cross_block_common_subexpressions_eliminated >
+                cross_block_cse_before.cross_block_common_subexpressions_eliminated,
+            "optimizing JIT extends GVN across proven extended basic blocks");
+    const auto scalar_replace_before = machine.jit_statistics();
+    invoke_one("scalarReplaceIntArray", 41, 42,
+               "optimizing JIT scalar-replaces a non-escaping one-element int array");
+    const auto scalar_replace_after = machine.jit_statistics();
+    require(scalar_replace_after.scalar_replaced_allocations >
+                scalar_replace_before.scalar_replaced_allocations &&
+                scalar_replace_after.scalar_replaced_array_accesses >=
+                    scalar_replace_before.scalar_replaced_array_accesses + 2U,
+            "optimizing JIT removes virtual array allocation and element accesses");
     invoke_one("foldedBranch", 4, 15,
                "optimizing JIT folds constant control flow");
     invoke_one("constantDivision", 52, 10,
                "optimizing JIT specializes division by constants");
+
+    const auto long_statistics_before = machine.jit_statistics();
+    constexpr phoneme::i64 long_left = 1'234'567;
+    constexpr phoneme::i64 long_right = 76'543;
+    constexpr phoneme::u32 long_shift = 7U;
+    const phoneme::u64 long_mixed =
+        (static_cast<phoneme::u64>(long_left + long_right) *
+         static_cast<phoneme::u64>(long_left - long_right)) ^
+        (static_cast<phoneme::u64>(long_left) << long_shift) ^
+        (static_cast<phoneme::u64>(long_right) >> long_shift);
+    const std::array<phoneme::vm::Value, 3> long_arithmetic_values {
+        phoneme::vm::Value::from_long(long_left),
+        phoneme::vm::Value::from_long(long_right),
+        phoneme::vm::Value::from_int(static_cast<phoneme::i32>(long_shift)),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto result = machine.invoke_static(
+            "corefixture/JitOps",
+            "longArithmetic",
+            "(JJI)J",
+            long_arithmetic_values);
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_long().value_or(0) ==
+                        static_cast<phoneme::i64>(long_mixed),
+                "JIT executes Java long arithmetic shifts and bitwise ops");
+    }
+
+    constexpr phoneme::i64 dividend = -9'876'543'210'123LL;
+    constexpr phoneme::i64 divisor = 97;
+    invoke_long_two("longDivide",
+                    dividend,
+                    divisor,
+                    dividend / divisor + dividend % divisor,
+                    "JIT executes Java long division and remainder");
+
+    const std::array<phoneme::vm::Value, 2> long_compare_values {
+        phoneme::vm::Value::from_long(-5),
+        phoneme::vm::Value::from_long(9),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto result = machine.invoke_static(
+            "corefixture/JitOps", "longCompare", "(JJ)I", long_compare_values);
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_int().value_or(0) == -1,
+                "JIT executes lcmp and branches");
+    }
+
+    const phoneme::vm::Value long_loop_limit =
+        phoneme::vm::Value::from_int(1'000);
+    for (int pass = 0; pass < 2; ++pass) {
+        auto result = machine.invoke_static(
+            "corefixture/JitOps",
+            "longLoop",
+            "(I)J",
+            std::span<const phoneme::vm::Value>(&long_loop_limit, 1U));
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_long().value_or(0) == 500'500,
+                "JIT executes hot loops with category-two locals");
+    }
+
+    const phoneme::vm::Value negative_seven =
+        phoneme::vm::Value::from_int(-7);
+    const phoneme::u64 widened_bits =
+        static_cast<phoneme::u64>(static_cast<phoneme::i64>(-7));
+    const phoneme::i64 round_trip_expected = static_cast<phoneme::i64>(
+        (widened_bits << 33U) + static_cast<phoneme::u64>(-21LL));
+    for (int pass = 0; pass < 2; ++pass) {
+        auto result = machine.invoke_static(
+            "corefixture/JitOps",
+            "intLongRoundTrip",
+            "(I)J",
+            std::span<const phoneme::vm::Value>(&negative_seven, 1U));
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_long().value_or(0) ==
+                        round_trip_expected,
+                "JIT executes i2l and l2i conversions");
+    }
+    const auto long_statistics_after = machine.jit_statistics();
+    require(long_statistics_after.compiled_methods >=
+                long_statistics_before.compiled_methods + 5U &&
+                long_statistics_after.executed_methods >=
+                long_statistics_before.executed_methods + 5U,
+            "JIT compiles and executes representative Java long methods");
+
+    const phoneme::vm::Value field_increment =
+        phoneme::vm::Value::from_int(2);
+    const auto field_write_statistics_before = machine.jit_statistics();
+    for (phoneme::i32 expected : {3, 5}) {
+        auto result = machine.invoke_static(
+            "corefixture/JitOps",
+            "fieldAccessFallback",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&field_increment, 1U));
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_int().value_or(0) == expected,
+                "JIT executes static field read-modify-write");
+    }
+    const auto field_write_statistics_after = machine.jit_statistics();
+    require(field_write_statistics_after.compiled_methods >=
+                field_write_statistics_before.compiled_methods + 1U &&
+                field_write_statistics_after.executed_methods >=
+                field_write_statistics_before.executed_methods + 1U,
+            "JIT natively executes putstatic with structured failure handling");
+
+    const auto direct_call_statistics_before = machine.jit_statistics();
+    for (int pass = 0; pass < 2; ++pass) {
+        auto direct_call = machine.invoke_static(
+            "corefixture/JitOps",
+            "callFallback",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&field_increment, 1U));
+        require(direct_call.has_value() &&
+                    direct_call->completed_normally() &&
+                    direct_call->return_value.has_value() &&
+                    direct_call->return_value->as_int().value_or(0) == 2,
+                "JIT executes an inlinable same-class invokestatic");
+    }
+    const auto direct_call_statistics_after = machine.jit_statistics();
+    require(direct_call_statistics_after.compiled_methods >=
+                direct_call_statistics_before.compiled_methods + 1U &&
+                direct_call_statistics_after.executed_methods >=
+                direct_call_statistics_before.executed_methods + 1U &&
+                direct_call_statistics_after.inlined_calls >
+                    direct_call_statistics_before.inlined_calls,
+            "JIT compiles and inlines a direct static scalar call wrapper");
+
+    const phoneme::vm::Value fallback_length =
+        phoneme::vm::Value::from_int(4);
+    const auto array_allocation_statistics_before = machine.jit_statistics();
+    for (int pass = 0; pass < 2; ++pass) {
+        auto primitive_array = machine.invoke_static(
+            "corefixture/JitOps",
+            "allocationFallback",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&fallback_length, 1U));
+        auto reference_array = machine.invoke_static(
+            "corefixture/JitOps",
+            "referenceArrayLength",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&fallback_length, 1U));
+        require(primitive_array.has_value() &&
+                    primitive_array->completed_normally() &&
+                    primitive_array->return_value.has_value() &&
+                    primitive_array->return_value->as_int().value_or(0) == 4,
+                "JIT executes newarray through the allocation helper");
+        require(reference_array.has_value() &&
+                    reference_array->completed_normally() &&
+                    reference_array->return_value.has_value() &&
+                    reference_array->return_value->as_int().value_or(0) == 4,
+                "JIT executes anewarray through the allocation helper");
+    }
+    const phoneme::vm::Value negative_length =
+        phoneme::vm::Value::from_int(-1);
+    auto negative_array = machine.invoke_static(
+        "corefixture/JitOps",
+        "allocationFallback",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&negative_length, 1U));
+    require(negative_array.has_value() &&
+                !negative_array->completed_normally() &&
+                negative_array->throwable.has_value(),
+            "JIT allocation reports negative array size without replay");
+    auto negative_array_class = machine.heap().class_name(
+        *negative_array->throwable);
+    require(negative_array_class.has_value() &&
+                *negative_array_class ==
+                    "java/lang/NegativeArraySizeException",
+            "JIT allocation preserves NegativeArraySizeException");
+    const auto array_allocation_statistics_after = machine.jit_statistics();
+    require(array_allocation_statistics_after.compiled_methods >=
+                array_allocation_statistics_before.compiled_methods + 2U &&
+                array_allocation_statistics_after.executed_methods >=
+                array_allocation_statistics_before.executed_methods + 4U,
+            "JIT natively executes primitive and reference array allocation");
+
+    const auto object_allocation_statistics_before = machine.jit_statistics();
+    const phoneme::vm::Value allocated_value =
+        phoneme::vm::Value::from_int(33);
+    auto allocated_value_field = machine.class_states().resolve_field(
+        "corefixture/JitOps$Allocated", "value", "I", false);
+    require(allocated_value_field.has_value(),
+            "resolve constructed object value field");
+    for (int pass = 0; pass < 2; ++pass) {
+        auto object_allocation = machine.invoke_static(
+            "corefixture/JitOps",
+            "objectAllocationFallback",
+            "()Ljava/lang/Object;");
+        auto constructed_allocation = machine.invoke_static(
+            "corefixture/JitOps",
+            "allocateObject",
+            "(I)Lcorefixture/JitOps$Allocated;",
+            std::span<const phoneme::vm::Value>(&allocated_value, 1U));
+        require(object_allocation.has_value() &&
+                    object_allocation->completed_normally() &&
+                    object_allocation->return_value.has_value() &&
+                    !object_allocation->return_value->as_reference()
+                         .value_or(phoneme::vm::ObjectRef{})
+                         .is_null(),
+                "JIT executes new with Object constructor dispatch");
+        require(constructed_allocation.has_value() &&
+                    constructed_allocation->completed_normally() &&
+                    constructed_allocation->return_value.has_value(),
+                "JIT executes new custom object and invokespecial constructor");
+        auto constructed_reference =
+            constructed_allocation->return_value->as_reference();
+        require(constructed_reference.has_value() &&
+                    !constructed_reference->is_null(),
+                "JIT returns the newly allocated custom object");
+        auto constructed_value = machine.heap().field(
+            *constructed_reference, allocated_value_field->index);
+        require(constructed_value.has_value() &&
+                    constructed_value->as_int().value_or(0) == 33,
+                "JIT constructor call initializes the allocated object");
+    }
+    const auto object_allocation_statistics_after = machine.jit_statistics();
+    require(object_allocation_statistics_after.compiled_methods >=
+                object_allocation_statistics_before.compiled_methods + 2U &&
+                object_allocation_statistics_after.executed_methods >=
+                object_allocation_statistics_before.executed_methods + 3U,
+            "JIT natively executes object allocation after class initialization");
+
+    const auto multi_array_statistics_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> multi_shape_arguments {
+        phoneme::vm::Value::from_int(3),
+        phoneme::vm::Value::from_int(5),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto multi_array = machine.invoke_static(
+            "corefixture/JitOps",
+            "multiArrayFallback",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&fallback_length, 1U));
+        auto multi_shape = machine.invoke_static(
+            "corefixture/JitOps",
+            "multiArrayShape",
+            "(II)I",
+            multi_shape_arguments);
+        require(multi_array.has_value() &&
+                    multi_array->completed_normally() &&
+                    multi_array->return_value.has_value() &&
+                    multi_array->return_value->as_int().value_or(0) == 4,
+                "JIT executes multianewarray outer allocation");
+        require(multi_shape.has_value() &&
+                    multi_shape->completed_normally() &&
+                    multi_shape->return_value.has_value() &&
+                    multi_shape->return_value->as_int().value_or(0) == 305,
+                "JIT materializes every requested multianewarray dimension");
+    }
+    auto negative_multi_array = machine.invoke_static(
+        "corefixture/JitOps",
+        "multiArrayFallback",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&negative_length, 1U));
+    require(negative_multi_array.has_value() &&
+                !negative_multi_array->completed_normally() &&
+                negative_multi_array->throwable.has_value(),
+            "JIT multianewarray reports negative dimensions");
+    auto negative_multi_class = machine.heap().class_name(
+        *negative_multi_array->throwable);
+    require(negative_multi_class.has_value() &&
+                *negative_multi_class ==
+                    "java/lang/NegativeArraySizeException",
+            "JIT multianewarray preserves NegativeArraySizeException");
+    const auto multi_array_statistics_after = machine.jit_statistics();
+    require(multi_array_statistics_after.compiled_methods >=
+                multi_array_statistics_before.compiled_methods + 2U &&
+                multi_array_statistics_after.executed_methods >=
+                multi_array_statistics_before.executed_methods + 4U,
+            "JIT natively executes multidimensional array allocation");
+
+    const auto reference_constant_statistics_before = machine.jit_statistics();
+    for (int pass = 0; pass < 2; ++pass) {
+        auto string_constant = machine.invoke_static(
+            "corefixture/JitOps",
+            "stringConstant",
+            "()Ljava/lang/String;");
+        auto class_constant = machine.invoke_static(
+            "corefixture/JitOps",
+            "classConstant",
+            "()Ljava/lang/Class;");
+        require(string_constant.has_value() &&
+                    string_constant->completed_normally() &&
+                    string_constant->return_value.has_value(),
+                "JIT loads an ldc String reference");
+        auto string_reference = string_constant->return_value->as_reference();
+        require(string_reference.has_value() &&
+                    !string_reference->is_null(),
+                "JIT ldc String result is non-null");
+        auto string_value = machine.heap().string_value(*string_reference);
+        require(string_value.has_value() &&
+                    *string_value == u"phoneME-JIT",
+                "JIT interns and returns the exact ldc String constant");
+        require(class_constant.has_value() &&
+                    class_constant->completed_normally() &&
+                    class_constant->return_value.has_value(),
+                "JIT loads an ldc Class reference");
+        auto class_reference = class_constant->return_value->as_reference();
+        require(class_reference.has_value() &&
+                    !class_reference->is_null(),
+                "JIT ldc Class result is non-null");
+        auto mirror_class = machine.heap().class_name(*class_reference);
+        require(mirror_class.has_value() &&
+                    *mirror_class == "java/lang/Class",
+                "JIT returns a Java Class mirror for ldc class constants");
+    }
+    const auto reference_constant_statistics_after = machine.jit_statistics();
+    require(reference_constant_statistics_after.compiled_methods >=
+                reference_constant_statistics_before.compiled_methods + 2U &&
+                reference_constant_statistics_after.executed_methods >=
+                reference_constant_statistics_before.executed_methods + 4U,
+            "JIT natively executes String and Class ldc bytecodes");
 
     auto jit_object = machine.heap().allocate_object("corefixture/JitOps", 0U);
     require(jit_object.has_value(), "allocate object for JIT reference tests");
@@ -855,6 +1473,1119 @@ void test_baseline_jit(const std::string& fixture_jar) {
         phoneme::vm::Value::from_reference({});
     const phoneme::vm::Value object_reference =
         phoneme::vm::Value::from_reference(*jit_object);
+    const std::array<phoneme::vm::Value, 2> allocation_root_arguments {
+        object_reference,
+        fallback_length,
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto preserved = machine.invoke_static(
+            "corefixture/JitOps",
+            "preserveAcrossArrayAllocation",
+            "(Ljava/lang/Object;I)Ljava/lang/Object;",
+            allocation_root_arguments);
+        require(preserved.has_value() && preserved->completed_normally() &&
+                    preserved->return_value.has_value() &&
+                    preserved->return_value->as_reference().value_or(
+                        phoneme::vm::ObjectRef{}) == *jit_object,
+                "JIT publishes live references across allocation safepoints");
+    }
+
+    const auto object_read_statistics_before = machine.jit_statistics();
+    for (int pass = 0; pass < 2; ++pass) {
+        auto static_value = machine.invoke_static(
+            "corefixture/JitOps", "readStaticValue", "()I");
+        auto instance_check = machine.invoke_static(
+            "corefixture/JitOps",
+            "isJitOps",
+            "(Ljava/lang/Object;)I",
+            std::span<const phoneme::vm::Value>(&object_reference, 1U));
+        auto cast_value = machine.invoke_static(
+            "corefixture/JitOps",
+            "castJitOps",
+            "(Ljava/lang/Object;)Lcorefixture/JitOps;",
+            std::span<const phoneme::vm::Value>(&object_reference, 1U));
+        require(static_value.has_value() &&
+                    static_value->completed_normally() &&
+                    static_value->return_value.has_value() &&
+                    static_value->return_value->as_int().value_or(0) == 5,
+                "JIT reads initialized static fields");
+        require(instance_check.has_value() &&
+                    instance_check->completed_normally() &&
+                    instance_check->return_value.has_value() &&
+                    instance_check->return_value->as_int().value_or(0) == 1,
+                "JIT executes instanceof through the type helper");
+        require(cast_value.has_value() && cast_value->completed_normally() &&
+                    cast_value->return_value.has_value() &&
+                    cast_value->return_value->as_reference().value_or(
+                        phoneme::vm::ObjectRef{}) == *jit_object,
+                "JIT executes successful checkcast with full references");
+    }
+    const auto object_read_statistics_after = machine.jit_statistics();
+    require(object_read_statistics_after.compiled_methods >=
+                object_read_statistics_before.compiled_methods + 3U &&
+                object_read_statistics_after.executed_methods >=
+                object_read_statistics_before.executed_methods + 3U,
+            "JIT natively executes static and type read operations");
+
+    const auto heap_statistics_before = machine.jit_statistics();
+    auto field_instance = machine.class_states().allocate_instance(
+        machine.heap(), "corefixture/JitOps");
+    auto instance_field = machine.class_states().resolve_field(
+        "corefixture/JitOps", "instanceValue", "I", false);
+    require(field_instance.has_value() && instance_field.has_value() &&
+                machine.heap().set_field(
+                    *field_instance,
+                    instance_field->index,
+                    phoneme::vm::Value::from_int(77)).has_value(),
+            "prepare instance field for JIT heap-read test");
+    for (int pass = 0; pass < 2; ++pass) {
+        auto result = machine.invoke_instance(
+            *field_instance,
+            "corefixture/JitOps",
+            "readInstanceValue",
+            "()I");
+        require(result.has_value() && result->completed_normally() &&
+                    result->return_value.has_value() &&
+                    result->return_value->as_int().value_or(0) == 77,
+                "JIT reads resolved instance fields through runtime helper");
+    }
+
+    require(machine.heap().set_field(
+                *field_instance,
+                instance_field->index,
+                phoneme::vm::Value::from_int(0)).has_value(),
+            "reset instance field for JIT resume test");
+    const auto resume_statistics_before = machine.jit_statistics();
+    const phoneme::vm::Value resume_target =
+        phoneme::vm::Value::from_reference(*field_instance);
+    auto resume_result = machine.invoke_static(
+        "corefixture/JitOps",
+        "incrementThenReadLazyStatic",
+        "(Lcorefixture/JitOps;)I",
+        std::span<const phoneme::vm::Value>(&resume_target, 1U));
+    require(resume_result.has_value() && resume_result->completed_normally() &&
+                resume_result->return_value.has_value() &&
+                resume_result->return_value->as_int().value_or(0) == 77,
+            "JIT resumes at the lazy-static bytecode");
+    auto resumed_field = machine.heap().field(
+        *field_instance, instance_field->index);
+    require(resumed_field.has_value() &&
+                resumed_field->as_int().value_or(0) == 1,
+            "JIT resume does not repeat the earlier field write");
+    const auto resume_statistics_after = machine.jit_statistics();
+    require(resume_statistics_after.compiled_methods >
+                resume_statistics_before.compiled_methods &&
+                resume_statistics_after.deoptimized_executions >
+                    resume_statistics_before.deoptimized_executions,
+            "JIT records precise frame resume");
+
+    require(machine.heap().set_field(
+                *field_instance,
+                instance_field->index,
+                phoneme::vm::Value::from_int(0)).has_value(),
+            "reset instance field for side-effecting call test");
+    const auto write_call_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> write_call_arguments {
+        phoneme::vm::Value::from_reference(*field_instance),
+        phoneme::vm::Value::from_int(123),
+    };
+    auto write_call_result = machine.invoke_static(
+        "corefixture/JitOps",
+        "writeThenCall",
+        "(Lcorefixture/JitOps;I)I",
+        write_call_arguments);
+    require(write_call_result.has_value() &&
+                write_call_result->completed_normally() &&
+                write_call_result->return_value.has_value() &&
+                write_call_result->return_value->as_int().value_or(0) == 123,
+            "JIT executes a call after an earlier heap side effect");
+    auto write_call_field = machine.heap().field(
+        *field_instance, instance_field->index);
+    require(write_call_field.has_value() &&
+                write_call_field->as_int().value_or(0) == 1,
+            "JIT nested call path does not replay the preceding putfield");
+    const auto write_call_after = machine.jit_statistics();
+    require(write_call_after.compiled_methods > write_call_before.compiled_methods &&
+                write_call_after.executed_methods > write_call_before.executed_methods,
+            "JIT keeps side-effecting callers compiled across nested calls");
+
+    require(machine.heap().set_field(
+                *field_instance,
+                instance_field->index,
+                phoneme::vm::Value::from_int(0)).has_value(),
+            "reset instance field for runtime-chain exception warmup");
+    const std::array<phoneme::vm::Value, 2> divide_warmup_arguments {
+        phoneme::vm::Value::from_reference(*field_instance),
+        phoneme::vm::Value::from_int(1),
+    };
+    auto divide_warmup = machine.invoke_static(
+        "corefixture/JitOps",
+        "instanceThenDivide",
+        "(Lcorefixture/JitOps;I)I",
+        divide_warmup_arguments);
+    require(divide_warmup.has_value() && divide_warmup->completed_normally() &&
+                divide_warmup->return_value.has_value() &&
+                divide_warmup->return_value->as_int().value_or(0) == 10,
+            "warm cached runtime-dispatch callee for exception chaining");
+    require(machine.heap().set_field(
+                *field_instance,
+                instance_field->index,
+                phoneme::vm::Value::from_int(0)).has_value(),
+            "reset side effect after runtime-chain exception warmup");
+    const auto runtime_exception_chain_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> divide_zero_arguments {
+        phoneme::vm::Value::from_reference(*field_instance),
+        phoneme::vm::Value::from_int(0),
+    };
+    auto chained_divide_zero = machine.invoke_static(
+        "corefixture/JitOps",
+        "callInstanceThenDivide",
+        "(Lcorefixture/JitOps;I)I",
+        divide_zero_arguments);
+    require(chained_divide_zero.has_value() &&
+                !chained_divide_zero->completed_normally() &&
+                chained_divide_zero->throwable.has_value(),
+            "runtime-dispatch fast chain propagates ArithmeticException");
+    auto chained_divide_class = machine.heap().class_name(
+        *chained_divide_zero->throwable);
+    require(chained_divide_class.has_value() &&
+                *chained_divide_class == "java/lang/ArithmeticException",
+            "runtime-dispatch fast chain preserves exception class");
+    auto chained_divide_field = machine.heap().field(
+        *field_instance, instance_field->index);
+    require(chained_divide_field.has_value() &&
+                chained_divide_field->as_int().value_or(0) == 1,
+            "runtime-dispatch fast chain never replays a callee side effect");
+    const auto runtime_exception_chain_after = machine.jit_statistics();
+    require(runtime_exception_chain_after.fast_chain_runtime_hits >
+                runtime_exception_chain_before.fast_chain_runtime_hits,
+            "runtime-dispatch exception path executes through cached JIT chain");
+
+    const auto nested_call_statistics_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2U> long_call_arguments {
+        phoneme::vm::Value::from_long(0x1234'5678'0000'0000LL),
+        phoneme::vm::Value::from_long(0x0000'0000'7654'3210LL),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto long_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "callLongs",
+            "(JJ)J",
+            long_call_arguments);
+        require(long_result.has_value() && long_result->completed_normally() &&
+                    long_result->return_value.has_value() &&
+                    long_result->return_value->as_long().value_or(0) ==
+                        0x1234'5678'7654'3210LL,
+                "JIT passes category-two arguments through invokestatic");
+    }
+    const auto long_inline_statistics = machine.jit_statistics();
+    require(long_inline_statistics.inlined_calls >
+                nested_call_statistics_before.inlined_calls,
+            "optimizing JIT inlines category-two long scalar calls");
+    const phoneme::vm::Value nonzero_divisor =
+        phoneme::vm::Value::from_int(4);
+    auto normal_nested_call = machine.invoke_static(
+        "corefixture/JitOps",
+        "callThrowing",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&nonzero_divisor, 1U));
+    require(normal_nested_call.has_value() &&
+                normal_nested_call->completed_normally() &&
+                normal_nested_call->return_value.has_value() &&
+                normal_nested_call->return_value->as_int().value_or(0) == 25,
+            "JIT completes a nested call that may throw");
+    const phoneme::vm::Value nested_zero_divisor =
+        phoneme::vm::Value::from_int(0);
+    auto throwing_nested_call = machine.invoke_static(
+        "corefixture/JitOps",
+        "callThrowing",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&nested_zero_divisor, 1U));
+    require(throwing_nested_call.has_value() &&
+                throwing_nested_call->throwable.has_value() &&
+                machine.heap().class_name(*throwing_nested_call->throwable)
+                    .value_or("") == "java/lang/ArithmeticException",
+            "JIT propagates the exact throwable from a nested invocation");
+    const auto nested_call_statistics_after = machine.jit_statistics();
+    require(nested_call_statistics_after.compiled_methods >=
+                nested_call_statistics_before.compiled_methods + 2U &&
+                nested_call_statistics_after.executed_methods >=
+                nested_call_statistics_before.executed_methods + 2U,
+            "JIT compiles category-two and throwing static call wrappers");
+
+    auto int_array = machine.heap().allocate_array(
+        "[I", 4U, phoneme::vm::Value::from_int(0));
+    auto long_array = machine.heap().allocate_array(
+        "[J", 3U, phoneme::vm::Value::from_long(0));
+    auto object_array = machine.heap().allocate_array(
+        "[Ljava/lang/Object;", 2U, null_reference);
+    auto byte_array = machine.heap().allocate_array(
+        "[B", 2U, phoneme::vm::Value::from_int(0));
+    auto char_array = machine.heap().allocate_array(
+        "[C", 2U, phoneme::vm::Value::from_int(0));
+    auto short_array = machine.heap().allocate_array(
+        "[S", 2U, phoneme::vm::Value::from_int(0));
+    require(int_array && long_array && object_array && byte_array &&
+                char_array && short_array,
+            "allocate arrays for JIT heap-read tests");
+    require(machine.heap().set_element(
+                *int_array, 2U, phoneme::vm::Value::from_int(40)).has_value() &&
+                machine.heap().set_element(
+                    *long_array,
+                    1U,
+                    phoneme::vm::Value::from_long(
+                        0x1234'5678'9ABC'DEFLL)).has_value() &&
+                machine.heap().set_element(
+                    *object_array, 1U, object_reference).has_value() &&
+                machine.heap().set_element(
+                    *byte_array,
+                    1U,
+                    phoneme::vm::Value::from_int(0xFF)).has_value() &&
+                machine.heap().set_element(
+                    *char_array,
+                    1U,
+                    phoneme::vm::Value::from_int(0xFFFF)).has_value() &&
+                machine.heap().set_element(
+                    *short_array,
+                    1U,
+                    phoneme::vm::Value::from_int(0xFFFF)).has_value(),
+            "populate arrays for JIT heap-read tests");
+
+    const auto array_lease_before = machine.jit_statistics();
+    const phoneme::vm::Value sum_array_argument =
+        phoneme::vm::Value::from_reference(*int_array);
+    for (int pass = 0; pass < 2; ++pass) {
+        auto sum_array = machine.invoke_static(
+            "corefixture/JitOps",
+            "sumIntArray",
+            "([I)I",
+            std::span<const phoneme::vm::Value>(&sum_array_argument, 1U));
+        require(sum_array.has_value() && sum_array->completed_normally() &&
+                    sum_array->return_value.has_value() &&
+                    sum_array->return_value->as_int().value_or(0) == 40,
+                "JIT array lease preserves canonical counted-loop loads");
+    }
+    const auto array_lease_after = machine.jit_statistics();
+    require(array_lease_after.array_bounds_checks_eliminated >
+                array_lease_before.array_bounds_checks_eliminated &&
+                array_lease_after.array_runtime_calls_eliminated >
+                    array_lease_before.array_runtime_calls_eliminated &&
+                array_lease_after.unrolled_int_array_loops >
+                    array_lease_before.unrolled_int_array_loops,
+            "optimizing JIT eliminates array helpers and unrolls proven int reductions");
+
+    auto store_lease_array = machine.heap().allocate_array(
+        "[I", 16U, phoneme::vm::Value::from_int(-1));
+    require(store_lease_array.has_value(),
+            "allocate primitive array for JIT store-lease test");
+    const auto store_lease_before = machine.jit_statistics();
+    const phoneme::vm::Value store_lease_argument =
+        phoneme::vm::Value::from_reference(*store_lease_array);
+    for (int pass = 0; pass < 2; ++pass) {
+        auto fill_array = machine.invoke_static(
+            "corefixture/JitOps",
+            "fillIntArray",
+            "([I)I",
+            std::span<const phoneme::vm::Value>(&store_lease_argument, 1U));
+        require(fill_array.has_value() && fill_array->completed_normally() &&
+                    fill_array->return_value.has_value() &&
+                    fill_array->return_value->as_int().value_or(0) == 16,
+                "JIT primitive store lease preserves counted-loop result");
+    }
+    for (phoneme::usize index = 0U; index < 16U; ++index) {
+        auto element = machine.heap().element(*store_lease_array, index);
+        require(element.has_value() &&
+                    element->as_int().value_or(-1) ==
+                        static_cast<phoneme::i32>(index),
+                "JIT primitive store lease writes exact array payload");
+    }
+    const auto store_lease_after = machine.jit_statistics();
+    require(store_lease_after.array_bounds_checks_eliminated >
+                store_lease_before.array_bounds_checks_eliminated &&
+                store_lease_after.array_runtime_calls_eliminated >
+                    store_lease_before.array_runtime_calls_eliminated,
+            "optimizing JIT eliminates proven primitive array-store helpers");
+
+    const auto invoke_array_int = [&machine](const char* method,
+                                             const char* descriptor,
+                                             phoneme::vm::ObjectRef array,
+                                             phoneme::i32 index,
+                                             phoneme::i32 expected,
+                                             const char* message) {
+        const std::array<phoneme::vm::Value, 2> arguments {
+            phoneme::vm::Value::from_reference(array),
+            phoneme::vm::Value::from_int(index),
+        };
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps", method, descriptor, arguments);
+            require(result.has_value() && result->completed_normally() &&
+                        result->return_value.has_value() &&
+                        result->return_value->as_int().value_or(0) == expected,
+                    message);
+        }
+    };
+    invoke_array_int("readIntArray",
+                     "([II)I",
+                     *int_array,
+                     2,
+                     44,
+                     "JIT executes iaload and arraylength");
+    invoke_array_int("readByteArray",
+                     "([BI)I",
+                     *byte_array,
+                     1,
+                     -1,
+                     "JIT preserves signed baload semantics");
+    invoke_array_int("readCharArray",
+                     "([CI)I",
+                     *char_array,
+                     1,
+                     65'535,
+                     "JIT preserves unsigned caload semantics");
+    invoke_array_int("readShortArray",
+                     "([SI)I",
+                     *short_array,
+                     1,
+                     -1,
+                     "JIT preserves signed saload semantics");
+
+    const std::array<phoneme::vm::Value, 2> long_array_arguments {
+        phoneme::vm::Value::from_reference(*long_array),
+        phoneme::vm::Value::from_int(1),
+    };
+    const std::array<phoneme::vm::Value, 2> object_array_arguments {
+        phoneme::vm::Value::from_reference(*object_array),
+        phoneme::vm::Value::from_int(1),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto long_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "readLongArray",
+            "([JI)J",
+            long_array_arguments);
+        require(long_result.has_value() && long_result->completed_normally() &&
+                    long_result->return_value.has_value() &&
+                    long_result->return_value->as_long().value_or(0) ==
+                        0x1234'5678'9ABC'DEFLL,
+                "JIT executes laload with full 64-bit values");
+
+        auto object_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "readObjectArray",
+            "([Ljava/lang/Object;I)Ljava/lang/Object;",
+            object_array_arguments);
+        require(object_result.has_value() &&
+                    object_result->completed_normally() &&
+                    object_result->return_value.has_value() &&
+                    object_result->return_value->as_reference().value_or(
+                        phoneme::vm::ObjectRef{}) == *jit_object,
+                "JIT executes aaload with full-width references");
+    }
+    const auto heap_statistics_after = machine.jit_statistics();
+    require(heap_statistics_after.compiled_methods >=
+                heap_statistics_before.compiled_methods + 7U &&
+                heap_statistics_after.executed_methods >=
+                heap_statistics_before.executed_methods + 7U,
+            "JIT compiles and executes read-only heap methods natively");
+
+    const auto floating_statistics_before = machine.jit_statistics();
+    constexpr float float_left = 7.25F;
+    constexpr float float_right = -2.5F;
+    const float float_mixed =
+        (float_left + float_right) * (float_left - float_right);
+    const float float_expected = -float_mixed / float_right + 1.5F;
+    const std::array<phoneme::vm::Value, 2> float_arguments {
+        phoneme::vm::Value::from_float(float_left),
+        phoneme::vm::Value::from_float(float_right),
+    };
+    constexpr double double_left = 123.75;
+    constexpr double double_right = -4.5;
+    const double double_mixed =
+        (double_left + double_right) * (double_left - double_right);
+    const double double_expected = -double_mixed / double_right + 1.25;
+    const std::array<phoneme::vm::Value, 2> double_arguments {
+        phoneme::vm::Value::from_double(double_left),
+        phoneme::vm::Value::from_double(double_right),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto float_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "floatArithmetic",
+            "(FF)F",
+            float_arguments);
+        auto double_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "doubleArithmetic",
+            "(DD)D",
+            double_arguments);
+        auto float_inline_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "callFloats",
+            "(FF)F",
+            float_arguments);
+        auto double_inline_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "callDoubles",
+            "(DD)D",
+            double_arguments);
+        require(float_result.has_value() &&
+                    float_result->completed_normally() &&
+                    float_result->return_value.has_value() &&
+                    std::fabs(float_result->return_value->as_float().value_or(0) -
+                              float_expected) < 0.0001F,
+                "JIT executes ARM64 float arithmetic and ldc constants");
+        require(double_result.has_value() &&
+                    double_result->completed_normally() &&
+                    double_result->return_value.has_value() &&
+                    std::fabs(double_result->return_value->as_double().value_or(0) -
+                              double_expected) < 0.000000001,
+                "JIT executes ARM64 double arithmetic and ldc2 constants");
+        require(float_inline_result.has_value() &&
+                    float_inline_result->completed_normally() &&
+                    float_inline_result->return_value.has_value() &&
+                    std::fabs(float_inline_result->return_value->as_float().value_or(0) -
+                              (float_left + float_right)) < 0.0001F,
+                "optimizing JIT inlines float scalar leaf calls");
+        require(double_inline_result.has_value() &&
+                    double_inline_result->completed_normally() &&
+                    double_inline_result->return_value.has_value() &&
+                    std::fabs(double_inline_result->return_value->as_double().value_or(0) -
+                              (double_left + double_right)) < 0.000000001,
+                "optimizing JIT inlines double scalar leaf calls");
+    }
+
+    auto float_array = machine.heap().allocate_array(
+        "[F", 2U, phoneme::vm::Value::from_float(0.0F));
+    auto double_array = machine.heap().allocate_array(
+        "[D", 2U, phoneme::vm::Value::from_double(0.0));
+    require(float_array && double_array &&
+                machine.heap().set_element(
+                    *float_array,
+                    1U,
+                    phoneme::vm::Value::from_float(-13.75F)).has_value() &&
+                machine.heap().set_element(
+                    *double_array,
+                    1U,
+                    phoneme::vm::Value::from_double(9'876.125)).has_value(),
+            "prepare floating arrays for JIT helper tests");
+    const std::array<phoneme::vm::Value, 2> float_array_arguments {
+        phoneme::vm::Value::from_reference(*float_array),
+        phoneme::vm::Value::from_int(1),
+    };
+    const std::array<phoneme::vm::Value, 2> double_array_arguments {
+        phoneme::vm::Value::from_reference(*double_array),
+        phoneme::vm::Value::from_int(1),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto float_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "readFloatArray",
+            "([FI)F",
+            float_array_arguments);
+        auto double_result = machine.invoke_static(
+            "corefixture/JitOps",
+            "readDoubleArray",
+            "([DI)D",
+            double_array_arguments);
+        require(float_result.has_value() &&
+                    float_result->completed_normally() &&
+                    float_result->return_value.has_value() &&
+                    float_result->return_value->as_float().value_or(0) == -13.75F,
+                "JIT executes faload through the heap helper ABI");
+        require(double_result.has_value() &&
+                    double_result->completed_normally() &&
+                    double_result->return_value.has_value() &&
+                    double_result->return_value->as_double().value_or(0) ==
+                        9'876.125,
+                "JIT executes daload through the heap helper ABI");
+    }
+    const auto floating_statistics_after = machine.jit_statistics();
+    require(floating_statistics_after.compiled_methods >=
+                floating_statistics_before.compiled_methods + 6U &&
+                floating_statistics_after.executed_methods >=
+                floating_statistics_before.executed_methods + 6U &&
+                floating_statistics_after.inlined_calls >=
+                    floating_statistics_before.inlined_calls + 2U,
+            "JIT compiles, executes and inlines floating-point methods natively");
+
+    const auto heap_write_statistics_before = machine.jit_statistics();
+    for (phoneme::i32 value : {91, 92}) {
+        const phoneme::vm::Value field_value =
+            phoneme::vm::Value::from_int(value);
+        auto write_result = machine.invoke_instance(
+            *field_instance,
+            "corefixture/JitOps",
+            "writeInstanceValue",
+            "(I)V",
+            std::span<const phoneme::vm::Value>(&field_value, 1U));
+        auto stored_value = machine.heap().field(
+            *field_instance, instance_field->index);
+        require(write_result.has_value() &&
+                    write_result->completed_normally() &&
+                    !write_result->return_value.has_value() &&
+                    stored_value.has_value() &&
+                    stored_value->as_int().value_or(0) == value,
+                "JIT executes putfield exactly once");
+    }
+
+    const auto polymorphic_call_statistics_before = machine.jit_statistics();
+    auto interface_target = machine.class_states().allocate_instance(
+        machine.heap(), "corefixture/JitOps$IntUnaryImpl");
+    auto interface_plus_target = machine.class_states().allocate_instance(
+        machine.heap(), "corefixture/JitOps$IntUnaryPlus");
+    require(interface_target.has_value() && interface_plus_target.has_value(),
+            "allocate polymorphic interface targets for JIT invocation tests");
+    const phoneme::vm::Value call_value = phoneme::vm::Value::from_int(8);
+    const std::array<phoneme::vm::Value, 2> virtual_call_arguments {
+        phoneme::vm::Value::from_reference(*field_instance),
+        call_value,
+    };
+    const std::array<phoneme::vm::Value, 2> interface_call_arguments {
+        phoneme::vm::Value::from_reference(*interface_target),
+        call_value,
+    };
+    const std::array<phoneme::vm::Value, 2> interface_plus_arguments {
+        phoneme::vm::Value::from_reference(*interface_plus_target),
+        call_value,
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto special_call = machine.invoke_instance(
+            *field_instance,
+            "corefixture/JitOps",
+            "callPrivate",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&call_value, 1U));
+        auto inlined_special_call = machine.invoke_instance(
+            *field_instance,
+            "corefixture/JitOps",
+            "callPrivateIdentity",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&call_value, 1U));
+        auto devirtualized_call = machine.invoke_instance(
+            *field_instance,
+            "corefixture/JitOps",
+            "callFinalIdentity",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&call_value, 1U));
+        auto virtual_call = machine.invoke_static(
+            "corefixture/JitOps",
+            "callVirtual",
+            "(Lcorefixture/JitOps;I)I",
+            virtual_call_arguments);
+        auto interface_call = machine.invoke_static(
+            "corefixture/JitOps",
+            "callInterface",
+            "(Lcorefixture/JitOps$IntUnary;I)I",
+            interface_call_arguments);
+        require(special_call.has_value() &&
+                    special_call->completed_normally() &&
+                    special_call->return_value.has_value() &&
+                    special_call->return_value->as_int().value_or(0) == 100,
+                "JIT executes invokespecial private calls");
+        require(inlined_special_call.has_value() &&
+                    inlined_special_call->completed_normally() &&
+                    inlined_special_call->return_value.has_value() &&
+                    inlined_special_call->return_value->as_int().value_or(0) == 8,
+                "JIT statically devirtualizes and inlines same-class invokespecial");
+        require(devirtualized_call.has_value() &&
+                    devirtualized_call->completed_normally() &&
+                    devirtualized_call->return_value.has_value() &&
+                    devirtualized_call->return_value->as_int().value_or(0) == 8,
+                "JIT devirtualizes final self invokevirtual and inlines its leaf body");
+        require(virtual_call.has_value() &&
+                    virtual_call->completed_normally() &&
+                    virtual_call->return_value.has_value() &&
+                    virtual_call->return_value->as_int().value_or(0) == 101,
+                "JIT executes invokevirtual with dynamic resolution");
+        require(interface_call.has_value() &&
+                    interface_call->completed_normally() &&
+                    interface_call->return_value.has_value() &&
+                    interface_call->return_value->as_int().value_or(0) == 24,
+                "JIT executes invokeinterface with dynamic resolution");
+        auto interface_plus_call = machine.invoke_static(
+            "corefixture/JitOps",
+            "callInterface",
+            "(Lcorefixture/JitOps$IntUnary;I)I",
+            interface_plus_arguments);
+        require(interface_plus_call.has_value() &&
+                    interface_plus_call->completed_normally() &&
+                    interface_plus_call->return_value.has_value() &&
+                    interface_plus_call->return_value->as_int().value_or(0) == 13,
+                "JIT PIC preserves alternating invokeinterface receiver classes");
+    }
+    const auto polymorphic_call_statistics_after = machine.jit_statistics();
+    require(polymorphic_call_statistics_after.compiled_methods >=
+                polymorphic_call_statistics_before.compiled_methods + 5U &&
+                polymorphic_call_statistics_after.executed_methods >=
+                polymorphic_call_statistics_before.executed_methods + 5U &&
+                polymorphic_call_statistics_after.inlined_calls >
+                    polymorphic_call_statistics_before.inlined_calls &&
+                polymorphic_call_statistics_after.devirtualized_calls >
+                    polymorphic_call_statistics_before.devirtualized_calls,
+            "JIT natively executes, devirtualizes and inlines special/virtual/interface wrappers");
+
+    // Canvas.paint uses the progress-watchdog budget mode.  Its root method is
+    // intentionally interpreted, but hot Java callees must remain eligible for
+    // JIT execution or the complete render tree falls back to the interpreter.
+    const auto watchdog_jit_before = machine.jit_statistics();
+    auto watchdog_nested_call = machine.invoke_instance(
+        *field_instance,
+        "corefixture/JitOps",
+        "callPrivate",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&call_value, 1U),
+        100'000U,
+        phoneme::vm::InstructionBudgetMode::progress_watchdog);
+    const auto watchdog_jit_after = machine.jit_statistics();
+    require(watchdog_nested_call.has_value() &&
+                watchdog_nested_call->completed_normally() &&
+                watchdog_nested_call->return_value.has_value() &&
+                watchdog_nested_call->return_value->as_int().value_or(0) == 100 &&
+                watchdog_jit_after.executed_methods >
+                    watchdog_jit_before.executed_methods,
+            "progress watchdog keeps nested Java JIT execution enabled");
+
+    const auto dynamic_statistics_before = machine.jit_statistics();
+    for (int pass = 0; pass < 2; ++pass) {
+        const phoneme::vm::Value addend = phoneme::vm::Value::from_int(7);
+        auto factory = machine.invoke_static(
+            "corefixture/JitOps",
+            "makeCapturedAdder",
+            "(I)Lcorefixture/JitOps$IntUnary;",
+            std::span<const phoneme::vm::Value>(&addend, 1U));
+        require(factory.has_value() && factory->completed_normally() &&
+                    factory->return_value.has_value(),
+                "JIT executes invokedynamic LambdaMetafactory callsite");
+        auto lambda = factory->return_value->as_reference();
+        require(lambda.has_value() && !lambda->is_null(),
+                "JIT invokedynamic returns a live lambda object");
+        const phoneme::vm::Value lambda_argument =
+            phoneme::vm::Value::from_int(35);
+        auto applied = machine.invoke_instance(
+            *lambda,
+            "corefixture/JitOps$IntUnary",
+            "apply",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&lambda_argument, 1U));
+        require(applied.has_value() && applied->completed_normally() &&
+                    applied->return_value.has_value() &&
+                    applied->return_value->as_int().value_or(0) == 42,
+                "JIT invokedynamic preserves captured lambda arguments");
+    }
+    const std::array<phoneme::vm::Value, 2> dynamic_call_arguments {
+        phoneme::vm::Value::from_int(7),
+        phoneme::vm::Value::from_int(35),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto round_trip = machine.invoke_static(
+            "corefixture/JitOps",
+            "callCapturedAdder",
+            "(II)I",
+            dynamic_call_arguments);
+        require(round_trip.has_value() && round_trip->completed_normally() &&
+                    round_trip->return_value.has_value() &&
+                    round_trip->return_value->as_int().value_or(0) == 42,
+                "JIT keeps invokedynamic plus lambda invokeinterface native");
+    }
+    const auto dynamic_statistics_after = machine.jit_statistics();
+    require(dynamic_statistics_after.compiled_methods >=
+                dynamic_statistics_before.compiled_methods + 2U &&
+                dynamic_statistics_after.executed_methods >=
+                    dynamic_statistics_before.executed_methods + 2U,
+            "JIT keeps invokedynamic lambda factories and callers in native code");
+
+    const auto invoke_array_write = [&machine](
+        const char* method,
+        const char* descriptor,
+        std::span<const phoneme::vm::Value> arguments,
+        const char* message) {
+        for (int pass = 0; pass < 2; ++pass) {
+            auto result = machine.invoke_static(
+                "corefixture/JitOps", method, descriptor, arguments);
+            require(result.has_value() && result->completed_normally() &&
+                        !result->return_value.has_value(),
+                    message);
+        }
+    };
+
+    const std::array<phoneme::vm::Value, 3> write_int_arguments {
+        phoneme::vm::Value::from_reference(*int_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(1'234),
+    };
+    const std::array<phoneme::vm::Value, 3> write_long_arguments {
+        phoneme::vm::Value::from_reference(*long_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_long(-0x1122'3344'5566'778LL),
+    };
+    const std::array<phoneme::vm::Value, 3> write_float_arguments {
+        phoneme::vm::Value::from_reference(*float_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_float(-3.25F),
+    };
+    const std::array<phoneme::vm::Value, 3> write_double_arguments {
+        phoneme::vm::Value::from_reference(*double_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_double(6.125),
+    };
+    const std::array<phoneme::vm::Value, 3> write_object_arguments {
+        phoneme::vm::Value::from_reference(*object_array),
+        phoneme::vm::Value::from_int(0),
+        object_reference,
+    };
+    const std::array<phoneme::vm::Value, 3> write_byte_arguments {
+        phoneme::vm::Value::from_reference(*byte_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0x1FF),
+    };
+    const std::array<phoneme::vm::Value, 3> write_char_arguments {
+        phoneme::vm::Value::from_reference(*char_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(-1),
+    };
+    const std::array<phoneme::vm::Value, 3> write_short_arguments {
+        phoneme::vm::Value::from_reference(*short_array),
+        phoneme::vm::Value::from_int(0),
+        phoneme::vm::Value::from_int(0xFFFF),
+    };
+    invoke_array_write("writeIntArray",
+                       "([III)V",
+                       write_int_arguments,
+                       "JIT executes iastore");
+    invoke_array_write("writeLongArray",
+                       "([JIJ)V",
+                       write_long_arguments,
+                       "JIT executes lastore");
+    invoke_array_write("writeFloatArray",
+                       "([FIF)V",
+                       write_float_arguments,
+                       "JIT executes fastore");
+    invoke_array_write("writeDoubleArray",
+                       "([DID)V",
+                       write_double_arguments,
+                       "JIT executes dastore");
+    invoke_array_write("writeObjectArray",
+                       "([Ljava/lang/Object;ILjava/lang/Object;)V",
+                       write_object_arguments,
+                       "JIT executes aastore");
+    invoke_array_write("writeByteArray",
+                       "([BII)V",
+                       write_byte_arguments,
+                       "JIT executes bastore");
+    invoke_array_write("writeCharArray",
+                       "([CII)V",
+                       write_char_arguments,
+                       "JIT executes castore");
+    invoke_array_write("writeShortArray",
+                       "([SII)V",
+                       write_short_arguments,
+                       "JIT executes sastore");
+
+    auto stored_int = machine.heap().element(*int_array, 0U);
+    auto stored_long = machine.heap().element(*long_array, 0U);
+    auto stored_float = machine.heap().element(*float_array, 0U);
+    auto stored_double = machine.heap().element(*double_array, 0U);
+    auto stored_object = machine.heap().element(*object_array, 0U);
+    auto stored_byte = machine.heap().element(*byte_array, 0U);
+    auto stored_char = machine.heap().element(*char_array, 0U);
+    auto stored_short = machine.heap().element(*short_array, 0U);
+    require(stored_int && stored_int->as_int().value_or(0) == 1'234 &&
+                stored_long && stored_long->as_long().value_or(0) ==
+                    -0x1122'3344'5566'778LL &&
+                stored_float && stored_float->as_float().value_or(0) == -3.25F &&
+                stored_double && stored_double->as_double().value_or(0) == 6.125 &&
+                stored_object && stored_object->as_reference().value_or(
+                    phoneme::vm::ObjectRef{}) == *jit_object &&
+                stored_byte && stored_byte->as_int().value_or(0) == -1 &&
+                stored_char && stored_char->as_int().value_or(0) == 65'535 &&
+                stored_short && stored_short->as_int().value_or(0) == -1,
+            "JIT array stores preserve Java primitive and reference semantics");
+
+    const std::array<phoneme::vm::Value, 2> null_field_arguments {
+        null_reference,
+        phoneme::vm::Value::from_int(123),
+    };
+    auto null_field_result = machine.invoke_static(
+        "corefixture/JitOps",
+        "writeNullableInstanceValue",
+        "(Lcorefixture/JitOps;I)V",
+        null_field_arguments);
+    require(null_field_result.has_value() &&
+                !null_field_result->completed_normally() &&
+                null_field_result->throwable.has_value(),
+            "JIT putfield reports NullPointerException without replay");
+    auto null_field_class = machine.heap().class_name(
+        *null_field_result->throwable);
+    require(null_field_class.has_value() &&
+                *null_field_class == "java/lang/NullPointerException",
+            "JIT putfield preserves Java null exception type");
+
+    auto string_array = machine.heap().allocate_array(
+        "[Ljava/lang/String;", 1U, null_reference);
+    require(string_array.has_value(),
+            "allocate covariant reference array for JIT store checks");
+    const std::array<phoneme::vm::Value, 3> incompatible_store_arguments {
+        phoneme::vm::Value::from_reference(*string_array),
+        phoneme::vm::Value::from_int(0),
+        object_reference,
+    };
+    auto incompatible_store = machine.invoke_static(
+        "corefixture/JitOps",
+        "writeObjectArray",
+        "([Ljava/lang/Object;ILjava/lang/Object;)V",
+        incompatible_store_arguments);
+    auto unchanged_reference = machine.heap().element(*string_array, 0U);
+    require(incompatible_store.has_value() &&
+                !incompatible_store->completed_normally() &&
+                incompatible_store->throwable.has_value() &&
+                unchanged_reference.has_value() &&
+                unchanged_reference->as_reference().value_or(
+                    phoneme::vm::ObjectRef{}).is_null(),
+            "JIT aastore rejects incompatible values before mutation");
+    auto incompatible_store_class = machine.heap().class_name(
+        *incompatible_store->throwable);
+    require(incompatible_store_class.has_value() &&
+                *incompatible_store_class == "java/lang/ArrayStoreException",
+            "JIT aastore preserves ArrayStoreException");
+
+    const std::array<phoneme::vm::Value, 3> bounds_store_arguments {
+        phoneme::vm::Value::from_reference(*int_array),
+        phoneme::vm::Value::from_int(99),
+        phoneme::vm::Value::from_int(9'999),
+    };
+    auto bounds_store = machine.invoke_static(
+        "corefixture/JitOps",
+        "writeIntArray",
+        "([III)V",
+        bounds_store_arguments);
+    auto unchanged_int = machine.heap().element(*int_array, 0U);
+    require(bounds_store.has_value() &&
+                !bounds_store->completed_normally() &&
+                bounds_store->throwable.has_value() &&
+                unchanged_int.has_value() &&
+                unchanged_int->as_int().value_or(0) == 1'234,
+            "JIT array-store bounds failure does not replay or mutate");
+    auto bounds_store_class = machine.heap().class_name(*bounds_store->throwable);
+    require(bounds_store_class.has_value() &&
+                *bounds_store_class ==
+                    "java/lang/ArrayIndexOutOfBoundsException",
+            "JIT array store preserves bounds exception type");
+
+    const auto heap_write_statistics_after = machine.jit_statistics();
+    require(heap_write_statistics_after.compiled_methods >=
+                heap_write_statistics_before.compiled_methods + 10U &&
+                heap_write_statistics_after.executed_methods >=
+                heap_write_statistics_before.executed_methods + 18U,
+            "JIT compiles and executes putfield plus all array-store opcodes");
+
+    const auto floating_edge_statistics_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> float_remainder_arguments {
+        phoneme::vm::Value::from_float(-17.5F),
+        phoneme::vm::Value::from_float(4.0F),
+    };
+    const std::array<phoneme::vm::Value, 2> double_remainder_arguments {
+        phoneme::vm::Value::from_double(123.5),
+        phoneme::vm::Value::from_double(-7.0),
+    };
+    const std::array<phoneme::vm::Value, 2> float_nan_arguments {
+        phoneme::vm::Value::from_float(
+            std::numeric_limits<float>::quiet_NaN()),
+        phoneme::vm::Value::from_float(1.0F),
+    };
+    const std::array<phoneme::vm::Value, 2> double_nan_arguments {
+        phoneme::vm::Value::from_double(
+            std::numeric_limits<double>::quiet_NaN()),
+        phoneme::vm::Value::from_double(1.0),
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto float_remainder = machine.invoke_static(
+            "corefixture/JitOps",
+            "floatRemainder",
+            "(FF)F",
+            float_remainder_arguments);
+        auto double_remainder = machine.invoke_static(
+            "corefixture/JitOps",
+            "doubleRemainder",
+            "(DD)D",
+            double_remainder_arguments);
+        require(float_remainder.has_value() &&
+                    float_remainder->completed_normally() &&
+                    float_remainder->return_value.has_value() &&
+                    float_remainder->return_value->as_float().value_or(0) ==
+                        std::fmod(-17.5F, 4.0F),
+                "JIT preserves Java frem semantics");
+        require(double_remainder.has_value() &&
+                    double_remainder->completed_normally() &&
+                    double_remainder->return_value.has_value() &&
+                    double_remainder->return_value->as_double().value_or(0) ==
+                        std::fmod(123.5, -7.0),
+                "JIT preserves Java drem semantics");
+
+        auto float_less = machine.invoke_static(
+            "corefixture/JitOps",
+            "floatCompareLess",
+            "(FF)I",
+            float_nan_arguments);
+        auto float_greater = machine.invoke_static(
+            "corefixture/JitOps",
+            "floatCompareGreater",
+            "(FF)I",
+            float_nan_arguments);
+        auto double_less = machine.invoke_static(
+            "corefixture/JitOps",
+            "doubleCompareLess",
+            "(DD)I",
+            double_nan_arguments);
+        auto double_greater = machine.invoke_static(
+            "corefixture/JitOps",
+            "doubleCompareGreater",
+            "(DD)I",
+            double_nan_arguments);
+        require(float_less.has_value() && float_less->completed_normally() &&
+                    float_less->return_value.has_value() &&
+                    float_less->return_value->as_int().value_or(0) == 1,
+                "JIT implements fcmpg NaN ordering");
+        require(float_greater.has_value() &&
+                    float_greater->completed_normally() &&
+                    float_greater->return_value.has_value() &&
+                    float_greater->return_value->as_int().value_or(0) == -1,
+                "JIT implements fcmpl NaN ordering");
+        require(double_less.has_value() && double_less->completed_normally() &&
+                    double_less->return_value.has_value() &&
+                    double_less->return_value->as_int().value_or(0) == 1,
+                "JIT implements dcmpg NaN ordering");
+        require(double_greater.has_value() &&
+                    double_greater->completed_normally() &&
+                    double_greater->return_value.has_value() &&
+                    double_greater->return_value->as_int().value_or(0) == -1,
+                "JIT implements dcmpl NaN ordering");
+    }
+
+    const auto invoke_conversion = [&machine](
+        const char* method,
+        const char* descriptor,
+        phoneme::vm::Value argument) {
+        return machine.invoke_static(
+            "corefixture/JitOps",
+            method,
+            descriptor,
+            std::span<const phoneme::vm::Value>(&argument, 1U));
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        auto int_float = invoke_conversion(
+            "intToFloat", "(I)F", phoneme::vm::Value::from_int(16'777'217));
+        auto int_double = invoke_conversion(
+            "intToDouble", "(I)D", phoneme::vm::Value::from_int(-123'456'789));
+        auto long_float = invoke_conversion(
+            "longToFloat",
+            "(J)F",
+            phoneme::vm::Value::from_long(9'876'543'210LL));
+        auto long_double = invoke_conversion(
+            "longToDouble",
+            "(J)D",
+            phoneme::vm::Value::from_long(-9'876'543'210LL));
+        auto float_int = invoke_conversion(
+            "floatToInt",
+            "(F)I",
+            phoneme::vm::Value::from_float(
+                std::numeric_limits<float>::quiet_NaN()));
+        auto float_long = invoke_conversion(
+            "floatToLong",
+            "(F)J",
+            phoneme::vm::Value::from_float(
+                std::numeric_limits<float>::infinity()));
+        auto float_double = invoke_conversion(
+            "floatToDouble",
+            "(F)D",
+            phoneme::vm::Value::from_float(-12.5F));
+        auto double_int = invoke_conversion(
+            "doubleToInt",
+            "(D)I",
+            phoneme::vm::Value::from_double(
+                -std::numeric_limits<double>::infinity()));
+        auto double_long = invoke_conversion(
+            "doubleToLong",
+            "(D)J",
+            phoneme::vm::Value::from_double(
+                std::numeric_limits<double>::infinity()));
+        auto double_float = invoke_conversion(
+            "doubleToFloat",
+            "(D)F",
+            phoneme::vm::Value::from_double(0.1));
+
+        require(int_float.has_value() && int_float->completed_normally() &&
+                    int_float->return_value.has_value() &&
+                    int_float->return_value->as_float().value_or(0) ==
+                        static_cast<float>(16'777'217),
+                "JIT executes i2f");
+        require(int_double.has_value() && int_double->completed_normally() &&
+                    int_double->return_value.has_value() &&
+                    int_double->return_value->as_double().value_or(0) ==
+                        static_cast<double>(-123'456'789),
+                "JIT executes i2d");
+        require(long_float.has_value() && long_float->completed_normally() &&
+                    long_float->return_value.has_value() &&
+                    long_float->return_value->as_float().value_or(0) ==
+                        static_cast<float>(9'876'543'210LL),
+                "JIT executes l2f");
+        require(long_double.has_value() && long_double->completed_normally() &&
+                    long_double->return_value.has_value() &&
+                    long_double->return_value->as_double().value_or(0) ==
+                        static_cast<double>(-9'876'543'210LL),
+                "JIT executes l2d");
+        require(float_int.has_value() && float_int->completed_normally() &&
+                    float_int->return_value.has_value() &&
+                    float_int->return_value->as_int().value_or(-1) == 0,
+                "JIT implements f2i NaN conversion");
+        require(float_long.has_value() && float_long->completed_normally() &&
+                    float_long->return_value.has_value() &&
+                    float_long->return_value->as_long().value_or(0) ==
+                        std::numeric_limits<phoneme::i64>::max(),
+                "JIT implements saturating f2l conversion");
+        require(float_double.has_value() &&
+                    float_double->completed_normally() &&
+                    float_double->return_value.has_value() &&
+                    float_double->return_value->as_double().value_or(0) ==
+                        static_cast<double>(-12.5F),
+                "JIT executes f2d");
+        require(double_int.has_value() && double_int->completed_normally() &&
+                    double_int->return_value.has_value() &&
+                    double_int->return_value->as_int().value_or(0) ==
+                        std::numeric_limits<phoneme::i32>::min(),
+                "JIT implements saturating d2i conversion");
+        require(double_long.has_value() && double_long->completed_normally() &&
+                    double_long->return_value.has_value() &&
+                    double_long->return_value->as_long().value_or(0) ==
+                        std::numeric_limits<phoneme::i64>::max(),
+                "JIT implements saturating d2l conversion");
+        require(double_float.has_value() &&
+                    double_float->completed_normally() &&
+                    double_float->return_value.has_value() &&
+                    double_float->return_value->as_float().value_or(0) ==
+                        static_cast<float>(0.1),
+                "JIT executes d2f");
+    }
+    const auto floating_edge_statistics_after = machine.jit_statistics();
+    require(floating_edge_statistics_after.compiled_methods >=
+                floating_edge_statistics_before.compiled_methods + 16U &&
+                floating_edge_statistics_after.executed_methods >=
+                floating_edge_statistics_before.executed_methods + 16U,
+            "JIT natively executes FP remainder comparison and conversions");
+
+    const std::array<phoneme::vm::Value, 2> null_array_arguments {
+        null_reference,
+        phoneme::vm::Value::from_int(0),
+    };
+    auto null_array_result = machine.invoke_static(
+        "corefixture/JitOps",
+        "readIntArray",
+        "([II)I",
+        null_array_arguments);
+    require(null_array_result.has_value() &&
+                !null_array_result->completed_normally() &&
+                null_array_result->throwable.has_value(),
+            "JIT deoptimizes failed heap reads to interpreter exceptions");
 
     for (int pass = 0; pass < 2; ++pass) {
         auto is_null = machine.invoke_static(
@@ -921,8 +2652,10 @@ void test_baseline_jit(const std::string& fixture_jar) {
         8U);
     require(!exhausted_budget.has_value() &&
                 exhausted_budget.error().code == phoneme::ErrorCode::invalid_state &&
-                exhausted_budget.error().message.find("budget") != std::string::npos,
-            "JIT budget exhaustion stops without replaying the method");
+                exhausted_budget.error().message.starts_with(
+                    "VM instruction budget was exhausted in "
+                    "corefixture/JitOps.sumLoop(I)I"),
+            "JIT budget exhaustion uses VM-level budget semantics");
 
     const std::array<phoneme::vm::Value, 2> zero_divisor {
         phoneme::vm::Value::from_int(10),
@@ -938,6 +2671,231 @@ void test_baseline_jit(const std::string& fixture_jar) {
     require(throwable_class.has_value() &&
                 *throwable_class == "java/lang/ArithmeticException",
             "JIT fallback preserves ArithmeticException semantics");
+
+    const auto throw_statistics_before = machine.jit_statistics();
+    const phoneme::vm::Value throwable_value =
+        phoneme::vm::Value::from_reference(*divide_by_zero->throwable);
+    for (int pass = 0; pass < 2; ++pass) {
+        auto thrown = machine.invoke_static(
+            "corefixture/JitOps",
+            "throwObject",
+            "(Ljava/lang/Throwable;)V",
+            std::span<const phoneme::vm::Value>(&throwable_value, 1U));
+        require(thrown.has_value() && !thrown->completed_normally() &&
+                    thrown->throwable == divide_by_zero->throwable,
+                "JIT athrow propagates the exact Java throwable object");
+    }
+    const phoneme::vm::Value null_throwable =
+        phoneme::vm::Value::from_reference({});
+    auto null_throw = machine.invoke_static(
+        "corefixture/JitOps",
+        "throwObject",
+        "(Ljava/lang/Throwable;)V",
+        std::span<const phoneme::vm::Value>(&null_throwable, 1U));
+    require(null_throw.has_value() &&
+                !null_throw->completed_normally() &&
+                null_throw->throwable.has_value(),
+            "JIT athrow null produces a Java exception");
+    auto null_throw_class = machine.heap().class_name(*null_throw->throwable);
+    require(null_throw_class.has_value() &&
+                *null_throw_class == "java/lang/NullPointerException",
+            "JIT athrow preserves null-throw semantics");
+    const auto throw_statistics_after = machine.jit_statistics();
+    require(throw_statistics_after.compiled_methods >=
+                throw_statistics_before.compiled_methods + 1U &&
+                throw_statistics_after.executed_methods >=
+                throw_statistics_before.executed_methods + 3U,
+            "JIT natively executes athrow without interpreter replay");
+
+    const auto catch_statistics_before = machine.jit_statistics();
+    const phoneme::vm::Value null_object_array =
+        phoneme::vm::Value::from_reference({});
+    auto caught_null = machine.invoke_static(
+        "corefixture/JitOps",
+        "catchNullArrayLength",
+        "([Ljava/lang/Object;)I",
+        std::span<const phoneme::vm::Value>(&null_object_array, 1U));
+    require(caught_null.has_value() && caught_null->completed_normally() &&
+                caught_null->return_value.has_value() &&
+                caught_null->return_value->as_int().value_or(0) == 41,
+            "JIT catches implicit NullPointerException inside native code");
+
+    const std::array<phoneme::vm::Value, 2> catch_bounds_arguments {
+        phoneme::vm::Value::from_reference(*int_array),
+        phoneme::vm::Value::from_int(99),
+    };
+    auto caught_bounds = machine.invoke_static(
+        "corefixture/JitOps",
+        "catchArrayBounds",
+        "([II)I",
+        catch_bounds_arguments);
+    require(caught_bounds.has_value() && caught_bounds->completed_normally() &&
+                caught_bounds->return_value.has_value() &&
+                caught_bounds->return_value->as_int().value_or(0) == 42,
+            "JIT catches ArrayIndexOutOfBoundsException at native handler BCI");
+
+    auto caught_throw = machine.invoke_static(
+        "corefixture/JitOps",
+        "catchThrownRuntime",
+        "(Ljava/lang/Throwable;)I",
+        std::span<const phoneme::vm::Value>(&throwable_value, 1U));
+    require(caught_throw.has_value() && caught_throw->completed_normally() &&
+                caught_throw->return_value.has_value() &&
+                caught_throw->return_value->as_int().value_or(0) == 43,
+            "JIT matches explicit athrow to the native RuntimeException handler");
+    const auto catch_statistics_after = machine.jit_statistics();
+    require(catch_statistics_after.compiled_methods >=
+                catch_statistics_before.compiled_methods + 3U &&
+                catch_statistics_after.executed_methods >=
+                catch_statistics_before.executed_methods + 3U,
+            "JIT compiles and completes try/catch methods without interpreter replay");
+
+    const auto monitor_statistics_before = machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> synchronized_add_arguments {
+        phoneme::vm::Value::from_reference(*jit_object),
+        phoneme::vm::Value::from_int(37),
+    };
+    auto synchronized_add = machine.invoke_static(
+        "corefixture/JitOps",
+        "synchronizedAdd",
+        "(Ljava/lang/Object;I)I",
+        synchronized_add_arguments);
+    require(synchronized_add.has_value() &&
+                synchronized_add->completed_normally() &&
+                synchronized_add->return_value.has_value() &&
+                synchronized_add->return_value->as_int().value_or(0) == 42,
+            "JIT executes monitorenter/monitorexit for synchronized blocks");
+    auto monitor_after_return = machine.monitors().snapshot(*jit_object);
+    require(monitor_after_return.has_value() &&
+                monitor_after_return->owner == 0U &&
+                monitor_after_return->recursion == 0U,
+            "JIT releases synchronized-block monitor on normal return");
+
+    const std::array<phoneme::vm::Value, 2> synchronized_throw_arguments {
+        phoneme::vm::Value::from_reference(*jit_object),
+        throwable_value,
+    };
+    auto synchronized_throw = machine.invoke_static(
+        "corefixture/JitOps",
+        "synchronizedThrow",
+        "(Ljava/lang/Object;Ljava/lang/Throwable;)V",
+        synchronized_throw_arguments);
+    require(synchronized_throw.has_value() &&
+                !synchronized_throw->completed_normally() &&
+                synchronized_throw->throwable == divide_by_zero->throwable,
+            "JIT synchronized cleanup propagates the original throwable");
+    auto monitor_after_throw = machine.monitors().snapshot(*jit_object);
+    require(monitor_after_throw.has_value() &&
+                monitor_after_throw->owner == 0U &&
+                monitor_after_throw->recursion == 0U,
+            "JIT releases synchronized-block monitor on exceptional exit");
+    const auto monitor_statistics_after = machine.jit_statistics();
+    require(monitor_statistics_after.compiled_methods >=
+                monitor_statistics_before.compiled_methods + 2U &&
+                monitor_statistics_after.executed_methods >=
+                monitor_statistics_before.executed_methods + 2U,
+            "JIT natively executes synchronized blocks without replay");
+
+    phoneme::vm::ClassRepository allocation_gc_classes;
+    require(allocation_gc_classes.add_archive(fixture_jar).has_value(),
+            "add JIT fixture archive for allocation safepoint GC test");
+    phoneme::vm::Machine allocation_gc_machine(
+        allocation_gc_classes,
+        phoneme::vm::HeapLimits {
+            .maximum_objects = 100'000U,
+            .maximum_bytes = 2U * 1024U * 1024U,
+        });
+    allocation_gc_machine.configure_jit(true);
+    auto allocation_live = allocation_gc_machine.heap().allocate_object(
+        "java/lang/Object", 0U);
+    require(allocation_live.has_value(),
+            "allocate live object for JIT allocation safepoint test");
+    phoneme::usize allocation_pressure_count = 0U;
+    while (true) {
+        auto garbage = allocation_gc_machine.heap().allocate_array(
+            "[B", 32U * 1024U, phoneme::vm::Value::from_int(0));
+        if (!garbage) break;
+        ++allocation_pressure_count;
+    }
+    require(allocation_pressure_count >= 2U,
+            "fill constrained heap before JIT allocation GC retry");
+    const std::array<phoneme::vm::Value, 2> allocation_gc_arguments {
+        phoneme::vm::Value::from_reference(*allocation_live),
+        phoneme::vm::Value::from_int(65'536),
+    };
+    auto allocation_gc_result = allocation_gc_machine.invoke_static(
+        "corefixture/JitOps",
+        "preserveAcrossArrayAllocation",
+        "(Ljava/lang/Object;I)Ljava/lang/Object;",
+        allocation_gc_arguments);
+    require(allocation_gc_result.has_value() &&
+                allocation_gc_result->completed_normally() &&
+                allocation_gc_result->return_value.has_value() &&
+                allocation_gc_result->return_value->as_reference().value_or(
+                    phoneme::vm::ObjectRef{}) == *allocation_live,
+            "precise JIT stack maps preserve live roots during allocation GC");
+    auto allocation_live_class = allocation_gc_machine.heap().class_name(
+        *allocation_live);
+    require(allocation_live_class.has_value() &&
+                *allocation_live_class == "java/lang/Object",
+            "allocation helper GC retains verifier-published JIT references");
+
+    phoneme::classfile::Method legacy_jsr_method {
+        .access_flags = 0x0009U,
+        .name = "sharedFinally",
+        .descriptor = "()Ljava/lang/Object;",
+        .code = phoneme::classfile::CodeAttribute {
+            .max_stack = 1,
+            .max_locals = 2,
+            .bytecode = {
+                0xA8, 0x00, 0x0C, // jsr 12; return at 3
+                0x01,             // aconst_null
+                0x4B,             // astore_0
+                0xA8, 0x00, 0x07, // jsr 12; return at 8
+                0x2A,             // aload_0
+                0xB0,             // areturn
+                0x00, 0x00,       // unreachable padding
+                0x4C,             // astore_1 (return address)
+                0xA9, 0x01,       // ret 1
+            },
+        },
+    };
+    auto legacy_jsr_owner = std::make_shared<const phoneme::classfile::ClassFile>(
+        phoneme::classfile::ClassFile::builtin(
+            "corefixture/JitLegacyFinally",
+            "java/lang/Object",
+            0x0021U,
+            {},
+            {legacy_jsr_method}));
+    phoneme::vm::RuntimeMetadata legacy_jsr_metadata;
+    require(legacy_jsr_metadata.publish_class(legacy_jsr_owner).has_value(),
+            "publish legacy jsr class for JIT execution");
+    const auto* published_jsr_method = legacy_jsr_owner->find_method(
+        "sharedFinally", "()Ljava/lang/Object;");
+    require(published_jsr_method != nullptr,
+            "find legacy jsr method for JIT execution");
+    auto legacy_jsr_runtime = legacy_jsr_metadata.publish_method(
+        legacy_jsr_owner, *published_jsr_method);
+    require(legacy_jsr_runtime.has_value(),
+            "publish legacy jsr runtime metadata");
+    phoneme::vm::BaselineJit legacy_jsr_jit(true);
+    auto legacy_jsr_result = legacy_jsr_jit.try_execute(
+        (*legacy_jsr_runtime)->id,
+        *legacy_jsr_owner,
+        *published_jsr_method,
+        *(*legacy_jsr_runtime)->descriptor,
+        std::span<const phoneme::vm::Value>{},
+        false,
+        1'000U);
+    require(legacy_jsr_result.has_value() &&
+                legacy_jsr_result->has_value() &&
+                (*legacy_jsr_result)->return_value.has_value(),
+            "JIT compiles and executes legacy jsr/ret finally bytecode");
+    auto legacy_jsr_reference =
+        (*legacy_jsr_result)->return_value->as_reference();
+    require(legacy_jsr_reference.has_value() &&
+                legacy_jsr_reference->is_null(),
+            "JIT jsr/ret preserves caller locals and return address flow");
 
     const auto statistics = machine.jit_statistics();
     require(statistics.compiled_methods >= 8U,
@@ -962,6 +2920,119 @@ void test_baseline_jit(const std::string& fixture_jar) {
                 statistics.code_cache_bytes <=
                     statistics.code_cache_limit_bytes,
             "JIT keeps generated code inside its configured cache limit");
+    require(statistics.executable_slab_count >= 1U &&
+                statistics.executable_mapped_bytes >= statistics.code_cache_bytes &&
+                statistics.code_cache_bytes <
+                    statistics.compiled_methods * 16U * 1024U,
+            "JIT packs methods into shared executable slabs instead of one page each");
+    require(statistics.compile_attempts >= statistics.compiled_methods &&
+                statistics.compile_time_nanoseconds > 0U &&
+                statistics.execution_time_nanoseconds > 0U,
+            "JIT records compile and native execution latency");
+    require(statistics.hot_loop_candidates >= 2U,
+            "JIT detects hot integer and long loops before compilation");
+    require(statistics.register_cached_methods >= 2U &&
+                statistics.register_cached_loads >= 4U,
+            "JIT keeps hot integer and long loop locals in ARM64 registers");
+    require(statistics.stack_cached_methods >= 2U &&
+                statistics.stack_cached_pops >= 4U &&
+                statistics.stack_cached_stores_elided >= 4U,
+            "JIT keeps hot loop operand-stack slots register-first without write-through");
+    require(statistics.compile_attempts ==
+                statistics.compiled_methods + statistics.rejected_methods,
+            "JIT accounts for every completed compilation attempt");
+
+    // Prove OSR independently of method-entry JIT. Startup mode deliberately
+    // keeps this small loop below the entry-compilation threshold, so the
+    // interpreter must execute real backedges before entering native code.
+    phoneme::vm::ClassRepository osr_classes;
+    require(osr_classes.add_archive(fixture_jar).has_value(),
+            "add JIT fixture archive for OSR test");
+    phoneme::vm::Machine osr_machine(osr_classes);
+    osr_machine.configure_jit(true);
+    osr_machine.configure_jit_startup(true);
+    const auto osr_statistics_before = osr_machine.jit_statistics();
+    const phoneme::vm::Value osr_limit = phoneme::vm::Value::from_int(1'000);
+    auto osr_result = osr_machine.invoke_static(
+        "corefixture/JitOps",
+        "sumLoop",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&osr_limit, 1U));
+    require(osr_result.has_value() && osr_result->completed_normally() &&
+                osr_result->return_value.has_value() &&
+                osr_result->return_value->as_int().value_or(0) == 500'500,
+            "JIT OSR enters a hot loop from the interpreter without replay");
+    const auto osr_statistics_after = osr_machine.jit_statistics();
+    require(osr_statistics_after.warmup_fallbacks >
+                osr_statistics_before.warmup_fallbacks &&
+                osr_statistics_after.osr_attempts >
+                    osr_statistics_before.osr_attempts &&
+                osr_statistics_after.osr_compiled_entries >
+                    osr_statistics_before.osr_compiled_entries &&
+                osr_statistics_after.osr_executions >
+                    osr_statistics_before.osr_executions,
+            "JIT proves on-stack replacement after interpreter warmup");
+
+    auto stateful_counter = osr_machine.heap().allocate_array(
+        "[I", 1U, phoneme::vm::Value::from_int(0));
+    require(stateful_counter.has_value(),
+            "allocate counter array for stateful OSR test");
+    const auto stateful_osr_before = osr_machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> stateful_osr_arguments {
+        phoneme::vm::Value::from_reference(*stateful_counter),
+        phoneme::vm::Value::from_int(4'096),
+    };
+    auto stateful_osr_result = osr_machine.invoke_static(
+        "corefixture/JitOps",
+        "statefulOsrLoop",
+        "([II)I",
+        stateful_osr_arguments);
+    require(stateful_osr_result.has_value() &&
+                stateful_osr_result->completed_normally() &&
+                stateful_osr_result->return_value.has_value() &&
+                stateful_osr_result->return_value->as_int().value_or(0) == 8'386'637,
+            "stateful JIT OSR survives a lazy-static resume inside the loop");
+    auto stateful_counter_value = osr_machine.heap().element(
+        *stateful_counter, 0U);
+    require(stateful_counter_value.has_value() &&
+                stateful_counter_value->as_int().value_or(0) == 4'096,
+            "stateful JIT OSR does not replay array writes after resume");
+    const auto stateful_osr_after = osr_machine.jit_statistics();
+    require(stateful_osr_after.osr_attempts >=
+                stateful_osr_before.osr_attempts + 2U &&
+                stateful_osr_after.osr_fallbacks >
+                    stateful_osr_before.osr_fallbacks &&
+                stateful_osr_after.osr_executions >
+                    stateful_osr_before.osr_executions,
+            "stateful JIT OSR deoptimizes precisely and re-enters natively");
+
+    auto call_counter = osr_machine.heap().allocate_array(
+        "[I", 1U, phoneme::vm::Value::from_int(0));
+    require(call_counter.has_value(),
+            "allocate counter array for call-capable OSR test");
+    const auto call_osr_before = osr_machine.jit_statistics();
+    const std::array<phoneme::vm::Value, 2> call_osr_arguments {
+        phoneme::vm::Value::from_reference(*call_counter),
+        phoneme::vm::Value::from_int(4'096),
+    };
+    auto call_osr_result = osr_machine.invoke_static(
+        "corefixture/JitOps",
+        "osrCallLoop",
+        "([II)I",
+        call_osr_arguments);
+    require(call_osr_result.has_value() &&
+                call_osr_result->completed_normally() &&
+                call_osr_result->return_value.has_value() &&
+                call_osr_result->return_value->as_int().value_or(-1) == 8'386'560,
+            "JIT OSR executes hot loops containing nested Java calls");
+    auto call_counter_value = osr_machine.heap().element(*call_counter, 0U);
+    require(call_counter_value.has_value() &&
+                call_counter_value->as_int().value_or(0) == 4'096,
+            "call-capable JIT OSR preserves exactly-once loop side effects");
+    const auto call_osr_after = osr_machine.jit_statistics();
+    require(call_osr_after.osr_attempts > call_osr_before.osr_attempts &&
+                call_osr_after.osr_executions > call_osr_before.osr_executions,
+            "JIT OSR remains native across bounded invoke bytecodes");
     restore_threshold();
 }
 
@@ -1452,6 +3523,20 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                           "execute unbound JDK 8 method reference");
     require_lambda_result("genericLambda", 4,
                           "execute generic JDK 8 lambda adaptation");
+    require_lambda_result("boxedConstructorMethodReference", 17,
+                          "unbox generic constructor method-reference argument");
+    require_lambda_result("boxedReturnMethodReference", 18,
+                          "box generic method-reference return value");
+    require_lambda_result("voidCompatibleMethodReference", 23,
+                          "discard value from void-compatible method reference");
+    require_lambda_result("widenedPrimitiveArgumentMethodReference", 12,
+                          "widen primitive method-reference argument");
+    require_lambda_result("widenedPrimitiveReturnMethodReference", 14,
+                          "widen primitive method-reference return");
+    require_lambda_result("genericReferenceCastFailure", 31,
+                          "throw ClassCastException for erased lambda argument");
+    require_lambda_result("nullUnboxingFailure", 37,
+                          "throw NullPointerException for lambda unboxing null");
     require_lambda_result("defaultInterfaceMethod", 9,
                           "execute JDK 8 default interface method");
 
@@ -1612,8 +3697,8 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "execute ThreadLocalRandom singleton and ranged APIs");
     require_jdk8_string_result("headlessCollectionsApi", 255,
                                "execute the bounded Java 8 modding collection profile");
-    require_jdk8_string_result("headlessIoApi", 15,
-                               "execute buffered streams and AutoCloseable compatibility");
+    require_jdk8_string_result("headlessIoApi", 63,
+                               "execute buffered streams readers and AutoCloseable compatibility");
     require_jdk8_string_result("headlessCompatibilityExceptions", 15,
                                "headless profile failures preserve Java exceptions");
     require_jdk8_string_result("utilExceptions", 15,
@@ -3602,8 +5687,11 @@ void test_runtime_canvas(const std::string& fixture_jar) {
             (event->kind == 3 && event->component_type == 22 &&
              event->text == "hide");
     }
-    require(detached_hidden,
-            "foreground detach invokes Canvas.hideNotify");
+    require(!detached_hidden,
+            "host render detach does not invoke Canvas.hideNotify");
+    require(runtime.app_state(canvas_app) ==
+                phoneme::runtime::AppState::active,
+            "host render detach keeps the MIDlet active");
 
     require(runtime.set_foreground(canvas_app,
                                    phoneme::Dimensions {240, 320}).has_value(),
@@ -6751,6 +8839,16 @@ void test_framebuffer_sizes() {
     auto frame = framebuffer.snapshot();
     require(frame.rgba.size() == 320U * 240U * 4U,
             "framebuffer uses exact RGBA byte count");
+    std::vector<phoneme::u8> replacement(320U * 240U * 4U, 7U);
+    const auto before_exchange = framebuffer.metadata().generation;
+    require(framebuffer.replace_exchange({320, 240}, replacement).has_value(),
+            "exchange framebuffer storage without an extra frame copy");
+    require(replacement.size() == 320U * 240U * 4U,
+            "framebuffer exchange returns reusable previous storage");
+    frame = framebuffer.snapshot();
+    require(frame.generation == before_exchange + 1U &&
+                !frame.rgba.empty() && frame.rgba.front() == 7U,
+            "framebuffer exchange publishes the replacement pixels");
     require(!framebuffer.resize({0, 240}).has_value(),
             "reject zero framebuffer width");
 }
@@ -6768,6 +8866,11 @@ int main(int argc, char** argv) {
         std::string_view(filter) == "vm-invocation") {
         test_machine_invocation(fixture_jar);
         std::cout << "Standalone VM invocation tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr && std::string_view(filter) == "framebuffer") {
+        test_framebuffer_sizes();
+        std::cout << "Standalone framebuffer tests passed\n";
         return 0;
     }
     if (filter != nullptr && std::string_view(filter) == "jit") {

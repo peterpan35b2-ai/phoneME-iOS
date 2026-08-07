@@ -35,10 +35,17 @@ class Image final {
 public:
     [[nodiscard]] static Result<Image> create_mutable(i32 width,
                                                        i32 height);
+    [[nodiscard]] static Result<Image> create_mutable_argb(i32 width,
+                                                            i32 height,
+                                                            Pixel initial_pixel = 0U);
     [[nodiscard]] static Result<Image> create_immutable(
         i32 width,
         i32 height,
         std::span<const Pixel> pixels);
+    [[nodiscard]] static Result<Image> create_immutable_owned(
+        i32 width,
+        i32 height,
+        std::vector<Pixel> pixels);
     [[nodiscard]] static Result<Image> transformed_region(
         const Image& source,
         i32 x,

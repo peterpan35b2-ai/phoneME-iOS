@@ -339,6 +339,10 @@ struct GameProfile: Codable, Equatable {
     var parallelScreenRedrawing = true
     var forceFullscreen = false
     var showFPS = false
+    // Optional values keep older profile JSON decodable. Missing/nil follows
+    // the app-wide chrome preference until the game gets an explicit override.
+    var showAppBar: Bool?
+    var showStatusBar: Bool?
     var frameRateLimit = Self.defaultFrameRate
     // Optional keeps older profile JSON decodable. Missing/nil uses the game's
     // native pacing, so FPS is not overridden unless the user enables it.

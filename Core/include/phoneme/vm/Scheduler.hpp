@@ -72,6 +72,7 @@ public:
                                 FramePacingMode mode) noexcept;
     void pace_current_frame_publication(Machine& machine);
     void note_current_frame_boundary() noexcept;
+    void note_current_frame_request() noexcept;
     void break_current_frame_pacing_sequence() noexcept;
     void cooperative_quantum(Machine& machine);
     void cooperative_yield(Machine& machine);
