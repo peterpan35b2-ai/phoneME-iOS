@@ -1,10 +1,20 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir websockify
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir websockify
 
 COPY host_port_token.py /opt/phoneme/host_port_token.py
-ENV PYTHONPATH=/opt/phoneme
+COPY websockify_compat.py /opt/phoneme/websockify_compat.py
+COPY websockify-entrypoint.sh /usr/local/bin/phoneme-websockify
+RUN chmod +x /usr/local/bin/phoneme-websockify
 
+ENV PYTHONPATH=/opt/phoneme \
+    PHONEME_TLS_CN=localhost \
+    PHONEME_TLS_SAN=DNS:localhost,IP:127.0.0.1,DNS:host.docker.internal
+
+VOLUME ["/certs"]
 EXPOSE 38473
 
-ENTRYPOINT ["websockify", "--verbose", "--token-plugin", "host_port_token.HostPortToken", "0.0.0.0:38473"]
+ENTRYPOINT ["/usr/local/bin/phoneme-websockify"]

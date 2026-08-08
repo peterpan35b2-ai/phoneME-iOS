@@ -11,6 +11,18 @@
   Content-Type: application/manifest+json; charset=utf-8
   Cache-Control: no-cache
 
+# Build pointers must always be revalidated so a long-running installed PWA can
+# discover a deploy without reloading first.
+/version.json
+  Cache-Control: no-store, max-age=0
+
+/asset-manifest.json
+  Cache-Control: no-cache
+
+# Vite assets are content-hashed and safe to keep indefinitely.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
 # Hash-versioned core assets never change in-place. Keep them in the browser
 # cache so reloads do not download and recompile the same multi-megabyte core.
 /wasm/build-:version/*

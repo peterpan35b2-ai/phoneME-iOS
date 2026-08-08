@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { PhoneMEWebRuntime } from "./phoneME";
-import type { GameEntry, JarMetadata } from "./types";
+import type { GameEntry, JarMetadata, ManagedStorageKind } from "./types";
 import { installWorkerMediaBridge, type MediaStatusMessage } from "./workerMediaBridge";
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -166,6 +166,49 @@ async function handleRequest(message: RequestMessage) {
   case "flushStorage":
     await runtime.flushStorage();
     return undefined;
+  case "listManagedStorage":
+    return await runtime.listManagedStorage(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativePath ?? "")
+    );
+  case "readManagedStorageFile":
+    return await runtime.readManagedStorageFile(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativePath ?? "")
+    );
+  case "exportManagedStorage":
+    return await runtime.exportManagedStorage(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativePath ?? "")
+    );
+  case "importManagedStorageFiles":
+    await runtime.importManagedStorageFiles(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativeDirectory ?? ""),
+      payload.uploads as Array<{ relativePath: string; file: File }>
+    );
+    return undefined;
+  case "createManagedStorageDirectory":
+    await runtime.createManagedStorageDirectory(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativePath ?? "")
+    );
+    return undefined;
+  case "deleteManagedStorageEntry":
+    await runtime.deleteManagedStorageEntry(
+      payload.kind as ManagedStorageKind,
+      String(payload.relativePath ?? "")
+    );
+    return undefined;
+  case "shutdown":
+    try {
+      runtime.stopMidlet();
+      await runtime.flushStorage();
+    } finally {
+      runtime.dispose();
+      scope.close();
+    }
+    return undefined;
   case "dispose":
     runtime.dispose();
     scope.close();
@@ -198,7 +241,10 @@ scope.addEventListener("message", (event: MessageEvent<RequestMessage | MediaSta
       const formatted = formatError(runtime.fatalError ?? error);
       if (!message.id) {
         postLog(formatted, true);
-        if (fatal) scope.close();
+        if (fatal) {
+          scope.postMessage({ event: "fatal", error: formatted });
+          scope.close();
+        }
         return;
       }
       postResponse({

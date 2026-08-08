@@ -1,4 +1,11 @@
-import type { GameEntry, JarMetadata, LcduiEvent } from "./types";
+import type {
+  GameEntry,
+  JarMetadata,
+  LcduiEvent,
+  ManagedStorageEntry,
+  ManagedStorageExport,
+  ManagedStorageKind
+} from "./types";
 
 type EmscriptenFs = {
   filesystems: { IDBFS: unknown };
@@ -6,8 +13,13 @@ type EmscriptenFs = {
   mkdirTree(path: string): void;
   mount(type: unknown, options: Record<string, unknown>, mountpoint: string): void;
   syncfs(populate: boolean, callback: (error?: unknown) => void): void;
+  readdir(path: string): string[];
+  stat(path: string): { mode: number; size: number; mtime?: Date | number };
+  isDir(mode: number): boolean;
+  readFile(path: string): Uint8Array;
   writeFile(path: string, data: Uint8Array): void;
   unlink(path: string): void;
+  rmdir(path: string): void;
 };
 
 type PhoneMEModule = {
@@ -82,10 +94,34 @@ const APP_ID = 1;
 const STORAGE_ROOT = "/phoneme";
 const RUNTIME_HOME = `${STORAGE_ROOT}/runtime`;
 const IMPORT_ROOT = `${STORAGE_ROOT}/imports`;
+const MANAGED_STORAGE_ROOTS: Record<ManagedStorageKind, string> = {
+  files: `${RUNTIME_HOME}/files`,
+  rms: `${RUNTIME_HOME}/rms`
+};
 
 function sanitizeName(value: string) {
   const normalized = value.normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-");
   return normalized.replace(/^-+|-+$/g, "").slice(0, 80) || "game.jar";
+}
+
+function normalizeManagedPath(value: string) {
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/")) throw new Error("Đường dẫn lưu trữ phải là đường dẫn tương đối");
+  const parts = normalized.split("/").filter((part) => part.length > 0 && part !== ".");
+  if (parts.some((part) => part === ".." || part.includes("\0"))) {
+    throw new Error("Đường dẫn lưu trữ không hợp lệ");
+  }
+  return parts.join("/");
+}
+
+function parentPath(value: string) {
+  const index = value.lastIndexOf("/");
+  return index < 0 ? "" : value.slice(0, index);
+}
+
+function basename(value: string, fallback: string) {
+  const normalized = normalizeManagedPath(value);
+  return normalized ? normalized.slice(normalized.lastIndexOf("/") + 1) : fallback;
 }
 
 export class PhoneMEWebRuntime {
@@ -146,6 +182,8 @@ export class PhoneMEWebRuntime {
     await this.syncFileSystem(true);
     this.ensureDirectory(RUNTIME_HOME);
     this.ensureDirectory(IMPORT_ROOT);
+    this.ensureDirectory(MANAGED_STORAGE_ROOTS.files);
+    this.ensureDirectory(MANAGED_STORAGE_ROOTS.rms);
     void globalThis.navigator?.storage?.persist?.().catch(() => false);
 
     this.runtime = this.module._phoneme_create();
@@ -453,18 +491,136 @@ export class PhoneMEWebRuntime {
     await this.flushPromise;
   }
 
+  async listManagedStorage(kind: ManagedStorageKind, relativePath = ""): Promise<ManagedStorageEntry[]> {
+    const module = this.requireModule();
+    const relative = normalizeManagedPath(relativePath);
+    const absolute = this.managedStoragePath(kind, relative);
+    this.ensureDirectory(MANAGED_STORAGE_ROOTS[kind]);
+    const entries = module.FS.readdir(absolute)
+      .filter((name) => name !== "." && name !== "..")
+      .map((name) => {
+        const path = relative ? `${relative}/${name}` : name;
+        const stat = module.FS.stat(this.managedStoragePath(kind, path));
+        const modifiedAt = stat.mtime instanceof Date ? stat.mtime.getTime() : Number(stat.mtime ?? 0);
+        return {
+          name,
+          path,
+          isDirectory: module.FS.isDir(stat.mode),
+          size: stat.size,
+          modifiedAt: Number.isFinite(modifiedAt) ? modifiedAt : 0
+        } satisfies ManagedStorageEntry;
+      });
+    entries.sort((left, right) => {
+      if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+      return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
+    });
+    return entries;
+  }
+
+  async readManagedStorageFile(kind: ManagedStorageKind, relativePath: string) {
+    const module = this.requireModule();
+    const relative = normalizeManagedPath(relativePath);
+    if (!relative) throw new Error("Hãy chọn một tệp để tải xuống");
+    const absolute = this.managedStoragePath(kind, relative);
+    const stat = module.FS.stat(absolute);
+    if (module.FS.isDir(stat.mode)) throw new Error("Đường dẫn đã chọn là thư mục");
+    return new Uint8Array(module.FS.readFile(absolute));
+  }
+
+  async exportManagedStorage(kind: ManagedStorageKind, relativePath: string): Promise<ManagedStorageExport> {
+    const module = this.requireModule();
+    const relative = normalizeManagedPath(relativePath);
+    const absolute = this.managedStoragePath(kind, relative);
+    const stat = module.FS.stat(absolute);
+    const name = basename(relative, kind === "rms" ? "rms" : "files");
+    if (!module.FS.isDir(stat.mode)) {
+      return {
+        name,
+        isDirectory: false,
+        files: [{ path: name, data: new Uint8Array(module.FS.readFile(absolute)) }]
+      };
+    }
+
+    const files: ManagedStorageExport["files"] = [];
+    const collect = (directory: string, archivePath: string) => {
+      for (const child of module.FS.readdir(directory)) {
+        if (child === "." || child === "..") continue;
+        const childAbsolute = `${directory}/${child}`;
+        const childArchivePath = archivePath ? `${archivePath}/${child}` : child;
+        const childStat = module.FS.stat(childAbsolute);
+        if (module.FS.isDir(childStat.mode)) collect(childAbsolute, childArchivePath);
+        else files.push({ path: childArchivePath, data: new Uint8Array(module.FS.readFile(childAbsolute)) });
+      }
+    };
+    collect(absolute, name);
+    return { name, isDirectory: true, files };
+  }
+
+  async importManagedStorageFiles(
+    kind: ManagedStorageKind,
+    relativeDirectory: string,
+    uploads: Array<{ relativePath: string; file: File }>
+  ) {
+    this.assertStorageMutationAllowed();
+    const module = this.requireModule();
+    const base = normalizeManagedPath(relativeDirectory);
+    for (const upload of uploads) {
+      const child = normalizeManagedPath(upload.relativePath);
+      if (!child) continue;
+      const target = base ? `${base}/${child}` : child;
+      const parent = parentPath(target);
+      if (parent) this.ensureDirectory(this.managedStoragePath(kind, parent));
+      module.FS.writeFile(
+        this.managedStoragePath(kind, target),
+        new Uint8Array(await upload.file.arrayBuffer())
+      );
+    }
+    await this.flushStorage();
+  }
+
+  async createManagedStorageDirectory(kind: ManagedStorageKind, relativePath: string) {
+    this.assertStorageMutationAllowed();
+    const relative = normalizeManagedPath(relativePath);
+    if (!relative) throw new Error("Tên thư mục không hợp lệ");
+    this.ensureDirectory(this.managedStoragePath(kind, relative));
+    await this.flushStorage();
+  }
+
+  async deleteManagedStorageEntry(kind: ManagedStorageKind, relativePath: string) {
+    this.assertStorageMutationAllowed();
+    const module = this.requireModule();
+    const relative = normalizeManagedPath(relativePath);
+    if (!relative) throw new Error("Không thể xóa thư mục gốc");
+    const remove = (absolute: string) => {
+      const stat = module.FS.stat(absolute);
+      if (!module.FS.isDir(stat.mode)) {
+        module.FS.unlink(absolute);
+        return;
+      }
+      for (const child of module.FS.readdir(absolute)) {
+        if (child === "." || child === "..") continue;
+        remove(`${absolute}/${child}`);
+      }
+      module.FS.rmdir(absolute);
+    };
+    remove(this.managedStoragePath(kind, relative));
+    await this.flushStorage();
+  }
+
   dispose() {
-    if (!this.module) return;
-    if (this.currentGame) this.module._phoneme_destroy_midlet(this.runtime, APP_ID);
-    if (this.runtime) this.module._phoneme_destroy(this.runtime);
-    if (this.framePointer) this.module._free(this.framePointer);
-    if (this.metadataPointer) this.module._free(this.metadataPointer);
+    const module = this.module;
+    if (module && this.currentGame && this.runtime) module._phoneme_destroy_midlet(this.runtime, APP_ID);
+    if (module && this.runtime) module._phoneme_destroy(this.runtime);
+    if (module && this.framePointer) module._free(this.framePointer);
+    if (module && this.metadataPointer) module._free(this.metadataPointer);
     this.runtime = 0;
     this.framePointer = 0;
+    this.frameCapacity = 0;
     this.metadataPointer = 0;
     this.module = null;
     this.initialized = false;
     this.currentGame = null;
+    this.flushPromise = null;
     this.fatalErrorValue = null;
     this.restoreWebSocketRouting?.();
     this.restoreWebSocketRouting = null;
@@ -489,7 +645,10 @@ export class PhoneMEWebRuntime {
         const destination = new URL(String(rawUrl));
         const port = destination.port || (destination.protocol === "wss:" ? "443" : "80");
         const routed = new URL(proxyBase.href);
-        routed.searchParams.set("token", `${destination.hostname}:${port}`);
+        const access = routed.searchParams.get("access") ?? "";
+        routed.searchParams.delete("access");
+        const target = `${destination.hostname}:${port}`;
+        routed.searchParams.set("token", access ? `${access}@${target}` : target);
         const nextArgs = rawProtocols === undefined
           ? [routed.href]
           : [routed.href, rawProtocols];
@@ -542,6 +701,17 @@ export class PhoneMEWebRuntime {
 
   private ensureDirectory(path: string) {
     this.module?.FS.mkdirTree(path);
+  }
+
+  private managedStoragePath(kind: ManagedStorageKind, relativePath: string) {
+    const relative = normalizeManagedPath(relativePath);
+    return relative ? `${MANAGED_STORAGE_ROOTS[kind]}/${relative}` : MANAGED_STORAGE_ROOTS[kind];
+  }
+
+  private assertStorageMutationAllowed() {
+    if (this.currentGame) {
+      throw new Error("Hãy dừng game trước khi thay đổi File/RMS để tránh hỏng dữ liệu đang mở");
+    }
   }
 
   private async resolveWasmAssets() {

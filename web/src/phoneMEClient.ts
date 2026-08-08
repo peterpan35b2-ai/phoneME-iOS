@@ -3,7 +3,14 @@ import {
   type FrameData,
   type PhoneMEOptions
 } from "./phoneME";
-import type { GameEntry, JarMetadata, LcduiEvent } from "./types";
+import type {
+  GameEntry,
+  JarMetadata,
+  LcduiEvent,
+  ManagedStorageEntry,
+  ManagedStorageExport,
+  ManagedStorageKind
+} from "./types";
 import { installWebMediaBridge } from "./webMediaBridge";
 
 type WorkerRequest = {
@@ -18,7 +25,7 @@ type WorkerResponse = {
   result?: unknown;
   error?: string;
   fatal?: boolean;
-  event?: "log" | "media";
+  event?: "log" | "media" | "fatal";
   line?: string;
   isError?: boolean;
   action?: string;
@@ -38,6 +45,7 @@ type WorkerResponse = {
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
+  timeout: number;
 };
 
 export type RuntimeTick = {
@@ -171,7 +179,9 @@ export class PhoneMEWebRuntime {
   }
 
   async resize(width: number, height: number) {
+    if (!this.ready) return;
     if (this.directRuntime) {
+      if (!this.directRuntime.activeGame) return;
       this.directRuntime.resize(width, height);
       return;
     }
@@ -212,34 +222,39 @@ export class PhoneMEWebRuntime {
   }
 
   async pause() {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) {
       this.directRuntime.pause();
       return;
     }
-    if (!this.currentGameValue) return;
     await this.request("pause");
   }
 
   async resume() {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) {
       this.directRuntime.resume();
       return;
     }
-    if (!this.currentGameValue) return;
     await this.request("resume");
   }
 
   async stopMidlet() {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) {
       this.directRuntime.stopMidlet();
       return;
     }
-    if (!this.currentGameValue) return;
     await this.request("stopMidlet");
     this.currentGameValue = null;
   }
 
+  endAppSession() {
+    this.invalidateRuntime(new Error("Phiên ứng dụng phoneME đã kết thúc"), true, true);
+  }
+
   async tick(previousGeneration: bigint, includeFrame: boolean): Promise<RuntimeTick> {
+    if (!this.ready || !this.activeGame) return { events: [], frame: null };
     if (this.directRuntime) {
       if (!includeFrame) this.directRuntime.pump();
       return {
@@ -254,26 +269,31 @@ export class PhoneMEWebRuntime {
   }
 
   async copyLcduiImage(componentId: number): Promise<FrameData | null> {
+    if (!this.ready || !this.activeGame) return null;
     if (this.directRuntime) return this.directRuntime.copyLcduiImage(componentId);
     return await this.request<FrameData | null>("copyLcduiImage", { componentId });
   }
 
   sendKey(keyCode: number, pressed: boolean) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.sendKey(keyCode, pressed);
     else this.notify("sendKey", { keyCode, pressed });
   }
 
   sendPointer(x: number, y: number, action: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.sendPointer(x, y, action);
     else this.notify("sendPointer", { x, y, action });
   }
 
   selectCommand(commandId: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.selectCommand(commandId);
     else this.notify("selectCommand", { commandId });
   }
 
   selectListItemCommand(componentId: number, elementIndex: number, commandId: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) {
       this.directRuntime.selectListItemCommand(componentId, elementIndex, commandId);
     } else {
@@ -282,47 +302,104 @@ export class PhoneMEWebRuntime {
   }
 
   focusItem(componentId: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.focusItem(componentId);
     else this.notify("focusItem", { componentId });
   }
 
   activateItem(componentId: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.activateItem(componentId);
     else this.notify("activateItem", { componentId });
   }
 
   setText(componentId: number, value: string, caret: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.setText(componentId, value, caret);
     else this.notify("setText", { componentId, value, caret });
   }
 
   setChoice(componentId: number, index: number, selected: boolean) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.setChoice(componentId, index, selected);
     else this.notify("setChoice", { componentId, index, selected });
   }
 
   setGauge(componentId: number, value: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.setGauge(componentId, value);
     else this.notify("setGauge", { componentId, value });
   }
 
   setDate(componentId: number, unixSeconds: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.setDate(componentId, unixSeconds);
     else this.notify("setDate", { componentId, unixSeconds });
   }
 
   setScrollPosition(position: number) {
+    if (!this.ready || !this.activeGame) return;
     if (this.directRuntime) this.directRuntime.setScrollPosition(position);
     else this.notify("setScrollPosition", { position });
   }
 
   async flushStorage() {
+    if (!this.ready) return;
     if (this.directRuntime) {
       await this.directRuntime.flushStorage();
       return;
     }
     if (!this.worker) return;
     await this.request("flushStorage");
+  }
+
+  async listManagedStorage(kind: ManagedStorageKind, relativePath = ""): Promise<ManagedStorageEntry[]> {
+    await this.ensureReady();
+    if (this.directRuntime) return await this.directRuntime.listManagedStorage(kind, relativePath);
+    return await this.request<ManagedStorageEntry[]>("listManagedStorage", { kind, relativePath });
+  }
+
+  async readManagedStorageFile(kind: ManagedStorageKind, relativePath: string) {
+    await this.ensureReady();
+    if (this.directRuntime) return await this.directRuntime.readManagedStorageFile(kind, relativePath);
+    return await this.request<Uint8Array<ArrayBuffer>>("readManagedStorageFile", { kind, relativePath });
+  }
+
+  async exportManagedStorage(kind: ManagedStorageKind, relativePath: string): Promise<ManagedStorageExport> {
+    await this.ensureReady();
+    if (this.directRuntime) return await this.directRuntime.exportManagedStorage(kind, relativePath);
+    return await this.request<ManagedStorageExport>("exportManagedStorage", { kind, relativePath });
+  }
+
+  async importManagedStorageFiles(
+    kind: ManagedStorageKind,
+    relativeDirectory: string,
+    uploads: Array<{ relativePath: string; file: File }>
+  ) {
+    await this.ensureReady();
+    if (this.directRuntime) {
+      await this.directRuntime.importManagedStorageFiles(kind, relativeDirectory, uploads);
+      return;
+    }
+    await this.request("importManagedStorageFiles", { kind, relativeDirectory, uploads });
+  }
+
+  async createManagedStorageDirectory(kind: ManagedStorageKind, relativePath: string) {
+    await this.ensureReady();
+    if (this.directRuntime) {
+      await this.directRuntime.createManagedStorageDirectory(kind, relativePath);
+      return;
+    }
+    await this.request("createManagedStorageDirectory", { kind, relativePath });
+  }
+
+  async deleteManagedStorageEntry(kind: ManagedStorageKind, relativePath: string) {
+    await this.ensureReady();
+    if (this.directRuntime) {
+      await this.directRuntime.deleteManagedStorageEntry(kind, relativePath);
+      return;
+    }
+    await this.request("deleteManagedStorageEntry", { kind, relativePath });
   }
 
   dispose() {
@@ -337,18 +414,49 @@ export class PhoneMEWebRuntime {
     const worker = this.worker;
     if (!worker) return Promise.reject(new Error("phoneME Web chưa sẵn sàng"));
     const id = ++this.nextRequestId;
+    const timeoutMilliseconds = this.requestTimeoutMilliseconds(type);
     return new Promise<T>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        const error = new Error(`phoneME Web không phản hồi khi xử lý ${type}`);
+        pending.reject(error);
+        this.invalidateRuntime(error);
+      }, timeoutMilliseconds);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
-        reject
+        reject,
+        timeout
       });
       try {
         worker.postMessage({ id, type, payload } satisfies WorkerRequest);
       } catch (error) {
+        const pending = this.pending.get(id);
+        if (pending) window.clearTimeout(pending.timeout);
         this.pending.delete(id);
         reject(error);
       }
     });
+  }
+
+  private requestTimeoutMilliseconds(type: string) {
+    switch (type) {
+    case "tick": return 2_000;
+    case "stopMidlet": return 1_000;
+    case "initialize":
+    case "launch": return 20_000;
+    case "installJar":
+    case "uninstall": return 30_000;
+    case "flushStorage":
+    case "listManagedStorage":
+    case "readManagedStorageFile": return 10_000;
+    case "exportManagedStorage":
+    case "importManagedStorageFiles":
+    case "createManagedStorageDirectory":
+    case "deleteManagedStorageEntry": return 30_000;
+    default: return 5_000;
+    }
   }
 
   private notify(type: string, payload?: unknown) {
@@ -365,10 +473,17 @@ export class PhoneMEWebRuntime {
       this.handleMediaCommand(message);
       return;
     }
+    if (message.event === "fatal") {
+      const error = new Error(message.error || "phoneME Web Worker đã dừng do lỗi nghiêm trọng");
+      this.onLog?.(error.message, true);
+      this.invalidateRuntime(error);
+      return;
+    }
     if (!message.id) return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
+    window.clearTimeout(pending.timeout);
     if (message.ok) {
       pending.resolve(message.result);
       return;
@@ -463,8 +578,7 @@ export class PhoneMEWebRuntime {
       window.clearInterval(this.mediaStatusTimer);
       this.mediaStatusTimer = null;
     }
-    const bridge = installWebMediaBridge();
-    for (const handle of this.mediaHandles.values()) bridge.close(handle);
+    installWebMediaBridge().reset();
     this.mediaHandles.clear();
   }
 
@@ -476,7 +590,7 @@ export class PhoneMEWebRuntime {
     this.invalidateRuntime(new Error("Không đọc được phản hồi từ phoneME Web Worker"));
   };
 
-  private invalidateRuntime(reason: Error, notifyWorker = false) {
+  private invalidateRuntime(reason: Error, notifyWorker = false, gracefulWorkerShutdown = false) {
     this.clearMediaBridgeState();
     const directRuntime = this.directRuntime;
     this.directRuntime = null;
@@ -496,17 +610,27 @@ export class PhoneMEWebRuntime {
       worker.removeEventListener("messageerror", this.handleWorkerMessageError);
       if (notifyWorker) {
         try {
-          worker.postMessage({ id: 0, type: "dispose" } satisfies WorkerRequest);
+          worker.postMessage({
+            id: 0,
+            type: gracefulWorkerShutdown ? "shutdown" : "dispose"
+          } satisfies WorkerRequest);
         } catch {
           // The worker may already be terminated after a fatal WebAssembly abort.
         }
       }
-      worker.terminate();
+      if (gracefulWorkerShutdown) {
+        window.setTimeout(() => worker.terminate(), 750);
+      } else {
+        worker.terminate();
+      }
     }
 
     this.initialized = false;
     this.currentGameValue = null;
-    for (const { reject } of this.pending.values()) reject(reason);
+    for (const { reject, timeout } of this.pending.values()) {
+      window.clearTimeout(timeout);
+      reject(reason);
+    }
     this.pending.clear();
   }
 }

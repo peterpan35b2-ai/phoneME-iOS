@@ -34,6 +34,8 @@ struct EmulatorView: View {
     @State private var keyboardObscuresDisplay = false
     @State private var activeVirtualKeyCount = 0
     @State private var keyboardHideTask: Task<Void, Never>?
+    @State private var appBarRevealTask: Task<Void, Never>?
+    @State private var isAppBarTemporarilyVisible = false
     @State private var showKeyboardLayoutPicker = false
     @State private var showHiddenKeysEditor = false
     @State private var hiddenKeyDraft: Set<String> = []
@@ -65,6 +67,10 @@ struct EmulatorView: View {
 
     private var isStatusBarVisible: Bool {
         runtimeProfile.showStatusBar ?? enableStatusBar
+    }
+
+    private var shouldPresentAppBar: Bool {
+        isAppBarVisible || isAppBarTemporarilyVisible || keyboardAdjustmentMode != .none
     }
 
     private var navigationTitle: String {
@@ -116,6 +122,8 @@ struct EmulatorView: View {
                         frameRateLimit: GameProfile.resolvedFrameRate(
                             runtimeProfile.frameRateLimit
                         ),
+                        isAppBarVisible: isAppBarVisible,
+                        toggleAppBarAction: toggleAppBarVisibility,
                         hideAction: hideApplication,
                         exitAction: { showExitConfirmation = true },
                         toggleRotationLockAction: toggleRotationLock,
@@ -226,15 +234,16 @@ struct EmulatorView: View {
             }
             .ignoresSafeArea(
                 .container,
-                edges: presentsEdgeToEdgeSurface ? .all : []
+                edges: presentsEdgeToEdgeSurface
+                    ? .all
+                    : (isAppBarTemporarilyVisible && !isAppBarVisible ? .top : [])
             )
+            .simultaneousGesture(appBarRevealGesture)
 #if os(iOS)
             .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
             .phoneMENavigationBarBackgroundVisible()
-            .phoneMENavigationBarVisible(
-                isAppBarVisible || keyboardAdjustmentMode != .none
-            )
+            .phoneMENavigationBarVisible(shouldPresentAppBar)
 #else
             .navigationTitle(navigationTitle)
 #endif
@@ -259,6 +268,7 @@ struct EmulatorView: View {
         }
         .onDisappear {
             keyboardHideTask?.cancel()
+            appBarRevealTask?.cancel()
             if let snapshot = keyboardAdjustmentSnapshot {
                 runtimeProfile = snapshot.profile
                 showKeypad = snapshot.showKeypad
@@ -430,6 +440,48 @@ struct EmulatorView: View {
             persistRuntimeProfile()
             errorMessage = error.localizedDescription
             showError = true
+        }
+    }
+
+    private var appBarRevealGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onEnded { value in
+                guard !isAppBarVisible,
+                      keyboardAdjustmentMode == .none,
+                      value.startLocation.y <= 28,
+                      value.translation.height >= 32,
+                      abs(value.translation.height) > abs(value.translation.width) else {
+                    return
+                }
+                revealAppBarTemporarily()
+            }
+    }
+
+    private func toggleAppBarVisibility() {
+        appBarRevealTask?.cancel()
+        runtimeProfile.showAppBar = !isAppBarVisible
+        isAppBarTemporarilyVisible = false
+        persistRuntimeProfile()
+    }
+
+    private func revealAppBarTemporarily() {
+        guard !isAppBarVisible, keyboardAdjustmentMode == .none else { return }
+
+        appBarRevealTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isAppBarTemporarilyVisible = true
+        }
+
+        appBarRevealTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard !Task.isCancelled,
+                  !isAppBarVisible,
+                  keyboardAdjustmentMode == .none else {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isAppBarTemporarilyVisible = false
+            }
         }
     }
 
@@ -884,6 +936,8 @@ private struct EmulatorToolbarAnchor: View, Equatable {
     let translationSourceLanguage: TranslationSourceLanguage
     let frameRateOverrideEnabled: Bool
     let frameRateLimit: Int
+    let isAppBarVisible: Bool
+    let toggleAppBarAction: () -> Void
     let hideAction: () -> Void
     let exitAction: () -> Void
     let toggleRotationLockAction: () -> Void
@@ -908,6 +962,7 @@ private struct EmulatorToolbarAnchor: View, Equatable {
             && lhs.translationSourceLanguage == rhs.translationSourceLanguage
             && lhs.frameRateOverrideEnabled == rhs.frameRateOverrideEnabled
             && lhs.frameRateLimit == rhs.frameRateLimit
+            && lhs.isAppBarVisible == rhs.isAppBarVisible
     }
 
     var body: some View {
@@ -1102,6 +1157,14 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                             Label("FPS", systemImage: "speedometer")
                         }
                         Divider()
+                        Button(action: toggleAppBarAction) {
+                            Label(
+                                isAppBarVisible ? "Hide App Bar" : "Show App Bar",
+                                systemImage: isAppBarVisible
+                                    ? "chevron.up"
+                                    : "chevron.down"
+                            )
+                        }
                         Button(action: hideAction) {
                             Label("Hide application", systemImage: "rectangle.portrait.and.arrow.right")
                         }

@@ -328,6 +328,49 @@ try {
     await sleep(holdMilliseconds);
   }
 
+  console.log("[smoke] exiting and relaunching MIDlet");
+  await evaluate(`(() => {
+    const button = document.querySelector('button[aria-label="Thêm"]');
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  await waitForExpression(`(() => {
+    const menu = document.querySelector('.player-menu .MuiMenu-list');
+    return Boolean(menu) && (menu.innerText || '').includes('Thoát');
+  })()`);
+  await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.player-menu .MuiMenuItem-root')]
+      .find((element) => element.textContent?.trim() === 'Thoát');
+    if (!item) return false;
+    item.click();
+    return true;
+  })()`);
+  await waitForExpression(`[...document.querySelectorAll('.MuiDialog-root button')].some((element) => element.textContent?.trim() === 'Thoát')`);
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll('.MuiDialog-root button')]
+      .find((element) => element.textContent?.trim() === 'Thoát');
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  await waitForExpression(`Boolean(document.querySelector('.game-row')) && !document.querySelector('canvas.emulator-canvas')`);
+  await evaluate(`(() => {
+    const row = document.querySelector('.game-row');
+    if (!row) return false;
+    row.click();
+    return true;
+  })()`);
+  await waitForExpression(`(() => {
+    const body = document.body?.innerText || '';
+    const canvas = document.querySelector('canvas.emulator-canvas');
+    return Boolean(canvas) && body.includes('Đang chạy ' + ${expectedTitleLiteral});
+  })()`, 30_000);
+  if (exceptions.length) {
+    throw new Error(`Browser exceptions after exit/relaunch: ${JSON.stringify(exceptions, null, 2)}`);
+  }
+  console.log("[smoke] runtime recovered after exit/relaunch");
+
   if (screenshotPath) {
     const dataUrl = await evaluate(`document.querySelector('canvas.emulator-canvas')?.toDataURL('image/png') || ''`);
     if (dataUrl) {

@@ -1,5 +1,0 @@
-# Native Darwin/macOS platform definitions for PCSL.
-
-EXE=
-LIBS=
-CFLAGS += -DDARWIN -DUNIX -D_DARWIN_C_SOURCE

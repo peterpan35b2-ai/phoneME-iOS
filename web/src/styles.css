@@ -306,6 +306,7 @@ button, input, textarea, select { font: inherit; }
   background: #000;
 }
 .emulator-root {
+  position: relative;
   width: 100%;
   height: 100dvh;
   display: flex;
@@ -314,7 +315,20 @@ button, input, textarea, select { font: inherit; }
   background: #000;
 }
 .emulator-appbar { flex: 0 0 auto; z-index: 30; }
+.emulator-appbar.temporary-overlay {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
+  z-index: 35;
+}
 .emulator-appbar .MuiToolbar-root { width: 100%; max-width: none; }
+.emulator-appbar-reveal-zone {
+  position: absolute;
+  inset: 0 0 auto;
+  height: max(28px, env(safe-area-inset-top));
+  z-index: 40;
+  touch-action: none;
+}
 .emulator-surface {
   position: relative;
   flex: 1 1 auto;

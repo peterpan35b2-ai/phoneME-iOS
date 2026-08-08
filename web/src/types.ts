@@ -1,4 +1,23 @@
-export type ViewId = "library" | "configure" | "emulator" | "settings";
+export type ViewId = "library" | "configure" | "emulator" | "settings" | "storage";
+
+export type ManagedStorageKind = "files" | "rms";
+
+export type ManagedStorageEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  size: number;
+  modifiedAt: number;
+};
+
+export type ManagedStorageExport = {
+  name: string;
+  isDirectory: boolean;
+  files: Array<{
+    path: string;
+    data: Uint8Array<ArrayBuffer>;
+  }>;
+};
 
 export type ThemePreference = "system" | "light" | "dark";
 

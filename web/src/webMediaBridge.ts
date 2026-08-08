@@ -5,6 +5,7 @@ type MediaEntry = {
   locator?: string;
   buffer?: AudioBuffer;
   loading?: Promise<void>;
+  abortController?: AbortController;
   source?: AudioBufferSourceNode;
   gain?: GainNode;
   loopCount: number;
@@ -89,9 +90,9 @@ function decodeProxyResponse(bytes: Uint8Array) {
   return bytes.slice(bodyOffset, bodyOffset + bodyLength);
 }
 
-async function fetchMediaBytes(locator: string) {
+async function fetchMediaBytes(locator: string, signal?: AbortSignal) {
   try {
-    const direct = await fetch(locator, { cache: "no-store" });
+    const direct = await fetch(locator, { cache: "no-store", signal });
     if (direct.ok) {
       const bytes = new Uint8Array(await direct.arrayBuffer());
       if (bytes.length > MAX_MEDIA_BYTES) throw new Error("Media response is too large");
@@ -105,7 +106,8 @@ async function fetchMediaBytes(locator: string) {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: encodeProxyRequest(locator),
-    cache: "no-store"
+    cache: "no-store",
+    signal
   });
   if (!response.ok) throw new Error(`HTTP bridge ${response.status}`);
   const bytes = decodeProxyResponse(new Uint8Array(await response.arrayBuffer()));
@@ -260,6 +262,7 @@ function renderMidi(context: AudioContext, bytes: Uint8Array) {
 class PhoneMEWebMediaBridge {
   private context: AudioContext | null = null;
   private entries = new Map<number, MediaEntry>();
+  private tones = new Set<OscillatorNode>();
   private nextHandle = 1;
 
   constructor() {
@@ -343,8 +346,29 @@ class PhoneMEWebMediaBridge {
     const entry = this.entries.get(handle);
     if (!entry) return;
     entry.desiredStart = false;
+    entry.abortController?.abort();
+    entry.abortController = undefined;
     this.stopSource(entry, false);
     this.entries.delete(handle);
+  }
+
+  reset() {
+    for (const entry of this.entries.values()) {
+      entry.desiredStart = false;
+      entry.abortController?.abort();
+      entry.abortController = undefined;
+      this.stopSource(entry, false);
+    }
+    this.entries.clear();
+    for (const oscillator of this.tones) {
+      oscillator.onended = null;
+      try { oscillator.stop(); } catch { /* Already stopped. */ }
+      try { oscillator.disconnect(); } catch { /* Already disconnected. */ }
+    }
+    this.tones.clear();
+    const context = this.context;
+    this.context = null;
+    if (context && context.state !== "closed") void context.close().catch(() => undefined);
   }
 
   setLoopCount(handle: number, count: number) {
@@ -418,6 +442,12 @@ class PhoneMEWebMediaBridge {
     oscillator.type = "sine";
     gain.gain.value = Math.max(0, Math.min(100, volume)) / 100 * 0.22;
     oscillator.connect(gain).connect(context.destination);
+    this.tones.add(oscillator);
+    oscillator.onended = () => {
+      this.tones.delete(oscillator);
+      try { oscillator.disconnect(); } catch { /* Already disconnected. */ }
+      try { gain.disconnect(); } catch { /* Already disconnected. */ }
+    };
     const now = context.currentTime;
     oscillator.start(now);
     oscillator.stop(now + durationMilliseconds / 1000);
@@ -444,7 +474,7 @@ class PhoneMEWebMediaBridge {
   }
 
   private ensureContext() {
-    if (!this.context) {
+    if (!this.context || this.context.state === "closed") {
       const Constructor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Constructor) throw new Error("Web Audio API is unavailable");
       this.context = new Constructor({ latencyHint: "interactive" });
@@ -454,10 +484,12 @@ class PhoneMEWebMediaBridge {
 
   private prepare(entry: MediaEntry) {
     if (entry.loading || entry.buffer || entry.error) return;
+    const abortController = entry.bytes ? undefined : new AbortController();
+    entry.abortController = abortController;
     entry.loading = (async () => {
       try {
         const context = this.ensureContext();
-        const bytes = entry.bytes ?? await fetchMediaBytes(entry.locator!);
+        const bytes = entry.bytes ?? await fetchMediaBytes(entry.locator!, abortController?.signal);
         if (isMidiType(entry.contentType, entry.locator)) {
           entry.buffer = renderMidi(context, bytes);
         } else {
@@ -471,6 +503,7 @@ class PhoneMEWebMediaBridge {
         entry.desiredStart = false;
         console.warn("phoneME media decode failed", error);
       } finally {
+        if (entry.abortController === abortController) entry.abortController = undefined;
         entry.loading = undefined;
       }
     })();

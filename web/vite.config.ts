@@ -1,6 +1,54 @@
+import { readFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { onRequestPost as handleHttpBridge } from "./functions/api/http.js";
+
+const iosAppIconUrl = new URL("../phoneME/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.svg", import.meta.url);
+const webBuildId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const webBuildCreatedAt = new Date().toISOString();
+
+function phoneMEBuildMetadata(): Plugin {
+  return {
+    name: "phoneme-build-metadata",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "version.json",
+        source: JSON.stringify({ version: webBuildId, createdAt: webBuildCreatedAt })
+      });
+    }
+  };
+}
+
+function phoneMEAppIcon(): Plugin {
+  const readIcon = () => readFileSync(iosAppIconUrl);
+  const install = (middlewares: { use: (handler: (req: any, res: any, next: () => void) => void) => void }) => {
+    middlewares.use((req, res, next) => {
+      const pathname = String(req.url ?? "").split("?", 1)[0];
+      if (pathname !== "/app-icon.svg") {
+        next();
+        return;
+      }
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      res.end(readIcon());
+    });
+  };
+
+  return {
+    name: "phoneme-app-icon",
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "app-icon.svg",
+        source: readIcon()
+      });
+    }
+  };
+}
 
 const isolationHeaders = {
   "Cross-Origin-Opener-Policy": "same-origin",
@@ -72,7 +120,10 @@ function phoneMEHttpBridge(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), phoneMEHttpBridge()],
+  define: {
+    __PHONEME_BUILD_ID__: JSON.stringify(webBuildId)
+  },
+  plugins: [react(), phoneMEBuildMetadata(), phoneMEAppIcon(), phoneMEHttpBridge()],
   server: {
     host: true,
     headers: isolationHeaders
@@ -83,6 +134,7 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
-    sourcemap: true
+    sourcemap: true,
+    manifest: "asset-manifest.json"
   }
 });

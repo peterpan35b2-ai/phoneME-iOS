@@ -46,7 +46,7 @@ Suite, RMS, save game và filesystem được mount bằng IDBFS/IndexedDB tại
 
 HTTP/HTTPS của MIDlet đi qua bridge cùng origin `POST /api/http`. Core gửi nguyên method/header/body trong binary envelope, server thực hiện request upstream rồi trả lại status/header/body; vì vậy game không còn phụ thuộc CORS hoặc mixed-content policy của request trực tiếp từ browser. Vite dev/preview có middleware bridge tích hợp; Cloudflare Pages dùng Function `functions/api/http.ts`.
 
-`socket://` vẫn dùng Emscripten SOCKFS và route qua websockify/WebSocket proxy được cấu hình trong Cài đặt. Trình duyệt không cung cấp raw TCP/UDP socket trực tiếp, nên các protocol này vẫn cần proxy/bridge ở phía server.
+`socket://` vẫn dùng Emscripten SOCKFS và route qua websockify/WebSocket proxy được cấu hình trong Cài đặt. Proxy Docker mặc định dùng TLS-only tại `wss://127.0.0.1:38473`. Container giữ một local CA và server certificate trong Docker volume `/certs`; server certificate có SAN cho `localhost`, `127.0.0.1` và `host.docker.internal`, tự renew trước khi hết hạn. CA public được export tại `Artifacts/phoneME-websockify-local-ca.crt`; trên macOS chạy `sh web/trust-websockify-ca-macos.sh` một lần rồi thoát hẳn/mở lại Chrome hoặc Safari để browser tin WSS. Production nên mount CA/certificate phù hợp hoặc dùng TLS public. Trình duyệt không cung cấp raw TCP/UDP socket trực tiếp, nên các protocol này vẫn cần proxy/bridge ở phía server.
 
 ## Media
 

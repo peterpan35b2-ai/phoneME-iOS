@@ -36,26 +36,39 @@ import {
   BusinessRounded,
   CalendarMonthRounded,
   CheckRounded,
+  CreateNewFolderRounded,
   DeleteOutlineRounded,
   DownloadRounded,
   EditRounded,
+  FolderRounded,
   GamepadRounded,
+  InsertDriveFileRounded,
   KeyboardRounded,
   MoreHorizRounded,
   RestartAltRounded,
   SearchRounded,
   SettingsRounded,
+  StorageRounded,
   SortByAlphaRounded,
   StopCircleRounded,
   SwapHorizRounded,
   TuneRounded,
   UploadRounded
 } from "@mui/icons-material";
+import { zipSync } from "fflate";
 import { EmulatorScreen } from "./EmulatorScreen";
 import { readJarMetadata } from "./jarMetadata";
 import { PhoneMEWebRuntime } from "./phoneMEClient";
+import { applyPwaUpdate, PWA_UPDATE_READY_EVENT, type PwaUpdateReadyDetail } from "./pwa";
 import { createPhoneMETheme, appbarThemeColor } from "./theme";
-import type { GameEntry, RuntimeSnapshot, ThemePreference, ViewId } from "./types";
+import type {
+  GameEntry,
+  ManagedStorageEntry,
+  ManagedStorageKind,
+  RuntimeSnapshot,
+  ThemePreference,
+  ViewId
+} from "./types";
 import {
   DEFAULT_GAME_PROFILE,
   normalizeGameProfile,
@@ -100,12 +113,10 @@ type LibraryPreferences = {
   descending: boolean;
 };
 
+const DEFAULT_WEBSOCKET_PROXY_URL = "wss://phoneme-websockify.fly.dev/?access=7f3bcf097f3878b2afc9d057865f384348ac1781d34f8b5f";
+
 function defaultWebsocketProxyUrl() {
-  if (typeof window === "undefined") return "";
-  const host = window.location.hostname;
-  return host === "localhost" || host === "127.0.0.1"
-    ? "ws://127.0.0.1:38473"
-    : "";
+  return DEFAULT_WEBSOCKET_PROXY_URL;
 }
 
 function normalizeWebsocketProxyUrl(value: string | undefined) {
@@ -114,6 +125,13 @@ function normalizeWebsocketProxyUrl(value: string | undefined) {
   try {
     const url = new URL(value);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") return fallback;
+    if (
+      url.protocol === "ws:" &&
+      url.port === "38473" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+    ) {
+      url.protocol = "wss:";
+    }
     // The target token is generated per socket by phoneME.ts. Old local test
     // values sometimes persisted ?token=127.0.0.1:18081; never reuse it.
     url.searchParams.delete("token");
@@ -154,6 +172,237 @@ function readJson<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function formatStorageSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function downloadBytes(bytes: Uint8Array<ArrayBuffer>, fileName: string, contentType = "application/octet-stream") {
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+function StorageManagerView({ runtime, games }: {
+  runtime: PhoneMEWebRuntime;
+  games: GameEntry[];
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [kind, setKind] = useState<ManagedStorageKind>("files");
+  const [path, setPath] = useState("");
+  const [entries, setEntries] = useState<ManagedStorageEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ severity: "success" | "error" | "info"; message: string } | null>(null);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [deleteEntry, setDeleteEntry] = useState<ManagedStorageEntry | null>(null);
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+  }, []);
+
+  const loadEntries = useCallback(async () => {
+    setLoading(true);
+    try {
+      setEntries(await runtime.listManagedStorage(kind, path));
+    } catch (error) {
+      setNotice({ severity: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
+    }
+  }, [kind, path, runtime]);
+
+  useEffect(() => {
+    void loadEntries();
+  }, [loadEntries]);
+
+  const changeKind = (next: ManagedStorageKind) => {
+    if (next === kind) return;
+    setKind(next);
+    setPath("");
+    setNotice(null);
+  };
+
+  const upload = async (files: FileList | null, preserveFolder: boolean) => {
+    const selected = Array.from(files ?? []);
+    if (!selected.length) return;
+    setBusy(true);
+    try {
+      const uploads = selected.map((file) => ({
+        relativePath: preserveFolder && file.webkitRelativePath ? file.webkitRelativePath : file.name,
+        file
+      }));
+      await runtime.importManagedStorageFiles(kind, path, uploads);
+      setNotice({ severity: "success", message: `Đã tải lên ${selected.length} tệp` });
+      await loadEntries();
+    } catch (error) {
+      setNotice({ severity: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadPath = async (relativePath: string) => {
+    setBusy(true);
+    try {
+      const exported = await runtime.exportManagedStorage(kind, relativePath);
+      if (!exported.isDirectory) {
+        const file = exported.files[0];
+        if (!file) throw new Error("Tệp không có dữ liệu");
+        downloadBytes(file.data, exported.name);
+      } else {
+        const archiveFiles: Record<string, Uint8Array> = {};
+        for (const file of exported.files) archiveFiles[file.path] = file.data;
+        const archive = zipSync(archiveFiles, { level: 6 });
+        downloadBytes(archive, `${exported.name}.zip`, "application/zip");
+      }
+      setNotice({ severity: "success", message: exported.isDirectory ? "Đã tạo file ZIP" : "Đã tải tệp" });
+    } catch (error) {
+      setNotice({ severity: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createFolder = async () => {
+    const name = newFolderName.trim();
+    if (!name || name === "." || name === ".." || /[\\/\0]/.test(name)) {
+      setNotice({ severity: "error", message: "Tên thư mục không hợp lệ" });
+      return;
+    }
+    setBusy(true);
+    try {
+      await runtime.createManagedStorageDirectory(kind, path ? `${path}/${name}` : name);
+      setNewFolderOpen(false);
+      setNewFolderName("");
+      setNotice({ severity: "success", message: `Đã tạo thư mục ${name}` });
+      await loadEntries();
+    } catch (error) {
+      setNotice({ severity: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteEntry) return;
+    const target = deleteEntry;
+    setBusy(true);
+    try {
+      await runtime.deleteManagedStorageEntry(kind, target.path);
+      setDeleteEntry(null);
+      setNotice({ severity: "success", message: `Đã xóa ${target.name}` });
+      await loadEntries();
+    } catch (error) {
+      setNotice({ severity: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runningGame = runtime.activeGame;
+  const pathParts = path ? path.split("/") : [];
+
+  return <Box className="storage-manager">
+    <input ref={fileInputRef} hidden type="file" multiple onChange={(event) => {
+      void upload(event.currentTarget.files, false);
+      event.currentTarget.value = "";
+    }} />
+    <input ref={folderInputRef} hidden type="file" multiple onChange={(event) => {
+      void upload(event.currentTarget.files, true);
+      event.currentTarget.value = "";
+    }} />
+
+    <Box className="storage-kind-switch">
+      <Button variant={kind === "files" ? "contained" : "text"} startIcon={<FolderRounded />} onClick={() => changeKind("files")}>Files</Button>
+      <Button variant={kind === "rms" ? "contained" : "text"} startIcon={<StorageRounded />} onClick={() => changeKind("rms")}>RMS</Button>
+    </Box>
+
+    {runningGame ? <Alert severity="warning">
+      {runningGame.title} đang chạy. Có thể duyệt/tải xuống, nhưng hãy dừng game trước khi upload, tạo hoặc xóa dữ liệu.
+    </Alert> : null}
+    {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.message}</Alert> : null}
+
+    <Box className="storage-breadcrumbs">
+      <Button size="small" onClick={() => setPath("")}>{kind === "files" ? "Files" : "RMS"}</Button>
+      {pathParts.map((part, index) => <Box className="storage-breadcrumb-part" key={`${part}-${index}`}>
+        <ArrowForwardIosRounded />
+        <Button size="small" onClick={() => setPath(pathParts.slice(0, index + 1).join("/"))}>{part}</Button>
+      </Box>)}
+    </Box>
+
+    <Box className="storage-actions">
+      <Button variant="outlined" startIcon={<UploadRounded />} disabled={busy || Boolean(runningGame)} onClick={() => fileInputRef.current?.click()}>Upload file</Button>
+      <Button variant="outlined" startIcon={<UploadRounded />} disabled={busy || Boolean(runningGame)} onClick={() => folderInputRef.current?.click()}>Upload folder</Button>
+      <Button variant="outlined" startIcon={<CreateNewFolderRounded />} disabled={busy || Boolean(runningGame)} onClick={() => setNewFolderOpen(true)}>Thư mục mới</Button>
+      <Button variant="outlined" startIcon={<DownloadRounded />} disabled={busy} onClick={() => void downloadPath(path)}>Tải thư mục này</Button>
+      <Button variant="text" disabled={busy || loading} onClick={() => void loadEntries()}>Làm mới</Button>
+    </Box>
+
+    <Box className="storage-list">
+      {path ? <Box className="storage-entry storage-parent-entry" role="button" tabIndex={0} onClick={() => setPath(pathParts.slice(0, -1).join("/"))} onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") setPath(pathParts.slice(0, -1).join("/"));
+      }}>
+        <FolderRounded />
+        <Box className="storage-entry-copy"><Typography>..</Typography><Typography variant="body2" color="text.secondary">Thư mục cha</Typography></Box>
+      </Box> : null}
+      {loading ? <Box className="storage-loading"><CircularProgress size={28} /></Box> : entries.length ? entries.map((entry) => {
+        const suite = path === "" ? games.find((game) => String(game.suiteId) === entry.name) : undefined;
+        const title = suite?.title ?? entry.name;
+        const subtitle = suite
+          ? `Suite ${entry.name}`
+          : entry.isDirectory
+            ? "Thư mục"
+            : `${formatStorageSize(entry.size)}${entry.modifiedAt ? ` · ${new Date(entry.modifiedAt).toLocaleString()}` : ""}`;
+        return <Box
+          className="storage-entry"
+          key={entry.path}
+          role={entry.isDirectory ? "button" : undefined}
+          tabIndex={entry.isDirectory ? 0 : undefined}
+          onClick={() => { if (entry.isDirectory) setPath(entry.path); }}
+          onKeyDown={(event) => {
+            if (entry.isDirectory && (event.key === "Enter" || event.key === " ")) setPath(entry.path);
+          }}
+        >
+          {entry.isDirectory ? <FolderRounded /> : <InsertDriveFileRounded />}
+          <Box className="storage-entry-copy"><Typography noWrap>{title}</Typography><Typography variant="body2" color="text.secondary" noWrap>{subtitle}</Typography></Box>
+          <Box className="storage-entry-actions">
+            <IconButton aria-label={`Tải ${entry.name}`} disabled={busy} onClick={(event) => { event.stopPropagation(); void downloadPath(entry.path); }}><DownloadRounded /></IconButton>
+            <IconButton aria-label={`Xóa ${entry.name}`} disabled={busy || Boolean(runningGame)} onClick={(event) => { event.stopPropagation(); setDeleteEntry(entry); }}><DeleteOutlineRounded /></IconButton>
+          </Box>
+        </Box>;
+      }) : <Box className="storage-empty"><Typography color="text.secondary">Thư mục trống</Typography></Box>}
+    </Box>
+
+    <Dialog open={newFolderOpen} onClose={() => { if (!busy) setNewFolderOpen(false); }}>
+      <DialogTitle>Thư mục mới</DialogTitle>
+      <DialogContent><TextField autoFocus fullWidth margin="dense" label="Tên thư mục" value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createFolder(); }} /></DialogContent>
+      <DialogActions><Button disabled={busy} onClick={() => setNewFolderOpen(false)}>Hủy</Button><Button disabled={busy} onClick={() => void createFolder()}>Tạo</Button></DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(deleteEntry)} onClose={() => { if (!busy) setDeleteEntry(null); }}>
+      <DialogTitle>Xóa {deleteEntry?.name}?</DialogTitle>
+      <DialogContent><DialogContentText>{deleteEntry?.isDirectory ? "Toàn bộ tệp bên trong thư mục này sẽ bị xóa khỏi IndexedDB." : "Tệp này sẽ bị xóa khỏi IndexedDB."}</DialogContentText></DialogContent>
+      <DialogActions><Button disabled={busy} onClick={() => setDeleteEntry(null)}>Hủy</Button><Button color="error" disabled={busy} onClick={() => void confirmDelete()}>Xóa</Button></DialogActions>
+    </Dialog>
+  </Box>;
 }
 
 function GameAvatar({ game }: { game: GameEntry }) {
@@ -475,7 +724,7 @@ function SettingsView({ settings, onChange, runtimeReady }: {
     <SettingSection title="Mạng">
       <Box className="proxy-row">
         <Typography>TCP proxy (websockify)</Typography>
-        <TextField fullWidth size="small" placeholder="ws://127.0.0.1:38473" value={settings.websocketProxyUrl} onChange={(event) => onChange({ ...settings, websocketProxyUrl: event.target.value.trim() })} />
+        <TextField fullWidth size="small" placeholder="wss://127.0.0.1:38473" value={settings.websocketProxyUrl} onChange={(event) => onChange({ ...settings, websocketProxyUrl: event.target.value.trim() })} />
         <Typography variant="body2" color="text.secondary">
           HTTP/HTTPS dùng trực tiếp mạng của trình duyệt. socket:// được chuyển qua websockify; tải lại trang để áp dụng proxy mới.
         </Typography>
@@ -524,6 +773,8 @@ export default function App() {
   const [deleteData, setDeleteData] = useState(true);
   const [showProfiles, setShowProfiles] = useState(false);
   const [snackbar, setSnackbar] = useState<{ message: string; severity: "success" | "error" | "info" } | null>(null);
+  const [pwaUpdateVersion, setPwaUpdateVersion] = useState<string | null>(null);
+  const [pwaUpdating, setPwaUpdating] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
 
   const paletteMode = settings.theme === "system" ? (prefersDark ? "dark" : "light") : settings.theme;
@@ -541,6 +792,24 @@ export default function App() {
     meta.setAttribute("content", appbarThemeColor(paletteMode));
     document.head.appendChild(meta);
   }, [paletteMode]);
+
+  useEffect(() => {
+    const onUpdateReady = (event: Event) => {
+      const detail = (event as CustomEvent<PwaUpdateReadyDetail>).detail;
+      if (detail?.version) setPwaUpdateVersion(detail.version);
+    };
+    window.addEventListener(PWA_UPDATE_READY_EVENT, onUpdateReady);
+    return () => window.removeEventListener(PWA_UPDATE_READY_EVENT, onUpdateReady);
+  }, []);
+
+  const installPwaUpdate = useCallback(() => {
+    if (!pwaUpdateVersion || pwaUpdating) return;
+    setPwaUpdating(true);
+    void applyPwaUpdate(pwaUpdateVersion).catch((error) => {
+      setPwaUpdating(false);
+      setSnackbar({ message: error instanceof Error ? error.message : String(error), severity: "error" });
+    });
+  }, [pwaUpdateVersion, pwaUpdating]);
 
   const saveSettings = useCallback((next: AppSettings) => {
     setSettings(next);
@@ -774,6 +1043,7 @@ export default function App() {
             setView("library");
           }}
           onStop={() => {
+            runtime.endAppSession();
             setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
             setActiveGame(null);
             setView("library");
@@ -836,10 +1106,9 @@ export default function App() {
             const game = contextGame;
             setContextMenuAnchor(null);
             setContextGame(null);
-            void runtime.stopMidlet().then(() => {
-              if (activeGame?.id === game.id) setActiveGame(null);
-              setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
-            });
+            runtime.endAppSession();
+            if (activeGame?.id === game.id) setActiveGame(null);
+            setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
           }}><StopCircleRounded fontSize="small" /><span>Dừng</span></MenuItem> : null}
           <MenuItem disabled><UploadRounded fontSize="small" /><span>Xuất RMS</span></MenuItem>
           <MenuItem disabled><DownloadRounded fontSize="small" /><span>Nhập RMS</span></MenuItem>
@@ -891,6 +1160,16 @@ export default function App() {
 
       <Snackbar open={Boolean(snackbar)} autoHideDuration={4200} onClose={() => setSnackbar(null)}>
         {snackbar ? <Alert severity={snackbar.severity} variant="filled" onClose={() => setSnackbar(null)}>{snackbar.message}</Alert> : undefined}
+      </Snackbar>
+
+      <Snackbar open={Boolean(pwaUpdateVersion)} anchorOrigin={{ vertical: "bottom", horizontal: "center" }}>
+        <Alert
+          severity="info"
+          variant="filled"
+          action={<Button color="inherit" size="small" disabled={pwaUpdating} onClick={installPwaUpdate}>{pwaUpdating ? "Đang cập nhật…" : "Cập nhật"}</Button>}
+        >
+          Có bản cập nhật phoneME Web mới.
+        </Alert>
       </Snackbar>
 
       <Box className="sr-only" aria-live="polite">{runtimeSnapshot.message} {logs.at(-1)}</Box>

@@ -3,14 +3,15 @@ import { CssBaseline } from "@mui/material";
 import App from "./App";
 import "./styles.css";
 import { installWebMediaBridge } from "./webMediaBridge";
+import { initPwa } from "./pwa";
 
 installWebMediaBridge();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     if (import.meta.env.PROD) {
-      void navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((error) => {
-        console.warn("phoneME PWA service worker registration failed", error);
+      void initPwa().catch((error) => {
+        console.warn("phoneME PWA initialization failed", error);
       });
       return;
     }

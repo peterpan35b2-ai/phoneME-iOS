@@ -3,6 +3,7 @@ import {
   AppBar,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -30,6 +31,7 @@ import {
   RestartAltRounded,
   ScreenRotationRounded,
   TranslateRounded,
+  VisibilityOffRounded,
   VisibilityRounded
 } from "@mui/icons-material";
 import { applyLcduiEvents, EMPTY_LCDUI_STATE, LCDUICommandBar, NativeLcduiView, type LcduiState } from "./lcdui";
@@ -69,8 +71,10 @@ const KEYBOARD_MAP: Record<string, number> = {
   " ": -5,
   q: -6,
   Q: -6,
+  F1: -6,
   e: -7,
   E: -7,
+  F2: -7,
   "0": 48,
   "1": 49,
   "2": 50,
@@ -571,11 +575,14 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   const activePointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const lastPointerMoveAtRef = useRef(0);
   const hideTimerRef = useRef<number | null>(null);
+  const appBarHideTimerRef = useRef<number | null>(null);
+  const appBarSwipeRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const [surfaceSize, setSurfaceSize] = useState({ width: 1, height: 1 });
   const [frameSize, setFrameSize] = useState({ width: profile.screenWidth, height: profile.screenHeight });
   const [lcdui, setLcdui] = useState<LcduiState>(EMPTY_LCDUI_STATE);
   const [fpsValue, setFpsValue] = useState(0);
   const [runtimeError, setRuntimeError] = useState("");
+  const [sessionReady, setSessionReady] = useState(false);
   const [showKeypad, setShowKeypad] = useState(profile.showVirtualKeyboard);
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const [keyboardMenuAnchor, setKeyboardMenuAnchor] = useState<HTMLElement | null>(null);
@@ -586,6 +593,7 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   const [showHiddenKeysEditor, setShowHiddenKeysEditor] = useState(false);
   const [hiddenKeyDraft, setHiddenKeyDraft] = useState<string[]>(profile.hiddenKeyboardControlIds);
   const [showExitConfirmation, setShowExitConfirmation] = useState(false);
+  const [isAppBarTemporarilyVisible, setIsAppBarTemporarilyVisible] = useState(false);
   const activeScreen = lcdui.activeScreenId ? lcdui.screens[lcdui.activeScreenId] : undefined;
   const hasNativeScreen = Boolean(activeScreen?.visible && activeScreen.type !== 22);
   const hasCanvasScreen = Boolean(activeScreen?.visible && activeScreen.type === 22);
@@ -634,6 +642,10 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     };
   }, [scheduleKeyboardHide]);
 
+  useEffect(() => () => {
+    if (appBarHideTimerRef.current !== null) window.clearTimeout(appBarHideTimerRef.current);
+  }, []);
+
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
@@ -649,6 +661,15 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     generationRef.current = 0n;
     setLcdui(EMPTY_LCDUI_STATE);
     setRuntimeError("");
+    setSessionReady(false);
+    onSnapshot({
+      phase: "loading",
+      message: runtime.ready ? `Đang mở ${game.title}` : `Đang chờ lõi phoneME để mở ${game.title}`,
+      fps: 0,
+      usedMemory: 0,
+      frameWidth: profile.screenWidth,
+      frameHeight: profile.screenHeight
+    });
     const alreadyRunning = runtime.activeGame?.id === game.id;
     const launchPromise = (async () => {
       if (!alreadyRunning) {
@@ -666,9 +687,10 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     })();
     void launchPromise.then(() => {
       if (!active) {
-        void runtime.stopMidlet();
+        runtime.endAppSession();
         return;
       }
+      setSessionReady(true);
       onSnapshot({
         phase: "running",
         message: `Đang chạy ${game.title}`,
@@ -686,7 +708,7 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     return () => {
       active = false;
       inputCoordinator.releaseAll();
-      void runtime.stopMidlet();
+      runtime.endAppSession();
     };
     // Launch once for this game/profile screen size. Visual profile fields are handled without restarting.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -763,6 +785,7 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   }, [inputCoordinator]);
 
   useEffect(() => {
+    if (!sessionReady) return;
     let timer = 0;
     let active = true;
     let nextTickAt = performance.now();
@@ -833,12 +856,12 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
       active = false;
       window.clearTimeout(timer);
     };
-  }, [frameSize.height, frameSize.width, hasNativeScreen, onSnapshot, profile.showFPS, runtime, runtimeError]);
+  }, [frameSize.height, frameSize.width, hasNativeScreen, onSnapshot, profile.showFPS, runtime, runtimeError, sessionReady]);
 
   const stop = () => {
     setShowExitConfirmation(false);
     inputCoordinator.releaseAll();
-    void runtime.stopMidlet();
+    runtime.endAppSession();
     onStop();
   };
 
@@ -864,11 +887,32 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     onProfileChange({ ...profile, showVirtualKeyboard: next });
   };
 
+  const revealAppBarTemporarily = () => {
+    if (profile.showAppBar || keyboardEditMode !== "none") return;
+    setIsAppBarTemporarilyVisible(true);
+    if (appBarHideTimerRef.current !== null) window.clearTimeout(appBarHideTimerRef.current);
+    appBarHideTimerRef.current = window.setTimeout(() => {
+      appBarHideTimerRef.current = null;
+      setIsAppBarTemporarilyVisible(false);
+    }, 8000);
+  };
+
+  const toggleAppBar = () => {
+    if (appBarHideTimerRef.current !== null) window.clearTimeout(appBarHideTimerRef.current);
+    appBarHideTimerRef.current = null;
+    setIsAppBarTemporarilyVisible(false);
+    onProfileChange({ ...profile, showAppBar: !profile.showAppBar });
+    closePlayerMenus();
+  };
+
   const closePlayerMenus = () => {
     setMenuAnchor(null);
     setKeyboardMenuAnchor(null);
     setLayoutMenuAnchor(null);
     setTranslationMenuAnchor(null);
+    if (isAppBarTemporarilyVisible) {
+      window.setTimeout(() => setIsAppBarTemporarilyVisible(false), 120);
+    }
   };
 
   const setKeyboardLayout = (layout: VirtualKeyboardType) => {
@@ -966,10 +1010,15 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     };
   };
 
-  const appBarVisible = profile.showAppBar || keyboardEditMode !== "none";
+  const appBarOccupiesLayout = profile.showAppBar || keyboardEditMode !== "none";
+  const appBarVisible = appBarOccupiesLayout || isAppBarTemporarilyVisible;
 
-  return <Box className={`emulator-root ${appBarVisible ? "with-appbar" : "without-appbar"}`}>
-    {appBarVisible ? <AppBar position="relative" elevation={0} className="emulator-appbar">
+  return <Box className={`emulator-root ${appBarOccupiesLayout ? "with-appbar" : "without-appbar"}`}>
+    {appBarVisible ? <AppBar
+      position={isAppBarTemporarilyVisible && !appBarOccupiesLayout ? "absolute" : "relative"}
+      elevation={0}
+      className={`emulator-appbar ${isAppBarTemporarilyVisible && !appBarOccupiesLayout ? "temporary-overlay" : ""}`}
+    >
       <Toolbar>
         {keyboardEditMode !== "none" ? <>
           <Button color="inherit" className="bar-text-action" onClick={discardKeyboardEdit}>Hủy</Button>
@@ -985,15 +1034,45 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
           <Tooltip title="Chụp màn hình">
             <IconButton color="inherit" onClick={saveScreenshot}><CameraAltRounded /></IconButton>
           </Tooltip>
-          <IconButton className="ellipsis-circle-button" color="inherit" aria-label="Thêm" onClick={(event) => setMenuAnchor(event.currentTarget)}><MoreHorizRounded /></IconButton>
+          <IconButton className="ellipsis-circle-button" color="inherit" aria-label="Thêm" onClick={(event) => {
+            if (appBarHideTimerRef.current !== null) window.clearTimeout(appBarHideTimerRef.current);
+            appBarHideTimerRef.current = null;
+            setMenuAnchor(event.currentTarget);
+          }}><MoreHorizRounded /></IconButton>
         </>}
       </Toolbar>
     </AppBar> : null}
+
+    {!appBarVisible ? <Box
+      className="emulator-appbar-reveal-zone"
+      aria-hidden="true"
+      onPointerDown={(event) => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        appBarSwipeRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* best effort */ }
+      }}
+      onPointerMove={(event) => {
+        const start = appBarSwipeRef.current;
+        if (!start || start.id !== event.pointerId) return;
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        if (dy >= 32 && Math.abs(dy) > Math.abs(dx)) {
+          appBarSwipeRef.current = null;
+          revealAppBarTemporarily();
+        }
+      }}
+      onPointerUp={() => { appBarSwipeRef.current = null; }}
+      onPointerCancel={() => { appBarSwipeRef.current = null; }}
+    /> : null}
 
     <Box ref={surfaceRef} className="emulator-surface">
       {runtimeError ? <Box className="emulator-error">
         <Typography variant="subtitle1">Không thể chạy ứng dụng</Typography>
         <Typography color="text.secondary">{runtimeError}</Typography>
+      </Box> : !sessionReady ? <Box className="emulator-error">
+        <CircularProgress size={28} />
+        <Typography variant="subtitle1">Đang khởi động {game.title}</Typography>
+        <Typography color="text.secondary">{runtime.ready ? "Đang tải ứng dụng…" : "Đang chờ lõi phoneME sẵn sàng…"}</Typography>
       </Box> : hasNativeScreen && activeScreen ? <NativeLcduiView runtime={runtime} screen={activeScreen} /> : <canvas
         ref={canvasRef}
         className="emulator-canvas"
@@ -1086,6 +1165,10 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
         <TranslateRounded fontSize="small" /><span>Tự động dịch</span><ArrowForwardIosRounded className="submenu-chevron" />
       </MenuItem>
       <Divider />
+      <MenuItem onClick={toggleAppBar}>
+        {profile.showAppBar ? <VisibilityOffRounded fontSize="small" /> : <VisibilityRounded fontSize="small" />}
+        <span>{profile.showAppBar ? "Ẩn App Bar" : "Hiện App Bar"}</span>
+      </MenuItem>
       <MenuItem className="destructive-menu-item" onClick={() => { closePlayerMenus(); setShowExitConfirmation(true); }}>
         <PowerSettingsNewRounded fontSize="small" /><span>Thoát</span>
       </MenuItem>
