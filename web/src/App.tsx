@@ -3,15 +3,8 @@ import {
   Alert,
   AppBar,
   Avatar,
-  BottomNavigation,
-  BottomNavigationAction,
   Box,
   Button,
-  Card,
-  CardActionArea,
-  CardContent,
-  CardMedia,
-  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -21,65 +14,128 @@ import {
   Divider,
   FormControl,
   FormControlLabel,
-  InputLabel,
+  IconButton,
+  InputAdornment,
+  Menu,
   MenuItem,
   Select,
+  Slider,
   Snackbar,
-  Stack,
   Switch,
   TextField,
   ThemeProvider,
   Toolbar,
-  Tooltip,
   Typography,
   useMediaQuery
 } from "@mui/material";
 import {
   AddRounded,
-  AppsRounded,
-  DarkModeRounded,
+  ArrowDownwardRounded,
+  ArrowForwardIosRounded,
+  ArrowUpwardRounded,
+  BusinessRounded,
+  CalendarMonthRounded,
+  CheckRounded,
   DeleteOutlineRounded,
+  DownloadRounded,
+  EditRounded,
   GamepadRounded,
-  InfoOutlined,
-  LightModeRounded,
-  MemoryRounded,
-  MonitorHeartRounded,
-  PlayArrowRounded,
+  KeyboardRounded,
+  MoreHorizRounded,
+  RestartAltRounded,
+  SearchRounded,
   SettingsRounded,
-  StorageRounded,
-  UploadFileRounded
+  SortByAlphaRounded,
+  StopCircleRounded,
+  SwapHorizRounded,
+  TuneRounded,
+  UploadRounded
 } from "@mui/icons-material";
 import { EmulatorScreen } from "./EmulatorScreen";
 import { readJarMetadata } from "./jarMetadata";
 import { PhoneMEWebRuntime } from "./phoneMEClient";
-import { createPhoneMETheme } from "./theme";
+import { createPhoneMETheme, appbarThemeColor } from "./theme";
 import type { GameEntry, RuntimeSnapshot, ThemePreference, ViewId } from "./types";
+import {
+  DEFAULT_GAME_PROFILE,
+  normalizeGameProfile,
+  type ButtonShape,
+  type KeyLayout,
+  type ScaleType,
+  type ScreenGravity,
+  type VirtualKeyboardType,
+  type WebGameProfile
+} from "./webProfile";
 
 const GAMES_KEY = "phoneme-web.games.v1";
-const SETTINGS_KEY = "phoneme-web.settings.v1";
+const SETTINGS_KEY = "phoneme-web.settings.v2";
+const LEGACY_SETTINGS_KEY = "phoneme-web.settings.v1";
+const PROFILES_KEY = "phoneme-web.game-profiles.v1";
+const LIBRARY_PREFS_KEY = "phoneme-web.library.v1";
 
 const SCREEN_PROFILES = [
-  { label: "240 × 320 (dọc)", width: 240, height: 320 },
-  { label: "320 × 240 (ngang)", width: 320, height: 240 },
-  { label: "176 × 208", width: 176, height: 208 },
+  { label: "128 × 128", width: 128, height: 128 },
   { label: "128 × 160", width: 128, height: 160 },
+  { label: "176 × 220", width: 176, height: 220 },
+  { label: "240 × 320", width: 240, height: 320 },
+  { label: "320 × 240", width: 320, height: 240 },
   { label: "360 × 640", width: 360, height: 640 }
 ];
 
+const HEAP_PRESETS = [16, 32, 64, 96, 128, 256, 512];
+
 type AppSettings = {
   theme: ThemePreference;
-  width: number;
-  height: number;
+  language: "system" | "vi" | "en";
+  translationProvider: "bing" | "google" | "automatic";
+  enableActionBar: boolean;
+  enableStatusBar: boolean;
+  keepScreenOn: boolean;
   websocketProxyUrl: string;
-  pixelated: boolean;
 };
+
+type LibrarySort = "name" | "date" | "vendor";
+type LibraryPreferences = {
+  sort: LibrarySort;
+  descending: boolean;
+};
+
+function defaultWebsocketProxyUrl() {
+  if (typeof window === "undefined") return "";
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1"
+    ? "ws://127.0.0.1:38473"
+    : "";
+}
+
+function normalizeWebsocketProxyUrl(value: string | undefined) {
+  const fallback = defaultWebsocketProxyUrl();
+  if (!value) return fallback;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "ws:" && url.protocol !== "wss:") return fallback;
+    // The target token is generated per socket by phoneME.ts. Old local test
+    // values sometimes persisted ?token=127.0.0.1:18081; never reuse it.
+    url.searchParams.delete("token");
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return fallback;
+  }
+}
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
-  width: 240,
-  height: 320,
-  websocketProxyUrl: "",
-  pixelated: true
+  language: "system",
+  translationProvider: "bing",
+  enableActionBar: true,
+  enableStatusBar: false,
+  keepScreenOn: false,
+  websocketProxyUrl: defaultWebsocketProxyUrl()
+};
+
+const DEFAULT_LIBRARY_PREFERENCES: LibraryPreferences = {
+  sort: "name",
+  descending: false
 };
 
 const EMPTY_SNAPSHOT: RuntimeSnapshot = {
@@ -100,106 +156,285 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 ** 2).toFixed(1)} MB`;
-}
-
-function GameAvatar({ game, size = 56 }: { game: GameEntry; size?: number }) {
+function GameAvatar({ game }: { game: GameEntry }) {
   return <Avatar
     src={game.iconDataUrl}
     variant="rounded"
-    sx={{ width: size, height: size, bgcolor: "primary.container", color: "primary.main", borderRadius: 3 }}
-  >{game.title.slice(0, 1).toUpperCase()}</Avatar>;
+    className="game-icon"
+  >{game.iconDataUrl ? null : <GamepadRounded fontSize="small" />}</Avatar>;
 }
 
-function LibraryView({ games, loading, onFiles, onLaunch, onDelete }: {
+function sectionTitle(value: string) {
+  const normalized = value.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const first = normalized.charAt(0).toUpperCase();
+  return /[A-Z]/.test(first) ? first : "#";
+}
+
+function LibraryView({
+  games,
+  searchText,
+  onSearchTextChange,
+  sort,
+  descending,
+  onLaunch,
+  onContextMenu,
+  onFiles
+}: {
   games: GameEntry[];
-  loading: boolean;
-  onFiles: (files: File[]) => void;
+  searchText: string;
+  onSearchTextChange: (value: string) => void;
+  sort: LibrarySort;
+  descending: boolean;
   onLaunch: (game: GameEntry) => void;
-  onDelete: (game: GameEntry) => void;
+  onContextMenu: (game: GameEntry, anchor: HTMLElement) => void;
+  onFiles: (files: File[]) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  return <Stack spacing={3}>
-    <Box
-      className={`import-zone ${dragging ? "dragging" : ""}`}
-      onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragOver={(event) => event.preventDefault()}
-      onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        setDragging(false);
-        onFiles(Array.from(event.dataTransfer.files));
-      }}
-    >
-      <input
-        ref={inputRef}
-        hidden
-        type="file"
-        accept=".jar,application/java-archive,application/zip"
-        multiple
-        onChange={(event) => {
-          onFiles(Array.from(event.target.files ?? []));
-          event.currentTarget.value = "";
-        }}
-      />
-      <Stack spacing={1.5} sx={{ alignItems: "center", textAlign: "center" }}>
-        <Box className="import-icon"><UploadFileRounded /></Box>
-        <Box>
-          <Typography variant="h6">Thêm game hoặc ứng dụng J2ME</Typography>
-          <Typography color="text.secondary">Thả file JAR vào đây hoặc chọn từ máy</Typography>
-        </Box>
-        <Button
-          variant="contained"
-          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <AddRounded />}
-          disabled={loading}
-          onClick={() => inputRef.current?.click()}
-        >{loading ? "Đang cài đặt" : "Chọn file JAR"}</Button>
-      </Stack>
-    </Box>
+  const longPressTimer = useRef<number | null>(null);
 
-    <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
-      <Box>
-        <Typography variant="h5">Thư viện</Typography>
-        <Typography color="text.secondary">{games.length} ứng dụng đã cài</Typography>
+  const visibleGames = useMemo(() => {
+    const query = searchText.trim().toLocaleLowerCase();
+    return games
+      .filter((game) => !query || [game.title, game.vendor, game.version, game.mainClass, game.fileName]
+        .some((value) => value.toLocaleLowerCase().includes(query)))
+      .sort((left, right) => {
+        let result = 0;
+        if (sort === "date") result = left.installedAt - right.installedAt;
+        else if (sort === "vendor") result = (left.vendor || left.title).localeCompare(right.vendor || right.title, undefined, { sensitivity: "base" });
+        else result = left.title.localeCompare(right.title, undefined, { sensitivity: "base" });
+        return descending ? -result : result;
+      });
+  }, [descending, games, searchText, sort]);
+
+  const sections = useMemo(() => {
+    const grouped = new Map<string, GameEntry[]>();
+    for (const game of visibleGames) {
+      const title = sort === "date"
+        ? new Date(game.installedAt).getFullYear().toString()
+        : sectionTitle(sort === "vendor" ? (game.vendor || game.title) : game.title);
+      grouped.set(title, [...(grouped.get(title) ?? []), game]);
+    }
+    return [...grouped.entries()];
+  }, [sort, visibleGames]);
+
+  return <Box
+    className={`library-surface ${dragging ? "dragging" : ""}`}
+    onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+    onDragOver={(event) => event.preventDefault()}
+    onDragLeave={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+    }}
+    onDrop={(event) => {
+      event.preventDefault();
+      setDragging(false);
+      onFiles(Array.from(event.dataTransfer.files));
+    }}
+  >
+    {games.length ? <>
+      <Box className="library-search-wrap">
+        <TextField
+          fullWidth
+          size="small"
+          value={searchText}
+          onChange={(event) => onSearchTextChange(event.target.value)}
+          placeholder="Tìm ứng dụng"
+          slotProps={{
+            input: {
+              startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>
+            }
+          }}
+        />
       </Box>
-      <Chip icon={<StorageRounded />} label="Dữ liệu lưu trong trình duyệt" />
-    </Stack>
 
-    {games.length ? <Box className="game-grid">
-      {games.map((game) => <Card key={game.id} className="game-card">
-        <CardActionArea onClick={() => onLaunch(game)} className="game-card-action">
-          {game.iconDataUrl ? <CardMedia component="img" image={game.iconDataUrl} alt="" className="game-cover" /> : <Box className="game-cover-placeholder">
-            <GamepadRounded />
-          </Box>}
-          <CardContent>
-            <Typography variant="subtitle1" noWrap title={game.title}>{game.title}</Typography>
-            <Typography variant="body2" color="text.secondary" noWrap title={game.vendor}>{game.vendor}</Typography>
-            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-              {game.version ? <Chip size="small" label={`v${game.version}`} /> : null}
-              <Chip size="small" label={game.fileName.replace(/\.jar$/i, "")} />
-            </Stack>
-          </CardContent>
-        </CardActionArea>
-        <Divider />
-        <Stack direction="row" sx={{ p: 1, justifyContent: "space-between" }}>
-          <Button startIcon={<PlayArrowRounded />} onClick={() => onLaunch(game)}>Chạy</Button>
-          <Tooltip title="Gỡ ứng dụng">
-            <Button color="error" onClick={() => onDelete(game)}><DeleteOutlineRounded /></Button>
-          </Tooltip>
-        </Stack>
-      </Card>)}
-    </Box> : <Box className="empty-library">
-      <AppsRounded />
-      <Typography variant="h6">Chưa có ứng dụng</Typography>
-      <Typography color="text.secondary">Nhập một file JAR để bắt đầu.</Typography>
+      <Box className="inset-list">
+        {sections.length ? sections.map(([title, sectionGames]) => <Box className="inset-section" key={title}>
+          <Typography className="inset-section-header">{title}</Typography>
+          <Box className="inset-section-body">
+            {sectionGames.map((game) => <Box
+              key={game.id}
+              className="game-row"
+              role="button"
+              tabIndex={0}
+              onClick={() => onLaunch(game)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onContextMenu(game, event.currentTarget);
+              }}
+              onPointerDown={(event) => {
+                if (event.pointerType === "mouse") return;
+                if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+                const anchor = event.currentTarget;
+                longPressTimer.current = window.setTimeout(() => onContextMenu(game, anchor), 520);
+              }}
+              onPointerUp={() => {
+                if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+                longPressTimer.current = null;
+              }}
+              onPointerCancel={() => {
+                if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+                longPressTimer.current = null;
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onLaunch(game);
+                }
+              }}
+            >
+              <GameAvatar game={game} />
+              <Box className="game-row-copy">
+                <Box className="game-row-title-line">
+                  <Typography className="game-row-title" noWrap>{game.title}</Typography>
+                </Box>
+                <Typography className="game-row-subtitle" noWrap>{game.vendor || game.fileName}</Typography>
+              </Box>
+              {game.version ? <Typography className="game-row-version" noWrap>{game.version}</Typography> : null}
+            </Box>)}
+          </Box>
+          {title === sections.at(-1)?.[0] ? <Typography className="inset-section-footer">{games.length} {games.length === 1 ? "App" : "Apps"}</Typography> : null}
+        </Box>) : <Box className="empty-filter-state">
+          <Typography variant="subtitle1">Không có ứng dụng</Typography>
+          <Typography variant="body2" color="text.secondary">Không có ứng dụng phù hợp bộ lọc hiện tại.</Typography>
+        </Box>}
+      </Box>
+    </> : <Box className="empty-library">
+      <GamepadRounded />
+      <Typography variant="h6">Không có ứng dụng</Typography>
+      <Typography color="text.secondary">Nhập file JAR J2ME để thêm vào thư viện.</Typography>
     </Box>}
-  </Stack>;
+
+    {dragging ? <Box className="drop-overlay"><Typography variant="h6">Thả file JAR để nhập</Typography></Box> : null}
+  </Box>;
+}
+
+function SettingSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return <Box className="form-section">
+    <Typography className="form-section-header">{title}</Typography>
+    <Box className="form-section-body">{children}</Box>
+  </Box>;
+}
+
+function SettingRow({ title, value, children, className = "" }: {
+  title: string;
+  value?: string;
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  return <Box className={`form-row ${className}`}>
+    <Box className="form-row-copy">
+      <Typography>{title}</Typography>
+      {value ? <Typography variant="body2" color="text.secondary">{value}</Typography> : null}
+    </Box>
+    {children}
+  </Box>;
+}
+
+function GameProfileEditor({ profile, onChange }: {
+  profile: WebGameProfile;
+  onChange: (profile: WebGameProfile) => void;
+}) {
+  const set = <K extends keyof WebGameProfile>(key: K, value: WebGameProfile[K]) => onChange(normalizeGameProfile({ ...profile, [key]: value }));
+  const profileValue = `${profile.screenWidth}x${profile.screenHeight}`;
+
+  return <Box className="profile-form">
+    <SettingSection title="Hiển thị">
+      <Box className="form-row screen-dimension-row">
+        <TextField
+          size="small"
+          value={profile.screenWidth}
+          onChange={(event) => set("screenWidth", Number.parseInt(event.target.value, 10) || profile.screenWidth)}
+          slotProps={{ htmlInput: { inputMode: "numeric", "aria-label": "Chiều rộng" } }}
+        />
+        <Typography color="text.secondary">×</Typography>
+        <TextField
+          size="small"
+          value={profile.screenHeight}
+          onChange={(event) => set("screenHeight", Number.parseInt(event.target.value, 10) || profile.screenHeight)}
+          slotProps={{ htmlInput: { inputMode: "numeric", "aria-label": "Chiều cao" } }}
+        />
+        <IconButton aria-label="Đổi chiều" onClick={() => onChange({ ...profile, screenWidth: profile.screenHeight, screenHeight: profile.screenWidth })}><SwapHorizRounded /></IconButton>
+      </Box>
+      <SettingRow title="Preset kích thước màn hình">
+        <FormControl size="small" className="row-control">
+          <Select
+            displayEmpty
+            value={SCREEN_PROFILES.some((item) => `${item.width}x${item.height}` === profileValue) ? profileValue : ""}
+            onChange={(event) => {
+              const [width, height] = String(event.target.value).split("x").map(Number);
+              onChange({ ...profile, screenWidth: width, screenHeight: height });
+            }}
+          >
+            <MenuItem value="" disabled>Tùy chỉnh</MenuItem>
+            {SCREEN_PROFILES.map((item) => <MenuItem key={item.label} value={`${item.width}x${item.height}`}>{item.label}</MenuItem>)}
+          </Select>
+        </FormControl>
+      </SettingRow>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Giữ tỷ lệ Canvas" control={<Switch checked={profile.preserveAspectRatio} onChange={(_, checked) => set("preserveAspectRatio", checked)} />} />
+      <Box className="slider-row">
+        <Box className="slider-row-title"><Typography>Canvas scale</Typography><Typography color="text.secondary">{profile.scalePercent}%</Typography></Box>
+        <Slider value={profile.scalePercent} min={10} max={300} step={1} onChange={(_, value) => set("scalePercent", value as number)} />
+      </Box>
+      <SettingRow title="Vị trí Canvas">
+        <Select size="small" className="row-control" value={profile.screenGravity} onChange={(event) => set("screenGravity", event.target.value as ScreenGravity)}>
+          <MenuItem value="left">Trái</MenuItem><MenuItem value="top">Trên</MenuItem><MenuItem value="center">Giữa</MenuItem><MenuItem value="right">Phải</MenuItem><MenuItem value="bottom">Dưới</MenuItem>
+        </Select>
+      </SettingRow>
+      <SettingRow title="Kiểu scale Canvas">
+        <Select size="small" className="row-control" value={profile.scaleType} onChange={(event) => set("scaleType", event.target.value as ScaleType)}>
+          <MenuItem value="asIs">Giữ nguyên</MenuItem><MenuItem value="fit">Vừa cửa sổ</MenuItem><MenuItem value="fill">Lấp đầy cửa sổ</MenuItem>
+        </Select>
+      </SettingRow>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Lọc ảnh" control={<Switch checked={profile.filtering} onChange={(_, checked) => set("filtering", checked)} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Buộc Canvas toàn màn hình" control={<Switch checked={profile.forceFullscreen} onChange={(_, checked) => set("forceFullscreen", checked)} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="App Bar" control={<Switch checked={profile.showAppBar} onChange={(_, checked) => set("showAppBar", checked)} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Status Bar" control={<Switch checked={profile.showStatusBar} onChange={(_, checked) => set("showStatusBar", checked)} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Hiện FPS" control={<Switch checked={profile.showFPS} onChange={(_, checked) => set("showFPS", checked)} />} />
+    </SettingSection>
+
+    <SettingSection title="Bộ nhớ">
+      <SettingRow title="Java heap" value={`${profile.heapSizeMegabytes} MiB`}>
+        <Select size="small" className="row-control" value={profile.heapSizeMegabytes} onChange={(event) => set("heapSizeMegabytes", Number(event.target.value))}>
+          {HEAP_PRESETS.map((size) => <MenuItem key={size} value={size}>{size} MiB</MenuItem>)}
+        </Select>
+      </SettingRow>
+    </SettingSection>
+
+    <SettingSection title="Phông chữ">
+      <Box className="font-size-row">
+        <TextField size="small" label="Nhỏ" value={profile.fontSmall} onChange={(event) => set("fontSmall", Number.parseInt(event.target.value, 10) || profile.fontSmall)} />
+        <TextField size="small" label="Vừa" value={profile.fontMedium} onChange={(event) => set("fontMedium", Number.parseInt(event.target.value, 10) || profile.fontMedium)} />
+        <TextField size="small" label="Lớn" value={profile.fontLarge} onChange={(event) => set("fontLarge", Number.parseInt(event.target.value, 10) || profile.fontLarge)} />
+      </Box>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Dùng Dynamic Type scaling" control={<Switch checked={profile.fontValuesAreScaledPixels} onChange={(_, checked) => set("fontValuesAreScaledPixels", checked)} />} />
+    </SettingSection>
+
+    <SettingSection title="Điều khiển">
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Cảm ứng" control={<Switch checked={profile.touchInput} onChange={(_, checked) => set("touchInput", checked)} />} />
+      <SettingRow title="Layout phím J2ME">
+        <Select size="small" className="row-control" value={profile.keyLayout} onChange={(event) => set("keyLayout", event.target.value as KeyLayout)}>
+          <MenuItem value="nokiaSE">Nokia/SE</MenuItem><MenuItem value="siemens">Siemens</MenuItem><MenuItem value="motorola">Motorola</MenuItem><MenuItem value="custom">Tùy chỉnh</MenuItem>
+        </Select>
+      </SettingRow>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Bàn phím ảo" control={<Switch checked={profile.showVirtualKeyboard} onChange={(_, checked) => set("showVirtualKeyboard", checked)} />} />
+      <SettingRow title="Layout bàn phím ảo">
+        <Select size="small" className="row-control" disabled={!profile.showVirtualKeyboard} value={profile.virtualKeyboardType} onChange={(event) => set("virtualKeyboardType", event.target.value as VirtualKeyboardType)}>
+          <MenuItem value="phone">Phone</MenuItem><MenuItem value="phoneArrows">Phone (arrows)</MenuItem><MenuItem value="numbersArrows">Numbers & arrows</MenuItem><MenuItem value="arrowsNumbers">Arrows & numbers</MenuItem><MenuItem value="numbers">Numbers</MenuItem><MenuItem value="arrows">Arrows</MenuItem>
+        </Select>
+      </SettingRow>
+      <SettingRow title="Hình dạng nút">
+        <Select size="small" className="row-control" disabled={!profile.showVirtualKeyboard} value={profile.buttonShape} onChange={(event) => set("buttonShape", event.target.value as ButtonShape)}>
+          <MenuItem value="oval">Oval</MenuItem><MenuItem value="rectangle">Chữ nhật</MenuItem><MenuItem value="roundedRectangle">Chữ nhật bo góc</MenuItem>
+        </Select>
+      </SettingRow>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Rung phản hồi" control={<Switch checked={profile.hapticFeedback} disabled={!profile.showVirtualKeyboard} onChange={(_, checked) => set("hapticFeedback", checked)} />} />
+      <Box className="slider-row disabled-aware">
+        <Box className="slider-row-title"><Typography>Độ trong suốt bàn phím</Typography><Typography color="text.secondary">{Math.round(profile.keyboardOpacity * 100)}%</Typography></Box>
+        <Slider disabled={!profile.showVirtualKeyboard} value={profile.keyboardOpacity} min={0.05} max={1} step={0.05} onChange={(_, value) => set("keyboardOpacity", value as number)} />
+      </Box>
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Giữ phím ngoài màn hình rõ hoàn toàn" control={<Switch checked={profile.forceOpacityForOffscreenKeys} disabled={!profile.showVirtualKeyboard} onChange={(_, checked) => set("forceOpacityForOffscreenKeys", checked)} />} />
+      <SettingRow title="Tự ẩn sau" value="ms"><TextField className="numeric-row-field" size="small" disabled={!profile.showVirtualKeyboard} value={profile.keyboardHideDelayMilliseconds} onChange={(event) => set("keyboardHideDelayMilliseconds", Number.parseInt(event.target.value, 10) || 0)} /></SettingRow>
+    </SettingSection>
+  </Box>;
 }
 
 function SettingsView({ settings, onChange, runtimeReady }: {
@@ -207,109 +442,105 @@ function SettingsView({ settings, onChange, runtimeReady }: {
   onChange: (settings: AppSettings) => void;
   runtimeReady: boolean;
 }) {
-  const profileValue = `${settings.width}x${settings.height}`;
-  return <Stack spacing={3} sx={{ maxWidth: 760 }}>
-    <Box>
-      <Typography variant="h5">Cài đặt</Typography>
-      <Typography color="text.secondary">Thiết lập hiển thị và kết nối cho phoneME Web.</Typography>
-    </Box>
-
-    <Card>
-      <CardContent>
-        <Stack spacing={2.5}>
-          <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
-            {settings.theme === "dark" ? <DarkModeRounded /> : <LightModeRounded />}
-            <Box sx={{ flex: 1 }}>
-              <Typography variant="subtitle1">Giao diện</Typography>
-              <Typography variant="body2" color="text.secondary">Theo hệ thống, sáng hoặc tối.</Typography>
-            </Box>
-            <FormControl size="small" sx={{ minWidth: 150 }}>
-              <Select value={settings.theme} onChange={(event) => onChange({ ...settings, theme: event.target.value as ThemePreference })}>
-                <MenuItem value="system">Theo hệ thống</MenuItem>
-                <MenuItem value="light">Sáng</MenuItem>
-                <MenuItem value="dark">Tối</MenuItem>
-              </Select>
-            </FormControl>
-          </Stack>
-          <Divider />
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: { sm: "center" } }}>
-            <MonitorHeartRounded />
-            <Box sx={{ flex: 1 }}>
-              <Typography variant="subtitle1">Kích thước màn hình J2ME</Typography>
-              <Typography variant="body2" color="text.secondary">Áp dụng khi mở hoặc đổi game.</Typography>
-            </Box>
-            <FormControl size="small" sx={{ minWidth: 190 }}>
-              <InputLabel id="screen-profile-label">Màn hình</InputLabel>
-              <Select
-                labelId="screen-profile-label"
-                label="Màn hình"
-                value={profileValue}
-                onChange={(event) => {
-                  const [width, height] = String(event.target.value).split("x").map(Number);
-                  onChange({ ...settings, width, height });
-                }}
-              >
-                {SCREEN_PROFILES.map((profile) => <MenuItem key={profile.label} value={`${profile.width}x${profile.height}`}>{profile.label}</MenuItem>)}
-              </Select>
-            </FormControl>
-          </Stack>
-          <Divider />
-          <FormControlLabel
-            control={<Switch checked={settings.pixelated} onChange={(_, checked) => onChange({ ...settings, pixelated: checked })} />}
-            label={<Box>
-              <Typography variant="subtitle1">Giữ nét pixel</Typography>
-              <Typography variant="body2" color="text.secondary">Tắt nội suy khi phóng Canvas game.</Typography>
-            </Box>}
-          />
-        </Stack>
-      </CardContent>
-    </Card>
-
-    <Card>
-      <CardContent>
-        <Stack spacing={2}>
-          <Box>
-            <Typography variant="subtitle1">WebSocket proxy cho socket/UDP</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Trình duyệt không mở TCP/UDP thô. Nhập proxy tương thích Emscripten để game online dùng socket:// hoặc datagram://.
-            </Typography>
-          </Box>
-          <TextField
-            fullWidth
-            label="Địa chỉ proxy"
-            placeholder="wss://proxy.example.com:8080"
-            value={settings.websocketProxyUrl}
-            onChange={(event) => onChange({ ...settings, websocketProxyUrl: event.target.value.trim() })}
-            helperText={runtimeReady ? "Thay đổi địa chỉ cần tải lại trang để áp dụng cho runtime hiện tại." : "Địa chỉ sẽ dùng khi core khởi động."}
-          />
-        </Stack>
-      </CardContent>
-    </Card>
-
-    <Alert severity="info" icon={<InfoOutlined />}>
-      Dữ liệu suite, RMS và filesystem được đồng bộ vào IndexedDB. Xóa dữ liệu trang web trong trình duyệt sẽ xóa toàn bộ thư viện phoneME Web.
-    </Alert>
-  </Stack>;
+  return <Box className="profile-form global-settings-form">
+    <SettingSection title="Ngôn ngữ">
+      <SettingRow title="Ngôn ngữ">
+        <Select size="small" className="row-control" value={settings.language} onChange={(event) => onChange({ ...settings, language: event.target.value as AppSettings["language"] })}>
+          <MenuItem value="system">Hệ thống</MenuItem><MenuItem value="vi">Tiếng Việt</MenuItem><MenuItem value="en">English</MenuItem>
+        </Select>
+      </SettingRow>
+    </SettingSection>
+    <SettingSection title="Giao diện">
+      <SettingRow title="Giao diện">
+        <Select size="small" className="row-control" value={settings.theme} onChange={(event) => onChange({ ...settings, theme: event.target.value as ThemePreference })}>
+          <MenuItem value="system">Hệ thống</MenuItem><MenuItem value="light">Sáng</MenuItem><MenuItem value="dark">Tối</MenuItem>
+        </Select>
+      </SettingRow>
+    </SettingSection>
+    <SettingSection title="Dịch thuật">
+      <SettingRow title="Dịch vụ dịch">
+        <Select size="small" className="row-control" value={settings.translationProvider} onChange={(event) => onChange({ ...settings, translationProvider: event.target.value as AppSettings["translationProvider"] })}>
+          <MenuItem value="bing">Bing Translator</MenuItem><MenuItem value="google">Google Translate</MenuItem><MenuItem value="automatic">Tự động</MenuItem>
+        </Select>
+      </SettingRow>
+    </SettingSection>
+    <SettingSection title="JIT">
+      <SettingRow title="Trạng thái JIT" value={runtimeReady ? "WebAssembly runtime sẵn sàng" : "Đang khởi động"} />
+    </SettingSection>
+    <SettingSection title="Trình chơi">
+      <FormControlLabel className="switch-row" labelPlacement="start" label="App Bar" control={<Switch checked={settings.enableActionBar} onChange={(_, checked) => onChange({ ...settings, enableActionBar: checked })} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Status Bar" control={<Switch checked={settings.enableStatusBar} onChange={(_, checked) => onChange({ ...settings, enableStatusBar: checked })} />} />
+      <FormControlLabel className="switch-row" labelPlacement="start" label="Giữ màn hình sáng" control={<Switch checked={settings.keepScreenOn} onChange={(_, checked) => onChange({ ...settings, keepScreenOn: checked })} />} />
+    </SettingSection>
+    <SettingSection title="Mạng">
+      <Box className="proxy-row">
+        <Typography>TCP proxy (websockify)</Typography>
+        <TextField fullWidth size="small" placeholder="ws://127.0.0.1:38473" value={settings.websocketProxyUrl} onChange={(event) => onChange({ ...settings, websocketProxyUrl: event.target.value.trim() })} />
+        <Typography variant="body2" color="text.secondary">
+          HTTP/HTTPS dùng trực tiếp mạng của trình duyệt. socket:// được chuyển qua websockify; tải lại trang để áp dụng proxy mới.
+        </Typography>
+      </Box>
+    </SettingSection>
+    <SettingSection title="Lưu trữ">
+      <Alert severity="info">Thư viện, RMS và filesystem được lưu trong IndexedDB của trình duyệt.</Alert>
+    </SettingSection>
+  </Box>;
 }
 
 export default function App() {
   const prefersDark = useMediaQuery("(prefers-color-scheme: dark)");
-  const compact = useMediaQuery("(max-width: 760px)");
   const runtimeRef = useRef(new PhoneMEWebRuntime());
-  const [settings, setSettings] = useState<AppSettings>(() => ({ ...DEFAULT_SETTINGS, ...readJson<AppSettings>(SETTINGS_KEY, DEFAULT_SETTINGS) }));
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    const legacy = readJson<Partial<AppSettings>>(LEGACY_SETTINGS_KEY, {});
+    const current = readJson<Partial<AppSettings>>(SETTINGS_KEY, {});
+    const merged = { ...DEFAULT_SETTINGS, ...legacy, ...current };
+    return {
+      ...merged,
+      websocketProxyUrl: normalizeWebsocketProxyUrl(merged.websocketProxyUrl)
+    };
+  });
+  const [libraryPreferences, setLibraryPreferences] = useState<LibraryPreferences>(() => ({ ...DEFAULT_LIBRARY_PREFERENCES, ...readJson<Partial<LibraryPreferences>>(LIBRARY_PREFS_KEY, {}) }));
   const [games, setGames] = useState<GameEntry[]>(() => readJson<GameEntry[]>(GAMES_KEY, []));
+  const [profiles, setProfiles] = useState<Record<string, WebGameProfile>>(() => {
+    const stored = readJson<Record<string, Partial<WebGameProfile>>>(PROFILES_KEY, {});
+    return Object.fromEntries(Object.entries(stored).map(([id, value]) => [id, normalizeGameProfile(value)]));
+  });
   const [view, setView] = useState<ViewId>("library");
   const [activeGame, setActiveGame] = useState<GameEntry | null>(null);
+  const [draftProfile, setDraftProfile] = useState<WebGameProfile>(DEFAULT_GAME_PROFILE);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState<RuntimeSnapshot>(EMPTY_SNAPSHOT);
   const [installing, setInstalling] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [libraryMenuAnchor, setLibraryMenuAnchor] = useState<HTMLElement | null>(null);
+  const [sortMenuAnchor, setSortMenuAnchor] = useState<HTMLElement | null>(null);
+  const [orderMenuAnchor, setOrderMenuAnchor] = useState<HTMLElement | null>(null);
+  const [configMenuAnchor, setConfigMenuAnchor] = useState<HTMLElement | null>(null);
+  const [contextMenuAnchor, setContextMenuAnchor] = useState<HTMLElement | null>(null);
+  const [contextGame, setContextGame] = useState<GameEntry | null>(null);
+  const [renameTarget, setRenameTarget] = useState<GameEntry | null>(null);
+  const [renameText, setRenameText] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<GameEntry | null>(null);
   const [deleteData, setDeleteData] = useState(true);
+  const [showProfiles, setShowProfiles] = useState(false);
   const [snackbar, setSnackbar] = useState<{ message: string; severity: "success" | "error" | "info" } | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
 
   const paletteMode = settings.theme === "system" ? (prefersDark ? "dark" : "light") : settings.theme;
   const theme = useMemo(() => createPhoneMETheme(paletteMode), [paletteMode]);
   const runtime = runtimeRef.current;
+
+  // Keep the PWA status-bar tint locked to the appbar surface (MD3 surface-container)
+  // and switch our design tokens on the same attribute. The static media-scoped metas
+  // in index.html cover first paint; once React is up this single meta wins on Android.
+  useEffect(() => {
+    document.documentElement.dataset.colorMode = paletteMode;
+    document.head.querySelectorAll('meta[name="theme-color"]').forEach((meta) => meta.remove());
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    meta.setAttribute("content", appbarThemeColor(paletteMode));
+    document.head.appendChild(meta);
+  }, [paletteMode]);
 
   const saveSettings = useCallback((next: AppSettings) => {
     setSettings(next);
@@ -321,43 +552,85 @@ export default function App() {
     localStorage.setItem(GAMES_KEY, JSON.stringify(next));
   }, []);
 
+  const saveLibraryPreferences = useCallback((next: LibraryPreferences) => {
+    setLibraryPreferences(next);
+    localStorage.setItem(LIBRARY_PREFS_KEY, JSON.stringify(next));
+  }, []);
+
+  const saveProfile = useCallback((game: GameEntry, profile: WebGameProfile) => {
+    const nextProfile = normalizeGameProfile(profile);
+    setProfiles((current) => {
+      const next = { ...current, [game.id]: nextProfile };
+      localStorage.setItem(PROFILES_KEY, JSON.stringify(next));
+      return next;
+    });
+    return nextProfile;
+  }, []);
+
   useEffect(() => {
     let active = true;
-    void runtime.initialize({
+    const options = {
       websocketProxyUrl: settings.websocketProxyUrl || undefined,
-      onLog: (line, error) => {
+      onLog: (line: string, error: boolean) => {
         if (!active) return;
         setLogs((current) => [...current.slice(-199), `${error ? "ERR" : "LOG"} ${line}`]);
       }
-    }).then(() => {
+    };
+    void (async () => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await runtime.initialize(options);
+          if (!active) return;
+          setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
+          return;
+        } catch (error) {
+          lastError = error;
+          if (!active) return;
+          if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 120));
+        }
+      }
       if (!active) return;
-      setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
-    }).catch((error) => {
-      if (!active) return;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
       setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "error", message });
       setSnackbar({ message, severity: "error" });
-    });
-    const flush = () => void runtime.flushStorage();
+    })();
+    const flush = () => { void runtime.flushStorage().catch(() => undefined); };
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
     window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    document.addEventListener("visibilitychange", flushWhenHidden);
     return () => {
       active = false;
       window.removeEventListener("pagehide", flush);
-      void runtime.flushStorage();
+      window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      flush();
       runtime.dispose();
     };
-    // Runtime options are intentionally fixed for one page lifecycle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtime]);
+
+  useEffect(() => {
+    if (!settings.keepScreenOn || !("wakeLock" in navigator)) return;
+    let released = false;
+    let lock: { release: () => Promise<void> } | null = null;
+    void (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> } }).wakeLock?.request("screen").then((value) => {
+      if (released) void value.release();
+      else lock = value;
+    }).catch(() => undefined);
+    return () => {
+      released = true;
+      if (lock) void lock.release();
+    };
+  }, [settings.keepScreenOn]);
 
   const importFiles = useCallback(async (files: File[]) => {
     const jars = files.filter((file) => file.name.toLowerCase().endsWith(".jar"));
     if (!jars.length) {
       setSnackbar({ message: "Vui lòng chọn file .jar", severity: "error" });
-      return;
-    }
-    if (!runtime.ready) {
-      setSnackbar({ message: "Core WebAssembly chưa sẵn sàng", severity: "error" });
       return;
     }
     setInstalling(true);
@@ -368,8 +641,7 @@ export default function App() {
         installed.push(await runtime.installJar(file, metadata));
       }
       const next = [...games, ...installed]
-        .filter((game, index, all) => all.findIndex((entry) => entry.suiteId === game.suiteId) === index)
-        .sort((left, right) => right.installedAt - left.installedAt);
+        .filter((game, index, all) => all.findIndex((entry) => entry.suiteId === game.suiteId) === index);
       saveGames(next);
       setSnackbar({ message: `Đã cài ${installed.length} ứng dụng`, severity: "success" });
     } catch (error) {
@@ -380,21 +652,62 @@ export default function App() {
     }
   }, [games, runtime, saveGames]);
 
-  const launch = useCallback((game: GameEntry) => {
-    if (!runtime.ready) {
-      setSnackbar({ message: "Core WebAssembly chưa sẵn sàng", severity: "error" });
+  const profileFor = useCallback((game: GameEntry) => normalizeGameProfile(profiles[game.id] ?? {
+    showAppBar: settings.enableActionBar,
+    showStatusBar: settings.enableStatusBar
+  }), [profiles, settings.enableActionBar, settings.enableStatusBar]);
+
+  const openGame = useCallback((game: GameEntry) => {
+    setActiveGame(game);
+    const profile = profileFor(game);
+    setDraftProfile(profile);
+    if (runtime.activeGame?.id === game.id) {
+      setView("emulator");
       return;
     }
-    setActiveGame(game);
-    setView("emulator");
-  }, [runtime]);
+    setView(profiles[game.id] ? "emulator" : "configure");
+  }, [profileFor, profiles, runtime]);
 
-  const confirmDelete = useCallback(async () => {
+  const openGameSettings = useCallback((game: GameEntry) => {
+    setActiveGame(game);
+    setDraftProfile(profileFor(game));
+    setContextMenuAnchor(null);
+    setContextGame(null);
+    setView("configure");
+  }, [profileFor]);
+
+  const startGame = useCallback(() => {
+    if (!activeGame) return;
+    const saved = saveProfile(activeGame, draftProfile);
+    setDraftProfile(saved);
+    setView("emulator");
+  }, [activeGame, draftProfile, saveProfile]);
+
+  const beginRename = (game: GameEntry) => {
+    setRenameTarget(game);
+    setRenameText(game.title);
+    setContextMenuAnchor(null);
+    setContextGame(null);
+  };
+
+  const confirmRename = () => {
+    if (!renameTarget) return;
+    const title = renameText.trim();
+    if (title) saveGames(games.map((game) => game.id === renameTarget.id ? { ...game, title } : game));
+    setRenameTarget(null);
+  };
+
+  const confirmDelete = useCallback(async (removeData: boolean) => {
     if (!deleteTarget) return;
     try {
-      await runtime.uninstall(deleteTarget, deleteData);
-      const next = games.filter((game) => game.id !== deleteTarget.id);
-      saveGames(next);
+      await runtime.uninstall(deleteTarget, removeData);
+      saveGames(games.filter((game) => game.id !== deleteTarget.id));
+      setProfiles((current) => {
+        const next = { ...current };
+        delete next[deleteTarget.id];
+        localStorage.setItem(PROFILES_KEY, JSON.stringify(next));
+        return next;
+      });
       if (activeGame?.id === deleteTarget.id) {
         setActiveGame(null);
         setView("library");
@@ -405,97 +718,182 @@ export default function App() {
     } finally {
       setDeleteTarget(null);
     }
-  }, [activeGame?.id, deleteData, deleteTarget, games, runtime, saveGames]);
+  }, [activeGame?.id, deleteTarget, games, runtime, saveGames]);
 
-  const navigation = [
-    { id: "library" as const, label: "Thư viện", icon: <AppsRounded /> },
-    { id: "emulator" as const, label: "Trình giả lập", icon: <GamepadRounded /> },
-    { id: "settings" as const, label: "Cài đặt", icon: <SettingsRounded /> }
-  ];
-
-  const content = view === "emulator" && activeGame ? <EmulatorScreen
-    runtime={runtime}
-    game={activeGame}
-    width={settings.width}
-    height={settings.height}
-    onStop={() => {
-      setActiveGame(null);
-      setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
-      setView("library");
-    }}
-    onSnapshot={setRuntimeSnapshot}
-  /> : view === "settings" ? <SettingsView settings={settings} onChange={saveSettings} runtimeReady={runtime.ready} /> : <LibraryView
-    games={games}
-    loading={installing}
-    onFiles={(files) => void importFiles(files)}
-    onLaunch={launch}
-    onDelete={(game) => { setDeleteData(true); setDeleteTarget(game); }}
-  />;
+  const showingEmulator = view === "emulator" && Boolean(activeGame);
 
   return <ThemeProvider theme={theme}>
-    <Box className={`app-root ${settings.pixelated ? "pixelated" : "smooth"}`}>
-      {!compact ? <Box component="nav" className="navigation-rail" aria-label="Điều hướng chính">
-        <Box className="brand-mark"><GamepadRounded /></Box>
-        <Stack spacing={1} sx={{ width: "100%" }}>
-          {navigation.map((item) => <Button
-            key={item.id}
-            className={`navigation-rail-action ${view === item.id ? "active" : ""}`}
-            color={view === item.id ? "primary" : "inherit"}
-            onClick={() => setView(item.id)}
-            startIcon={item.icon}
-          >{item.label}</Button>)}
-        </Stack>
-      </Box> : null}
+    <Box
+      className={`app-root ${draftProfile.filtering ? "smooth" : "pixelated"}`}
+      data-runtime-phase={runtimeSnapshot.phase}
+    >
+      <input
+        ref={importInputRef}
+        hidden
+        type="file"
+        accept=".jar,application/java-archive,application/zip"
+        multiple
+        onChange={(event) => {
+          void importFiles(Array.from(event.target.files ?? []));
+          event.currentTarget.value = "";
+        }}
+      />
 
-      <Box className="app-column">
-        <AppBar position="sticky" color="transparent" elevation={0} className="top-app-bar">
-          <Toolbar>
-            <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", minWidth: 0, flex: 1 }}>
-              {compact ? <Box className="mobile-brand"><GamepadRounded /></Box> : null}
-              <Box sx={{ minWidth: 0 }}>
-                <Typography variant="h6" noWrap>phoneME Web</Typography>
-                <Typography variant="body2" color="text.secondary" noWrap>{runtimeSnapshot.message}</Typography>
-              </Box>
-            </Stack>
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-              {activeGame ? <Chip size="small" icon={<MemoryRounded />} label={formatBytes(runtimeSnapshot.usedMemory)} /> : null}
-              {activeGame ? <Chip size="small" label={`${runtimeSnapshot.fps.toFixed(0)} FPS`} /> : null}
-              <Chip
-                size="small"
-                color={runtimeSnapshot.phase === "error" ? "error" : runtimeSnapshot.phase === "loading" ? "default" : "success"}
-                label={runtimeSnapshot.phase === "loading" ? "Đang nạp" : runtimeSnapshot.phase === "error" ? "Lỗi" : "WASM"}
-              />
-            </Stack>
-          </Toolbar>
-        </AppBar>
+      {!showingEmulator ? <AppBar position="sticky" elevation={0} className="native-appbar">
+        <Toolbar>
+          {view === "library" ? <IconButton color="inherit" aria-label="Nhập JAR" disabled={installing} onClick={() => importInputRef.current?.click()}>
+            {installing ? <CircularProgress size={22} color="inherit" /> : <AddRounded />}
+          </IconButton> : view === "configure" ? <Button color="inherit" className="bar-text-action" onClick={() => { setActiveGame(null); setView("library"); }}>Hủy</Button> : <Box className="bar-leading-spacer" />}
 
-        <Box component="main" className="main-content">{content}</Box>
+          <Typography className="native-appbar-title" variant="h6" noWrap>
+            {view === "configure" ? activeGame?.title : view === "settings" ? "Cài đặt" : "Thư viện"}
+          </Typography>
+
+          {view === "library" ? <>
+            <IconButton className="ellipsis-circle-button" color="inherit" aria-label="Thêm tùy chọn" onClick={(event) => setLibraryMenuAnchor(event.currentTarget)}><MoreHorizRounded /></IconButton>
+          </> : view === "configure" ? <>
+            <IconButton color="inherit" aria-label="Thêm tùy chọn" onClick={(event) => setConfigMenuAnchor(event.currentTarget)}><MoreHorizRounded /></IconButton>
+            <Button color="inherit" className="bar-text-action primary" onClick={startGame}>Bắt đầu</Button>
+          </> : <Button color="inherit" className="bar-text-action primary" onClick={() => setView("library")}>Xong</Button>}
+        </Toolbar>
+      </AppBar> : null}
+
+      <Box component="main" className={showingEmulator ? "emulator-page" : "page-surface"}>
+        {showingEmulator && activeGame ? <EmulatorScreen
+          runtime={runtime}
+          game={activeGame}
+          profile={draftProfile}
+          translationProvider={settings.translationProvider}
+          onProfileChange={(profile) => {
+            setDraftProfile(profile);
+            saveProfile(activeGame, profile);
+          }}
+          onHide={() => {
+            setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
+            setActiveGame(null);
+            setView("library");
+          }}
+          onStop={() => {
+            setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
+            setActiveGame(null);
+            setView("library");
+          }}
+          onSnapshot={setRuntimeSnapshot}
+        /> : view === "configure" && activeGame ? <GameProfileEditor profile={draftProfile} onChange={setDraftProfile} /> : view === "settings" ? <SettingsView settings={settings} onChange={saveSettings} runtimeReady={runtime.ready} /> : <LibraryView
+          games={games}
+          searchText={searchText}
+          onSearchTextChange={setSearchText}
+          sort={libraryPreferences.sort}
+          descending={libraryPreferences.descending}
+          onLaunch={openGame}
+          onContextMenu={(game, anchor) => { setContextGame(game); setContextMenuAnchor(anchor); }}
+          onFiles={(files) => void importFiles(files)}
+        />}
       </Box>
 
-      {compact ? <BottomNavigation className="bottom-navigation" value={view} onChange={(_, value) => setView(value as ViewId)} showLabels>
-        {navigation.map((item) => <BottomNavigationAction key={item.id} value={item.id} label={item.label} icon={item.icon} />)}
-      </BottomNavigation> : null}
+      <Menu className="native-menu" anchorEl={libraryMenuAnchor} open={Boolean(libraryMenuAnchor)} onClose={() => { setLibraryMenuAnchor(null); setSortMenuAnchor(null); setOrderMenuAnchor(null); }}>
+        <MenuItem onClick={(event) => setSortMenuAnchor(event.currentTarget)}>
+          <SortByAlphaRounded fontSize="small" /><span>Sắp xếp theo</span><ArrowForwardIosRounded className="submenu-chevron" />
+        </MenuItem>
+        <MenuItem onClick={(event) => setOrderMenuAnchor(event.currentTarget)}>
+          {libraryPreferences.descending ? <ArrowDownwardRounded fontSize="small" /> : <ArrowUpwardRounded fontSize="small" />}
+          <span>Thứ tự</span><ArrowForwardIosRounded className="submenu-chevron" />
+        </MenuItem>
+        <Divider />
+        <MenuItem onClick={() => { setLibraryMenuAnchor(null); setView("settings"); }}><SettingsRounded fontSize="small" /><span>Cài đặt</span></MenuItem>
+        <MenuItem onClick={() => { setLibraryMenuAnchor(null); setShowProfiles(true); }}><TuneRounded fontSize="small" /><span>Profiles</span></MenuItem>
+      </Menu>
+
+      <Menu className="native-menu" anchorEl={sortMenuAnchor} open={Boolean(sortMenuAnchor)} onClose={() => setSortMenuAnchor(null)} anchorOrigin={{ vertical: "top", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "left" }}>
+        <MenuItem onClick={() => { saveLibraryPreferences({ ...libraryPreferences, sort: "name" }); setSortMenuAnchor(null); }}>
+          <SortByAlphaRounded fontSize="small" /><span>Tên</span>{libraryPreferences.sort === "name" ? <CheckRounded className="menu-trailing-check" /> : null}
+        </MenuItem>
+        <MenuItem onClick={() => { saveLibraryPreferences({ ...libraryPreferences, sort: "date" }); setSortMenuAnchor(null); }}>
+          <CalendarMonthRounded fontSize="small" /><span>Ngày</span>{libraryPreferences.sort === "date" ? <CheckRounded className="menu-trailing-check" /> : null}
+        </MenuItem>
+        <MenuItem onClick={() => { saveLibraryPreferences({ ...libraryPreferences, sort: "vendor" }); setSortMenuAnchor(null); }}>
+          <BusinessRounded fontSize="small" /><span>Nhà phát hành</span>{libraryPreferences.sort === "vendor" ? <CheckRounded className="menu-trailing-check" /> : null}
+        </MenuItem>
+      </Menu>
+
+      <Menu className="native-menu" anchorEl={orderMenuAnchor} open={Boolean(orderMenuAnchor)} onClose={() => setOrderMenuAnchor(null)} anchorOrigin={{ vertical: "top", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "left" }}>
+        <MenuItem onClick={() => { saveLibraryPreferences({ ...libraryPreferences, descending: false }); setOrderMenuAnchor(null); }}>
+          <ArrowUpwardRounded fontSize="small" /><span>Tăng dần</span>{!libraryPreferences.descending ? <CheckRounded className="menu-trailing-check" /> : null}
+        </MenuItem>
+        <MenuItem onClick={() => { saveLibraryPreferences({ ...libraryPreferences, descending: true }); setOrderMenuAnchor(null); }}>
+          <ArrowDownwardRounded fontSize="small" /><span>Giảm dần</span>{libraryPreferences.descending ? <CheckRounded className="menu-trailing-check" /> : null}
+        </MenuItem>
+      </Menu>
+
+      <Menu className="native-menu" anchorEl={configMenuAnchor} open={Boolean(configMenuAnchor)} onClose={() => setConfigMenuAnchor(null)}>
+        <MenuItem onClick={() => { setDraftProfile({ ...DEFAULT_GAME_PROFILE, showAppBar: settings.enableActionBar, showStatusBar: settings.enableStatusBar }); setConfigMenuAnchor(null); }}><RestartAltRounded fontSize="small" /><span>Đặt lại cài đặt</span></MenuItem>
+        <MenuItem onClick={() => { setDraftProfile((profile) => ({ ...profile, keyLayout: "nokiaSE", virtualKeyboardType: "arrowsNumbers" })); setConfigMenuAnchor(null); }}><KeyboardRounded fontSize="small" /><span>Đặt lại layout phím</span></MenuItem>
+      </Menu>
+
+      <Menu className="native-menu" anchorEl={contextMenuAnchor} open={Boolean(contextMenuAnchor)} onClose={() => { setContextMenuAnchor(null); setContextGame(null); }}>
+        {contextGame ? <>
+          {runtime.activeGame?.id === contextGame.id ? <MenuItem className="destructive-menu-item" onClick={() => {
+            const game = contextGame;
+            setContextMenuAnchor(null);
+            setContextGame(null);
+            void runtime.stopMidlet().then(() => {
+              if (activeGame?.id === game.id) setActiveGame(null);
+              setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
+            });
+          }}><StopCircleRounded fontSize="small" /><span>Dừng</span></MenuItem> : null}
+          <MenuItem disabled><UploadRounded fontSize="small" /><span>Xuất RMS</span></MenuItem>
+          <MenuItem disabled><DownloadRounded fontSize="small" /><span>Nhập RMS</span></MenuItem>
+          <Divider />
+          <MenuItem onClick={() => beginRename(contextGame)}><EditRounded fontSize="small" /><span>Đổi tên</span></MenuItem>
+          <MenuItem onClick={() => openGameSettings(contextGame)}><SettingsRounded fontSize="small" /><span>Cài đặt</span></MenuItem>
+          <MenuItem className="destructive-menu-item" onClick={() => { setDeleteTarget(contextGame); setContextMenuAnchor(null); setContextGame(null); }}><DeleteOutlineRounded fontSize="small" /><span>Gỡ cài đặt</span></MenuItem>
+        </> : null}
+      </Menu>
+
+      <Dialog open={Boolean(renameTarget)} onClose={() => setRenameTarget(null)}>
+        <DialogTitle>Đổi tên</DialogTitle>
+        <DialogContent><TextField autoFocus fullWidth margin="dense" label="Tên ứng dụng" value={renameText} onChange={(event) => setRenameText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") confirmRename(); }} /></DialogContent>
+        <DialogActions><Button onClick={() => setRenameTarget(null)}>Hủy</Button><Button onClick={confirmRename}>OK</Button></DialogActions>
+      </Dialog>
 
       <Dialog open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)}>
         <DialogTitle>Gỡ {deleteTarget?.title}?</DialogTitle>
         <DialogContent>
-          <DialogContentText sx={{ mb: 2 }}>Ứng dụng sẽ bị xóa khỏi thư viện.</DialogContentText>
-          <FormControlLabel
-            control={<Switch checked={deleteData} onChange={(_, checked) => setDeleteData(checked)} />}
-            label="Xóa cả RMS, save game và dữ liệu ứng dụng"
-          />
+          <DialogContentText>Giữ dữ liệu để khôi phục save và cài đặt khi nhập lại cùng JAR, hoặc xóa toàn bộ RMS, file và cài đặt ứng dụng vĩnh viễn.</DialogContentText>
         </DialogContent>
-        <DialogActions>
+        <DialogActions className="stacked-dialog-actions">
+          <Button color="error" onClick={() => void confirmDelete(true)}>Gỡ ứng dụng & xóa dữ liệu</Button>
+          <Button color="error" onClick={() => void confirmDelete(false)}>Chỉ gỡ ứng dụng</Button>
           <Button onClick={() => setDeleteTarget(null)}>Hủy</Button>
-          <Button color="error" variant="contained" onClick={() => void confirmDelete()}>Gỡ ứng dụng</Button>
         </DialogActions>
       </Dialog>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={4500} onClose={() => setSnackbar(null)}>
+      <Dialog open={showProfiles} onClose={() => setShowProfiles(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Profiles</DialogTitle>
+        <DialogContent className="profiles-dialog-content">
+          {games.filter((game) => Boolean(profiles[game.id])).length ? games.filter((game) => Boolean(profiles[game.id])).map((game) => <Button
+            key={game.id}
+            className="profile-dialog-row"
+            onClick={() => {
+              setShowProfiles(false);
+              openGameSettings(game);
+            }}
+          >
+            <GameAvatar game={game} />
+            <Box className="profile-dialog-copy">
+              <Typography noWrap>{game.title}</Typography>
+              <Typography variant="body2" color="text.secondary" noWrap>{profiles[game.id].screenWidth} × {profiles[game.id].screenHeight} · {profiles[game.id].virtualKeyboardType}</Typography>
+            </Box>
+          </Button>) : <Typography color="text.secondary">Chưa có profile đã lưu.</Typography>}
+        </DialogContent>
+        <DialogActions><Button onClick={() => setShowProfiles(false)}>Xong</Button></DialogActions>
+      </Dialog>
+
+      <Snackbar open={Boolean(snackbar)} autoHideDuration={4200} onClose={() => setSnackbar(null)}>
         {snackbar ? <Alert severity={snackbar.severity} variant="filled" onClose={() => setSnackbar(null)}>{snackbar.message}</Alert> : undefined}
       </Snackbar>
 
-      <Box className="sr-only" aria-live="polite">{logs.at(-1)}</Box>
+      <Box className="sr-only" aria-live="polite">{runtimeSnapshot.message} {logs.at(-1)}</Box>
     </Box>
   </ThemeProvider>;
 }

@@ -76,6 +76,7 @@ Status JavaWorkerThread::start(
     joinable_ = true;
     return {};
 #else
+#if defined(__cpp_exceptions)
     try {
         thread_ = std::jthread(
             [task = std::move(task)](std::stop_token stop_token) mutable {
@@ -86,6 +87,12 @@ Status JavaWorkerThread::start(
                     "could not start Java worker thread: " +
                         std::string(error.what()));
     }
+#else
+    thread_ = std::jthread(
+        [task = std::move(task)](std::stop_token stop_token) mutable {
+            task(stop_token);
+        });
+#endif
     return {};
 #endif
 }

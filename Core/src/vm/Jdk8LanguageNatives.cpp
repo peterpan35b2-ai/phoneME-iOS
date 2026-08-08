@@ -1,5 +1,6 @@
 #include "Jdk8CompatNativesParts.hpp"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <string>
@@ -17,6 +18,428 @@ constexpr usize kEnumOrdinalField = 1U;
 constexpr usize kComparatorKindField = 0U;
 constexpr usize kComparatorFirstField = 1U;
 constexpr usize kComparatorSecondField = 2U;
+constexpr usize kBigDecimalUnscaledField = 0U;
+constexpr usize kBigDecimalScaleField = 1U;
+
+struct BigDecimalValue final {
+    i64 unscaled {0};
+    i32 scale {0};
+};
+
+[[nodiscard]] u64 unsigned_magnitude(i64 value) noexcept {
+    if (value >= 0) return static_cast<u64>(value);
+    return static_cast<u64>(-(value + 1)) + 1U;
+}
+
+[[nodiscard]] Result<BigDecimalValue> parse_big_decimal(
+    std::u16string_view text) {
+    if (text.empty()) {
+        return fail_java("java/lang/NumberFormatException",
+                         "BigDecimal input is empty");
+    }
+    usize cursor = 0U;
+    bool negative = false;
+    if (text[cursor] == u'+' || text[cursor] == u'-') {
+        negative = text[cursor] == u'-';
+        if (++cursor == text.size()) {
+            return fail_java("java/lang/NumberFormatException",
+                             "BigDecimal has no digits");
+        }
+    }
+
+    constexpr u64 kPositiveLimit =
+        static_cast<u64>(std::numeric_limits<i64>::max());
+    constexpr u64 kNegativeLimit = kPositiveLimit + 1U;
+    const u64 limit = negative ? kNegativeLimit : kPositiveLimit;
+    u64 magnitude = 0U;
+    i32 fractional_digits = 0;
+    bool decimal_point = false;
+    bool has_digit = false;
+    while (cursor < text.size()) {
+        const char16_t character = text[cursor];
+        if (character >= u'0' && character <= u'9') {
+            has_digit = true;
+            const u64 digit = static_cast<u64>(character - u'0');
+            if (magnitude > (limit - digit) / 10U) {
+                return fail_java("java/lang/NumberFormatException",
+                                 "BigDecimal magnitude exceeds Core range");
+            }
+            magnitude = magnitude * 10U + digit;
+            if (decimal_point) {
+                if (fractional_digits == 10000) {
+                    return fail_java("java/lang/NumberFormatException",
+                                     "BigDecimal scale exceeds Core range");
+                }
+                ++fractional_digits;
+            }
+            ++cursor;
+            continue;
+        }
+        if (character == u'.' && !decimal_point) {
+            decimal_point = true;
+            ++cursor;
+            continue;
+        }
+        break;
+    }
+    if (!has_digit) {
+        return fail_java("java/lang/NumberFormatException",
+                         "BigDecimal has no digits");
+    }
+
+    i32 exponent = 0;
+    if (cursor < text.size() &&
+        (text[cursor] == u'e' || text[cursor] == u'E')) {
+        ++cursor;
+        bool exponent_negative = false;
+        if (cursor < text.size() &&
+            (text[cursor] == u'+' || text[cursor] == u'-')) {
+            exponent_negative = text[cursor] == u'-';
+            ++cursor;
+        }
+        if (cursor == text.size() || text[cursor] < u'0' ||
+            text[cursor] > u'9') {
+            return fail_java("java/lang/NumberFormatException",
+                             "BigDecimal exponent is invalid");
+        }
+        i32 parsed = 0;
+        while (cursor < text.size() && text[cursor] >= u'0' &&
+               text[cursor] <= u'9') {
+            const i32 digit = static_cast<i32>(text[cursor] - u'0');
+            if (parsed > 10000 || parsed * 10 + digit > 10000) {
+                return fail_java("java/lang/NumberFormatException",
+                                 "BigDecimal exponent exceeds Core range");
+            }
+            parsed = parsed * 10 + digit;
+            ++cursor;
+        }
+        exponent = exponent_negative ? -parsed : parsed;
+    }
+    if (cursor != text.size()) {
+        return fail_java("java/lang/NumberFormatException",
+                         "BigDecimal contains invalid characters");
+    }
+
+    i32 scale = fractional_digits - exponent;
+    if (scale < 0) {
+        const i32 zeros = -scale;
+        for (i32 index = 0; index < zeros; ++index) {
+            if (magnitude > limit / 10U) {
+                return fail_java("java/lang/NumberFormatException",
+                                 "BigDecimal magnitude exceeds Core range");
+            }
+            magnitude *= 10U;
+        }
+        scale = 0;
+    }
+    if (scale > 10000) {
+        return fail_java("java/lang/NumberFormatException",
+                         "BigDecimal scale exceeds Core range");
+    }
+
+    i64 unscaled = 0;
+    if (negative) {
+        unscaled = magnitude == kNegativeLimit
+            ? std::numeric_limits<i64>::min()
+            : -static_cast<i64>(magnitude);
+    } else {
+        unscaled = static_cast<i64>(magnitude);
+    }
+    return BigDecimalValue {.unscaled = unscaled, .scale = scale};
+}
+
+[[nodiscard]] Result<BigDecimalValue> big_decimal_value(
+    Machine& machine, ObjectRef object) {
+    auto unscaled = long_field(machine, object, kBigDecimalUnscaledField);
+    auto scale = int_field(machine, object, kBigDecimalScaleField);
+    if (!unscaled) return std::unexpected(unscaled.error());
+    if (!scale) return std::unexpected(scale.error());
+    return BigDecimalValue {.unscaled = *unscaled, .scale = *scale};
+}
+
+[[nodiscard]] Result<ObjectRef> make_big_decimal(
+    Machine& machine, BigDecimalValue value) {
+    auto object = new_instance(machine, "java/math/BigDecimal");
+    if (!object) return std::unexpected(object.error());
+    auto root = machine.pin_native_root(*object);
+    if (!root) return std::unexpected(root.error());
+    auto unscaled = set_long_field(machine, *object, kBigDecimalUnscaledField,
+                                   value.unscaled);
+    auto scale = set_int_field(machine, *object, kBigDecimalScaleField,
+                               value.scale);
+    if (!unscaled) return std::unexpected(unscaled.error());
+    if (!scale) return std::unexpected(scale.error());
+    return *object;
+}
+
+[[nodiscard]] std::string magnitude_digits(i64 value) {
+    return std::to_string(unsigned_magnitude(value));
+}
+
+[[nodiscard]] int compare_big_decimal(BigDecimalValue left,
+                                      BigDecimalValue right) {
+    if (left.unscaled == 0) {
+        if (right.unscaled == 0) return 0;
+        return right.unscaled < 0 ? 1 : -1;
+    }
+    if (right.unscaled == 0) return left.unscaled < 0 ? -1 : 1;
+    const bool left_negative = left.unscaled < 0;
+    const bool right_negative = right.unscaled < 0;
+    if (left_negative != right_negative) return left_negative ? -1 : 1;
+
+    std::string left_digits = magnitude_digits(left.unscaled);
+    std::string right_digits = magnitude_digits(right.unscaled);
+    const i64 left_integer_digits =
+        static_cast<i64>(left_digits.size()) - left.scale;
+    const i64 right_integer_digits =
+        static_cast<i64>(right_digits.size()) - right.scale;
+    int magnitude_compare = 0;
+    if (left_integer_digits != right_integer_digits) {
+        magnitude_compare = left_integer_digits < right_integer_digits ? -1 : 1;
+    } else {
+        const i32 common_scale = std::max(left.scale, right.scale);
+        left_digits.append(static_cast<usize>(common_scale - left.scale), '0');
+        right_digits.append(static_cast<usize>(common_scale - right.scale), '0');
+        if (left_digits != right_digits) {
+            magnitude_compare = left_digits < right_digits ? -1 : 1;
+        }
+    }
+    return left_negative ? -magnitude_compare : magnitude_compare;
+}
+
+[[nodiscard]] Result<BigDecimalValue> move_big_decimal_right(
+    BigDecimalValue value, i32 places) {
+    if (places <= value.scale) {
+        const i64 new_scale = static_cast<i64>(value.scale) - places;
+        if (new_scale > 10000) {
+            return fail_java("java/lang/ArithmeticException",
+                             "BigDecimal scale exceeds Core range");
+        }
+        value.scale = static_cast<i32>(new_scale);
+        return value;
+    }
+    i64 zeros = static_cast<i64>(places) - value.scale;
+    value.scale = 0;
+    const bool negative = value.unscaled < 0;
+    u64 magnitude = unsigned_magnitude(value.unscaled);
+    const u64 limit = negative
+        ? static_cast<u64>(std::numeric_limits<i64>::max()) + 1U
+        : static_cast<u64>(std::numeric_limits<i64>::max());
+    while (zeros-- > 0) {
+        if (magnitude > limit / 10U) {
+            return fail_java("java/lang/ArithmeticException",
+                             "BigDecimal movePointRight overflow");
+        }
+        magnitude *= 10U;
+    }
+    if (negative) {
+        value.unscaled = magnitude == limit
+            ? std::numeric_limits<i64>::min()
+            : -static_cast<i64>(magnitude);
+    } else {
+        value.unscaled = static_cast<i64>(magnitude);
+    }
+    return value;
+}
+
+[[nodiscard]] i64 truncated_big_decimal(BigDecimalValue value) noexcept {
+    if (value.scale <= 0) return value.unscaled;
+    if (value.scale > 18) return 0;
+    for (i32 index = 0; index < value.scale; ++index) value.unscaled /= 10;
+    return value.unscaled;
+}
+
+[[nodiscard]] Result<i64> exact_big_decimal_integer(BigDecimalValue value) {
+    if (value.scale <= 0) return value.unscaled;
+    if (value.scale > 18) {
+        if (value.unscaled == 0) return 0;
+        return fail_java("java/lang/ArithmeticException",
+                         "BigDecimal has a nonzero fractional part");
+    }
+    i64 divisor = 1;
+    for (i32 index = 0; index < value.scale; ++index) divisor *= 10;
+    if (value.unscaled % divisor != 0) {
+        return fail_java("java/lang/ArithmeticException",
+                         "BigDecimal has a nonzero fractional part");
+    }
+    return value.unscaled / divisor;
+}
+
+[[nodiscard]] double floating_big_decimal(BigDecimalValue value) noexcept {
+    double result = static_cast<double>(value.unscaled);
+    for (i32 index = 0; index < value.scale; ++index) result /= 10.0;
+    return result;
+}
+
+[[nodiscard]] std::u16string big_decimal_text(BigDecimalValue value) {
+    const bool negative = value.unscaled < 0;
+    std::string digits = magnitude_digits(value.unscaled);
+    std::string text;
+    if (negative) text.push_back('-');
+    if (value.scale == 0) {
+        text += digits;
+    } else if (static_cast<usize>(value.scale) >= digits.size()) {
+        text += "0.";
+        text.append(static_cast<usize>(value.scale) - digits.size(), '0');
+        text += digits;
+    } else {
+        const usize point = digits.size() - static_cast<usize>(value.scale);
+        text.append(digits, 0U, point);
+        text.push_back('.');
+        text.append(digits, point, std::string::npos);
+    }
+    std::u16string result;
+    result.reserve(text.size());
+    for (const char character : text) {
+        result.push_back(static_cast<char16_t>(character));
+    }
+    return result;
+}
+
+void register_big_decimal(NativeMethodRegistry& registry) {
+    add(registry, "java/math/BigDecimal", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto input = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!input) return std::unexpected(input.error());
+            auto text = string_value(machine, *input);
+            if (!text) return std::unexpected(text.error());
+            auto parsed = parse_big_decimal(*text);
+            if (!parsed) return std::unexpected(parsed.error());
+            auto unscaled = set_long_field(machine, *object,
+                kBigDecimalUnscaledField, parsed->unscaled);
+            auto scale = set_int_field(machine, *object,
+                kBigDecimalScaleField, parsed->scale);
+            if (!unscaled) return std::unexpected(unscaled.error());
+            if (!scale) return std::unexpected(scale.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/math/BigDecimal", "valueOf",
+        "(J)Ljava/math/BigDecimal;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto value = long_argument(arguments, 0U);
+            if (!value) return std::unexpected(value.error());
+            auto object = make_big_decimal(machine,
+                BigDecimalValue {.unscaled = *value, .scale = 0});
+            if (!object) return std::unexpected(object.error());
+            return std::optional<Value>(Value::from_reference(*object));
+        });
+    add(registry, "java/math/BigDecimal", "movePointRight",
+        "(I)Ljava/math/BigDecimal;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto places = int_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!places) return std::unexpected(places.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            auto moved = move_big_decimal_right(*value, *places);
+            if (!moved) return std::unexpected(moved.error());
+            auto result = make_big_decimal(machine, *moved);
+            if (!result) return std::unexpected(result.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+    add(registry, "java/math/BigDecimal", "intValueExact", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            auto exact = exact_big_decimal_integer(*value);
+            if (!exact) return std::unexpected(exact.error());
+            if (*exact < std::numeric_limits<i32>::min() ||
+                *exact > std::numeric_limits<i32>::max()) {
+                return fail_java("java/lang/ArithmeticException",
+                                 "BigDecimal does not fit int");
+            }
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(*exact)));
+        });
+    const auto compare = [&registry](const char* descriptor, bool generic) {
+        add(registry, "java/math/BigDecimal", "compareTo", descriptor,
+            [generic](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                auto other = reference_argument(arguments, 1U);
+                if (!object) return std::unexpected(object.error());
+                if (!other) return std::unexpected(other.error());
+                if (generic) {
+                    auto class_name = machine.heap().class_name(*other);
+                    if (!class_name) return std::unexpected(class_name.error());
+                    if (*class_name != "java/math/BigDecimal") {
+                        return fail_java("java/lang/ClassCastException",
+                                         "BigDecimal.compareTo requires BigDecimal");
+                    }
+                }
+                auto left = big_decimal_value(machine, *object);
+                auto right = big_decimal_value(machine, *other);
+                if (!left) return std::unexpected(left.error());
+                if (!right) return std::unexpected(right.error());
+                return std::optional<Value>(Value::from_int(
+                    compare_big_decimal(*left, *right)));
+            });
+    };
+    compare("(Ljava/math/BigDecimal;)I", false);
+    compare("(Ljava/lang/Object;)I", true);
+    add(registry, "java/math/BigDecimal", "intValue", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(
+                static_cast<i32>(truncated_big_decimal(*value))));
+        });
+    add(registry, "java/math/BigDecimal", "longValue", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_long(
+                truncated_big_decimal(*value)));
+        });
+    add(registry, "java/math/BigDecimal", "floatValue", "()F",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_float(
+                static_cast<float>(floating_big_decimal(*value))));
+        });
+    add(registry, "java/math/BigDecimal", "doubleValue", "()D",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_double(
+                floating_big_decimal(*value)));
+        });
+    add(registry, "java/math/BigDecimal", "toString",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto value = big_decimal_value(machine, *object);
+            if (!value) return std::unexpected(value.error());
+            auto text = create_string(machine, big_decimal_text(*value));
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
+}
 
 [[nodiscard]] Result<ObjectRef> make_comparator(Machine& machine,
                                                 i32 kind,
@@ -419,6 +842,7 @@ void register_small_methods(NativeMethodRegistry& registry) {
 
 void register_jdk8_language_natives(NativeMethodRegistry& registry) {
     register_enum(registry);
+    register_big_decimal(registry);
     register_functional(registry);
     register_comparator(registry);
     register_small_methods(registry);

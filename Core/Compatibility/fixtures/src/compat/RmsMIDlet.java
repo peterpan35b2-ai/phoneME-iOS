@@ -20,9 +20,15 @@ public final class RmsMIDlet extends MIDlet {
                 throw new RuntimeException("RMS round trip mismatch");
             }
             store.closeRecordStore();
+            store = RecordStore.openRecordStore("compat17", false);
+            byte[] reopened = store.getRecord(id);
+            if (reopened.length != payload.length || reopened[2] != payload[2]) {
+                throw new RuntimeException("RMS reopen mismatch");
+            }
+            store.closeRecordStore();
             RecordStore.deleteRecordStore("compat17");
             Form result = new Form("RMS OK");
-            result.append("roundtrip");
+            result.append("roundtrip + reopen");
             Display.getDisplay(this).setCurrent(result);
         } catch (Exception error) {
             throw new RuntimeException(error.toString());

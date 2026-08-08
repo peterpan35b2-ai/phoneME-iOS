@@ -208,3 +208,4 @@ web/node_modules/
 web/dist/
 web/public/wasm/
 __pycache__/
+*.class

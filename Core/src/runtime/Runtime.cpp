@@ -447,67 +447,6 @@ private:
     vm::Machine& machine_;
 };
 
-[[nodiscard]] bool is_glu_vendor(std::u16string_view vendor) noexcept {
-    constexpr std::u16string_view kPrefix = u"glu";
-    if (vendor.size() < kPrefix.size()) return false;
-    for (usize index = 0; index < kPrefix.size(); ++index) {
-        char16_t character = vendor[index];
-        if (character >= u'A' && character <= u'Z') {
-            character = static_cast<char16_t>(character - u'A' + u'a');
-        }
-        if (character != kPrefix[index]) return false;
-    }
-    return true;
-}
-
-void apply_legacy_property_defaults(vm::Machine& machine,
-                                    const Suite& suite) {
-    const auto vendor = suite.properties.find(u"MIDlet-Vendor");
-    const bool glu_suite =
-        vendor != suite.properties.end() && is_glu_vendor(vendor->second);
-    if (glu_suite) {
-        if (!suite.properties.contains(u"ClientLogoEnable")) {
-            // Several GLU/Metaflow builds call equals() directly on this
-            // optional property. Reference devices shipped these builds with
-            // the carrier customization defaulted off even when the final JAR
-            // manifest omitted the key.
-            machine.set_app_property(u"ClientLogoEnable", u"false");
-        }
-        if (!suite.properties.contains(u"Glu-Locale")) {
-            // Some multilingual GLU launchers received Glu-Locale from the
-            // JAD, while redistributed archives commonly retain only the JAR.
-            // Only synthesize the deployment property when the archive carries
-            // the matching multi.dat descriptor.
-            auto archive = archive::ZipArchive::open(suite.jar_path);
-            if (archive && archive->find("multi.dat") != nullptr) {
-                machine.set_app_property(u"Glu-Locale", u"multi");
-            }
-        }
-    }
-
-    const auto title = suite.properties.find(u"MIDlet-Name");
-    if (!suite.properties.contains(u"NOOFPUZZLES") &&
-        title != suite.properties.end() && title->second == u"Real Steel") {
-        // This build was distributed with NOOFPUZZLES in its JAD, but many
-        // preserved copies contain only the JAR. The constructor dereferences
-        // the property unconditionally; tier 3 enables the complete 30-puzzle
-        // data set already present in the archive.
-        machine.set_app_property(u"NOOFPUZZLES", u"3");
-    }
-
-    const auto nokia_platform = suite.properties.find(u"Nokia-Platform");
-    if (!machine.configured_system_property(u"microedition.platform") &&
-        nokia_platform != suite.properties.end() &&
-        nokia_platform->second.find(u"Nokia") != std::u16string::npos) {
-        // Nokia S60 titles commonly validate microedition.platform against the
-        // Nokia-Platform wildcard from their manifest. The generic "j2me"
-        // capability string is correct for vendor-neutral suites but causes
-        // those handset-targeted builds to call System.exit during startup.
-        machine.set_system_property(u"microedition.platform",
-                                    u"NokiaN95-1/30.0.015");
-    }
-}
-
 [[nodiscard]] Status copy_framebuffer_to_image(
     Framebuffer& framebuffer,
     graphics::Image& image) {
@@ -1627,7 +1566,6 @@ Status Runtime::start_midlet(SuiteId suite_id,
         application_vm->machine.set_app_property(key, value);
     }
     configure_suite_capabilities(application_vm->machine, suite);
-    apply_legacy_property_defaults(application_vm->machine, suite);
     auto is_midlet = application_vm->classes.is_assignable(
         main_class, "javax/microedition/midlet/MIDlet");
     if (!is_midlet) return fail_start(is_midlet.error());
@@ -1674,24 +1612,58 @@ Status Runtime::start_midlet(SuiteId suite_id,
     bool start_app_deferred = false;
     vm::MidletSignal launch_signal = vm::MidletSignal::none;
 #if defined(PHONEME_WEB)
-    // Emscripten cannot start a newly-created pthread until the current WASM
-    // entrypoint yields back to the worker event loop. Waiting synchronously
-    // for that pthread here deadlocks launch. The browser host already invokes
-    // the complete runtime from a dedicated Web Worker, so running startApp on
-    // this worker keeps the UI responsive and lets Java threads created by the
-    // MIDlet begin as soon as the launch call returns.
+    // A newly scheduled Emscripten pthread cannot execute until this WASM
+    // entrypoint returns to the browser event loop. Run startApp on the MIDP
+    // lifecycle thread, mark it deferred immediately, and let the normal pump
+    // path finalize its result. This also lets blocking browser Fetch and Java
+    // networking execute on a real pthread instead of deadlocking launch().
+    auto lifecycle_state = std::make_shared<AsyncLifecycleState>();
     {
-        std::scoped_lock application_operation(application_vm->operation_mutex);
-        ScopedUnpacedExecution unpaced(application_vm->machine.scheduler());
-        auto started = application_vm->machine.invoke_instance(
-            *receiver, main_class, "startApp", "()V", {},
-            kMidletLifecycleInstructionBudget);
-        if (!started) return fail_start(started.error());
-        auto completion = require_normal_completion(
-            application_vm->machine, *started, "MIDlet startApp");
-        if (!completion) return fail_start(completion.error());
-        launch_signal = application_vm->machine.consume_midlet_signal();
+        std::scoped_lock state_lock(application_vm->lifecycle_state_mutex);
+        application_vm->deferred_start_app = lifecycle_state;
     }
+    auto lifecycle_thread_root = application_vm->machine.allocate_pinned_instance(
+        "java/lang/Thread");
+    if (!lifecycle_thread_root) {
+        return fail_start(lifecycle_thread_root.error());
+    }
+    auto lifecycle_thread = lifecycle_thread_root->get();
+    if (!lifecycle_thread) return fail_start(lifecycle_thread.error());
+    auto initialized_thread = application_vm->machine.initialize_java_thread(
+        *lifecycle_thread, *receiver);
+    if (!initialized_thread) return fail_start(initialized_thread.error());
+    ApplicationVM* const lifecycle_vm = application_vm.get();
+    auto scheduled_lifecycle = application_vm->machine.scheduler().start_native_thread(
+        application_vm->machine,
+        *lifecycle_thread,
+        [lifecycle_vm, lifecycle_state, receiver = *receiver, main_class](
+            std::stop_token stop_token)
+            -> Result<std::optional<vm::ObjectRef>> {
+            std::optional<Error> failure;
+            vm::MidletSignal signal = vm::MidletSignal::none;
+            if (!stop_token.stop_requested()) {
+                auto started = lifecycle_vm->machine.invoke_instance(
+                    receiver, main_class, "startApp", "()V", {},
+                    kMidletLifecycleInstructionBudget);
+                if (!started) {
+                    failure = started.error();
+                } else {
+                    auto completion = require_normal_completion(
+                        lifecycle_vm->machine, *started, "MIDlet startApp");
+                    if (!completion) failure = completion.error();
+                }
+                signal = lifecycle_vm->machine.consume_midlet_signal();
+            }
+            {
+                std::scoped_lock state_lock(lifecycle_state->mutex);
+                lifecycle_state->failure = std::move(failure);
+                lifecycle_state->signal = signal;
+            }
+            lifecycle_state->completed.store(true, std::memory_order_release);
+            return std::optional<vm::ObjectRef> {};
+        });
+    if (!scheduled_lifecycle) return fail_start(scheduled_lifecycle.error());
+    start_app_deferred = true;
 #else
     // MIDP lifecycle callbacks and LCDUI event dispatch run on independent
     // threads in phoneME. A number of legacy games keep startApp() on-stack

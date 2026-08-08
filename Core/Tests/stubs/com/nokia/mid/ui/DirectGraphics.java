@@ -20,10 +20,33 @@ public interface DirectGraphics {
     int TYPE_INT_888_RGB = 888;
     int TYPE_INT_8888_ARGB = 8888;
 
+    void setARGBColor(int argb);
+    int getAlphaComponent();
+    int getNativePixelFormat();
+    void drawImage(javax.microedition.lcdui.Image image,
+            int x, int y, int anchor, int manipulation);
+    void drawTriangle(int x1, int y1, int x2, int y2,
+            int x3, int y3, int argbColor);
+    void fillTriangle(int x1, int y1, int x2, int y2,
+            int x3, int y3, int argbColor);
+    void fillPolygon(int[] xPoints, int xOffset, int[] yPoints,
+            int yOffset, int nPoints, int argbColor);
+    void drawPolygon(int[] xPoints, int xOffset, int[] yPoints,
+            int yOffset, int nPoints, int argbColor);
     void drawPixels(byte[] pixels, byte[] transparencyMask,
+            int offset, int scanlength, int x, int y,
+            int width, int height, int manipulation, int format);
+    void drawPixels(int[] pixels, boolean transparency,
+            int offset, int scanlength, int x, int y,
+            int width, int height, int manipulation, int format);
+    void drawPixels(short[] pixels, boolean transparency,
             int offset, int scanlength, int x, int y,
             int width, int height, int manipulation, int format);
     void getPixels(byte[] pixels, byte[] transparencyMask,
             int offset, int scanlength, int x, int y,
             int width, int height, int format);
+    void getPixels(int[] pixels, int offset, int scanlength,
+            int x, int y, int width, int height, int format);
+    void getPixels(short[] pixels, int offset, int scanlength,
+            int x, int y, int width, int height, int format);
 }

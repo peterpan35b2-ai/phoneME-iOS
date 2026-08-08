@@ -1067,6 +1067,50 @@ Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
         (void)::unlink(temporary.c_str());
         return injected;
     }
+#if defined(__EMSCRIPTEN__)
+    // MEMFS/IDBFS does not provide reliable POSIX hard-link semantics. In
+    // particular link() may return a non-ENOENT error even when the canonical
+    // file does not exist, which made first-time RecordStore creation fail.
+    // Preserve an existing committed generation with a byte-for-byte backup
+    // instead; recovery only depends on the backup contents, not inode identity.
+    struct stat existing_stat {};
+    if (::stat(path.c_str(), &existing_stat) == 0) {
+        auto previous = read_all_file(path);
+        if (!previous) {
+            (void)::unlink(temporary.c_str());
+            return fail(ErrorCode::io_error,
+                        "failed to read the previous RMS generation");
+        }
+        const int backup_descriptor = ::open(
+            backup.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+            S_IRUSR | S_IWUSR);
+        if (backup_descriptor < 0) {
+            (void)::unlink(temporary.c_str());
+            return fail(ErrorCode::io_error,
+                        "failed to create the previous RMS generation backup");
+        }
+        auto backup_written = write_all(backup_descriptor, *previous);
+        const int backup_close_result = ::close(backup_descriptor);
+        if (!backup_written || backup_close_result != 0) {
+            (void)::unlink(temporary.c_str());
+            (void)::unlink(backup.c_str());
+            return fail(ErrorCode::io_error,
+                        "failed to preserve the previous RMS generation");
+        }
+        has_backup = true;
+        injected = inject_fault_unlocked(
+            RecordStoreFaultPoint::after_backup_link);
+        if (!injected) {
+            (void)::unlink(temporary.c_str());
+            (void)::unlink(backup.c_str());
+            return injected;
+        }
+    } else if (errno != ENOENT) {
+        (void)::unlink(temporary.c_str());
+        return fail(ErrorCode::io_error,
+                    "failed to inspect the previous RMS generation");
+    }
+#else
     if (::link(path.c_str(), backup.c_str()) == 0) {
         has_backup = true;
         injected = inject_fault_unlocked(
@@ -1081,6 +1125,7 @@ Status RecordStoreRegistry::persist_unlocked(const Store& store) const {
         return fail(ErrorCode::io_error,
                     "failed to preserve the previous RMS generation");
     }
+#endif
 
     injected = inject_fault_unlocked(RecordStoreFaultPoint::rename);
     if (!injected) {

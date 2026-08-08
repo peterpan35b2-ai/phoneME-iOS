@@ -1,279 +1,346 @@
 @import "@fontsource-variable/google-sans";
 
+/* MD3 design tokens. Surface ramp owned here (MUI only emits the standard roles);
+   values mirror APPBAR_THEME_COLOR in theme.ts so the PWA status-bar tint == appbar. */
+:root {
+  color-scheme: light;
+  --md3-surface: #fbf8ff;
+  --md3-surface-container-lowest: #ffffff;
+  --md3-surface-container-low: #f5f2fa;
+  --md3-surface-container: #efedf4;   /* = appbar = status-bar tint */
+  --md3-surface-container-high: #e9e7ee;
+  --md3-surface-container-highest: #e3e1ec;
+  --md3-surface-variant: #e4e1ec;
+  --md3-primary-container: #dee0ff;
+  --md3-on-primary-container: #000d61;
+  --md3-secondary-container: #e1e0f9;
+  --md3-on-secondary-container: #181a2c;
+  --md3-outline: #777680;
+  --md3-outline-variant: #c7c5d0;
+  --md3-state-hover: color-mix(in srgb, var(--mui-palette-primary-main) 8%, transparent);
+  --md3-state-press: color-mix(in srgb, var(--mui-palette-primary-main) 12%, transparent);
+}
+[data-color-mode="dark"],
+[data-mui-color-scheme="dark"] {
+  color-scheme: dark;
+  --md3-surface: #121318;
+  --md3-surface-container-lowest: #0d0d13;
+  --md3-surface-container-low: #1b1b21;
+  --md3-surface-container: #1f1f25;   /* = appbar = status-bar tint */
+  --md3-surface-container-high: #2a2930;
+  --md3-surface-container-highest: #35343b;
+  --md3-surface-variant: #45464f;
+  --md3-primary-container: #2a3c9b;
+  --md3-on-primary-container: #dee0ff;
+  --md3-secondary-container: #424559;
+  --md3-on-secondary-container: #e1e0f9;
+  --md3-outline: #90909a;
+  --md3-outline-variant: #45464f;
+  --md3-state-hover: color-mix(in srgb, var(--mui-palette-primary-main) 8%, transparent);
+  --md3-state-press: color-mix(in srgb, var(--mui-palette-primary-main) 12%, transparent);
+}
+
 :root {
   font-family: "Google Sans Variable", "Google Sans", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
 
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  min-width: 320px;
-  min-height: 100%;
-  margin: 0;
-}
-
-body {
-  min-height: 100vh;
-  overflow-x: hidden;
-}
-
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
+* { box-sizing: border-box; }
+html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
+html { background-color: var(--mui-palette-background-default); overscroll-behavior: none; }
+body { min-height: 100dvh; overflow-x: hidden; overscroll-behavior-y: none; }
+button, input, textarea, select { font: inherit; }
 
 .app-root {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
+  min-height: 100dvh;
   background: var(--mui-palette-background-default);
   color: var(--mui-palette-text-primary);
 }
 
-.navigation-rail {
-  position: fixed;
-  inset: 0 auto 0 0;
-  z-index: 20;
-  width: 104px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 24px;
-  padding: 20px 10px;
-  border-right: 1px solid var(--mui-palette-divider);
-  background: color-mix(in srgb, var(--mui-palette-background-paper) 88%, var(--mui-palette-primary-main) 12%);
+/* ── Top app bars (MD3: neutral surface-container, 64dp) ─────────────────────── */
+.native-appbar,
+.emulator-appbar {
+  color: var(--mui-palette-text-primary);
+  background: var(--md3-surface-container) !important;
+  border-bottom: 1px solid var(--md3-outline-variant);
+  padding-top: env(safe-area-inset-top);
 }
 
-.brand-mark,
-.mobile-brand {
-  display: grid;
-  place-items: center;
+.native-appbar .MuiToolbar-root,
+.emulator-appbar .MuiToolbar-root {
+  min-height: 64px;
+  width: min(100%, 980px);
+  margin-inline: auto;
+  padding-inline: 4px;
+  gap: 0;
+}
+
+.native-appbar .MuiIconButton-root,
+.emulator-appbar .MuiIconButton-root {
   width: 48px;
   height: 48px;
-  flex: 0 0 auto;
-  border-radius: 16px;
-  background: var(--mui-palette-primary-main);
-  color: var(--mui-palette-primary-contrastText);
-  box-shadow: var(--mui-shadows-2);
 }
 
-.navigation-rail-action.MuiButton-root {
-  width: 100%;
+.native-appbar-title,
+.emulator-appbar-title {
+  flex: 1;
   min-width: 0;
-  min-height: 70px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 8px 2px;
-  border-radius: 18px;
-  font-size: 11px;
-  line-height: 1.2;
+  padding-inline: 8px;
+  font-weight: 500 !important;
+}
+
+/* Text actions: neutral leading, primary trailing CTA (MD3 text buttons). */
+.bar-text-action.MuiButton-root {
+  min-width: 0;
+  min-height: 40px;
+  padding-inline: 12px;
+  font-weight: 500;
   color: var(--mui-palette-text-secondary);
 }
-
-.navigation-rail-action.MuiButton-root .MuiButton-startIcon {
-  margin: 0;
-}
-
-.navigation-rail-action.MuiButton-root.active {
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 18%, transparent);
+.bar-text-action.primary.MuiButton-root {
   color: var(--mui-palette-primary-main);
+  font-weight: 600;
 }
 
-.app-column {
-  min-width: 0;
-  grid-column: 2;
-}
+.bar-leading-spacer { width: 48px; flex: 0 0 48px; }
+.page-surface { min-height: calc(100dvh - 64px); }
 
-.top-app-bar {
-  border-bottom: 1px solid var(--mui-palette-divider);
-  background: color-mix(in srgb, var(--mui-palette-background-default) 88%, transparent) !important;
-  backdrop-filter: blur(18px) saturate(140%);
-}
-
-.top-app-bar .MuiToolbar-root {
-  min-height: 72px;
-  padding-inline: clamp(16px, 3vw, 36px);
-}
-
-.main-content {
-  width: min(1440px, 100%);
+/* ── Library (MD3 list / inset-grouped on surface) ──────────────────────────── */
+.library-surface {
+  position: relative;
+  width: min(100%, 760px);
+  min-height: calc(100dvh - 64px);
   margin-inline: auto;
-  padding: clamp(20px, 3vw, 40px);
+  padding: 8px 16px 48px;
 }
 
-.import-zone {
-  min-height: 260px;
-  display: grid;
-  place-items: center;
-  padding: 32px;
-  border: 2px dashed var(--mui-palette-divider);
-  border-radius: 28px;
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 5%, var(--mui-palette-background-paper));
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+.library-search-wrap {
+  position: sticky;
+  top: 64px;
+  z-index: 5;
+  padding: 8px 0 12px;
+  background: linear-gradient(var(--mui-palette-background-default) 70%, transparent);
 }
 
-.import-zone.dragging {
-  border-color: var(--mui-palette-primary-main);
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 13%, var(--mui-palette-background-paper));
-  transform: scale(1.005);
+.library-search-wrap .MuiOutlinedInput-root {
+  min-height: 56px;
+  border-radius: 999px;
+  background: var(--md3-surface-container-high);
 }
+.library-search-wrap .MuiOutlinedInput-root .MuiOutlinedInput-notchedOutline,
+.library-search-wrap .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline,
+.library-search-wrap .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline { border: 0; }
+.library-search-wrap .MuiOutlinedInput-root.Mui-focused {
+  background: var(--md3-surface-container-highest);
+  box-shadow: inset 0 0 0 2px var(--mui-palette-primary-main);
+}
+.library-search-wrap .MuiOutlinedInput-input { font-size: 16px; }
 
-.import-icon {
-  display: grid;
-  place-items: center;
-  width: 64px;
-  height: 64px;
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 16%, transparent);
+.inset-list { display: grid; gap: 24px; }
+.inset-section { min-width: 0; }
+.inset-section-header,
+.form-section-header,
+.menu-section-label {
+  display: block;
+  padding: 0 16px 8px;
   color: var(--mui-palette-primary-main);
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.031em !important;
 }
 
-.import-icon svg {
-  font-size: 32px;
-}
-
-.game-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 20px;
-}
-
-.game-card {
-  min-width: 0;
+.inset-section-body,
+.form-section-body {
   overflow: hidden;
-  border-radius: 22px !important;
-  background: var(--mui-palette-background-paper);
-  transition: transform 160ms ease, box-shadow 160ms ease;
+  border: 1px solid var(--md3-outline-variant);
+  border-radius: 16px;
+  background: var(--md3-surface-container-low);
 }
 
-.game-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--mui-shadows-3);
-}
-
-.game-card-action {
-  min-height: 260px;
-  display: flex !important;
-  flex-direction: column;
-  align-items: stretch !important;
-}
-
-.game-card-action .MuiCardContent-root {
-  width: 100%;
-}
-
-.game-cover,
-.game-cover-placeholder {
-  width: 100%;
-  height: 150px;
-  object-fit: contain !important;
-  image-rendering: pixelated;
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 9%, var(--mui-palette-background-paper));
-}
-
-.game-cover-placeholder {
+/* MD3 two-line list item (72dp), 40dp leading avatar, 16dp spacing. */
+.game-row {
+  min-height: 72px;
   display: grid;
-  place-items: center;
-  color: var(--mui-palette-primary-main);
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  outline: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  transition: background-color 110ms ease;
 }
 
-.game-cover-placeholder svg {
-  font-size: 58px;
+.game-row + .game-row,
+.form-row + .form-row,
+.form-row + .switch-row,
+.switch-row + .form-row,
+.switch-row + .switch-row,
+.slider-row + .form-row,
+.form-row + .slider-row,
+.switch-row + .slider-row,
+.slider-row + .switch-row,
+.screen-dimension-row + .form-row,
+.form-row + .font-size-row,
+.font-size-row + .switch-row {
+  border-top: 1px solid var(--md3-outline-variant);
 }
 
-.empty-library {
-  min-height: 280px;
+.game-row:hover,
+.game-row:focus-visible { background: var(--md3-state-hover); }
+.game-row:active { background: var(--md3-state-press); }
+
+.game-icon.MuiAvatar-root {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  color: var(--mui-palette-text-secondary);
+  background: var(--md3-secondary-container);
+}
+.game-icon img { object-fit: contain; image-rendering: pixelated; }
+.game-row-copy { min-width: 0; }
+.game-row-title-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.game-row-title {
+  min-width: 0;
+  font-size: 16px !important;
+  font-weight: 500 !important;
+  line-height: 1.5 !important;
+  letter-spacing: 0.009em !important;
+}
+.game-row-subtitle,
+.game-row-version {
+  color: var(--mui-palette-text-secondary);
+  font-size: 14px !important;
+}
+.game-row-version { max-width: 120px; }
+.running-indicator { flex: 0 0 auto; color: var(--mui-palette-success-main); font-size: 12px; }
+.inset-section-footer {
+  padding: 8px 16px 0;
+  color: var(--mui-palette-text-secondary);
+  font-size: 12px !important;
+  letter-spacing: 0.031em;
+}
+
+.empty-library,
+.empty-filter-state {
+  min-height: calc(100dvh - 200px);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--mui-palette-divider);
-  border-radius: 24px;
-  color: var(--mui-palette-text-secondary);
+  padding: 24px;
+  text-align: center;
 }
-
-.empty-library > svg {
-  font-size: 54px;
-}
-
-.emulator-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(270px, 340px);
-  gap: clamp(18px, 3vw, 32px);
-  align-items: start;
-}
-
-.emulator-stage-card {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--mui-palette-divider);
-  background: var(--mui-palette-background-paper) !important;
-}
-
-.emulator-toolbar {
-  min-height: 72px;
-  padding: 10px 12px 8px 20px;
-}
-
-.emulator-display-shell {
+.empty-library > svg { margin-bottom: 8px; font-size: 56px; color: var(--mui-palette-primary-main); }
+.drop-overlay {
+  position: fixed;
+  inset: 64px 0 0;
+  z-index: 20;
   display: grid;
   place-items: center;
-  min-height: min(70vh, 760px);
-  padding: clamp(18px, 4vw, 48px);
-  background:
-    radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--mui-palette-primary-main) 18%, transparent), transparent 45%),
-    color-mix(in srgb, var(--mui-palette-common-black) 88%, var(--mui-palette-primary-main));
+  color: var(--mui-palette-primary-main);
+  background: var(--md3-state-hover);
+  border: 3px dashed var(--mui-palette-primary-main);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
 }
 
-.emulator-display {
-  position: relative;
-  width: min(100%, 560px);
-  max-height: 72vh;
+/* ── Settings / profile editor (MD3 list rows, 56dp, 16dp padding) ──────────── */
+.profile-form {
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 16px 16px 56px;
+  display: grid;
+  gap: 24px;
+}
+.form-section { min-width: 0; }
+.form-section-header { padding-left: 16px; }
+.form-row,
+.switch-row.MuiFormControlLabel-root,
+.slider-row,
+.screen-dimension-row,
+.font-size-row,
+.proxy-row {
+  min-height: 56px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 16px;
+}
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.form-row-copy { flex: 1; min-width: 0; }
+.form-row-copy > .MuiTypography-root:first-child { font-size: 14px; font-weight: 500; letter-spacing: 0.009em; }
+.form-row-copy .MuiTypography-body2 { margin-top: 2px; }
+.row-control { min-width: 152px !important; max-width: 256px; }
+.switch-row.MuiFormControlLabel-root { display: flex; justify-content: space-between; gap: 16px; }
+.switch-row .MuiFormControlLabel-label { flex: 1; font-size: 14px; }
+.switch-row .MuiSwitch-root { margin-left: auto; }
+.slider-row { display: grid; align-content: center; gap: 4px; }
+.slider-row-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.slider-row-title .MuiTypography-root { font-size: 14px; }
+.slider-row .MuiSlider-root { padding-block: 12px 8px; }
+.screen-dimension-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto minmax(80px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.screen-dimension-row .MuiInputBase-input,
+.numeric-row-field .MuiInputBase-input { text-align: center; font-variant-numeric: tabular-nums; }
+.numeric-row-field { width: 96px; }
+.font-size-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.proxy-row { display: grid; gap: 8px; min-height: 0; padding-block: 16px; }
+.global-settings-form .MuiAlert-root { border-radius: 16px; }
+
+/* ── Emulator surface ───────────────────────────────────────────────────────── */
+.emulator-page {
+  min-height: 100dvh;
+  height: 100dvh;
   overflow: hidden;
-  border-radius: 12px;
   background: #000;
-  box-shadow: 0 24px 60px rgb(0 0 0 / 0.42);
+}
+.emulator-root {
+  width: 100%;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #000;
+}
+.emulator-appbar { flex: 0 0 auto; z-index: 30; }
+.emulator-appbar .MuiToolbar-root { width: 100%; max-width: none; }
+.emulator-surface {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
   touch-action: none;
 }
-
-.emulator-display:fullscreen {
-  width: min(100vw, calc(100vh * var(--screen-ratio, .75)));
-  max-height: none;
-  margin: auto;
-  border-radius: 0;
-}
-
-.emulator-canvas,
-.native-lcdui {
+.emulator-root.without-appbar .emulator-surface { height: 100dvh; }
+.emulator-canvas {
+  position: absolute;
   display: block;
-  width: 100%;
-  height: 100%;
+  max-width: none;
+  max-height: none;
+  background: #000;
+  touch-action: none;
 }
-
 .pixelated .emulator-canvas,
-.pixelated .lcdui-image {
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-}
-
+.pixelated .lcdui-image { image-rendering: pixelated; image-rendering: crisp-edges; }
 .smooth .emulator-canvas,
-.smooth .lcdui-image {
-  image-rendering: auto;
-}
-
+.smooth .lcdui-image { image-rendering: auto; }
 .emulator-error {
   position: absolute;
   inset: 0;
+  z-index: 25;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -281,88 +348,365 @@ select {
   gap: 8px;
   padding: 28px;
   text-align: center;
-  background: var(--mui-palette-background-paper);
+  color: var(--mui-palette-text-primary);
+  background: var(--md3-surface);
+}
+.fps-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 15;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: white;
+  background: rgb(0 0 0 / .52);
+  font: 500 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
 }
 
-.virtual-keypad {
-  position: sticky;
-  top: 96px;
-  display: grid;
-  gap: 18px;
-  padding: 20px;
-  border-radius: 24px !important;
-  background: color-mix(in srgb, var(--mui-palette-background-paper) 94%, var(--mui-palette-primary-main) 6%) !important;
+/* ── Virtual keypad (MD3 surface roles + group hierarchy; geometry kept in TS) ─ */
+.virtual-keypad-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  pointer-events: none;
   user-select: none;
 }
-
-.soft-key-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+.virtual-key-grid {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  pointer-events: none;
 }
-
-.dpad,
-.number-pad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-.virtual-key.MuiButton-root {
+.virtual-key-cell {
+  position: absolute;
   min-width: 0;
-  min-height: 52px;
+  min-height: 0;
+  display: flex;
+  padding: clamp(2px, 0.9vw, 4px);
+  pointer-events: none;
+}
+.keyboard-editing .virtual-key-cell.editable {
+  pointer-events: auto;
+  cursor: move;
+}
+.keyboard-editing .virtual-key.MuiButton-root {
+  pointer-events: none;
+  border: 2px dashed var(--mui-palette-primary-main);
+  background: var(--md3-primary-container);
+  color: var(--md3-on-primary-container);
+}
+.virtual-key.MuiButton-root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
   padding: 0;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 12%, var(--mui-palette-background-paper));
+  border: 1px solid var(--md3-outline-variant);
   color: var(--mui-palette-text-primary);
-  box-shadow: inset 0 0 0 1px var(--mui-palette-divider);
+  box-shadow: none;
+  pointer-events: auto;
   touch-action: none;
+  font-size: clamp(16px, 4.2vw, 22px);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  transition: background-color 55ms linear, color 55ms linear, transform 55ms linear;
 }
-
-.virtual-key.MuiButton-root:active {
+/* D-pad (directions) = strongest; numbers = standard; soft-keys = ghost outline. */
+.virtual-key.group-directions.MuiButton-root {
+  background: color-mix(in srgb, var(--md3-surface-container-highest) calc(var(--keyboard-opacity) * 100%), transparent);
+  border-color: var(--md3-outline);
+}
+.virtual-key.group-numbers.MuiButton-root {
+  background: color-mix(in srgb, var(--md3-surface-container-high) calc(var(--keyboard-opacity) * 100%), transparent);
+}
+.virtual-key.group-soft-keys.MuiButton-root {
+  background: color-mix(in srgb, var(--md3-surface-container-high) calc(var(--keyboard-opacity) * 60%), transparent);
+  color: var(--mui-palette-text-secondary);
+}
+.virtual-key.shape-roundedRectangle.MuiButton-root { border-radius: 28%; }
+.virtual-key.shape-rectangle.MuiButton-root { border-radius: 0; }
+.virtual-key.shape-oval.MuiButton-root { border-radius: 999px; }
+.virtual-key.MuiButton-root:hover { background: var(--md3-state-hover); }
+.virtual-key.MuiButton-root:active,
+.virtual-key.MuiButton-root.Mui-focusVisible {
+  color: var(--mui-palette-primary-contrastText);
+  background: var(--mui-palette-primary-main);
   transform: scale(.96);
-  background: color-mix(in srgb, var(--mui-palette-primary-main) 24%, var(--mui-palette-background-paper));
 }
 
+/* ── Menus / dialogs (MD3: container surface-container-high, items 48dp) ─────── */
+.native-menu .MuiPaper-root,
+.player-menu .MuiPaper-root,
+.player-submenu .MuiPaper-root {
+  min-width: 240px;
+  border: 1px solid var(--md3-outline-variant);
+  border-radius: 16px;
+  background: var(--md3-surface-container-high);
+  box-shadow: var(--mui-shadows-4);
+}
+.native-menu .MuiMenu-list,
+.player-menu .MuiMenu-list,
+.player-submenu .MuiMenu-list { padding: 8px; }
+.native-menu .MuiMenuItem-root,
+.player-menu .MuiMenuItem-root,
+.player-submenu .MuiMenuItem-root {
+  min-height: 48px;
+  gap: 0;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.native-menu .MuiDivider-root,
+.player-menu .MuiDivider-root,
+.player-submenu .MuiDivider-root { margin-block: 4px; border-color: var(--md3-outline-variant); }
+.menu-section-label { padding: 8px 12px 4px !important; }
+.destructive-menu-item { color: var(--mui-palette-error-main) !important; }
+.MuiMenuItem-root > svg:not(.submenu-chevron):not(.menu-trailing-check) { width: 24px; margin-right: 12px; }
+.menu-trailing-check,
+.submenu-chevron { margin-left: auto !important; margin-right: 0 !important; }
+.submenu-chevron { width: 16px !important; font-size: 16px !important; color: var(--mui-palette-text-secondary); }
+.menu-icon-spacer { width: 36px; flex: 0 0 36px; }
+.ellipsis-circle-button.MuiIconButton-root { border: 1px solid var(--md3-outline-variant); }
+.stacked-dialog-actions.MuiDialogActions-root { flex-direction: column; align-items: stretch; padding: 8px 24px 24px; gap: 8px; }
+.stacked-dialog-actions .MuiButton-root { justify-content: flex-start; }
+.profiles-dialog-content { display: grid; gap: 8px; }
+.profile-dialog-row.MuiButton-root {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 16px;
+  padding: 12px;
+  border-radius: 16px;
+  color: var(--mui-palette-text-primary);
+}
+.profile-dialog-copy { min-width: 0; flex: 1; text-align: left; }
+.emulator-appbar-title.editing-title { text-align: center; }
+.visible-buttons-dialog { display: grid; padding-inline: 8px !important; }
+.visible-button-row.MuiFormControlLabel-root {
+  width: 100%;
+  min-height: 56px;
+  justify-content: space-between;
+  margin: 0;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--md3-outline-variant);
+}
+.visible-button-row:last-child { border-bottom: 0; }
+.visible-button-row .MuiFormControlLabel-label { flex: 1; }
+
+/* ── Native LCDUI screens (emulator bridge → MD3 surfaces) ──────────────────── */
 .native-lcdui {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  background: var(--mui-palette-background-paper);
+  grid-template-areas:
+    "header"
+    "body"
+    "actions";
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
   color: var(--mui-palette-text-primary);
+  background: var(--md3-surface);
   touch-action: pan-y;
 }
-
+.native-lcdui.lcdui-kind-0,
+.native-lcdui.lcdui-kind-1,
+.native-lcdui.lcdui-kind-4 {
+  background: var(--md3-surface);
+}
+.lcdui-screen-header {
+  grid-area: header;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--md3-outline-variant);
+  background: var(--md3-surface);
+}
+.lcdui-screen-body { grid-area: body; min-width: 0; min-height: 0; overflow: hidden; }
 .native-lcdui-content {
+  min-width: 0;
   min-height: 0;
+  height: 100%;
   overflow-y: auto;
-  padding: clamp(14px, 4vw, 24px);
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: clamp(12px, 3vw, 20px);
 }
-
 .native-lcdui-actions {
-  min-height: 58px;
-  overflow-x: auto;
-  padding: 8px 12px;
-  border-top: 1px solid var(--mui-palette-divider);
-  background: color-mix(in srgb, var(--mui-palette-background-paper) 92%, var(--mui-palette-primary-main) 8%);
+  grid-area: actions;
+  min-height: 56px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--md3-outline-variant);
+  background: var(--md3-surface-container);
 }
-
-.lcdui-image {
-  display: block;
+.emulator-root > .native-lcdui-actions {
+  flex: 0 0 auto;
+  width: 100%;
+}
+.lcdui-softkey-slot { flex: 1 1 0; min-width: 0; }
+.native-lcdui-actions .MuiButton-root {
+  min-height: 40px;
+  border-radius: 999px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lcdui-image { display: block; max-width: 100%; height: auto; }
+.lcdui-form-scroll { background: var(--md3-surface); }
+.lcdui-form-card {
+  width: min(100%, 720px);
+  margin-inline: auto;
+  overflow: hidden;
+  border: 1px solid var(--md3-outline-variant);
+  border-radius: 16px;
+  background: var(--md3-surface-container-low);
+}
+.lcdui-form-row { min-width: 0; padding: 16px; }
+.lcdui-form-row.spacer-row { padding: 0; }
+.lcdui-form-divider { margin-left: 16px !important; border-color: var(--md3-outline-variant); }
+.lcdui-item-label {
+  display: block !important;
+  margin-bottom: 8px !important;
+  color: var(--mui-palette-text-secondary) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 1.25 !important;
+  letter-spacing: 0.031em !important;
+}
+.lcdui-inline-choice-list { min-width: 0; overflow: hidden; border-radius: 12px; }
+.lcdui-choice-button.MuiButton-root {
+  min-height: 48px;
+  padding: 4px 0;
+  color: var(--mui-palette-text-primary);
+  text-transform: none;
+  justify-content: stretch;
+  border-radius: 0;
+}
+.lcdui-choice-cell {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+.lcdui-choice-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 10px;
+}
+.lcdui-choice-image {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
+.lcdui-choice-text { flex: 1 1 auto; min-width: 0; line-height: 1.4 !important; }
+.lcdui-choice-accessory {
+  min-width: 24px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--mui-palette-text-secondary);
+}
+.lcdui-choice-accessory .MuiCheckbox-root,
+.lcdui-choice-accessory .MuiRadio-root { padding: 0; pointer-events: none; }
+.lcdui-inline-choice-list .MuiDivider-root.with-icon { margin-left: 52px; border-color: var(--md3-outline-variant); }
+.lcdui-popup-choice { min-height: 48px; }
+.lcdui-readonly-text {
+  min-height: 48px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--md3-surface-container);
+}
+.lcdui-counter { align-self: flex-end; color: var(--mui-palette-text-secondary); font-variant-numeric: tabular-nums; }
+.lcdui-textbox-container { background: var(--md3-surface); }
+.lcdui-textbox { width: min(100%, 720px); min-height: 100%; margin-inline: auto; }
+.lcdui-textbox .MuiFormControl-root { flex: 1; }
+.lcdui-textbox .MuiInputBase-root { align-items: flex-start; }
+.lcdui-custom-item {
   max-width: 100%;
-  height: auto;
+  overflow: hidden;
+  border-radius: 12px;
+  touch-action: none;
+  user-select: none;
 }
-
-.bottom-navigation {
-  position: fixed !important;
-  inset: auto 0 0;
-  z-index: 40;
-  height: calc(68px + env(safe-area-inset-bottom));
-  padding-bottom: env(safe-area-inset-bottom);
-  border-top: 1px solid var(--mui-palette-divider);
-  background: color-mix(in srgb, var(--mui-palette-background-paper) 92%, transparent) !important;
-  backdrop-filter: blur(18px) saturate(140%);
+.lcdui-list {
+  width: min(100%, 760px);
+  height: 100%;
+  margin-inline: auto !important;
+  overflow-y: auto;
+  background: var(--md3-surface-container-low);
+  border: 1px solid var(--md3-outline-variant);
+  border-radius: 16px;
+}
+.lcdui-list-row {
+  min-height: 56px;
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--md3-outline-variant);
+  background: var(--md3-surface-container-low);
+}
+.lcdui-list-row:last-child { border-bottom: 0; }
+.lcdui-list-main-action.MuiListItemButton-root { min-width: 0; flex: 1; padding: 8px 12px 8px 16px; }
+.lcdui-list-item-menu.MuiIconButton-root { width: 48px; height: 48px; margin: auto 4px; border-radius: 999px; }
+.lcdui-menu-command-icon,
+.lcdui-command-menu-icon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  margin-right: 12px;
+  color: var(--mui-palette-text-secondary);
+}
+.lcdui-disclosure { color: var(--mui-palette-text-secondary); margin-left: 8px; }
+.lcdui-alert-container {
+  display: grid;
+  place-items: center;
+  background: var(--md3-surface);
+}
+.lcdui-alert-card {
+  width: min(100%, 420px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--md3-outline-variant);
+  border-radius: 28px;
+  background: var(--md3-surface-container-low);
+  text-align: center;
+}
+.lcdui-alert-icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  color: var(--mui-palette-primary-main);
+}
+.lcdui-alert-icon.alert-type-18,
+.lcdui-alert-icon.alert-type-20 { color: var(--mui-palette-warning-main); }
+.lcdui-alert-icon.alert-type-19 { color: var(--mui-palette-error-main); }
+.lcdui-alert-icon svg { font-size: 40px; }
+.lcdui-alert-image { max-width: 56px; max-height: 56px; }
+.lcdui-alert-title { font-size: 22px !important; font-weight: 500 !important; line-height: 1.75 !important; }
+.lcdui-alert-detail { white-space: pre-wrap; color: var(--mui-palette-text-secondary); }
+.lcdui-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  background: var(--md3-surface);
 }
 
 .sr-only {
@@ -377,74 +721,40 @@ select {
   border: 0;
 }
 
-@media (max-width: 960px) {
-  .emulator-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .virtual-keypad {
-    position: static;
-    width: min(420px, 100%);
-    margin-inline: auto;
-  }
+@media (orientation: landscape) {
+  .virtual-key.MuiButton-root { font-size: clamp(14px, 2.2vw, 20px); }
 }
 
-@media (max-width: 760px) {
-  .app-root {
-    display: block;
-    padding-bottom: calc(68px + env(safe-area-inset-bottom));
-  }
+@media (max-width: 520px) {
+  .native-appbar .MuiToolbar-root,
+  .emulator-appbar .MuiToolbar-root { padding-inline: 4px; }
+  .native-appbar-title,
+  .emulator-appbar-title { padding-inline: 8px; }
+  .library-surface { padding-inline: 12px; }
+  .game-row { padding-inline: 12px; }
+  .game-row-version { max-width: 80px; }
+  .profile-form { padding-inline: 12px; }
+  .form-row,
+  .switch-row.MuiFormControlLabel-root,
+  .slider-row,
+  .screen-dimension-row,
+  .font-size-row,
+  .proxy-row { padding-inline: 12px; }
+  .row-control { min-width: 128px !important; max-width: 180px; }
+}
 
-  .app-column {
-    display: block;
-  }
-
-  .top-app-bar .MuiToolbar-root {
-    min-height: 64px;
-    padding-inline: 14px;
-  }
-
-  .top-app-bar .MuiChip-root:not(:last-child) {
-    display: none;
-  }
-
-  .main-content {
-    padding: 18px 14px 28px;
-  }
-
-  .import-zone {
-    min-height: 220px;
-    padding: 24px 18px;
-    border-radius: 22px;
-  }
-
-  .game-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 12px;
-  }
-
-  .game-cover,
-  .game-cover-placeholder {
-    height: 120px;
-  }
-
-  .emulator-display-shell {
-    min-height: 0;
-    padding: 14px;
-  }
-
-  .emulator-stage-card {
-    border-radius: 20px !important;
-  }
+@media (max-width: 380px) {
+  .game-row-version { display: none; }
+  .font-size-row { grid-template-columns: 1fr; }
+  .screen-dimension-row { grid-template-columns: minmax(64px, 1fr) auto minmax(64px, 1fr) auto; }
+  .bar-text-action.MuiButton-root { padding-inline: 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
   }
 }

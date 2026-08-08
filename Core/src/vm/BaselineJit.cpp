@@ -8605,7 +8605,9 @@ public:
     }
 
     ~Impl() {
+#if defined(__aarch64__)
         stop_background_compiler();
+#endif
         (void)flush_profile();
     }
 
@@ -10157,7 +10159,9 @@ private:
     u32 unavailable_probe_countdown_ {0U};
     u64 code_cache_limit_bytes_ {kDefaultCodeCacheBytes};
     u64 code_cache_bytes_ {0U};
+#if defined(__aarch64__)
     u64 use_tick_ {0U};
+#endif
     JitStatistics stats_;
 };
 

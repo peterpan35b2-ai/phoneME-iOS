@@ -37,6 +37,7 @@
 #include "MediaNatives.hpp"
 #include "PushNatives.hpp"
 #include "ReferenceNatives.hpp"
+#include "RegexEngine.hpp"
 #include "RmsNatives.hpp"
 #include "SecurityNatives.hpp"
 #include "StringEncodingNatives.hpp"
@@ -1216,242 +1217,6 @@ void register_text_builder(NativeMethodRegistry& registry,
     return value;
 }
 
-enum class SplitAtomKind : u8 {
-    literal,
-    any,
-    whitespace,
-    digit,
-    word,
-    character_class,
-};
-
-struct SplitPattern final {
-    SplitAtomKind kind {SplitAtomKind::literal};
-    std::u16string literal;
-    std::vector<std::pair<char16_t, char16_t>> ranges;
-    bool negate_class {false};
-    bool repeat {false};
-};
-
-[[nodiscard]] bool split_whitespace(char16_t value) noexcept {
-    return value == u' ' || value == u'\t' || value == u'\n' ||
-           value == u'\v' || value == u'\f' || value == u'\r';
-}
-
-[[nodiscard]] bool split_word(char16_t value) noexcept {
-    return (value >= u'a' && value <= u'z') ||
-           (value >= u'A' && value <= u'Z') ||
-           (value >= u'0' && value <= u'9') || value == u'_';
-}
-
-[[nodiscard]] SplitPattern parse_split_pattern(std::u16string regex) {
-    if (regex.size() >= 4U && regex.starts_with(u"\\Q") &&
-        regex.ends_with(u"\\E")) {
-        return SplitPattern {
-            .kind = SplitAtomKind::literal,
-            .literal = regex.substr(2U, regex.size() - 4U),
-        };
-    }
-
-    bool repeat = false;
-    if (regex.size() > 1U &&
-        (regex.back() == u'+' || regex.back() == u'*')) {
-        repeat = true;
-        regex.pop_back();
-    }
-    if (regex == u".") {
-        return SplitPattern {.kind = SplitAtomKind::any, .repeat = repeat};
-    }
-    if (regex == u"\\s") {
-        return SplitPattern {
-            .kind = SplitAtomKind::whitespace,
-            .repeat = repeat,
-        };
-    }
-    if (regex == u"\\d") {
-        return SplitPattern {.kind = SplitAtomKind::digit, .repeat = repeat};
-    }
-    if (regex == u"\\w") {
-        return SplitPattern {.kind = SplitAtomKind::word, .repeat = repeat};
-    }
-    if (regex == u"\\t") {
-        return SplitPattern {
-            .kind = SplitAtomKind::literal,
-            .literal = std::u16string(1U, u'\t'),
-        };
-    }
-    if (regex == u"\\n") {
-        return SplitPattern {
-            .kind = SplitAtomKind::literal,
-            .literal = std::u16string(1U, u'\n'),
-        };
-    }
-    if (regex == u"\\r") {
-        return SplitPattern {
-            .kind = SplitAtomKind::literal,
-            .literal = std::u16string(1U, u'\r'),
-        };
-    }
-    if (regex == u"\\f") {
-        return SplitPattern {
-            .kind = SplitAtomKind::literal,
-            .literal = std::u16string(1U, u'\f'),
-        };
-    }
-    if (regex.size() >= 2U && regex.front() == u'[' &&
-        regex.back() == u']') {
-        SplitPattern result {
-            .kind = SplitAtomKind::character_class,
-            .repeat = repeat,
-        };
-        usize index = 1U;
-        if (index + 1U < regex.size() && regex[index] == u'^') {
-            result.negate_class = true;
-            ++index;
-        }
-        const usize end = regex.size() - 1U;
-        while (index < end) {
-            char16_t first = regex[index++];
-            if (first == u'\\' && index < end) {
-                first = regex[index++];
-            }
-            char16_t last = first;
-            if (index + 1U < end && regex[index] == u'-') {
-                ++index;
-                last = regex[index++];
-                if (last == u'\\' && index < end) {
-                    last = regex[index++];
-                }
-                if (last < first) std::swap(first, last);
-            }
-            result.ranges.emplace_back(first, last);
-        }
-        if (!result.ranges.empty()) return result;
-    }
-
-    std::u16string literal;
-    literal.reserve(regex.size());
-    for (usize index = 0; index < regex.size(); ++index) {
-        if (regex[index] == u'\\' && index + 1U < regex.size()) {
-            literal.push_back(regex[++index]);
-        } else {
-            literal.push_back(regex[index]);
-        }
-    }
-    return SplitPattern {
-        .kind = SplitAtomKind::literal,
-        .literal = std::move(literal),
-    };
-}
-
-[[nodiscard]] bool split_atom_matches(const SplitPattern& pattern,
-                                      char16_t value) noexcept {
-    switch (pattern.kind) {
-      case SplitAtomKind::any:
-        return true;
-      case SplitAtomKind::whitespace:
-        return split_whitespace(value);
-      case SplitAtomKind::digit:
-        return value >= u'0' && value <= u'9';
-      case SplitAtomKind::word:
-        return split_word(value);
-      case SplitAtomKind::character_class: {
-        bool matches = false;
-        for (const auto [first, last] : pattern.ranges) {
-            if (value >= first && value <= last) {
-                matches = true;
-                break;
-            }
-        }
-        return pattern.negate_class ? !matches : matches;
-      }
-      case SplitAtomKind::literal:
-        return false;
-    }
-    return false;
-}
-
-[[nodiscard]] std::optional<std::pair<usize, usize>> next_split_match(
-    std::u16string_view text,
-    const SplitPattern& pattern,
-    usize search_from) noexcept {
-    if (pattern.kind == SplitAtomKind::literal) {
-        if (pattern.literal.empty()) {
-            if (search_from < text.size()) return {{search_from, 0U}};
-            return std::nullopt;
-        }
-        const usize position = text.find(pattern.literal, search_from);
-        if (position == std::u16string_view::npos) return std::nullopt;
-        return {{position, pattern.literal.size()}};
-    }
-
-    for (usize position = search_from; position < text.size(); ++position) {
-        if (!split_atom_matches(pattern, text[position])) continue;
-        usize length = 1U;
-        if (pattern.repeat) {
-            while (position + length < text.size() &&
-                   split_atom_matches(pattern, text[position + length])) {
-                ++length;
-            }
-        }
-        return {{position, length}};
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] std::vector<std::u16string> split_java_text(
-    std::u16string_view text,
-    const SplitPattern& pattern,
-    i32 limit = 0) {
-    if (limit == 1) {
-        return {std::u16string(text)};
-    }
-    if (pattern.kind == SplitAtomKind::literal && pattern.literal.empty()) {
-        std::vector<std::u16string> characters;
-        characters.reserve(text.size());
-        for (usize index = 0U; index < text.size(); ++index) {
-            if (limit > 0 && characters.size() + 1U >=
-                                 static_cast<usize>(limit)) {
-                characters.emplace_back(text.substr(index));
-                return characters;
-            }
-            characters.emplace_back(1U, text[index]);
-        }
-        if (characters.empty()) characters.emplace_back();
-        if (limit == 0) {
-            while (!characters.empty() && characters.back().empty()) {
-                characters.pop_back();
-            }
-        }
-        return characters;
-    }
-
-    std::vector<std::u16string> parts;
-    usize cursor = 0U;
-    usize search_from = 0U;
-    bool matched = false;
-    while (auto match = next_split_match(text, pattern, search_from)) {
-        if (limit > 0 && parts.size() + 1U >=
-                             static_cast<usize>(limit)) {
-            break;
-        }
-        matched = true;
-        parts.emplace_back(text.substr(cursor, match->first - cursor));
-        cursor = match->first + match->second;
-        search_from = cursor;
-        if (search_from > text.size()) break;
-    }
-    if (!matched) {
-        parts.emplace_back(text);
-        return parts;
-    }
-    parts.emplace_back(text.substr(cursor));
-    if (limit == 0) {
-        while (!parts.empty() && parts.back().empty()) parts.pop_back();
-    }
-    return parts;
-}
-
 void register_string_extensions(NativeMethodRegistry& registry) {
     add(registry, "java/lang/String", "<init>", "()V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -2196,23 +1961,9 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/IllegalArgumentException",
                                  "String.replaceAll arguments are invalid");
             }
-            if (*regex != u"\\s+") {
-                return fail_java("java/lang/IllegalArgumentException",
-                                 "String.replaceAll pattern is unsupported");
-            }
-            std::u16string output;
-            output.reserve(text->size());
-            for (usize index = 0U; index < text->size();) {
-                if ((*text)[index] <= u' ') {
-                    while (index < text->size() && (*text)[index] <= u' ') {
-                        ++index;
-                    }
-                    output.append(*replacement);
-                } else {
-                    output.push_back((*text)[index++]);
-                }
-            }
-            auto result = create_java_string(machine, std::move(output));
+            auto output = replace_all_java_regex(*regex, *text, *replacement);
+            if (!output) return std::unexpected(output.error());
+            auto result = create_java_string(machine, std::move(*output));
             if (!result) return std::unexpected(result.error());
             return std::optional<Value>(Value::from_reference(*result));
         });
@@ -2298,17 +2049,17 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                                  "String.split pattern is not String");
             }
 
-            auto parts = split_java_text(*text,
-                                         parse_split_pattern(*regex_text));
+            auto parts = split_java_regex(*regex_text, *text);
+            if (!parts) return std::unexpected(parts.error());
             auto array = machine.heap().allocate_array(
-                "[Ljava/lang/String;", parts.size(),
+                "[Ljava/lang/String;", parts->size(),
                 Value::from_reference({}));
             if (!array) return std::unexpected(array.error());
             auto array_root = machine.pin_native_root(*array);
             if (!array_root) return std::unexpected(array_root.error());
-            for (usize index = 0; index < parts.size(); ++index) {
+            for (usize index = 0; index < parts->size(); ++index) {
                 auto value = create_java_string(machine,
-                                                std::move(parts[index]));
+                                                std::move((*parts)[index]));
                 if (!value) return std::unexpected(value.error());
                 auto stored = machine.heap().set_element(
                     *array, index, Value::from_reference(*value));
@@ -2341,17 +2092,17 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                                  "String.split pattern is not String");
             }
 
-            auto parts = split_java_text(
-                *text, parse_split_pattern(*regex_text), *limit);
+            auto parts = split_java_regex(*regex_text, *text, *limit);
+            if (!parts) return std::unexpected(parts.error());
             auto array = machine.heap().allocate_array(
-                "[Ljava/lang/String;", parts.size(),
+                "[Ljava/lang/String;", parts->size(),
                 Value::from_reference({}));
             if (!array) return std::unexpected(array.error());
             auto array_root = machine.pin_native_root(*array);
             if (!array_root) return std::unexpected(array_root.error());
-            for (usize index = 0; index < parts.size(); ++index) {
+            for (usize index = 0; index < parts->size(); ++index) {
                 auto value = create_java_string(machine,
-                                                std::move(parts[index]));
+                                                std::move((*parts)[index]));
                 if (!value) return std::unexpected(value.error());
                 auto stored = machine.heap().set_element(
                     *array, index, Value::from_reference(*value));
@@ -2380,74 +2131,10 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                 return fail(ErrorCode::invalid_argument,
                             "String.matches arguments are invalid");
             }
-            const auto is_digit = [](char16_t character) noexcept {
-                return character >= u'0' && character <= u'9';
-            };
-            const auto has_prefix = [](std::u16string_view value,
-                                       std::u16string_view prefix) noexcept {
-                return value.size() >= prefix.size() &&
-                       value.substr(0U, prefix.size()) == prefix;
-            };
-
-            bool matched = false;
-            if (*pattern_text == u"TC-\\d{2}") {
-                matched = text->size() == 5U &&
-                          has_prefix(*text, u"TC-") &&
-                          is_digit((*text)[3U]) &&
-                          is_digit((*text)[4U]);
-            } else if (*pattern_text == u"(?:LH|CV)-SKILL-\\d{2}") {
-                const bool prefix = has_prefix(*text, u"LH-SKILL-") ||
-                                    has_prefix(*text, u"CV-SKILL-");
-                matched = prefix && text->size() == 11U &&
-                          is_digit((*text)[9U]) &&
-                          is_digit((*text)[10U]);
-            } else if (*pattern_text ==
-                       u"(?:LH|CV)-ITEM-\\d+-\\d{2}") {
-                const bool prefix = has_prefix(*text, u"LH-ITEM-") ||
-                                    has_prefix(*text, u"CV-ITEM-");
-                if (prefix && text->size() >= 12U) {
-                    usize cursor = 8U;
-                    const usize digit_start = cursor;
-                    while (cursor < text->size() &&
-                           is_digit((*text)[cursor])) {
-                        ++cursor;
-                    }
-                    matched = cursor > digit_start &&
-                              cursor + 3U == text->size() &&
-                              (*text)[cursor] == u'-' &&
-                              is_digit((*text)[cursor + 1U]) &&
-                              is_digit((*text)[cursor + 2U]);
-                }
-            } else if (*pattern_text == u"[A-Z0-9_-]{4,32}") {
-                matched = text->size() >= 4U && text->size() <= 32U;
-                for (usize index = 0U; matched && index < text->size();
-                     ++index) {
-                    const char16_t character = (*text)[index];
-                    matched = (character >= u'A' && character <= u'Z') ||
-                              is_digit(character) || character == u'_' ||
-                              character == u'-';
-                }
-            } else {
-                bool contains_meta = false;
-                for (const char16_t character : *pattern_text) {
-                    if (character == u'\\' || character == u'[' ||
-                        character == u']' || character == u'(' ||
-                        character == u')' || character == u'{' ||
-                        character == u'}' || character == u'+' ||
-                        character == u'*' || character == u'?' ||
-                        character == u'|' || character == u'.' ||
-                        character == u'^' || character == u'$') {
-                        contains_meta = true;
-                        break;
-                    }
-                }
-                if (contains_meta) {
-                    return fail_java("java/lang/IllegalArgumentException",
-                                     "String.matches pattern is unsupported");
-                }
-                matched = *text == *pattern_text;
-            }
-            return std::optional<Value>(Value::from_int(matched ? 1 : 0));
+            auto match = match_java_regex(*pattern_text, *text);
+            if (!match) return std::unexpected(match.error());
+            return std::optional<Value>(Value::from_int(
+                match->has_value() ? 1 : 0));
         });
 
     add(registry, "java/lang/String", "format",

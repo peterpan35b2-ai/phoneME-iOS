@@ -51,6 +51,13 @@ target_compile_options(phoneMECore PRIVATE
     -Werror=return-type
 )
 target_link_libraries(phoneMECore PRIVATE z)
+# std::regex reports invalid patterns with std::regex_error. Keep exceptions
+# isolated to the regex translation unit while the rest of the VM remains
+# built with -fno-exceptions.
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vm/RegexEngine.cpp"
+    PROPERTIES COMPILE_OPTIONS "-fexceptions"
+)
 if(EMSCRIPTEN)
     target_compile_options(phoneMECore PRIVATE
         -pthread
@@ -149,6 +156,8 @@ if(EMSCRIPTEN)
     target_link_libraries(phoneMEWeb PRIVATE phoneMECore z)
     target_link_options(phoneMEWeb PRIVATE
         -pthread
+        "SHELL:-sFETCH=1"
+        "SHELL:-sFETCH_SUPPORT_INDEXEDDB=0"
         "SHELL:-sUSE_ZLIB=1"
         "SHELL:-lidbfs.js"
         "SHELL:-sMODULARIZE=1"
@@ -163,6 +172,7 @@ if(EMSCRIPTEN)
         "SHELL:-sMAXIMUM_MEMORY=1073741824"
         "SHELL:-sSTACK_SIZE=2097152"
         "SHELL:-sPTHREAD_POOL_SIZE=4"
+        "SHELL:-sPTHREAD_POOL_DELAY_LOAD=1"
         "SHELL:-sPTHREAD_POOL_SIZE_STRICT=0"
         "SHELL:-sEXPORTED_RUNTIME_METHODS=['FS','HEAPU8','HEAP32','ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
         "SHELL:-sEXPORTED_FUNCTIONS=['_malloc','_free','_phoneme_c_api_version','_phoneme_create','_phoneme_destroy','_phoneme_configure','_phoneme_configure_keymap','_phoneme_configure_app_frame_pacing','_phoneme_configure_app_heap','_phoneme_configure_jit','_phoneme_jit_status','_phoneme_configure_translation','_phoneme_configure_translation_v2','_phoneme_configure_app_translation','_phoneme_configure_app_translation_v2','_phoneme_install_jar','_phoneme_uninstall_suite','_phoneme_set_suite_trust','_phoneme_start_system','_phoneme_start_midlet','_phoneme_set_foreground','_phoneme_pause_midlet','_phoneme_resume_midlet','_phoneme_destroy_midlet','_phoneme_midlet_state','_phoneme_foreground_app_id','_phoneme_midlet_used_memory','_phoneme_stop','_phoneme_suspend','_phoneme_resume','_phoneme_is_running','_phoneme_is_suspended','_phoneme_last_exit_code','_phoneme_send_key','_phoneme_send_pointer','_phoneme_pump_events','_phoneme_copy_frame_rgba','_phoneme_poll_lcdui_event','_phoneme_lcdui_select_command','_phoneme_lcdui_select_list_item_command','_phoneme_lcdui_focus_item','_phoneme_lcdui_activate_item','_phoneme_lcdui_set_text','_phoneme_lcdui_set_choice','_phoneme_lcdui_set_gauge','_phoneme_lcdui_set_date','_phoneme_lcdui_set_scroll_position','_phoneme_copy_lcdui_image_rgba','_phoneme_web_poll_lcdui_event_json','_phoneme_web_error_name']"

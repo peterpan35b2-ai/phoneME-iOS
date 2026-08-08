@@ -3,9 +3,31 @@
   Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Resource-Policy: same-origin
 
-/wasm/*.wasm
-  Content-Type: application/wasm
-  Cache-Control: no-cache, no-store, must-revalidate
+/sw.js
+  Cache-Control: no-cache
+  Service-Worker-Allowed: /
 
-/wasm/*.js
-  Cache-Control: no-cache, no-store, must-revalidate
+/manifest.webmanifest
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: no-cache
+
+# Hash-versioned core assets never change in-place. Keep them in the browser
+# cache so reloads do not download and recompile the same multi-megabyte core.
+/wasm/build-:version/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/wasm/build-:version/*.wasm
+  Content-Type: application/wasm
+
+# The manifest is the only mutable pointer to a versioned core pair. Revalidate
+# it on reload instead of disabling the browser cache for every WASM asset.
+/wasm/manifest.json
+  Cache-Control: no-cache
+
+# Legacy fixed names are retained for older frontends and must stay revalidated.
+/wasm/phoneme.wasm
+  Content-Type: application/wasm
+  Cache-Control: no-cache
+
+/wasm/phoneme.js
+  Cache-Control: no-cache

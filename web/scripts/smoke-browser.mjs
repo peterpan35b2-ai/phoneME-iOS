@@ -1,25 +1,38 @@
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const customJarPath = process.argv[2];
+const websocketProxyUrl = process.env.PHONEME_WEBSOCKET_PROXY_URL?.trim() || "";
+const holdMilliseconds = Math.max(0, Number.parseInt(process.env.PHONEME_SMOKE_HOLD_MS ?? "0", 10) || 0);
+const skipReload = process.env.PHONEME_SMOKE_SKIP_RELOAD === "1";
+const skipPlayerMenu = process.env.PHONEME_SMOKE_SKIP_PLAYER_MENU === "1";
+const overrideMainClass = process.env.PHONEME_SMOKE_MAIN_CLASS?.trim() || "";
+const keySequence = (process.env.PHONEME_SMOKE_KEYS ?? "")
+  .split(",")
+  .map((key) => key.trim())
+  .filter(Boolean);
+const keyDelayMilliseconds = Math.max(0, Number.parseInt(process.env.PHONEME_SMOKE_KEY_DELAY_MS ?? "0", 10) || 0);
+const screenshotPath = process.env.PHONEME_SMOKE_SCREENSHOT?.trim() || "";
 const jarPath = path.resolve(
   customJarPath ??
     path.join(
       root,
-      "../Core/build/core-audit-canvas-graphics6/canvas-graphics-host-tests.task.90018.qux7Zj/canvas-graphics-fixture.jar"
+      "../Core/Compatibility/fixtures/generated/compatibility-fixtures.jar"
     )
 );
 const chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const port = 4175;
-const debuggingPort = 9227;
+const debuggingPort = Number.parseInt(process.env.PHONEME_SMOKE_DEBUG_PORT ?? "", 10) || (19000 + (process.pid % 10000));
+const externalBaseUrl = process.env.PHONEME_SMOKE_BASE_URL?.trim() || "";
+const baseUrl = externalBaseUrl || `http://127.0.0.1:${port}`;
 
 await access(jarPath);
 await access(chromePath);
 
-const preview = spawn(
+const preview = externalBaseUrl ? null : spawn(
   "npm",
   ["run", "preview", "--", "--host", "127.0.0.1", "--port", String(port)],
   { cwd: root, stdio: ["ignore", "pipe", "pipe"] }
@@ -33,7 +46,7 @@ const chrome = spawn(
     "--no-default-browser-check",
     `--remote-debugging-port=${debuggingPort}`,
     `--user-data-dir=/tmp/phoneme-web-smoke-${process.pid}`,
-    `http://127.0.0.1:${port}`
+    baseUrl
   ],
   { stdio: ["ignore", "pipe", "pipe"] }
 );
@@ -74,6 +87,7 @@ await new Promise((resolve, reject) => {
 let commandId = 0;
 const pending = new Map();
 const exceptions = [];
+const networkEvents = [];
 socket.addEventListener("message", (event) => {
   const message = JSON.parse(String(event.data));
   if (message.id) {
@@ -87,6 +101,16 @@ socket.addEventListener("message", (event) => {
   }
   if (message.method === "Runtime.exceptionThrown") {
     exceptions.push(message.params.exceptionDetails);
+  } else if (message.method === "Network.requestWillBeSent") {
+    const request = message.params?.request;
+    if (request?.url?.includes('/api/http')) {
+      networkEvents.push({ kind: 'request', method: request.method, url: request.url });
+    }
+  } else if (message.method === "Network.responseReceived") {
+    const response = message.params?.response;
+    if (response?.url?.includes('/api/http')) {
+      networkEvents.push({ kind: 'response', status: response.status, url: response.url });
+    }
   }
 });
 
@@ -125,10 +149,31 @@ try {
   await command("Runtime.enable");
   await command("DOM.enable");
   await command("Page.enable");
+  await command("Network.enable");
+
+  if (websocketProxyUrl) {
+    console.log("[smoke] configuring WebSocket proxy", websocketProxyUrl);
+    await evaluate(`(() => {
+      const key = 'phoneme-web.settings.v2';
+      let settings = {};
+      try { settings = JSON.parse(localStorage.getItem(key) || '{}'); } catch {}
+      settings.websocketProxyUrl = ${JSON.stringify(websocketProxyUrl)};
+      localStorage.setItem(key, JSON.stringify(settings));
+      return true;
+    })()`);
+    await command("Page.reload", { ignoreCache: false });
+  }
 
   console.log("[smoke] waiting for runtime");
-  await waitForExpression("document.body?.innerText.includes('phoneME Web đã sẵn sàng')");
-  console.log("[smoke] runtime ready");
+  await waitForExpression("document.querySelector('.app-root')?.getAttribute('data-runtime-phase') === 'ready'");
+  const manifestResponse = await fetch(new URL("/wasm/manifest.json", baseUrl), { cache: "no-store" });
+  if (!manifestResponse.ok) throw new Error(`WASM manifest HTTP ${manifestResponse.status}`);
+  const wasmManifest = await manifestResponse.json();
+  if (!String(wasmManifest.module ?? "").startsWith("build-") ||
+      !String(wasmManifest.wasm ?? "").startsWith("build-")) {
+    throw new Error(`Invalid versioned WASM manifest: ${JSON.stringify(wasmManifest)}`);
+  }
+  console.log("[smoke] runtime ready", wasmManifest.version);
   const documentNode = await command("DOM.getDocument", { depth: -1, pierce: true });
   const inputNode = await command("DOM.querySelector", {
     nodeId: documentNode.root.nodeId,
@@ -142,16 +187,36 @@ try {
   });
 
   console.log("[smoke] waiting for installation");
-  await waitForExpression("document.body?.innerText.includes('1 ứng dụng đã cài')", 30_000);
+  await waitForExpression("Boolean(document.querySelector('.game-row'))", 30_000);
   console.log("[smoke] installed");
   const installedTitle = await evaluate(`(() => {
-    const card = document.querySelector('.game-card');
-    const titled = card?.querySelector('[title]');
+    const row = document.querySelector('.game-row');
+    const titled = row?.querySelector('.game-row-title');
     return titled?.getAttribute('title') || titled?.textContent?.trim() || '';
   })()`);
   if (!installedTitle) throw new Error("Installed MIDlet title not found");
+  if (overrideMainClass) {
+    console.log("[smoke] overriding MIDlet main class", overrideMainClass);
+    await evaluate(`(() => {
+      const key = 'phoneme-web.games.v1';
+      const games = JSON.parse(localStorage.getItem(key) || '[]');
+      if (!games.length) return false;
+      games[0].mainClass = ${JSON.stringify(overrideMainClass)};
+      localStorage.setItem(key, JSON.stringify(games));
+      return true;
+    })()`);
+    await command("Page.reload", { ignoreCache: false });
+    await waitForExpression("document.querySelector('.app-root')?.getAttribute('data-runtime-phase') === 'ready' && Boolean(document.querySelector('.game-row-title'))", 30_000);
+  }
   await evaluate(`(() => {
-    const button = [...document.querySelectorAll('button')].find((element) => element.textContent?.trim() === 'Chạy');
+    const row = document.querySelector('.game-row');
+    if (!row) return false;
+    row.click();
+    return true;
+  })()`);
+  await waitForExpression("[...document.querySelectorAll('button')].some((element) => element.textContent?.trim() === 'Bắt đầu')");
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll('button')].find((element) => element.textContent?.trim() === 'Bắt đầu');
     if (!button) return false;
     button.click();
     return true;
@@ -159,7 +224,7 @@ try {
 
   console.log("[smoke] launching MIDlet");
   const expectedTitleLiteral = JSON.stringify(installedTitle);
-  const strictFixture = !customJarPath;
+  const strictFixture = !customJarPath && !overrideMainClass;
   const result = await waitForExpression(`(() => {
     const body = document.body?.innerText || '';
     const error = body.includes('Không thể chạy ứng dụng');
@@ -168,7 +233,20 @@ try {
     const running = body.includes('Đang chạy ' + ${expectedTitleLiteral});
     if (error) return { status: 'error', body };
     if (canvas && running && canvas.width === 240 && canvas.height === 320) {
-      return { status: 'canvas', width: canvas.width, height: canvas.height, body };
+      const surface = document.querySelector('.emulator-surface');
+      const keypad = document.querySelector('.virtual-keypad-overlay');
+      const appbar = document.querySelector('.emulator-appbar');
+      const canvasRect = canvas.getBoundingClientRect();
+      const surfaceRect = surface?.getBoundingClientRect();
+      return {
+        status: 'canvas',
+        width: canvas.width,
+        height: canvas.height,
+        topAligned: Boolean(surfaceRect) && Math.abs(canvasRect.top - surfaceRect.top) < 2,
+        keypad: Boolean(keypad),
+        appbar: Boolean(appbar),
+        body
+      };
     }
     if (${strictFixture ? "false" : "true"} && lcdui && running) {
       return { status: 'lcdui', body };
@@ -179,11 +257,106 @@ try {
   if (result.status === "error") {
     throw new Error(`MIDlet launch failed:\n${result.body}`);
   }
+  if (result.status === "canvas" && (!result.topAligned || !result.keypad || !result.appbar)) {
+    throw new Error(`Player chrome/layout mismatch: ${JSON.stringify(result, null, 2)}`);
+  }
   if (exceptions.length) {
     throw new Error(`Browser exceptions: ${JSON.stringify(exceptions, null, 2)}`);
   }
 
-  console.log(JSON.stringify({ ok: true, jarPath, result }, null, 2));
+  if (!skipPlayerMenu) {
+    console.log("[smoke] checking Swift-style player menu");
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="Thêm"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`);
+    await waitForExpression(`(() => {
+      const body = document.body?.innerText || '';
+      return body.includes('Bàn phím ảo') &&
+        body.includes('Khóa xoay màn hình') &&
+        body.includes('Tự động dịch') &&
+        body.includes('Thoát');
+    })()`);
+    const playerMenuText = await evaluate(`(() => {
+      const menu = document.querySelector('.player-menu .MuiMenu-list');
+      return menu?.innerText || '';
+    })()`);
+    if (/Tạm dừng|Khởi động lại|Toàn màn hình/.test(playerMenuText)) {
+      throw new Error(`Player menu contains non-Swift actions: ${playerMenuText}`);
+    }
+    await evaluate(`document.body.click()`);
+  }
+
+  const frameHashes = [];
+  const captureFrameHash = async (label) => {
+    const value = await evaluate(`(() => {
+      const canvas = document.querySelector('canvas.emulator-canvas');
+      if (!canvas) return null;
+      const context = canvas.getContext('2d');
+      if (!context) return null;
+      const bytes = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let hash = 2166136261 >>> 0;
+      for (let index = 0; index < bytes.length; index += 97) {
+        hash ^= bytes[index];
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+      return hash.toString(16).padStart(8, '0');
+    })()`);
+    frameHashes.push({ label, value });
+  };
+
+  if (keySequence.length) {
+    if (keyDelayMilliseconds > 0) {
+      console.log(`[smoke] waiting ${keyDelayMilliseconds} ms before keys`);
+      await sleep(keyDelayMilliseconds);
+    }
+    await captureFrameHash("before-keys");
+    console.log("[smoke] sending keys", keySequence.join(", "));
+    for (const key of keySequence) {
+      await command("Input.dispatchKeyEvent", { type: "keyDown", key });
+      await sleep(80);
+      await command("Input.dispatchKeyEvent", { type: "keyUp", key });
+      await sleep(250);
+      await captureFrameHash(key);
+    }
+  }
+
+  if (holdMilliseconds > 0) {
+    console.log(`[smoke] holding active MIDlet for ${holdMilliseconds} ms`);
+    await sleep(holdMilliseconds);
+  }
+
+  if (screenshotPath) {
+    const dataUrl = await evaluate(`document.querySelector('canvas.emulator-canvas')?.toDataURL('image/png') || ''`);
+    if (dataUrl) {
+      await writeFile(screenshotPath, Buffer.from(dataUrl.split(',', 2)[1], 'base64'));
+      console.log('[smoke] wrote screenshot', screenshotPath);
+    }
+  }
+
+  const liveState = await evaluate(`(() => ({
+    phase: document.querySelector('.app-root')?.getAttribute('data-runtime-phase') || '',
+    live: document.querySelector('.sr-only')?.textContent || '',
+    error: document.querySelector('.emulator-error')?.textContent || ''
+  }))()`);
+  let reload = "skipped";
+  if (!skipReload) {
+    console.log("[smoke] reloading while MIDlet is active");
+    await command("Page.reload", { ignoreCache: false });
+    await waitForExpression(`(() => {
+      return document.querySelector('.app-root')?.getAttribute('data-runtime-phase') === 'ready' &&
+        Boolean(document.querySelector('.game-row'));
+    })()`, 30_000);
+    if (exceptions.length) {
+      throw new Error(`Browser exceptions after reload: ${JSON.stringify(exceptions, null, 2)}`);
+    }
+    console.log("[smoke] runtime recovered after reload");
+    reload = "ready";
+  }
+
+  console.log(JSON.stringify({ ok: true, jarPath, result, liveState, reload, networkEvents, frameHashes }, null, 2));
 } catch (error) {
   exitCode = 1;
   console.error(error instanceof Error ? error.stack : String(error));
@@ -203,7 +376,7 @@ try {
 } finally {
   socket.close();
   chrome.kill("SIGTERM");
-  preview.kill("SIGTERM");
+  preview?.kill("SIGTERM");
   await sleep(200);
   if (/TypeError|ReferenceError|RuntimeError/.test(browserErrors)) {
     console.error(browserErrors);

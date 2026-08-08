@@ -383,6 +383,26 @@ using namespace builtin;
         });
     }
 
+    if (name == "java/math/BigDecimal") {
+        return make_class("java/math/BigDecimal", "java/lang/Number",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "unscaled", "J"),
+            field(kPrivate | kFinal, "scale", "I"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic | kStatic, "valueOf", "(J)Ljava/math/BigDecimal;"),
+            method(kPublic, "movePointRight", "(I)Ljava/math/BigDecimal;"),
+            method(kPublic, "intValueExact", "()I"),
+            method(kPublic, "compareTo", "(Ljava/math/BigDecimal;)I"),
+            method(kPublic, "compareTo", "(Ljava/lang/Object;)I"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/lang/Comparable", "java/io/Serializable"});
+    }
+
     if (name == "java/security/SecureRandom") {
         return make_class("java/security/SecureRandom", "java/util/Random",
                           kOrdinary, {}, {
@@ -430,6 +450,8 @@ using namespace builtin;
                    "(Ljava/lang/String;)Ljava/util/regex/Pattern;"),
             method(kPublic | kStatic, "compile",
                    "(Ljava/lang/String;I)Ljava/util/regex/Pattern;"),
+            method(kPublic | kStatic, "matches",
+                   "(Ljava/lang/String;Ljava/lang/CharSequence;)Z"),
             method(kPublic, "matcher",
                    "(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;"),
         });
@@ -446,6 +468,8 @@ using namespace builtin;
             method(kPrivate, "<init>",
                    "(Ljava/util/regex/Pattern;Ljava/lang/String;)V"),
             method(kPublic, "find", "()Z"),
+            method(kPublic, "matches", "()Z"),
+            method(kPublic, "group", "()Ljava/lang/String;"),
             method(kPublic, "group", "(I)Ljava/lang/String;"),
         });
     }

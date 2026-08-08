@@ -761,6 +761,61 @@ public final class Jdk8Semantics {
         return result;
     }
 
+    public static int stringRegexMatchesApi() {
+        int result = 0;
+        if ("AB-05".matches("[A-Z]{2}-\\d{2}")) result |= 1;
+        if ("alpha-12".matches("(?:alpha|beta)-\\d{2}")) result |= 2;
+        if ("gamma-05".matches("(?:alpha|beta|gamma)-\\d{2}")) result |= 4;
+        if ("item-123-09".matches("item-\\d+-\\d{2}")) result |= 8;
+        if ("CODE_9-X".matches("[A-Z0-9_-]{4,32}")) result |= 16;
+        return result;
+    }
+
+    public static int generalRegexApi() {
+        int result = 0;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+            "(foo|bar)-(\\d+)").matcher("x bar-42 y");
+        if (matcher.find() && matcher.group().equals("bar-42")
+                && matcher.group(1).equals("bar")
+                && matcher.group(2).equals("42")) result |= 1;
+
+        String[] parts = "one, two;three".split("\\s*[,;]\\s*");
+        if (parts.length == 3 && parts[0].equals("one")
+                && parts[1].equals("two") && parts[2].equals("three")) {
+            result |= 2;
+        }
+
+        if ("foo-12 bar-7".replaceAll("([a-z]+)-(\\d+)", "$1:$2")
+                .equals("foo:12 bar:7")) result |= 4;
+        if ("aaaa".matches("a{2,4}") && "abbb".matches("ab+")) result |= 8;
+
+        try {
+            java.util.regex.Pattern.compile("([a-z]");
+        } catch (java.util.regex.PatternSyntaxException expected) {
+            result |= 16;
+        }
+        return result;
+    }
+
+    public static int bigDecimalApi() {
+        int result = 0;
+        java.math.BigDecimal half = new java.math.BigDecimal("0.5");
+        if (half.compareTo(java.math.BigDecimal.valueOf(0L)) > 0
+                && half.compareTo(java.math.BigDecimal.valueOf(10L)) < 0) {
+            result |= 1;
+        }
+        if (half.movePointRight(2).intValueExact() == 50) result |= 2;
+        if (new java.math.BigDecimal("0.50").compareTo(half) == 0) result |= 4;
+        if (new java.math.BigDecimal("-1.25").compareTo(
+                java.math.BigDecimal.valueOf(0L)) < 0) result |= 8;
+        try {
+            half.intValueExact();
+        } catch (ArithmeticException expected) {
+            result |= 16;
+        }
+        return result;
+    }
+
     public static int streamApi() {
         int result = 0;
         java.util.ArrayList values = new java.util.ArrayList();

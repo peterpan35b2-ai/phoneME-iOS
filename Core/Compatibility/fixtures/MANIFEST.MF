@@ -4,6 +4,7 @@ MIDlet-Version: 1.0.0
 MIDlet-Vendor: phoneME-iOS Project
 MicroEdition-Configuration: CLDC-1.1
 MicroEdition-Profile: MIDP-2.0
+MIDlet-Permissions: javax.microedition.io.Connector.http, javax.microedition.io.Connector.socket, javax.microedition.io.Connector.datagram
 MIDlet-1: Canvas Fixture,,compat.CanvasOfflineMIDlet
 MIDlet-2: LCDUI Fixture,,compat.LcduiMIDlet
 MIDlet-3: RMS Fixture,,compat.RmsMIDlet

@@ -515,11 +515,9 @@ void register_class_natives(NativeMethodRegistry& registry) {
                 class_name->front() != '[') {
                 // Several CLDC/S60 implementations accepted a leading slash
                 // while still resolving the resource beside the MIDlet class.
-                // Commercial games rely on that compatibility quirk (for
-                // example game/SexWG loading "/swg.sse" stored as
-                // game/swg.sse). Preserve the standard archive-root lookup
-                // first, then fall back to the mirror class package only when
-                // the absolute resource does not exist.
+                // Preserve the standard archive-root lookup first, then apply
+                // that handset compatibility behavior only when the absolute
+                // resource does not exist.
                 const usize slash = class_name->rfind('/');
                 if (slash != std::string::npos) {
                     std::string package_path(

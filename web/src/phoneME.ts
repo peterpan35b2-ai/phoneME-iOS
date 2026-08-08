@@ -3,6 +3,7 @@ import type { GameEntry, JarMetadata, LcduiEvent } from "./types";
 type EmscriptenFs = {
   filesystems: { IDBFS: unknown };
   mkdir(path: string): void;
+  mkdirTree(path: string): void;
   mount(type: unknown, options: Record<string, unknown>, mountpoint: string): void;
   syncfs(populate: boolean, callback: (error?: unknown) => void): void;
   writeFile(path: string, data: Uint8Array): void;
@@ -18,12 +19,16 @@ type PhoneMEModule = {
   UTF8ToString(pointer: number): string;
   stringToUTF8(value: string, pointer: number, capacity: number): void;
   lengthBytesUTF8(value: string): number;
+  pthreadPoolReady?: Promise<unknown>;
   _phoneme_c_api_version(): number;
   _phoneme_create(): number;
   _phoneme_destroy(runtime: number): void;
   _phoneme_configure(runtime: number, runtimeHome: number, classArchive: number): number;
   _phoneme_configure_keymap(runtime: number, up: number, down: number, left: number, right: number, fire: number, soft1: number, soft2: number): number;
+  _phoneme_configure_app_frame_pacing(runtime: number, appId: number, framesPerSecond: number, pacingMode: number): number;
+  _phoneme_configure_app_heap(runtime: number, appId: number, heapMegabytes: number): number;
   _phoneme_configure_translation(runtime: number, enabled: number, source: number, target: number): number;
+  _phoneme_configure_app_translation_v2(runtime: number, appId: number, enabled: number, provider: number, source: number, target: number): number;
   _phoneme_install_jar(runtime: number, jarPath: number, suiteIdOut: number): number;
   _phoneme_uninstall_suite(runtime: number, suiteId: number, removeData: number): number;
   _phoneme_set_suite_trust(runtime: number, suiteId: number, trust: number): number;
@@ -55,8 +60,14 @@ type PhoneMEModule = {
 
 type ModuleFactory = (options: Record<string, unknown>) => Promise<PhoneMEModule>;
 
+type WasmBuildManifest = {
+  version: string;
+  module: string;
+  wasm: string;
+};
+
 export type FrameData = {
-  pixels: Uint8ClampedArray;
+  pixels: Uint8ClampedArray<ArrayBuffer>;
   width: number;
   height: number;
   generation: bigint;
@@ -86,13 +97,19 @@ export class PhoneMEWebRuntime {
   private currentGame: GameEntry | null = null;
   private initialized = false;
   private flushPromise: Promise<void> | null = null;
+  private fatalErrorValue: Error | null = null;
+  private restoreWebSocketRouting: (() => void) | null = null;
 
   get ready() {
-    return this.initialized && this.module !== null && this.runtime !== 0;
+    return this.initialized && this.module !== null && this.runtime !== 0 && !this.fatalErrorValue;
   }
 
   get activeGame() {
     return this.currentGame;
+  }
+
+  get fatalError() {
+    return this.fatalErrorValue;
   }
 
   async initialize(options: PhoneMEOptions = {}) {
@@ -101,24 +118,35 @@ export class PhoneMEWebRuntime {
       throw new Error("WebAssembly đa luồng cần COOP/COEP. Hãy chạy bằng Vite hoặc máy chủ có header cách ly chéo nguồn.");
     }
 
-    const moduleUrl = new URL("/wasm/phoneme.js", globalThis.location.href).href;
+    this.fatalErrorValue = null;
+    this.configureWebsockifyRouting(options.websocketProxyUrl);
+    const { moduleUrl, wasmUrl } = await this.resolveWasmAssets();
     const imported = await import(/* @vite-ignore */ moduleUrl) as { default: ModuleFactory };
     this.module = await imported.default({
-      locateFile: (path: string) => new URL(path, moduleUrl).href,
+      locateFile: (path: string) => path === "phoneme.wasm" ? wasmUrl : new URL(path, moduleUrl).href,
       print: (line: string) => options.onLog?.(String(line), false),
       printErr: (line: string) => options.onLog?.(String(line), true),
-      websocket: options.websocketProxyUrl ? { url: options.websocketProxyUrl } : undefined
+      websocket: options.websocketProxyUrl ? { subprotocol: "binary" } : undefined,
+      onAbort: (reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason || "WebAssembly đã abort");
+        this.fatalErrorValue = new Error(message);
+      }
     });
 
     this.ensureDirectory(STORAGE_ROOT);
     try {
-      this.module.FS.mount(this.module.FS.filesystems.IDBFS, {}, STORAGE_ROOT);
+      this.module.FS.mount(
+        this.module.FS.filesystems.IDBFS,
+        { autoPersist: true },
+        STORAGE_ROOT
+      );
     } catch (error) {
-      if (!String(error).toLowerCase().includes("busy")) throw error;
+      if (this.errnoOf(error) !== 10) throw error; // EBUSY: already mounted.
     }
     await this.syncFileSystem(true);
     this.ensureDirectory(RUNTIME_HOME);
     this.ensureDirectory(IMPORT_ROOT);
+    void globalThis.navigator?.storage?.persist?.().catch(() => false);
 
     this.runtime = this.module._phoneme_create();
     if (!this.runtime) throw new Error("Không tạo được phoneME runtime");
@@ -184,12 +212,17 @@ export class PhoneMEWebRuntime {
     await this.flushStorage();
   }
 
-  launch(game: GameEntry, width: number, height: number) {
+  async launch(game: GameEntry, width: number, height: number) {
     const module = this.requireModule();
+    await module.pthreadPoolReady;
     if (this.currentGame) {
       module._phoneme_destroy_midlet(this.runtime, APP_ID);
       this.currentGame = null;
     }
+    this.assertOk(
+      module._phoneme_set_suite_trust(this.runtime, game.suiteId, 1),
+      `Cấp quyền ${game.title}`
+    );
     const result = this.withCString(game.mainClass, (mainClass) =>
       module._phoneme_start_midlet(this.runtime, game.suiteId, mainClass, APP_ID, width, height)
     );
@@ -203,6 +236,49 @@ export class PhoneMEWebRuntime {
       this.requireModule()._phoneme_set_foreground(this.runtime, APP_ID, width, height),
       "Đổi kích thước màn hình"
     );
+  }
+
+  configureHeap(heapMegabytes: number) {
+    this.assertOk(
+      this.requireModule()._phoneme_configure_app_heap(this.runtime, APP_ID, heapMegabytes),
+      "Cấu hình heap"
+    );
+  }
+
+  configureFrameRate() {
+    this.assertOk(
+      this.requireModule()._phoneme_configure_app_frame_pacing(
+        this.runtime,
+        APP_ID,
+        30,
+        1
+      ),
+      "Giới hạn FPS"
+    );
+  }
+
+  configureFrameRateOverride(_enabled: boolean, _framesPerSecond: number) {
+    this.configureFrameRate();
+  }
+
+  configureTranslation(enabled: boolean, provider: "google" | "bing" | "automatic", sourceLanguage: string) {
+    if (!this.currentGame) return;
+    const module = this.requireModule();
+    const providerValue = provider === "google" ? 0 : provider === "bing" ? 1 : 2;
+    const invoke = (sourcePointer: number) => this.withCString("vi", (targetPointer) =>
+      module._phoneme_configure_app_translation_v2(
+        this.runtime,
+        APP_ID,
+        enabled ? 1 : 0,
+        providerValue,
+        sourcePointer,
+        targetPointer
+      )
+    );
+    const code = sourceLanguage === "auto"
+      ? invoke(0)
+      : this.withCString(sourceLanguage, invoke);
+    this.assertOk(code, "Cấu hình tự động dịch");
   }
 
   pause() {
@@ -273,7 +349,8 @@ export class PhoneMEWebRuntime {
       generationPointer
     );
     if (copied <= 0) return null;
-    const pixels = new Uint8ClampedArray(module.HEAPU8.slice(this.framePointer, this.framePointer + copied).buffer);
+    const pixels = new Uint8ClampedArray(copied);
+    pixels.set(module.HEAPU8.subarray(this.framePointer, this.framePointer + copied));
     return { pixels, width, height, generation };
   }
 
@@ -305,14 +382,18 @@ export class PhoneMEWebRuntime {
     if (copied <= 0) return null;
     const view = new DataView(module.HEAPU8.buffer);
     return {
-      pixels: new Uint8ClampedArray(module.HEAPU8.slice(this.framePointer, this.framePointer + copied).buffer),
+      pixels: (() => {
+        const pixels = new Uint8ClampedArray(copied);
+        pixels.set(module.HEAPU8.subarray(this.framePointer, this.framePointer + copied));
+        return pixels;
+      })(),
       width: view.getInt32(widthPointer, true),
       height: view.getInt32(heightPointer, true),
       generation: view.getBigUint64(generationPointer, true)
     };
   }
 
-  pollLcduiEvents(limit = 256) {
+  pollLcduiEvents(limit = 512) {
     const module = this.requireModule();
     const events: LcduiEvent[] = [];
     while (events.length < limit) {
@@ -384,9 +465,46 @@ export class PhoneMEWebRuntime {
     this.module = null;
     this.initialized = false;
     this.currentGame = null;
+    this.fatalErrorValue = null;
+    this.restoreWebSocketRouting?.();
+    this.restoreWebSocketRouting = null;
+  }
+
+  private configureWebsockifyRouting(proxyUrl?: string) {
+    this.restoreWebSocketRouting?.();
+    this.restoreWebSocketRouting = null;
+    if (!proxyUrl) return;
+
+    const proxyBase = new URL(proxyUrl, globalThis.location.href);
+    const NativeWebSocket = globalThis.WebSocket;
+    const RoutedWebSocket = new Proxy(NativeWebSocket, {
+      construct(Target, args) {
+        const [rawUrl, rawProtocols] = args as [string | URL, string | string[] | undefined];
+        const protocols = Array.isArray(rawProtocols)
+          ? rawProtocols
+          : rawProtocols ? [rawProtocols] : [];
+        const isSocketFs = protocols.includes("binary") || protocols.includes("base64");
+        if (!isSocketFs) return Reflect.construct(Target, args);
+
+        const destination = new URL(String(rawUrl));
+        const port = destination.port || (destination.protocol === "wss:" ? "443" : "80");
+        const routed = new URL(proxyBase.href);
+        routed.searchParams.set("token", `${destination.hostname}:${port}`);
+        const nextArgs = rawProtocols === undefined
+          ? [routed.href]
+          : [routed.href, rawProtocols];
+        return Reflect.construct(Target, nextArgs);
+      }
+    }) as typeof WebSocket;
+
+    globalThis.WebSocket = RoutedWebSocket;
+    this.restoreWebSocketRouting = () => {
+      if (globalThis.WebSocket === RoutedWebSocket) globalThis.WebSocket = NativeWebSocket;
+    };
   }
 
   private requireModule() {
+    if (this.fatalErrorValue) throw this.fatalErrorValue;
     if (!this.module || !this.runtime) throw new Error("phoneME Web chưa sẵn sàng");
     return this.module;
   }
@@ -423,13 +541,36 @@ export class PhoneMEWebRuntime {
   }
 
   private ensureDirectory(path: string) {
-    if (!this.module) return;
+    this.module?.FS.mkdirTree(path);
+  }
+
+  private async resolveWasmAssets() {
+    const fallbackModuleUrl = new URL("/wasm/phoneme.js", globalThis.location.href).href;
+    const fallbackWasmUrl = new URL("/wasm/phoneme.wasm", globalThis.location.href).href;
     try {
-      this.module.FS.mkdir(path);
-    } catch (error) {
-      const message = String(error).toLowerCase();
-      if (!message.includes("exist")) throw error;
+      const manifestUrl = new URL("/wasm/manifest.json", globalThis.location.href);
+      const response = await fetch(manifestUrl, { cache: "no-cache" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const manifest = await response.json() as Partial<WasmBuildManifest>;
+      if (!manifest.version || !manifest.module || !manifest.wasm) {
+        throw new Error("manifest WebAssembly không hợp lệ");
+      }
+      const moduleUrl = new URL(manifest.module, manifestUrl).href;
+      const wasmUrl = new URL(manifest.wasm, manifestUrl).href;
+      if (new URL(moduleUrl).origin !== globalThis.location.origin || new URL(wasmUrl).origin !== globalThis.location.origin) {
+        throw new Error("manifest WebAssembly trỏ ra ngoài origin");
+      }
+      return { moduleUrl, wasmUrl };
+    } catch {
+      // Backward-compatible fallback for deployments created before manifest.json.
+      return { moduleUrl: fallbackModuleUrl, wasmUrl: fallbackWasmUrl };
     }
+  }
+
+  private errnoOf(error: unknown) {
+    if (!error || typeof error !== "object") return undefined;
+    const errno = (error as { errno?: unknown }).errno;
+    return typeof errno === "number" ? errno : undefined;
   }
 
   private syncFileSystem(populate: boolean) {

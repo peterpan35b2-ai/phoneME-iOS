@@ -11,6 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#if defined(PHONEME_WEB)
+#include <emscripten/fetch.h>
+#endif
+
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
 #endif
@@ -76,11 +80,18 @@ constexpr usize kMaximumInterimResponses = 8U;
 constexpr usize kIoChunkSize = 16U * 1024U;
 constexpr i32 kCancellationPollMilliseconds = 50;
 // Socket reads and accepts may legitimately block for the lifetime of an
-// online MIDlet. Start small, then grow when every existing worker is occupied
-// so listener threads cannot starve writes, reconnects, DNS, or other MIDlets.
+// online MIDlet. Web runs exactly one foreground MIDlet, so keep its idle
+// pthread footprint small and grow only when concurrent socket work requires
+// it. Native hosts retain the larger pool used by multi-app/background modes.
+#if defined(__EMSCRIPTEN__)
+constexpr usize kInitialNetworkWorkerCount = 2U;
+constexpr usize kMaximumNetworkWorkerCount = 32U;
+constexpr usize kMaximumReservedNetworkWorkers = 4U;
+#else
 constexpr usize kInitialNetworkWorkerCount = 8U;
 constexpr usize kMaximumNetworkWorkerCount = 32U;
 constexpr usize kMaximumReservedNetworkWorkers = 4U;
+#endif
 
 enum class NetworkTaskClass : u8 {
     blocking_input,
@@ -105,28 +116,36 @@ using CancellationCheck = std::function<bool()>;
 
 struct ScopedDescriptor final {
     int value {-1};
+    bool owned {true};
 
     ScopedDescriptor() = default;
-    explicit ScopedDescriptor(int descriptor) noexcept : value(descriptor) {}
+    explicit ScopedDescriptor(int descriptor, bool owns_descriptor = true) noexcept
+        : value(descriptor), owned(owns_descriptor) {}
     ScopedDescriptor(const ScopedDescriptor&) = delete;
     ScopedDescriptor& operator=(const ScopedDescriptor&) = delete;
     ScopedDescriptor(ScopedDescriptor&& other) noexcept
-        : value(std::exchange(other.value, -1)) {}
+        : value(std::exchange(other.value, -1)), owned(other.owned) {
+        other.owned = true;
+    }
     ScopedDescriptor& operator=(ScopedDescriptor&& other) noexcept {
         if (this != &other) {
             reset();
             value = std::exchange(other.value, -1);
+            owned = other.owned;
+            other.owned = true;
         }
         return *this;
     }
     ~ScopedDescriptor() { reset(); }
 
     void reset(int descriptor = -1) noexcept {
-        if (value >= 0) ::close(value);
+        if (owned && value >= 0) ::close(value);
         value = descriptor;
+        owned = true;
     }
 
     [[nodiscard]] int release() noexcept {
+        owned = true;
         return std::exchange(value, -1);
     }
 };
@@ -136,6 +155,10 @@ struct HandleState final {
         : descriptor(socket_descriptor) {}
 
     int descriptor {-1};
+    // Browser WebSockets do not expose TCP socket options. Keep the MIDP
+    // options virtualized per connection while SOCKFS/websockify owns the
+    // actual transport.
+    std::array<i32, 5> socket_options {1, 0, 0, 16'384, 16'384};
     std::timed_mutex input_gate;
     std::timed_mutex output_gate;
 };
@@ -1293,6 +1316,212 @@ enum class TransferFraming : u8 {
                 "HTTP response has too many interim responses");
 }
 
+#if defined(PHONEME_WEB)
+struct BrowserFetchHandle final {
+    emscripten_fetch_t* value {nullptr};
+
+    BrowserFetchHandle() = default;
+    explicit BrowserFetchHandle(emscripten_fetch_t* fetch) : value(fetch) {}
+    BrowserFetchHandle(const BrowserFetchHandle&) = delete;
+    BrowserFetchHandle& operator=(const BrowserFetchHandle&) = delete;
+    ~BrowserFetchHandle() {
+        if (value != nullptr) emscripten_fetch_close(value);
+    }
+};
+
+void append_browser_u32(std::vector<u8>& output, u32 value) {
+    output.push_back(static_cast<u8>(value & 0xFFU));
+    output.push_back(static_cast<u8>((value >> 8U) & 0xFFU));
+    output.push_back(static_cast<u8>((value >> 16U) & 0xFFU));
+    output.push_back(static_cast<u8>((value >> 24U) & 0xFFU));
+}
+
+[[nodiscard]] u32 read_browser_u32(std::span<const u8> bytes,
+                                   usize offset) noexcept {
+    if (offset + 4U > bytes.size()) return 0U;
+    return static_cast<u32>(bytes[offset]) |
+           (static_cast<u32>(bytes[offset + 1U]) << 8U) |
+           (static_cast<u32>(bytes[offset + 2U]) << 16U) |
+           (static_cast<u32>(bytes[offset + 3U]) << 24U);
+}
+
+[[nodiscard]] std::string serialize_browser_proxy_headers(
+    const std::vector<Header>& headers) {
+    std::string serialized;
+    for (const auto& [name, value] : headers) {
+        if (name.find_first_of("\r\n") != std::string::npos ||
+            value.find_first_of("\r\n") != std::string::npos) {
+            continue;
+        }
+        if (serialized.size() + name.size() + value.size() + 4U >
+            kMaximumHttpHeaderBytes) {
+            break;
+        }
+        serialized.append(name);
+        serialized.append(": ");
+        serialized.append(value);
+        serialized.append("\r\n");
+    }
+    return serialized;
+}
+
+[[nodiscard]] std::vector<Header> parse_browser_response_headers(
+    std::string_view serialized) {
+    std::vector<Header> headers;
+    usize cursor = 0;
+    while (cursor < serialized.size()) {
+        usize end = serialized.find('\n', cursor);
+        if (end == std::string_view::npos) end = serialized.size();
+        std::string_view line = serialized.substr(cursor, end - cursor);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1U);
+        const usize separator = line.find(':');
+        if (separator != std::string_view::npos && separator != 0U) {
+            headers.emplace_back(std::string(line.substr(0U, separator)),
+                                 trim(line.substr(separator + 1U)));
+        }
+        cursor = end == serialized.size() ? end : end + 1U;
+    }
+    return headers;
+}
+
+[[nodiscard]] Result<HttpResponse> perform_browser_http(HttpRequest request) {
+    if (request.method.empty() || request.method.size() >= 32U) {
+        return fail(ErrorCode::invalid_argument,
+                    "browser HTTP method is invalid");
+    }
+    if (request.body.size() > kMaximumHttpResponseBytes) {
+        return fail(ErrorCode::overflow,
+                    "browser HTTP request body exceeds safety limit");
+    }
+
+    const std::string url = request.url.to_string();
+    const std::string headers = serialize_browser_proxy_headers(request.headers);
+    if (request.method.size() > std::numeric_limits<u32>::max() ||
+        url.size() > std::numeric_limits<u32>::max() ||
+        headers.size() > std::numeric_limits<u32>::max() ||
+        request.body.size() > std::numeric_limits<u32>::max()) {
+        return fail(ErrorCode::overflow,
+                    "browser HTTP proxy request exceeds envelope limit");
+    }
+
+    std::vector<u8> envelope;
+    envelope.reserve(20U + request.method.size() + url.size() +
+                     headers.size() + request.body.size());
+    envelope.insert(envelope.end(), {'P', 'M', 'H', '1'});
+    append_browser_u32(envelope, static_cast<u32>(request.method.size()));
+    append_browser_u32(envelope, static_cast<u32>(url.size()));
+    append_browser_u32(envelope, static_cast<u32>(headers.size()));
+    append_browser_u32(envelope, static_cast<u32>(request.body.size()));
+    envelope.insert(envelope.end(), request.method.begin(), request.method.end());
+    envelope.insert(envelope.end(), url.begin(), url.end());
+    envelope.insert(envelope.end(), headers.begin(), headers.end());
+    envelope.insert(envelope.end(), request.body.begin(), request.body.end());
+
+    emscripten_fetch_attr_t attributes;
+    emscripten_fetch_attr_init(&attributes);
+    std::memcpy(attributes.requestMethod, "POST", 5U);
+    attributes.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY |
+                            EMSCRIPTEN_FETCH_SYNCHRONOUS |
+                            EMSCRIPTEN_FETCH_REPLACE;
+    attributes.timeoutMSecs = request.timeout_ms > 0
+        ? static_cast<uint32_t>(request.timeout_ms)
+        : 0U;
+    attributes.requestData = reinterpret_cast<const char*>(envelope.data());
+    attributes.requestDataSize = envelope.size();
+    const char* proxy_headers[] = {
+        "Content-Type", "application/octet-stream",
+        "X-PhoneME-HTTP-Bridge", "1",
+        nullptr
+    };
+    attributes.requestHeaders = proxy_headers;
+
+    BrowserFetchHandle fetch(emscripten_fetch(&attributes, "/api/http"));
+    if (fetch.value == nullptr) {
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge could not be started");
+    }
+    if (fetch.value->status == 0U) {
+        const std::string detail = fetch.value->statusText[0] != '\0'
+            ? std::string(fetch.value->statusText)
+            : std::string("HTTP bridge unavailable");
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge failed: " + detail);
+    }
+    if (fetch.value->status < 200U || fetch.value->status >= 300U) {
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge returned status " +
+                    std::to_string(fetch.value->status));
+    }
+    if (fetch.value->data == nullptr || fetch.value->numBytes < 24U ||
+        fetch.value->numBytes > kMaximumHttpResponseBytes +
+                                  kMaximumHttpHeaderBytes + 256U * 1024U) {
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge returned an invalid response");
+    }
+
+    const auto* raw = reinterpret_cast<const u8*>(fetch.value->data);
+    const std::span<const u8> bytes(raw,
+        static_cast<usize>(fetch.value->numBytes));
+    if (std::memcmp(bytes.data(), "PMR1", 4U) != 0) {
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge response has invalid magic");
+    }
+    const i32 status = static_cast<i32>(read_browser_u32(bytes, 4U));
+    const usize final_url_length = read_browser_u32(bytes, 8U);
+    const usize reason_length = read_browser_u32(bytes, 12U);
+    const usize header_length = read_browser_u32(bytes, 16U);
+    const usize body_length = read_browser_u32(bytes, 20U);
+    if (header_length > kMaximumHttpHeaderBytes ||
+        body_length > kMaximumHttpResponseBytes) {
+        return fail(ErrorCode::overflow,
+                    "browser HTTP bridge response exceeds safety limit");
+    }
+    const usize metadata_length = final_url_length + reason_length +
+                                  header_length;
+    if (metadata_length > bytes.size() - 24U ||
+        body_length > bytes.size() - 24U - metadata_length) {
+        return fail(ErrorCode::io_error,
+                    "browser HTTP bridge response is truncated");
+    }
+
+    usize cursor = 24U;
+    const std::string final_url(
+        reinterpret_cast<const char*>(bytes.data() + cursor),
+        final_url_length);
+    cursor += final_url_length;
+    const std::string reason(
+        reinterpret_cast<const char*>(bytes.data() + cursor),
+        reason_length);
+    cursor += reason_length;
+    const std::string serialized_headers(
+        reinterpret_cast<const char*>(bytes.data() + cursor),
+        header_length);
+    cursor += header_length;
+
+    HttpResponse response;
+    response.final_url = request.url;
+    if (!final_url.empty()) {
+        auto parsed_url = Url::parse(final_url);
+        if (parsed_url) response.final_url = std::move(*parsed_url);
+    }
+    response.status_code = status;
+    response.reason = reason;
+    response.headers = parse_browser_response_headers(serialized_headers);
+    if (body_length > 0U) {
+        response.body.assign(bytes.begin() + static_cast<std::ptrdiff_t>(cursor),
+                             bytes.begin() + static_cast<std::ptrdiff_t>(cursor + body_length));
+    }
+    if (response.final_url.scheme == Scheme::https) {
+        response.security = SecurityMetadata {
+            .protocol_name = "TLS",
+            .protocol_version = "browser-proxy",
+            .cipher_suite = "browser-managed",
+        };
+    }
+    return response;
+}
+#endif
+
 #if defined(__APPLE__)
 struct AppleHttpsHandle final {
     i32 value {0};
@@ -2071,7 +2300,11 @@ public:
     Result<OperationId> perform_http(
         HttpRequest request,
         Completion<HttpResponse> completion) override {
-#if defined(__APPLE__)
+#if defined(PHONEME_WEB)
+        const OperationId operation {next_operation_.fetch_add(1U)};
+        completion(perform_browser_http(std::move(request)));
+        return operation;
+#elif defined(__APPLE__)
         if (request.url.scheme == Scheme::http ||
             request.url.scheme == Scheme::https) {
             if (request.body.size() >
@@ -2138,6 +2371,32 @@ public:
             return fail(ErrorCode::invalid_argument,
                         "socket buffer size must be positive");
         }
+#if defined(PHONEME_WEB)
+        // Browser WebSocket/SOCKFS does not expose TCP_NODELAY, SO_LINGER,
+        // SO_KEEPALIVE or native buffer sizing. MIDP applications commonly set
+        // these options during startup, so preserve their requested values and
+        // report success instead of failing with ENOPROTOOPT.
+        const OperationId operation {next_operation_.fetch_add(1U)};
+        {
+            std::scoped_lock lock(mutex_);
+            const auto found = handles_.find(handle.value);
+            if (found == handles_.end() || found->second == nullptr ||
+                found->second->descriptor < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "native network handle is closed");
+            }
+            i32 stored = value;
+            if (option == SocketOption::delay ||
+                option == SocketOption::keep_alive) {
+                stored = value == 0 ? 0 : 1;
+            } else if (option == SocketOption::linger) {
+                stored = std::max(value, 0);
+            }
+            found->second->socket_options[static_cast<usize>(option)] = stored;
+        }
+        completion(true);
+        return operation;
+#else
         return start_async<bool>(
             NetworkTaskClass::latency_sensitive,
             std::move(completion),
@@ -2185,12 +2444,29 @@ public:
                 }
                 return true;
             });
+#endif
     }
 
     Result<OperationId> get_socket_option(
         NativeHandle handle,
         SocketOption option,
         Completion<i32> completion) override {
+#if defined(PHONEME_WEB)
+        const OperationId operation {next_operation_.fetch_add(1U)};
+        i32 value = 0;
+        {
+            std::scoped_lock lock(mutex_);
+            const auto found = handles_.find(handle.value);
+            if (found == handles_.end() || found->second == nullptr ||
+                found->second->descriptor < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "native network handle is closed");
+            }
+            value = found->second->socket_options[static_cast<usize>(option)];
+        }
+        completion(value);
+        return operation;
+#else
         return start_async<i32>(
             NetworkTaskClass::latency_sensitive,
             std::move(completion),
@@ -2240,6 +2516,7 @@ public:
                 }
                 return static_cast<i32>(integer);
             });
+#endif
     }
 
     Status shutdown_output(NativeHandle handle) override {
@@ -2540,8 +2817,21 @@ private:
                             "native network handle is closed");
             }
             state = found->second;
+#if defined(PHONEME_WEB)
+            // SOCKFS readiness notifications are attached to the original fd.
+            // A dup() can write through the shared socket but its poll wait is
+            // not notified when a WebSocket message arrives, so reads can hang.
+            descriptor = state->descriptor;
+#else
             descriptor = ::dup(state->descriptor);
+#endif
         }
+#if defined(PHONEME_WEB)
+        return DuplicatedHandle {
+            .descriptor = ScopedDescriptor {descriptor, false},
+            .state = std::move(state),
+        };
+#else
         if (descriptor < 0) return io_failure("dup network handle failed");
         configure_descriptor(descriptor);
         auto nonblocking = set_nonblocking(descriptor, true);
@@ -2553,6 +2843,7 @@ private:
             .descriptor = ScopedDescriptor {descriptor},
             .state = std::move(state),
         };
+#endif
     }
 
     [[nodiscard]] Result<NativeConnection> store_connection(

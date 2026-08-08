@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir websockify
+
+COPY host_port_token.py /opt/phoneme/host_port_token.py
+ENV PYTHONPATH=/opt/phoneme
+
+EXPOSE 38473
+
+ENTRYPOINT ["websockify", "--verbose", "--token-plugin", "host_port_token.HostPortToken", "0.0.0.0:38473"]

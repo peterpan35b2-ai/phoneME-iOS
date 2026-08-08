@@ -3702,7 +3702,13 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
     require_jdk8_string_result("arraysRangeSortApi", 1,
                                "sort bounded int-array ranges with JDK semantics");
     require_jdk8_string_result("regexApi", 15,
-                               "match VQSV regex patterns in Core");
+                               "match general regex patterns in Core");
+    require_jdk8_string_result("stringRegexMatchesApi", 31,
+                               "execute general String.matches regex semantics");
+    require_jdk8_string_result("generalRegexApi", 31,
+                               "execute matcher, split and replacement regex semantics");
+    require_jdk8_string_result("bigDecimalApi", 31,
+                               "execute BigDecimal decimal parameter semantics");
     require_jdk8_string_result("streamApi", 3,
                                "map ArrayList streams to primitive arrays");
     require_jdk8_string_result("gzipApi", 1,

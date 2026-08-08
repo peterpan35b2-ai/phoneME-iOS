@@ -2,8 +2,10 @@
 
 import { PhoneMEWebRuntime } from "./phoneME";
 import type { GameEntry, JarMetadata } from "./types";
+import { installWorkerMediaBridge, type MediaStatusMessage } from "./workerMediaBridge";
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
+const mediaBridge = installWorkerMediaBridge(scope);
 const runtime = new PhoneMEWebRuntime();
 
 type RequestMessage = {
@@ -17,10 +19,30 @@ type ResponseMessage = {
   ok: boolean;
   result?: unknown;
   error?: string;
+  fatal?: boolean;
 };
 
 function postResponse(message: ResponseMessage, transfer: Transferable[] = []) {
   scope.postMessage(message, transfer);
+}
+
+function formatError(error: unknown) {
+  if (error instanceof Error) return error.stack || error.message;
+  if (error && typeof error === "object") {
+    const candidate = error as { name?: unknown; message?: unknown; stack?: unknown };
+    if (typeof candidate.stack === "string" && candidate.stack) return candidate.stack;
+    if (typeof candidate.message === "string" && candidate.message) {
+      return typeof candidate.name === "string" && candidate.name
+        ? `${candidate.name}: ${candidate.message}`
+        : candidate.message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      // Fall through to String for non-serializable foreign errors.
+    }
+  }
+  return String(error);
 }
 
 function postLog(line: string, isError: boolean) {
@@ -49,7 +71,7 @@ async function handleRequest(message: RequestMessage) {
     await runtime.uninstall(payload.game as GameEntry, Boolean(payload.removeData));
     return undefined;
   case "launch":
-    runtime.launch(
+    await runtime.launch(
       payload.game as GameEntry,
       Number(payload.width),
       Number(payload.height)
@@ -57,6 +79,22 @@ async function handleRequest(message: RequestMessage) {
     return undefined;
   case "resize":
     runtime.resize(Number(payload.width), Number(payload.height));
+    return undefined;
+  case "configureHeap":
+    runtime.configureHeap(Number(payload.heapMegabytes));
+    return undefined;
+  case "configureFrameRate":
+    runtime.configureFrameRate();
+    return undefined;
+  case "configureFrameRateOverride":
+    runtime.configureFrameRate();
+    return undefined;
+  case "configureTranslation":
+    runtime.configureTranslation(
+      Boolean(payload.enabled),
+      payload.provider as "google" | "bing" | "automatic",
+      String(payload.sourceLanguage ?? "auto")
+    );
     return undefined;
   case "pause":
     runtime.pause();
@@ -75,9 +113,7 @@ async function handleRequest(message: RequestMessage) {
       : null;
     return {
       events: runtime.pollLcduiEvents(),
-      frame,
-      state: runtime.state(),
-      usedMemory: runtime.usedMemory()
+      frame
     };
   }
   case "copyLcduiImage":
@@ -139,8 +175,13 @@ async function handleRequest(message: RequestMessage) {
   }
 }
 
-scope.addEventListener("message", (event: MessageEvent<RequestMessage>) => {
-  const message = event.data;
+scope.addEventListener("message", (event: MessageEvent<RequestMessage | MediaStatusMessage>) => {
+  const incoming = event.data;
+  if ("event" in incoming) {
+    if (incoming.event === "mediaStatus") mediaBridge.applyStatus(incoming);
+    return;
+  }
+  const message = incoming;
   void Promise.resolve()
     .then(() => handleRequest(message))
     .then((result) => {
@@ -153,14 +194,19 @@ scope.addEventListener("message", (event: MessageEvent<RequestMessage>) => {
       postResponse({ id: message.id, ok: true, result }, transfer);
     })
     .catch((error) => {
+      const fatal = Boolean(runtime.fatalError);
+      const formatted = formatError(runtime.fatalError ?? error);
       if (!message.id) {
-        postLog(error instanceof Error ? error.stack || error.message : String(error), true);
+        postLog(formatted, true);
+        if (fatal) scope.close();
         return;
       }
       postResponse({
         id: message.id,
         ok: false,
-        error: error instanceof Error ? error.message : String(error)
+        error: formatted,
+        fatal
       });
+      if (fatal) scope.close();
     });
 });

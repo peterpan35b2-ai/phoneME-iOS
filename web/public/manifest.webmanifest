@@ -1,0 +1,22 @@
+{
+  "name": "phoneME J2ME Emulator",
+  "short_name": "phoneME",
+  "description": "Trình giả lập J2ME phoneME chạy trực tiếp trên trình duyệt.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#fbf8ff",
+  "theme_color": "#efedf4",
+  "categories": ["games", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

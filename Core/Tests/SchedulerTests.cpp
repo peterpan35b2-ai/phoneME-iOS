@@ -598,9 +598,9 @@ int main(int argc, char** argv) {
                     started->return_value->as_int().value_or(0) == 1,
                 "start non-cooperative Java worker");
 
-        // The old lifetime-wide 10M instruction budget killed real game loops
-        // such as Ninja School shortly after launch. A scheduler-owned worker
-        // must remain alive across many cooperative VM quanta instead. Run
+        // The old lifetime-wide 10M instruction budget killed long-running
+        // game loops shortly after launch. A scheduler-owned worker must remain
+        // alive across many cooperative VM quanta instead. Run
         // this section with the production pacing path and print process CPU
         // time so regressions can be compared without device Instruments.
         const std::clock_t busy_cpu_start = std::clock();

@@ -6,7 +6,11 @@
 #include <string>
 #include <unordered_map>
 
-#if defined(__APPLE__)
+#if defined(PHONEME_WEB)
+#include <emscripten.h>
+#define PHONEME_WEAK_IMPORT
+#define PHONEME_MEDIA_HOST_FALLBACK 0
+#elif defined(__APPLE__)
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #define PHONEME_WEAK_IMPORT __attribute__((weak_import))
@@ -48,6 +52,122 @@ int32_t phoneme_ios_media_play_tone(int32_t note,
                                     int32_t duration_milliseconds,
                                     int32_t volume) PHONEME_WEAK_IMPORT;
 }
+
+#if defined(PHONEME_WEB)
+extern "C" {
+int32_t phoneme_ios_media_create_data(const uint8_t* data,
+                                      int32_t length,
+                                      const char* content_type) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        if (!bridge || !$0 || $1 <= 0) return 0;
+        const bytes = HEAPU8.slice($0, $0 + $1);
+        return bridge.createData(bytes, UTF8ToString($2)) | 0;
+    }, data, length, content_type);
+}
+
+int32_t phoneme_ios_media_create_locator(const char* locator,
+                                         const char* content_type) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        if (!bridge || !$0) return 0;
+        return bridge.createLocator(UTF8ToString($0), UTF8ToString($1)) | 0;
+    }, locator, content_type);
+}
+
+int32_t phoneme_ios_media_start(int32_t handle) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.start($0) | 0) : 0;
+    }, handle);
+}
+
+int32_t phoneme_ios_media_stop(int32_t handle) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.stop($0) | 0) : 0;
+    }, handle);
+}
+
+void phoneme_ios_media_close(int32_t handle) {
+    MAIN_THREAD_EM_ASM({
+        globalThis.__phoneMEMediaBridge?.close($0);
+    }, handle);
+}
+
+void phoneme_ios_media_set_loop_count(int32_t handle, int32_t count) {
+    MAIN_THREAD_EM_ASM({
+        globalThis.__phoneMEMediaBridge?.setLoopCount($0, $1);
+    }, handle, count);
+}
+
+void phoneme_ios_media_set_volume(int32_t handle, int32_t level) {
+    MAIN_THREAD_EM_ASM({
+        globalThis.__phoneMEMediaBridge?.setVolume($0, $1);
+    }, handle, level);
+}
+
+void phoneme_ios_media_set_mute(int32_t handle, int32_t muted) {
+    MAIN_THREAD_EM_ASM({
+        globalThis.__phoneMEMediaBridge?.setMute($0, $1);
+    }, handle, muted);
+}
+
+int64_t phoneme_ios_media_set_time(int32_t handle, int64_t microseconds) {
+    const double value = MAIN_THREAD_EM_ASM_DOUBLE({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? Number(bridge.setTime($0, $1)) : -1;
+    }, handle, static_cast<double>(microseconds));
+    return static_cast<int64_t>(value);
+}
+
+int64_t phoneme_ios_media_get_time(int32_t handle) {
+    const double value = MAIN_THREAD_EM_ASM_DOUBLE({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? Number(bridge.getTime($0)) : -1;
+    }, handle);
+    return static_cast<int64_t>(value);
+}
+
+int64_t phoneme_ios_media_get_duration(int32_t handle) {
+    const double value = MAIN_THREAD_EM_ASM_DOUBLE({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? Number(bridge.getDuration($0)) : -1;
+    }, handle);
+    return static_cast<int64_t>(value);
+}
+
+int32_t phoneme_ios_media_is_playing(int32_t handle) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.isPlaying($0) | 0) : 0;
+    }, handle);
+}
+
+int32_t phoneme_ios_media_has_ended(int32_t handle) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.hasEnded($0) | 0) : 0;
+    }, handle);
+}
+
+int32_t phoneme_ios_media_has_error(int32_t handle) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.hasError($0) | 0) : 1;
+    }, handle);
+}
+
+int32_t phoneme_ios_media_play_tone(int32_t note,
+                                    int32_t duration_milliseconds,
+                                    int32_t volume) {
+    return MAIN_THREAD_EM_ASM_INT({
+        const bridge = globalThis.__phoneMEMediaBridge;
+        return bridge ? (bridge.playTone($0, $1, $2) | 0) : 0;
+    }, note, duration_milliseconds, volume);
+}
+}
+#endif
 
 #if PHONEME_MEDIA_HOST_FALLBACK
 extern "C" {
@@ -320,7 +440,9 @@ private:
     };
 
     [[nodiscard]] static bool bridge_available() noexcept {
-#if PHONEME_MEDIA_HOST_FALLBACK
+#if defined(PHONEME_WEB)
+        return true;
+#elif PHONEME_MEDIA_HOST_FALLBACK
         return false;
 #else
         return phoneme_ios_media_create_data != nullptr &&

@@ -1,0 +1,99 @@
+export type ScreenGravity = "left" | "top" | "center" | "right" | "bottom";
+export type ScaleType = "asIs" | "fit" | "fill";
+export type KeyLayout = "nokiaSE" | "siemens" | "motorola" | "custom";
+export type VirtualKeyboardType = "phone" | "phoneArrows" | "numbersArrows" | "arrowsNumbers" | "numbers" | "arrows";
+export type ButtonShape = "oval" | "rectangle" | "roundedRectangle";
+export type TranslationSourceLanguage = "auto" | "zh-CN" | "zh-TW" | "ja" | "ko" | "en" | "ru" | "th" | "id" | "es" | "pt" | "fr" | "de";
+export type KeyboardControlOffset = { x: number; y: number };
+export type KeyboardGroupScale = { width: number; height: number };
+
+export type WebGameProfile = {
+  screenWidth: number;
+  screenHeight: number;
+  preserveAspectRatio: boolean;
+  scalePercent: number;
+  screenGravity: ScreenGravity;
+  scaleType: ScaleType;
+  filtering: boolean;
+  forceFullscreen: boolean;
+  showFPS: boolean;
+  showAppBar: boolean;
+  showStatusBar: boolean;
+  frameRateOverride: boolean;
+  frameRateLimit: number;
+  rotationLocked: boolean;
+  autoTranslateEnabled: boolean;
+  translationSourceLanguage: TranslationSourceLanguage;
+  heapSizeMegabytes: number;
+  fontSmall: number;
+  fontMedium: number;
+  fontLarge: number;
+  fontValuesAreScaledPixels: boolean;
+  touchInput: boolean;
+  keyLayout: KeyLayout;
+  showVirtualKeyboard: boolean;
+  virtualKeyboardType: VirtualKeyboardType;
+  buttonShape: ButtonShape;
+  hapticFeedback: boolean;
+  keyboardOpacity: number;
+  forceOpacityForOffscreenKeys: boolean;
+  keyboardHideDelayMilliseconds: number;
+  keyboardControlOffsets: Record<string, KeyboardControlOffset>;
+  keyboardGroupScales: Record<string, KeyboardGroupScale>;
+  hiddenKeyboardControlIds: string[];
+};
+
+export const DEFAULT_GAME_PROFILE: WebGameProfile = {
+  screenWidth: 240,
+  screenHeight: 320,
+  preserveAspectRatio: true,
+  scalePercent: 100,
+  screenGravity: "top",
+  scaleType: "fit",
+  filtering: false,
+  forceFullscreen: false,
+  showFPS: false,
+  showAppBar: true,
+  showStatusBar: true,
+  frameRateOverride: true,
+  frameRateLimit: 30,
+  rotationLocked: false,
+  autoTranslateEnabled: false,
+  translationSourceLanguage: "auto",
+  heapSizeMegabytes: 64,
+  fontSmall: 18,
+  fontMedium: 22,
+  fontLarge: 26,
+  fontValuesAreScaledPixels: false,
+  touchInput: true,
+  keyLayout: "nokiaSE",
+  showVirtualKeyboard: true,
+  virtualKeyboardType: "arrowsNumbers",
+  buttonShape: "roundedRectangle",
+  hapticFeedback: false,
+  keyboardOpacity: 0.20,
+  forceOpacityForOffscreenKeys: false,
+  keyboardHideDelayMilliseconds: 0,
+  keyboardControlOffsets: {},
+  keyboardGroupScales: {},
+  hiddenKeyboardControlIds: []
+};
+
+export function normalizeGameProfile(value?: Partial<WebGameProfile> | null): WebGameProfile {
+  const profile = { ...DEFAULT_GAME_PROFILE, ...(value ?? {}) };
+  profile.screenWidth = Math.max(1, Math.round(profile.screenWidth));
+  profile.screenHeight = Math.max(1, Math.round(profile.screenHeight));
+  profile.scalePercent = Math.min(300, Math.max(10, Math.round(profile.scalePercent)));
+  profile.frameRateOverride = true;
+  profile.frameRateLimit = 30;
+  profile.heapSizeMegabytes = Math.min(512, Math.max(1, Math.round(profile.heapSizeMegabytes)));
+  profile.fontSmall = Math.max(1, Math.round(profile.fontSmall));
+  profile.fontMedium = Math.max(1, Math.round(profile.fontMedium));
+  profile.fontLarge = Math.max(1, Math.round(profile.fontLarge));
+  profile.keyboardOpacity = Math.min(1, Math.max(0.05, profile.keyboardOpacity));
+  profile.keyboardHideDelayMilliseconds = Math.min(60_000, Math.max(0, Math.round(profile.keyboardHideDelayMilliseconds)));
+  profile.keyboardControlOffsets = { ...(profile.keyboardControlOffsets ?? {}) };
+  profile.keyboardGroupScales = { ...(profile.keyboardGroupScales ?? {}) };
+  profile.hiddenKeyboardControlIds = [...(profile.hiddenKeyboardControlIds ?? [])];
+  return profile;
+}
