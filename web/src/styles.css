@@ -298,6 +298,80 @@ button, input, textarea, select { font: inherit; }
 .proxy-row { display: grid; gap: 8px; min-height: 0; padding-block: 16px; }
 .global-settings-form .MuiAlert-root { border-radius: 16px; }
 
+/* ── IndexedDB File/RMS manager ─────────────────────────────────────────────── */
+.storage-manager {
+  width: min(100%, 860px);
+  margin-inline: auto;
+  padding: 16px 16px 56px;
+  display: grid;
+  gap: 16px;
+}
+.storage-kind-switch {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px;
+  gap: 4px;
+  border-radius: 16px;
+  background: var(--md3-surface-container-low);
+  border: 1px solid var(--md3-outline-variant);
+}
+.storage-kind-switch .MuiButton-root { border-radius: 12px; min-width: 108px; }
+.storage-breadcrumbs {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 4px 8px;
+  border-radius: 14px;
+  background: var(--md3-surface-container-low);
+  border: 1px solid var(--md3-outline-variant);
+  scrollbar-width: thin;
+}
+.storage-breadcrumb-part { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.storage-breadcrumb-part > svg { width: 14px; height: 14px; color: var(--mui-palette-text-secondary); }
+.storage-breadcrumbs .MuiButton-root { min-width: 0; white-space: nowrap; text-transform: none; }
+.storage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-actions .MuiButton-root { border-radius: 999px; }
+.storage-list {
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--md3-outline-variant);
+  background: var(--md3-surface-container-low);
+}
+.storage-entry {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 16px;
+  outline: none;
+}
+.storage-entry + .storage-entry { border-top: 1px solid var(--md3-outline-variant); }
+.storage-entry[role="button"] { cursor: pointer; touch-action: manipulation; }
+.storage-entry[role="button"]:hover,
+.storage-entry[role="button"]:focus-visible { background: var(--md3-state-hover); }
+.storage-entry[role="button"]:active { background: var(--md3-state-press); }
+.storage-entry > svg { color: var(--mui-palette-primary-main); }
+.storage-entry-copy { min-width: 0; }
+.storage-entry-copy > .MuiTypography-root:first-child { font-weight: 500; }
+.storage-entry-actions { display: flex; align-items: center; }
+.storage-entry-actions .MuiIconButton-root { width: 44px; height: 44px; }
+.storage-parent-entry { grid-template-columns: 32px minmax(0, 1fr); }
+.storage-loading,
+.storage-empty { min-height: 120px; display: grid; place-items: center; padding: 24px; }
+
+@media (max-width: 600px) {
+  .storage-manager { padding-inline: 12px; }
+  .storage-kind-switch { width: 100%; }
+  .storage-kind-switch .MuiButton-root { flex: 1; }
+  .storage-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .storage-actions .MuiButton-root { min-width: 0; }
+  .storage-entry { grid-template-columns: 28px minmax(0, 1fr) auto; gap: 8px; padding-left: 12px; }
+  .storage-entry-actions .MuiIconButton-root { width: 40px; height: 40px; }
+}
+
 /* ── Emulator surface ───────────────────────────────────────────────────────── */
 .emulator-page {
   min-height: 100dvh;

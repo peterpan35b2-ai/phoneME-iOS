@@ -41,3 +41,11 @@ int32_t phoneme_copy_frame_rgba(
 ```
 
 `phoneme_copy_frame_rgba` returns the required byte count. It may be called once with a null destination to query the current frame size. Pixels are tightly packed RGBA8888.
+
+## License
+
+Copyright 2026 Duy Pham. Licensed under the **Apache License, Version 2.0** with the **Commons Clause License Condition v1.0**.
+
+This software is **not for commercial sale**. You may use, copy, modify, merge, publish, and distribute it under the Apache 2.0 terms, **but you may not Sell the Software** — i.e. you may not provide to third parties, for a fee or other consideration, a product or service whose value derives entirely or substantially from the function of this software (including paid hosting or paid consulting/support for it). All other rights and conditions of the Apache License remain in effect.
+
+See [`LICENSE`](LICENSE) for the full terms.

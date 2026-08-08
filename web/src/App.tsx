@@ -55,7 +55,7 @@ import {
   TuneRounded,
   UploadRounded
 } from "@mui/icons-material";
-import { zipSync } from "fflate";
+import { zip } from "fflate";
 import { EmulatorScreen } from "./EmulatorScreen";
 import { readJarMetadata } from "./jarMetadata";
 import { PhoneMEWebRuntime } from "./phoneMEClient";
@@ -198,13 +198,23 @@ function downloadBytes(bytes: Uint8Array<ArrayBuffer>, fileName: string, content
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-function StorageManagerView({ runtime, games }: {
+function createZip(files: Record<string, Uint8Array>) {
+  return new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
+    zip(files, { level: 6 }, (error, data) => {
+      if (error) reject(error);
+      else resolve(data);
+    });
+  });
+}
+
+function StorageManagerView({ runtime, games, initialKind = "files" }: {
   runtime: PhoneMEWebRuntime;
   games: GameEntry[];
+  initialKind?: ManagedStorageKind;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const [kind, setKind] = useState<ManagedStorageKind>("files");
+  const [kind, setKind] = useState<ManagedStorageKind>(initialKind);
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<ManagedStorageEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -270,7 +280,7 @@ function StorageManagerView({ runtime, games }: {
       } else {
         const archiveFiles: Record<string, Uint8Array> = {};
         for (const file of exported.files) archiveFiles[file.path] = file.data;
-        const archive = zipSync(archiveFiles, { level: 6 });
+        const archive = await createZip(archiveFiles);
         downloadBytes(archive, `${exported.name}.zip`, "application/zip");
       }
       setNotice({ severity: "success", message: exported.isDirectory ? "Đã tạo file ZIP" : "Đã tải tệp" });
@@ -772,6 +782,7 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState<GameEntry | null>(null);
   const [deleteData, setDeleteData] = useState(true);
   const [showProfiles, setShowProfiles] = useState(false);
+  const [storageInitialKind, setStorageInitialKind] = useState<ManagedStorageKind>("files");
   const [snackbar, setSnackbar] = useState<{ message: string; severity: "success" | "error" | "info" } | null>(null);
   const [pwaUpdateVersion, setPwaUpdateVersion] = useState<string | null>(null);
   const [pwaUpdating, setPwaUpdating] = useState(false);
@@ -1015,7 +1026,7 @@ export default function App() {
           </IconButton> : view === "configure" ? <Button color="inherit" className="bar-text-action" onClick={() => { setActiveGame(null); setView("library"); }}>Hủy</Button> : <Box className="bar-leading-spacer" />}
 
           <Typography className="native-appbar-title" variant="h6" noWrap>
-            {view === "configure" ? activeGame?.title : view === "settings" ? "Cài đặt" : "Thư viện"}
+            {view === "configure" ? activeGame?.title : view === "settings" ? "Cài đặt" : view === "storage" ? "File & RMS" : "Thư viện"}
           </Typography>
 
           {view === "library" ? <>
@@ -1049,7 +1060,7 @@ export default function App() {
             setView("library");
           }}
           onSnapshot={setRuntimeSnapshot}
-        /> : view === "configure" && activeGame ? <GameProfileEditor profile={draftProfile} onChange={setDraftProfile} /> : view === "settings" ? <SettingsView settings={settings} onChange={saveSettings} runtimeReady={runtime.ready} /> : <LibraryView
+        /> : view === "configure" && activeGame ? <GameProfileEditor profile={draftProfile} onChange={setDraftProfile} /> : view === "settings" ? <SettingsView settings={settings} onChange={saveSettings} runtimeReady={runtime.ready} /> : view === "storage" ? <StorageManagerView runtime={runtime} games={games} initialKind={storageInitialKind} /> : <LibraryView
           games={games}
           searchText={searchText}
           onSearchTextChange={setSearchText}
@@ -1070,6 +1081,7 @@ export default function App() {
           <span>Thứ tự</span><ArrowForwardIosRounded className="submenu-chevron" />
         </MenuItem>
         <Divider />
+        <MenuItem onClick={() => { setStorageInitialKind("files"); setLibraryMenuAnchor(null); setView("storage"); }}><StorageRounded fontSize="small" /><span>File & RMS</span></MenuItem>
         <MenuItem onClick={() => { setLibraryMenuAnchor(null); setView("settings"); }}><SettingsRounded fontSize="small" /><span>Cài đặt</span></MenuItem>
         <MenuItem onClick={() => { setLibraryMenuAnchor(null); setShowProfiles(true); }}><TuneRounded fontSize="small" /><span>Profiles</span></MenuItem>
       </Menu>
@@ -1110,8 +1122,8 @@ export default function App() {
             if (activeGame?.id === game.id) setActiveGame(null);
             setRuntimeSnapshot({ ...EMPTY_SNAPSHOT, phase: "ready", message: "phoneME Web đã sẵn sàng" });
           }}><StopCircleRounded fontSize="small" /><span>Dừng</span></MenuItem> : null}
-          <MenuItem disabled><UploadRounded fontSize="small" /><span>Xuất RMS</span></MenuItem>
-          <MenuItem disabled><DownloadRounded fontSize="small" /><span>Nhập RMS</span></MenuItem>
+          <MenuItem onClick={() => { setStorageInitialKind("rms"); setContextMenuAnchor(null); setContextGame(null); setView("storage"); }}><StorageRounded fontSize="small" /><span>Quản lý RMS</span></MenuItem>
+          <MenuItem onClick={() => { setStorageInitialKind("files"); setContextMenuAnchor(null); setContextGame(null); setView("storage"); }}><FolderRounded fontSize="small" /><span>Quản lý Files</span></MenuItem>
           <Divider />
           <MenuItem onClick={() => beginRename(contextGame)}><EditRounded fontSize="small" /><span>Đổi tên</span></MenuItem>
           <MenuItem onClick={() => openGameSettings(contextGame)}><SettingsRounded fontSize="small" /><span>Cài đặt</span></MenuItem>

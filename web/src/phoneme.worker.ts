@@ -53,6 +53,27 @@ function frameTransfer(frame: ReturnType<PhoneMEWebRuntime["copyFrame"]>) {
   return frame ? [frame.pixels.buffer as ArrayBuffer] : [];
 }
 
+function resultTransfer(result: unknown): Transferable[] {
+  if (!result) return [];
+  if (result instanceof Uint8Array || result instanceof Uint8ClampedArray) {
+    return [result.buffer as ArrayBuffer];
+  }
+  if (typeof result !== "object") return [];
+  if ("frame" in result) {
+    return frameTransfer((result as { frame: ReturnType<PhoneMEWebRuntime["copyFrame"]> }).frame);
+  }
+  if ("pixels" in result) {
+    return [(result as { pixels: Uint8ClampedArray }).pixels.buffer as ArrayBuffer];
+  }
+  if ("files" in result) {
+    const files = (result as { files?: Array<{ data?: Uint8Array }> }).files ?? [];
+    return files
+      .map((file) => file.data?.buffer)
+      .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
+  }
+  return [];
+}
+
 async function handleRequest(message: RequestMessage) {
   const payload = message.payload ?? {};
   switch (message.type) {
@@ -229,12 +250,7 @@ scope.addEventListener("message", (event: MessageEvent<RequestMessage | MediaSta
     .then(() => handleRequest(message))
     .then((result) => {
       if (!message.id) return;
-      const transfer = result && typeof result === "object" && "frame" in result
-        ? frameTransfer((result as { frame: ReturnType<PhoneMEWebRuntime["copyFrame"]> }).frame)
-        : result && typeof result === "object" && "pixels" in result
-          ? [(result as { pixels: Uint8ClampedArray }).pixels.buffer as ArrayBuffer]
-          : [];
-      postResponse({ id: message.id, ok: true, result }, transfer);
+      postResponse({ id: message.id, ok: true, result }, resultTransfer(result));
     })
     .catch((error) => {
       const fatal = Boolean(runtime.fatalError);
