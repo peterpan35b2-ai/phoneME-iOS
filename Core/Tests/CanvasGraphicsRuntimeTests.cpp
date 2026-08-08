@@ -344,9 +344,27 @@ int main(int argc, char** argv) {
     }
     require(resized_event, "active Canvas receives sizeChanged after resize");
 
+    runtime.send_key(-59, true);
+    bool pressed_before_suspend = false;
+    while (auto event = runtime.poll_ui_event()) {
+        pressed_before_suspend = pressed_before_suspend ||
+            (event->kind == 3 && event->component_type == 22 &&
+             event->text == "eventDown:-59");
+    }
+    require(pressed_before_suspend,
+            "Canvas key is held before host presentation suspension");
+
     runtime.suspend();
     require(runtime.is_suspended(),
             "host presentation enters suspended state");
+    bool released_on_suspend = false;
+    while (auto event = runtime.poll_ui_event()) {
+        released_on_suspend = released_on_suspend ||
+            (event->kind == 3 && event->component_type == 22 &&
+             event->text == "eventUp:-59");
+    }
+    require(released_on_suspend,
+            "host presentation suspension synthesizes keyReleased for held keys");
     require(runtime.app_state(event_app_id) ==
                 phoneme::runtime::AppState::active,
             "host presentation suspension keeps MIDlet active");

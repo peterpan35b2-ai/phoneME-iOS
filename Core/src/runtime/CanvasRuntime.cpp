@@ -227,6 +227,7 @@ Status CanvasRuntime::set_host_rendering_enabled(bool enabled) {
 
     host_rendering_enabled_ = enabled;
     bool scheduled_repaint = false;
+    std::vector<std::pair<vm::ObjectRef, std::vector<i32>>> release_callbacks;
     for (u64 key : canvas_order_) {
         const auto found = canvases_.find(key);
         if (found == canvases_.end()) continue;
@@ -240,6 +241,15 @@ Status CanvasRuntime::set_host_rendering_enabled(bool enabled) {
         if (!enabled) {
             // Presentation detachment must behave like releasing every host
             // input edge without exposing a Canvas hideNotify lifecycle event.
+            // Some MIDlets maintain their own movement flags in keyPressed /
+            // keyReleased rather than polling GameCanvas.getKeyStates(), so a
+            // silent pressed_keys clear can leave gameplay permanently latched.
+            if (!state.pressed_keys.empty()) {
+                std::vector<i32> keys(
+                    state.pressed_keys.begin(), state.pressed_keys.end());
+                std::ranges::sort(keys);
+                release_callbacks.emplace_back(state.object, std::move(keys));
+            }
             state.key_states = 0;
             state.pressed_keys.clear();
             state.next_key_repeat.clear();
@@ -247,6 +257,18 @@ Status CanvasRuntime::set_host_rendering_enabled(bool enabled) {
         if (renderable && state.effectively_visible) {
             merge_region(state.repaint_region, full_region());
             scheduled_repaint = true;
+        }
+    }
+    if (!enabled) {
+        for (const auto& [object, keys] : release_callbacks) {
+            for (const i32 key_code : keys) {
+                CanvasState* current = find_state(object);
+                if (current == nullptr) break;
+                if (suppresses_key_callback(*current, key_code)) continue;
+                auto released = invoke_key_callback(
+                    *current, "keyReleased", key_code);
+                if (!released) return released;
+            }
         }
     }
     if (scheduled_repaint) {

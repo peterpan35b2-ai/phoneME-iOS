@@ -121,6 +121,92 @@ private final class KeyboardEditPreviewStore: ObservableObject {
     }
 }
 
+@MainActor
+private final class VirtualKeyboardInputCoordinator: ObservableObject {
+    private var heldControls: [String: [J2MEKey]] = [:]
+    private var keyOwnerCounts: [J2MEKey: Int] = [:]
+    private weak var activeSession: EmulatorSession?
+#if canImport(UIKit)
+    private let lightHaptic = UIImpactFeedbackGenerator(style: .light)
+    private let mediumHaptic = UIImpactFeedbackGenerator(style: .medium)
+#endif
+
+    @discardableResult
+    func press(
+        controlID: String,
+        keys: [J2MEKey],
+        session: EmulatorSession
+    ) -> Bool {
+        guard heldControls[controlID] == nil else { return false }
+        if let activeSession, activeSession !== session {
+            _ = releaseAll(session: activeSession)
+        }
+        activeSession = session
+
+        var seenKeys = Set<J2MEKey>()
+        let uniqueKeys = keys.filter { seenKeys.insert($0).inserted }
+        guard !uniqueKeys.isEmpty else { return false }
+
+        heldControls[controlID] = uniqueKeys
+        for key in uniqueKeys {
+            let ownerCount = keyOwnerCounts[key, default: 0]
+            keyOwnerCounts[key] = ownerCount + 1
+            if ownerCount == 0 {
+                session.send(key, pressed: true)
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func release(
+        controlID: String,
+        session: EmulatorSession
+    ) -> Bool {
+        guard let keys = heldControls.removeValue(forKey: controlID) else {
+            return false
+        }
+        let targetSession = activeSession ?? session
+
+        for key in keys {
+            guard let ownerCount = keyOwnerCounts[key] else { continue }
+            if ownerCount <= 1 {
+                keyOwnerCounts.removeValue(forKey: key)
+                targetSession.send(key, pressed: false)
+            } else {
+                keyOwnerCounts[key] = ownerCount - 1
+            }
+        }
+        if heldControls.isEmpty {
+            activeSession = nil
+        }
+        return true
+    }
+
+#if canImport(UIKit)
+    func performHaptic(emphasized: Bool) {
+        let generator = emphasized ? mediumHaptic : lightHaptic
+        generator.impactOccurred()
+        generator.prepare()
+    }
+#endif
+
+    @discardableResult
+    func releaseAll(session: EmulatorSession) -> Int {
+        let releasedControlCount = heldControls.count
+        let targetSession = activeSession ?? session
+        heldControls.removeAll(keepingCapacity: true)
+
+        let keys = keyOwnerCounts.keys.sorted { $0.rawValue < $1.rawValue }
+        keyOwnerCounts.removeAll(keepingCapacity: true)
+        activeSession = nil
+        for key in keys {
+            targetSession.send(key, pressed: false)
+        }
+        return releasedControlCount
+    }
+}
+
 struct KeyboardControlDescriptor: Identifiable, Equatable {
     let id: String
     let label: String
@@ -440,6 +526,7 @@ enum KeyboardLayoutCatalog {
 }
 
 struct KeypadView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: EmulatorSession
 
     @Binding var profile: GameProfile
@@ -453,6 +540,8 @@ struct KeypadView: View {
     // rebuilding the moving key hierarchy for every touch event can cancel
     // the active high-priority gesture and stall the main thread.
     @StateObject private var resizePreviews = KeyboardEditPreviewStore()
+    @StateObject private var inputCoordinator = VirtualKeyboardInputCoordinator()
+    @State private var inputResetGeneration: UInt = 0
 
     private let movementGridSize: CGFloat = 4
 
@@ -490,6 +579,8 @@ struct KeypadView: View {
                             matchingGroupScales: matchingScales,
                             resizePreview: resizePreviews.preview(for: control.groupID),
                             movementGridSize: movementGridSize,
+                            inputCoordinator: inputCoordinator,
+                            inputResetGeneration: inputResetGeneration,
                             onKeyActivity: onKeyActivity,
                             onPositionDragEnded: { translation in
                                 commitControlPosition(
@@ -517,13 +608,33 @@ struct KeypadView: View {
             }
             .onChange(of: editMode) { _ in
                 resizePreviews.resetAll()
+                releaseAllVirtualKeys()
             }
             .onChange(of: obscuresDisplay) { value in
                 onObscuresDisplayChange(value)
             }
         }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active {
+                releaseAllVirtualKeys()
+            }
+        }
+        .onChange(of: profile.virtualKeyboardType) { _ in
+            releaseAllVirtualKeys()
+        }
+        .onDisappear {
+            releaseAllVirtualKeys()
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Virtual keyboard")
+    }
+
+    private func releaseAllVirtualKeys() {
+        let releasedControlCount = inputCoordinator.releaseAll(session: session)
+        inputResetGeneration &+= 1
+        for _ in 0..<releasedControlCount {
+            onKeyActivity(false)
+        }
     }
 
     private func layoutFrames(
@@ -725,6 +836,77 @@ struct KeypadView: View {
 }
 
 #if canImport(UIKit)
+private struct VirtualKeyTouchCaptureView: UIViewRepresentable {
+    let resetGeneration: UInt
+    let onPressedChanged: (Bool) -> Void
+
+    func makeUIView(context: Context) -> TouchCaptureView {
+        let view = TouchCaptureView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isAccessibilityElement = false
+        view.isMultipleTouchEnabled = true
+        view.isExclusiveTouch = false
+        view.onPressedChanged = onPressedChanged
+        view.applyResetGeneration(resetGeneration)
+        return view
+    }
+
+    func updateUIView(_ uiView: TouchCaptureView, context: Context) {
+        uiView.onPressedChanged = onPressedChanged
+        uiView.applyResetGeneration(resetGeneration)
+    }
+
+    final class TouchCaptureView: UIView {
+        var onPressedChanged: ((Bool) -> Void)?
+
+        private var activeTouchIDs = Set<ObjectIdentifier>()
+        private var resetGeneration: UInt?
+
+        func applyResetGeneration(_ generation: UInt) {
+            guard resetGeneration != generation else { return }
+            resetGeneration = generation
+            activeTouchIDs.removeAll(keepingCapacity: true)
+        }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let wasPressed = !activeTouchIDs.isEmpty
+            for touch in touches {
+                activeTouchIDs.insert(ObjectIdentifier(touch))
+            }
+            if !wasPressed, !activeTouchIDs.isEmpty {
+                onPressedChanged?(true)
+            }
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            finish(touches)
+        }
+
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            finish(touches)
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window == nil, !activeTouchIDs.isEmpty {
+                activeTouchIDs.removeAll(keepingCapacity: true)
+                onPressedChanged?(false)
+            }
+        }
+
+        private func finish(_ touches: Set<UITouch>) {
+            guard !activeTouchIDs.isEmpty else { return }
+            for touch in touches {
+                activeTouchIDs.remove(ObjectIdentifier(touch))
+            }
+            if activeTouchIDs.isEmpty {
+                onPressedChanged?(false)
+            }
+        }
+    }
+}
+
 private struct KeyboardEditPanGestureView: UIViewRepresentable {
     let onChanged: (CGSize) -> Void
     let onEnded: (CGSize) -> Void
@@ -811,6 +993,8 @@ private struct VirtualKeyButton: View {
     let matchingGroupScales: [Double]
     @ObservedObject var resizePreview: KeyboardGroupResizePreview
     let movementGridSize: CGFloat
+    let inputCoordinator: VirtualKeyboardInputCoordinator
+    let inputResetGeneration: UInt
     let onKeyActivity: (Bool) -> Void
     let onPositionDragEnded: (CGSize) -> Void
     let onResizeDragEnded: (GameProfile.KeyboardGroupScale) -> Void
@@ -841,8 +1025,10 @@ private struct VirtualKeyButton: View {
             anchor: .center
         )
         .offset(positionPreviewTranslation)
+        .onChange(of: inputResetGeneration) { _ in
+            isPressed = false
+        }
         .onDisappear {
-            guard isPressed else { return }
             isPressed = false
             release()
         }
@@ -854,37 +1040,54 @@ private struct VirtualKeyButton: View {
             .foregroundStyle(labelColor)
             .frame(width: width, height: height)
             .background { buttonBackground(effectiveOpacity: effectiveOpacity) }
-            .overlay {
-                if editMode != .none {
-                    editOutline
-                        .opacity(editMode == .size && !isGroupSelected ? 0.55 : 1)
-
-                    keyboardEditGestureLayer
-                }
-            }
+            .overlay { keyboardInteractionLayer }
             .contentShape(Rectangle())
             .scaleEffect(isPressed && editMode == .none ? 0.96 : 1)
             .animation(.easeOut(duration: 0.06), value: isPressed)
-            .highPriorityGesture(
-                keyPressGesture,
-                including: editMode == .none ? .all : .none
-            )
             .accessibilityLabel(control.accessibilityLabel)
             .accessibilityAddTraits(.isButton)
     }
 
+    @ViewBuilder
+    private var keyboardInteractionLayer: some View {
+        if editMode == .none {
+#if canImport(UIKit)
+            VirtualKeyTouchCaptureView(
+                resetGeneration: inputResetGeneration,
+                onPressedChanged: setPressed
+            )
+#else
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(keyPressGesture)
+#endif
+        } else {
+            editOutline
+                .opacity(editMode == .size && !isGroupSelected ? 0.55 : 1)
+            keyboardEditGestureLayer
+        }
+    }
+
+#if !canImport(UIKit)
     private var keyPressGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { _ in
-                guard !isPressed else { return }
-                isPressed = true
-                press()
+                setPressed(true)
             }
             .onEnded { _ in
-                guard isPressed else { return }
-                isPressed = false
-                release()
+                setPressed(false)
             }
+    }
+#endif
+
+    private func setPressed(_ pressed: Bool) {
+        guard isPressed != pressed else { return }
+        isPressed = pressed
+        if pressed {
+            press()
+        } else {
+            release()
+        }
     }
 
     @ViewBuilder
@@ -1039,25 +1242,29 @@ private struct VirtualKeyButton: View {
     }
 
     private func press() {
-        guard !control.keys.isEmpty else { return }
+        guard inputCoordinator.press(
+            controlID: control.id,
+            keys: control.keys,
+            session: session
+        ) else {
+            return
+        }
         onKeyActivity(true)
 #if canImport(UIKit)
         if profile.hapticFeedback {
-            UIImpactFeedbackGenerator(style: control.emphasized ? .medium : .light).impactOccurred()
+            inputCoordinator.performHaptic(emphasized: control.emphasized)
         }
 #endif
-        for key in control.keys {
-            session.send(key, pressed: true)
-        }
     }
 
     private func release() {
-        for key in control.keys {
-            session.send(key, pressed: false)
+        guard inputCoordinator.release(
+            controlID: control.id,
+            session: session
+        ) else {
+            return
         }
-        if !control.keys.isEmpty {
-            onKeyActivity(false)
-        }
+        onKeyActivity(false)
     }
 }
 

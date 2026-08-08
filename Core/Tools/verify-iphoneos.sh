@@ -19,6 +19,14 @@ case "$EXPECTED_DECODED_EXECUTION" in
     exit 2
     ;;
 esac
+EXPECTED_THINLTO="${PHONEME_ENABLE_THINLTO:-}"
+case "$EXPECTED_THINLTO" in
+  ""|0|1) ;;
+  *)
+    echo "PHONEME_ENABLE_THINLTO must be 0 or 1 when provided." >&2
+    exit 2
+    ;;
+esac
 case "$APPLE_SDK" in
   iphoneos) EXPECTED_PLATFORM_ID=2 ;;
   iphonesimulator) EXPECTED_PLATFORM_ID=7 ;;
@@ -28,6 +36,7 @@ case "$APPLE_SDK" in
     ;;
 esac
 PROVENANCE="$BUILD_ROOT/build-provenance.txt"
+BUILD_CONFIG_HASH_FILE="$BUILD_ROOT/build-config-sha256-final.txt"
 
 [[ -f "$ARCHIVE" ]] || {
   echo "Core archive is missing: $ARCHIVE" >&2
@@ -117,19 +126,6 @@ rg -q '[_[:space:]]phoneme_c_api_version$' <<< "$GLOBAL_SYMBOLS" || {
   exit 1
 }
 
-while IFS= read -r object; do
-  [[ -f "$object" ]] || continue
-  INFO="$(otool -l "$object")"
-  rg -q "platform ${EXPECTED_PLATFORM_ID}" <<< "$INFO" || {
-    echo "Object is not built for $APPLE_SDK: $object" >&2
-    exit 1
-  }
-  rg -q "minos ${IOS_DEPLOYMENT_TARGET//./\\.}" <<< "$INFO" || {
-    echo "Object has the wrong deployment target: $object" >&2
-    exit 1
-  }
-done < <(find "$BUILD_ROOT/objects" -type f -name '*.o' -print | LC_ALL=C sort)
-
 [[ -f "$PROVENANCE" ]] || {
   echo "Core build provenance is missing." >&2
   exit 1
@@ -160,6 +156,66 @@ if [[ -n "$EXPECTED_DECODED_EXECUTION" &&
   exit 1
 fi
 
+THINLTO="$(awk -F= '$1 == "thinlto_compiled" {print $2}' "$PROVENANCE")"
+case "$THINLTO" in
+  0|1) ;;
+  *)
+    echo "Core provenance has no valid ThinLTO setting." >&2
+    exit 1
+    ;;
+esac
+if [[ -n "$EXPECTED_THINLTO" && "$THINLTO" != "$EXPECTED_THINLTO" ]]; then
+  echo "Core provenance has the wrong ThinLTO setting: $THINLTO" >&2
+  exit 1
+fi
+
+BUILD_CONFIG_HASH="$(awk -F= '$1 == "build_config_sha256" {print $2}' "$PROVENANCE")"
+[[ "$BUILD_CONFIG_HASH" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Core provenance has no valid build configuration hash." >&2
+  exit 1
+}
+[[ -f "$BUILD_CONFIG_HASH_FILE" ]] || {
+  echo "Core build configuration hash file is missing." >&2
+  exit 1
+}
+[[ "$(cat "$BUILD_CONFIG_HASH_FILE")" == "$BUILD_CONFIG_HASH" ]] || {
+  echo "Core build configuration hash does not match provenance." >&2
+  exit 1
+}
+
+NORMALIZED_MINOS="$(awk -F. '{printf "%d.%d.%d", $1 + 0, (NF > 1 ? $2 + 0 : 0), (NF > 2 ? $3 + 0 : 0)}' <<< "$IOS_DEPLOYMENT_TARGET")"
+case "$APPLE_SDK" in
+  iphoneos) EXPECTED_TARGET_TRIPLE="arm64-apple-ios${NORMALIZED_MINOS}" ;;
+  iphonesimulator) EXPECTED_TARGET_TRIPLE="arm64-apple-ios${NORMALIZED_MINOS}-simulator" ;;
+esac
+
+while IFS= read -r object; do
+  [[ -f "$object" ]] || continue
+  if [[ "$THINLTO" == "1" ]]; then
+    FILE_TYPE="$(file -b "$object")"
+    rg -q 'LLVM (IR )?bitcode' <<< "$FILE_TYPE" || {
+      echo "ThinLTO object is not LLVM bitcode: $object ($FILE_TYPE)" >&2
+      exit 1
+    }
+    BITCODE_TRIPLES="$(LC_ALL=C strings "$object" | rg -o 'arm64-apple-ios[0-9.]+(-simulator)?' | LC_ALL=C sort -u)"
+    grep -qx "$EXPECTED_TARGET_TRIPLE" <<< "$BITCODE_TRIPLES" || {
+      echo "ThinLTO object has the wrong Apple target: $object" >&2
+      echo "Expected target triple: $EXPECTED_TARGET_TRIPLE" >&2
+      exit 1
+    }
+  else
+    INFO="$(otool -l "$object")"
+    rg -q "platform ${EXPECTED_PLATFORM_ID}" <<< "$INFO" || {
+      echo "Object is not built for $APPLE_SDK: $object" >&2
+      exit 1
+    }
+    rg -q "minos ${IOS_DEPLOYMENT_TARGET//./\\.}" <<< "$INFO" || {
+      echo "Object has the wrong deployment target: $object" >&2
+      exit 1
+    }
+  fi
+done < <(find "$BUILD_ROOT/objects" -type f -name '*.o' -print | LC_ALL=C sort)
+
 printf 'phoneME Core verification passed.\n'
 printf 'Archive: %s\n' "$ARCHIVE"
 printf 'Architecture: arm64\n'
@@ -175,4 +231,6 @@ printf 'Imported source references: none\n'
 printf 'External phoneME runtime archive: not required\n'
 printf 'Built-in C++ boot classes: enabled\n'
 printf 'Decoded execution compiled: %s\n' "$DECODED_EXECUTION"
+printf 'ThinLTO compiled: %s\n' "$THINLTO"
+printf 'Build configuration hash: %s\n' "$BUILD_CONFIG_HASH"
 printf 'Pointer-to-32-bit casts: none detected\n'

@@ -913,8 +913,20 @@ void Heap::mark_unlocked(ObjectRef root, std::vector<ObjectRef>& pending) {
     for (const Value& value : slot.object.fields) {
         append_reference(value);
     }
-    for (const Value& value : slot.object.elements) {
-        append_reference(value);
+
+    // Primitive Java arrays cannot contain object references. Skipping their
+    // payload here is especially important for image/audio buffers and M3G
+    // geometry, where a single reachable array can contain tens of thousands
+    // of Value slots. Multi-dimensional arrays and object arrays remain
+    // reference arrays and must still be traced element-by-element.
+    const bool trace_array_elements =
+        !slot.object.is_array ||
+        !slot.object.array_kind.has_value() ||
+        *slot.object.array_kind == HeapArrayKind::reference;
+    if (trace_array_elements) {
+        for (const Value& value : slot.object.elements) {
+            append_reference(value);
+        }
     }
 }
 

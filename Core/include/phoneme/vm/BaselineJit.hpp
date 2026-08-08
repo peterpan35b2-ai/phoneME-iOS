@@ -257,6 +257,13 @@ public:
     [[nodiscard]] JitAvailability availability() const noexcept;
     [[nodiscard]] JitStatistics statistics() const noexcept;
 
+    // Native results pack the executed-bytecode count into 30 bits. Machine
+    // uses this limit to admit only statically bounded calls when a Java thread
+    // itself has a larger (for example effectively-unbounded) VM budget.
+    [[nodiscard]] static constexpr u64 maximum_instruction_budget() noexcept {
+        return 0x3FFF'FFFFU;
+    }
+
     [[nodiscard]] Result<std::optional<JitExecutionResult>> try_execute(
         MethodId method_id,
         const classfile::ClassFile& owner,

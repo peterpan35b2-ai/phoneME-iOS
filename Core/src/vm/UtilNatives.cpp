@@ -653,13 +653,10 @@ struct TokenizerState final {
     if (!replacement) return std::unexpected(replacement.error());
     auto count = int_field(machine, vector, kVectorCountField);
     if (!count) return std::unexpected(count.error());
-    for (i32 index = 0; index < *count; ++index) {
-        auto value = machine.heap().element(*data,
-                                            static_cast<usize>(index));
-        if (!value) return std::unexpected(value.error());
-        auto stored = machine.heap().set_element(
-            *replacement, static_cast<usize>(index), *value);
-        if (!stored) return stored;
+    if (*count != 0) {
+        auto copied = machine.heap().copy_array_range(
+            *data, 0U, *replacement, 0U, static_cast<usize>(*count));
+        if (!copied) return copied;
     }
     return set_reference_field(machine, vector,
                                kVectorDataField, *replacement);
@@ -713,13 +710,12 @@ struct TokenizerState final {
         return fail_java("java/lang/ArrayIndexOutOfBoundsException",
                          "Vector index is out of range");
     }
-    for (i32 current = index; current + 1 < *count; ++current) {
-        auto next = machine.heap().element(
-            *data, static_cast<usize>(current + 1));
-        if (!next) return std::unexpected(next.error());
-        auto stored = machine.heap().set_element(
-            *data, static_cast<usize>(current), *next);
-        if (!stored) return stored;
+    const usize shifted = static_cast<usize>(*count - index - 1);
+    if (shifted != 0U) {
+        auto copied = machine.heap().copy_array_range(
+            *data, static_cast<usize>(index + 1),
+            *data, static_cast<usize>(index), shifted);
+        if (!copied) return copied;
     }
     auto cleared = machine.heap().set_element(
         *data, static_cast<usize>(*count - 1), Value::from_reference({}));
@@ -1107,13 +1103,12 @@ void register_array_list(NativeMethodRegistry& registry) {
             if (!capacity) return std::unexpected(capacity.error());
             auto data = vector_data(machine, *object);
             if (!data) return std::unexpected(data.error());
-            for (i32 current = *count; current > *index; --current) {
-                auto previous = machine.heap().element(
-                    *data, static_cast<usize>(current - 1));
-                if (!previous) return std::unexpected(previous.error());
-                auto shifted = machine.heap().set_element(
-                    *data, static_cast<usize>(current), *previous);
-                if (!shifted) return std::unexpected(shifted.error());
+            const usize shifted = static_cast<usize>(*count - *index);
+            if (shifted != 0U) {
+                auto copied = machine.heap().copy_array_range(
+                    *data, static_cast<usize>(*index),
+                    *data, static_cast<usize>(*index + 1), shifted);
+                if (!copied) return std::unexpected(copied.error());
             }
             auto stored = machine.heap().set_element(
                 *data, static_cast<usize>(*index),
@@ -1186,9 +1181,9 @@ void register_array_list(NativeMethodRegistry& registry) {
                 return fail(ErrorCode::invalid_state,
                             "ArrayList state is invalid");
             }
-            for (i32 index = 0; index < *count; ++index) {
-                auto cleared = machine.heap().set_element(
-                    *data, static_cast<usize>(index),
+            if (*count != 0) {
+                auto cleared = machine.heap().fill_array_range(
+                    *data, 0U, static_cast<usize>(*count),
                     Value::from_reference({}));
                 if (!cleared) return std::unexpected(cleared.error());
             }
@@ -1439,13 +1434,11 @@ void register_vector(NativeMethodRegistry& registry) {
             auto replacement = allocate_object_array(
                 machine, static_cast<usize>(*count));
             if (!replacement) return std::unexpected(replacement.error());
-            for (i32 index = 0; index < *count; ++index) {
-                auto value = machine.heap().element(
-                    *data, static_cast<usize>(index));
-                if (!value) return std::unexpected(value.error());
-                auto stored = machine.heap().set_element(
-                    *replacement, static_cast<usize>(index), *value);
-                if (!stored) return std::unexpected(stored.error());
+            if (*count != 0) {
+                auto copied = machine.heap().copy_array_range(
+                    *data, 0U, *replacement, 0U,
+                    static_cast<usize>(*count));
+                if (!copied) return std::unexpected(copied.error());
             }
             auto stored = set_reference_field(
                 machine, *object, kVectorDataField, *replacement);
@@ -1472,12 +1465,11 @@ void register_vector(NativeMethodRegistry& registry) {
             } else if (*requested < *count) {
                 auto data = vector_data(machine, *object);
                 if (!data) return std::unexpected(data.error());
-                for (i32 index = *requested; index < *count; ++index) {
-                    auto cleared = machine.heap().set_element(
-                        *data, static_cast<usize>(index),
-                        Value::from_reference({}));
-                    if (!cleared) return std::unexpected(cleared.error());
-                }
+                auto cleared = machine.heap().fill_array_range(
+                    *data, static_cast<usize>(*requested),
+                    static_cast<usize>(*count - *requested),
+                    Value::from_reference({}));
+                if (!cleared) return std::unexpected(cleared.error());
             }
             auto updated = set_int_field(
                 machine, *object, kVectorCountField, *requested);
@@ -1525,13 +1517,11 @@ void register_vector(NativeMethodRegistry& registry) {
                 return fail_java("java/lang/ArrayIndexOutOfBoundsException",
                                  "Vector.copyInto destination is too small");
             }
-            for (i32 index = 0; index < *count; ++index) {
-                auto value = machine.heap().element(
-                    *data, static_cast<usize>(index));
-                if (!value) return std::unexpected(value.error());
-                auto stored = machine.heap().set_element(
-                    *destination, static_cast<usize>(index), *value);
-                if (!stored) return std::unexpected(stored.error());
+            if (*count != 0) {
+                auto copied = machine.heap().copy_array_range(
+                    *data, 0U, *destination, 0U,
+                    static_cast<usize>(*count));
+                if (!copied) return std::unexpected(copied.error());
             }
             return std::optional<Value> {};
         });
@@ -1682,13 +1672,12 @@ void register_vector(NativeMethodRegistry& registry) {
             if (!capacity) return std::unexpected(capacity.error());
             auto data = vector_data(machine, *object);
             if (!data) return std::unexpected(data.error());
-            for (i32 current = *count; current > *index; --current) {
-                auto previous = machine.heap().element(
-                    *data, static_cast<usize>(current - 1));
-                if (!previous) return std::unexpected(previous.error());
-                auto stored = machine.heap().set_element(
-                    *data, static_cast<usize>(current), *previous);
-                if (!stored) return std::unexpected(stored.error());
+            const usize shifted = static_cast<usize>(*count - *index);
+            if (shifted != 0U) {
+                auto copied = machine.heap().copy_array_range(
+                    *data, static_cast<usize>(*index),
+                    *data, static_cast<usize>(*index + 1), shifted);
+                if (!copied) return std::unexpected(copied.error());
             }
             auto stored = machine.heap().set_element(
                 *data, static_cast<usize>(*index),
@@ -1750,9 +1739,9 @@ void register_vector(NativeMethodRegistry& registry) {
             if (!count || !data)
                 return fail(ErrorCode::invalid_state,
                             "Vector state is invalid");
-            for (i32 index = 0; index < *count; ++index) {
-                auto cleared = machine.heap().set_element(
-                    *data, static_cast<usize>(index),
+            if (*count != 0) {
+                auto cleared = machine.heap().fill_array_range(
+                    *data, 0U, static_cast<usize>(*count),
                     Value::from_reference({}));
                 if (!cleared) return std::unexpected(cleared.error());
             }

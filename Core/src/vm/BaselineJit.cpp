@@ -221,7 +221,8 @@ constexpr u32 kArrayLeaseRegister = 29U;
 constexpr u32 kStackPointer = 31U;
 constexpr u64 kDeoptMarker = 1ULL << 63U;
 constexpr u64 kBudgetExhaustedMarker = 1ULL << 62U;
-constexpr u32 kMaximumPackedBudget = 0x3FFF'FFFFU;
+constexpr u32 kMaximumPackedBudget = static_cast<u32>(
+    BaselineJit::maximum_instruction_budget());
 
 enum class Arm64Condition : u32 {
     equal = 0x0U,

@@ -21,7 +21,7 @@ case "$APPLE_SDK" in
 esac
 
 if [[ -n "${PHONEME_CORE_BUILD_DIR:-}" ]]; then
-  BUILD_ROOT="$(phoneme_prepare_managed_root "$PHONEME_CORE_BUILD_DIR" "$CORE_ROOT")"
+  BUILD_ROOT="$(phoneme_prepare_incremental_root "$PHONEME_CORE_BUILD_DIR" "$CORE_ROOT")"
 else
   BUILD_ROOT="$(phoneme_make_isolated_root "$CORE_ROOT" "$APPLE_SDK-arm64")"
 fi
@@ -37,6 +37,24 @@ case "$DECODED_EXECUTION" in
   0|1) ;;
   *)
     echo "PHONEME_ENABLE_DECODED_EXECUTION must be 0 or 1." >&2
+    exit 2
+    ;;
+esac
+
+# Core is a release-optimized static library even when the app target is Debug,
+# but keep Debug iteration fast by default. Standalone/device builds default to
+# ThinLTO because they are production-style builds unless explicitly disabled.
+if [[ -n "${PHONEME_ENABLE_THINLTO:-}" ]]; then
+  THINLTO="$PHONEME_ENABLE_THINLTO"
+elif [[ "${CONFIGURATION:-Release}" == "Debug" ]]; then
+  THINLTO=0
+else
+  THINLTO=1
+fi
+case "$THINLTO" in
+  0|1) ;;
+  *)
+    echo "PHONEME_ENABLE_THINLTO must be 0 or 1." >&2
     exit 2
     ;;
 esac
@@ -93,6 +111,7 @@ FINAL_SOURCE_HASHES="$BUILD_ROOT/source-sha256-final.txt"
 BUILD_LOG="$BUILD_ROOT/build.log"
 PROVENANCE="$BUILD_ROOT/build-provenance.txt"
 OBJECT_LIST="$BUILD_ROOT/archive-members.txt"
+FINAL_BUILD_CONFIG_HASH="$BUILD_ROOT/build-config-sha256-final.txt"
 
 (
   cd "$CORE_ROOT"
@@ -147,6 +166,33 @@ COMMON_FLAGS=(
   -Werror=int-to-pointer-cast
   -Werror=implicit-function-declaration
 )
+if [[ "$THINLTO" == "1" ]]; then
+  COMMON_FLAGS+=( -flto=thin )
+fi
+
+# Object-cache validity must include the actual compilation configuration, not
+# only source contents. Otherwise toggling decoded execution, optimization
+# flags, SDK/toolchain, or ThinLTO can silently reuse incompatible stale .o
+# files and make both benchmarks and shipped archives non-reproducible.
+BUILD_CONFIG_HASH="$({
+  printf 'compiler=%s\n' "$CXX"
+  "$CXX" --version
+  printf 'sdk=%s\n' "$SDK_ROOT"
+  printf 'target=%s\n' "$TARGET_TRIPLE"
+  printf 'flag=%s\n' "${COMMON_FLAGS[@]}"
+  shasum -a 256 "$BASH_SOURCE"
+} | shasum -a 256 | awk '{print $1}')"
+PREVIOUS_BUILD_CONFIG_HASH=""
+if [[ -f "$FINAL_BUILD_CONFIG_HASH" ]]; then
+  PREVIOUS_BUILD_CONFIG_HASH="$(cat "$FINAL_BUILD_CONFIG_HASH")"
+fi
+BUILD_CONFIG_UNCHANGED=false
+if [[ -n "$PREVIOUS_BUILD_CONFIG_HASH" &&
+      "$PREVIOUS_BUILD_CONFIG_HASH" == "$BUILD_CONFIG_HASH" ]]; then
+  BUILD_CONFIG_UNCHANGED=true
+fi
+CURRENT_OBJECT_FINGERPRINT="$BUILD_CONFIG_HASH:$SOURCE_TREE_HASH"
+PREVIOUS_OBJECT_FINGERPRINT="$BUILD_CONFIG_HASH:$PREVIOUS_SOURCE_TREE_HASH"
 
 : > "$BUILD_LOG"
 BUILD_JOBS="${PHONEME_BUILD_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')}"
@@ -173,24 +219,25 @@ compile_source() {
   if [[ -f "$object" && -f "$marker" ]]; then
     local marker_hash
     marker_hash="$(cat "$marker")"
-    if [[ "$marker_hash" == "$SOURCE_TREE_HASH" ]]; then
+    if [[ "$marker_hash" == "$CURRENT_OBJECT_FINGERPRINT" ]]; then
       printf 'CACHED %s\n' "$source" | tee -a "$BUILD_LOG"
       return 0
     fi
 
-    # A previous complete build can be reused across .cpp-only changes. A
-    # header change invalidates every object; otherwise compare this source's
-    # old and new hashes before promoting its marker to the new tree hash.
+    # A previous complete build can be reused across .cpp-only changes only
+    # when the compiler configuration is identical. A header or build-flag
+    # change invalidates every object.
     if [[ "$HEADERS_UNCHANGED" == true &&
+          "$BUILD_CONFIG_UNCHANGED" == true &&
           -n "$PREVIOUS_SOURCE_TREE_HASH" &&
-          "$marker_hash" == "$PREVIOUS_SOURCE_TREE_HASH" ]]; then
+          "$marker_hash" == "$PREVIOUS_OBJECT_FINGERPRINT" ]]; then
       local current_source_hash
       local previous_source_hash
       current_source_hash="$(awk -v path="$source" '$2 == path { print $1; exit }' "$SOURCE_HASHES")"
       previous_source_hash="$(awk -v path="$source" '$2 == path { print $1; exit }' "$FINAL_SOURCE_HASHES")"
       if [[ -n "$current_source_hash" &&
             "$current_source_hash" == "$previous_source_hash" ]]; then
-        printf '%s\n' "$SOURCE_TREE_HASH" > "$marker.tmp"
+        printf '%s\n' "$CURRENT_OBJECT_FINGERPRINT" > "$marker.tmp"
         mv "$marker.tmp" "$marker"
         printf 'CACHED %s\n' "$source" | tee -a "$BUILD_LOG"
         return 0
@@ -203,7 +250,7 @@ compile_source() {
     -c "$CORE_ROOT/$source" \
     -o "$object" \
     2>&1 | tee -a "$BUILD_LOG"
-  printf '%s\n' "$SOURCE_TREE_HASH" > "$marker.tmp"
+  printf '%s\n' "$CURRENT_OBJECT_FINGERPRINT" > "$marker.tmp"
   mv "$marker.tmp" "$marker"
 }
 
@@ -255,6 +302,8 @@ fi
 
 rm -f "$OUTPUT_ARCHIVE"
 ZERO_AR_DATE=1 xcrun libtool -static -D -o "$OUTPUT_ARCHIVE" "${OBJECTS[@]}"
+printf '%s\n' "$BUILD_CONFIG_HASH" > "$FINAL_BUILD_CONFIG_HASH.tmp"
+mv "$FINAL_BUILD_CONFIG_HASH.tmp" "$FINAL_BUILD_CONFIG_HASH"
 
 ARCHITECTURES="$(xcrun lipo -archs "$OUTPUT_ARCHIVE")"
 if [[ "$ARCHITECTURES" != "arm64" ]]; then
@@ -283,6 +332,8 @@ compiler=$CXX
 sdk=$SDK_ROOT
 cxx_standard=c++23
 decoded_execution_compiled=$DECODED_EXECUTION
+thinlto_compiled=$THINLTO
+build_config_sha256=$BUILD_CONFIG_HASH
 legacy_source_compiled=false
 vendor_source_compiled=false
 external_runtime_archive_required=false
@@ -301,6 +352,7 @@ PHONEME_CORE_OUTPUT=$OUTPUT_ARCHIVE
 IOS_DEPLOYMENT_TARGET=$IOS_DEPLOYMENT_TARGET
 PHONEME_APPLE_SDK=$APPLE_SDK
 PHONEME_ENABLE_DECODED_EXECUTION=$DECODED_EXECUTION
+PHONEME_ENABLE_THINLTO=$THINLTO
 EOF
 
 cat <<EOF
@@ -312,6 +364,7 @@ Platform: $APPLE_SDK
 Deployment target: iOS $IOS_DEPLOYMENT_TARGET
 C++ standard: C++23
 Decoded execution compiled: $DECODED_EXECUTION
+ThinLTO compiled: $THINLTO
 Source files: $SOURCE_COUNT
 Archive members: $OBJECT_COUNT
 Archive size: $ARCHIVE_SIZE

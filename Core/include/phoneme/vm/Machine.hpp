@@ -612,6 +612,9 @@ namespace phoneme::vm
     [[nodiscard]] std::optional<u64> bounded_jit_invocation_cost(
         const ResolvedMethod& target,
         u32 recursion_depth);
+    [[nodiscard]] std::optional<u64> safe_jit_instruction_budget(
+        const ResolvedMethod& target,
+        u64 requested_budget);
     [[nodiscard]] Result<ObjectRef> intern_string(
         std::string_view modified_utf8);
     [[nodiscard]] Result<ObjectRef> create_throwable(

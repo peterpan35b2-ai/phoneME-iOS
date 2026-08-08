@@ -134,6 +134,37 @@ phoneme_prepare_managed_root() {
   printf '%s\n' "$path"
 }
 
+# Build caches need a managed root with the same path-safety guarantees as test
+# roots, but deleting it on every invocation defeats incremental compilation.
+# Reuse only directories previously marked by our tooling; never adopt an
+# arbitrary existing path.
+phoneme_prepare_incremental_root() {
+  local path="$1"
+  local core_root="$2"
+
+  [[ "$path" == /* ]] || path="$PWD/$path"
+  [[ ! -L "$path" ]] || {
+    phoneme_tool_error "refusing symlink incremental root: $path"
+    return 64
+  }
+  path="$(phoneme_resolve_path_for_creation "$path")" || return
+  phoneme_assert_safe_path "$path" "$core_root" || return
+
+  if [[ -e "$path" ]]; then
+    [[ -d "$path" && -f "$path/.phoneme-test-root" ]] || {
+      phoneme_tool_error "refusing unmarked incremental root: $path"
+      return 65
+    }
+  else
+    mkdir -p "$path"
+    printf '%s\n' "phoneME isolated root" > "$path/.phoneme-test-root"
+  fi
+
+  path="$(cd "$path" && pwd -P)"
+  phoneme_assert_safe_path "$path" "$core_root" || return
+  printf '%s\n' "$path"
+}
+
 phoneme_safe_remove_root() {
   local root="${1:-}"
   local core_root="${2:-${CORE_ROOT:-}}"

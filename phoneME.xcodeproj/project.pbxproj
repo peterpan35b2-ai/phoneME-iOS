@@ -491,6 +491,7 @@
 					CoreFoundation,
 					"-framework",
 					ImageIO,
+					"-flto=thin",
 					"-Wl,-force_load,$(DERIVED_FILE_DIR)/libphoneMECoreNoMain.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.phoneme.emulator;

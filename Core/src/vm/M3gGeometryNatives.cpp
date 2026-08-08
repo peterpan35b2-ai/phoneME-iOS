@@ -64,12 +64,9 @@ constexpr const char* kSprite3D = "javax/microedition/m3g/Sprite3D";
     auto destination = allocate_array(machine, std::move(class_name),
                                       *length, initial);
     if (!destination) return std::unexpected(destination.error());
-    for (usize index = 0; index < *length; ++index) {
-        auto value = machine.heap().element(source, index);
-        if (!value) return std::unexpected(value.error());
-        auto stored = machine.heap().set_element(*destination, index, *value);
-        if (!stored) return std::unexpected(stored.error());
-    }
+    auto copied = machine.heap().copy_array_range(
+        source, 0U, *destination, 0U, *length);
+    if (!copied) return std::unexpected(copied.error());
     return *destination;
 }
 
@@ -92,11 +89,10 @@ constexpr const char* kSprite3D = "javax/microedition/m3g/Sprite3D";
     auto result = allocate_array(machine, std::move(class_name),
                                  old_length + 1U, initial);
     if (!result) return std::unexpected(result.error());
-    for (usize index = 0; index < old_length; ++index) {
-        auto value = machine.heap().element(existing, index);
-        if (!value) return std::unexpected(value.error());
-        auto stored = machine.heap().set_element(*result, index, *value);
-        if (!stored) return std::unexpected(stored.error());
+    if (old_length != 0U) {
+        auto copied = machine.heap().copy_array_range(
+            existing, 0U, *result, 0U, old_length);
+        if (!copied) return std::unexpected(copied.error());
     }
     auto stored = machine.heap().set_element(*result, old_length, appended);
     if (!stored) return std::unexpected(stored.error());

@@ -5703,6 +5703,27 @@ namespace phoneme::vm
     return maximum_cost;
   }
 
+  std::optional<u64> Machine::safe_jit_instruction_budget(
+      const ResolvedMethod& target,
+      u64 requested_budget)
+  {
+    const u64 native_limit = BaselineJit::maximum_instruction_budget();
+    if (requested_budget <= native_limit)
+      return requested_budget;
+
+    // Scheduler-owned Thread.run entries intentionally use an effectively
+    // unbounded VM budget. The ARM64 ABI cannot encode that value, but simply
+    // rejecting it also disables JIT for every finite helper reached from the
+    // long-lived interpreter loop. Admit only methods whose complete Java call
+    // tree is statically proven acyclic/non-blocking and fits in one native
+    // budget window. This preserves scheduler safety: an unbounded loop never
+    // enters native code without a resumable budget safepoint.
+    const auto bounded_cost = bounded_jit_invocation_cost(target, 0U);
+    if (!bounded_cost.has_value() || *bounded_cost > native_limit)
+      return std::nullopt;
+    return native_limit;
+  }
+
   u32 Machine::dispatch_jit_runtime(
       JitExecutionContext* parent_context,
       const classfile::ClassFile& owner,
@@ -8903,7 +8924,10 @@ namespace phoneme::vm
               ? root_jit_instructions - root_jit_nested_instructions
               : 0U;
     }
-    if (!root_jit_deopt_state.has_value() &&
+    if (const auto root_jit_budget =
+            safe_jit_instruction_budget(invocation.method, instruction_budget);
+        root_jit_budget.has_value() &&
+        !root_jit_deopt_state.has_value() &&
         budget_mode != InstructionBudgetMode::progress_watchdog &&
         invocation.method.runtime != nullptr &&
         invocation.method.owner != nullptr &&
@@ -8940,7 +8964,7 @@ namespace phoneme::vm
           *invocation.descriptor,
           invocation.arguments,
           invocation.has_receiver,
-          instruction_budget,
+          *root_jit_budget,
           jit_hooks,
           invocation.method.owner);
       if (!jitted)
@@ -13007,7 +13031,10 @@ namespace phoneme::vm
           // completed nested call.  Disabling nested JIT here forces an entire
           // Canvas.paint render tree back through the interpreter and is
           // catastrophic for game frame rate.
-          if (nested->method.runtime != nullptr &&
+          if (const auto nested_jit_budget = safe_jit_instruction_budget(
+                  nested->method, remaining_execution_budget());
+              nested_jit_budget.has_value() &&
+              nested->method.runtime != nullptr &&
               nested->method.owner != nullptr &&
               nested->descriptor != nullptr &&
               !nested->return_override.has_value() &&
@@ -13016,7 +13043,6 @@ namespace phoneme::vm
               !nested->return_unboxing_target.has_value() &&
               !nested->return_widening_target.has_value())
           {
-            const u64 remaining_budget = remaining_execution_budget();
             JitExecutionContext jit_context{
                 .machine = this,
                 .owner = nested->method.owner.get(),
@@ -13046,7 +13072,7 @@ namespace phoneme::vm
                 *nested->descriptor,
                 nested->arguments,
                 nested->has_receiver,
-                remaining_budget,
+                *nested_jit_budget,
                 jit_hooks,
                 nested->method.owner);
             if (!jitted)

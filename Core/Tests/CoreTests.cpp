@@ -821,6 +821,40 @@ void test_baseline_jit(const std::string& fixture_jar) {
         return;
     }
 
+    {
+        phoneme::vm::ClassRepository long_budget_classes;
+        require(long_budget_classes.add_archive(fixture_jar).has_value(),
+                "add JIT fixture archive for long-lived thread budget test");
+        phoneme::vm::Machine long_budget_machine(long_budget_classes);
+        long_budget_machine.configure_jit(true);
+        auto counter = long_budget_machine.heap().allocate_array(
+            "[I", 1U, phoneme::vm::Value::from_int(0));
+        require(counter.has_value(),
+                "allocate counter array for long-lived JIT budget test");
+        const std::array<phoneme::vm::Value, 2> long_budget_arguments {
+            phoneme::vm::Value::from_reference(*counter),
+            phoneme::vm::Value::from_int(64),
+        };
+        const auto long_budget_before = long_budget_machine.jit_statistics();
+        auto long_budget_result = long_budget_machine.invoke_static(
+            "corefixture/JitOps",
+            "osrCallLoop",
+            "([II)I",
+            long_budget_arguments,
+            std::numeric_limits<phoneme::u64>::max());
+        const auto long_budget_after = long_budget_machine.jit_statistics();
+        auto counter_value = long_budget_machine.heap().element(*counter, 0U);
+        require(long_budget_result.has_value() &&
+                    long_budget_result->completed_normally() &&
+                    long_budget_result->return_value.has_value() &&
+                    long_budget_result->return_value->as_int().value_or(-1) == 2016 &&
+                    counter_value.has_value() &&
+                    counter_value->as_int().value_or(-1) == 64 &&
+                    long_budget_after.executed_methods >
+                        long_budget_before.executed_methods,
+                "long-lived Java threads JIT statically bounded nested helpers");
+    }
+
     phoneme::vm::ClassRepository startup_classes;
     require(startup_classes.add_archive(fixture_jar).has_value(),
             "add JIT fixture archive for startup-tier policy test");

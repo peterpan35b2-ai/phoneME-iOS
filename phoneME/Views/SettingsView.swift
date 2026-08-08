@@ -33,6 +33,8 @@ enum AppTheme: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var storage: PhoneMEStorageController
     @EnvironmentObject private var library: GameLibrary
     @EnvironmentObject private var profiles: GameProfileStore
@@ -92,6 +94,15 @@ struct SettingsView: View {
                     Label(jitStatusTitle, systemImage: jitStatusSystemImage)
                         .foregroundStyle(jitStatusForegroundStyle)
                 }
+#if os(iOS)
+                if session.jitStatus == .unavailable,
+                   PhoneMECAPI.isTrollStoreJITBuild,
+                   let url = PhoneMECAPI.trollStoreJITURL {
+                    Button("Enable JIT with TrollStore") {
+                        openURL(url)
+                    }
+                }
+#endif
             } header: {
                 Text("JIT")
             }
@@ -150,6 +161,11 @@ struct SettingsView: View {
         }
         .task {
             session.refreshJITStatus()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                session.refreshJITStatus()
+            }
         }
     }
 

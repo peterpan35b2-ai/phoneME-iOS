@@ -99,8 +99,8 @@ set_string_array_entitlement() {
 }
 
 # The package remains attachable by TrollStore/StikDebug. JIT readiness is
-# verified at runtime by executing generated ARM64 code, not inferred from an
-# entitlement or a child-process ptrace call.
+# verified at runtime from the process code-signing flags (CS_DEBUGGED or
+# CS_KILL cleared); a successful child spawn alone is never treated as proof.
 set_boolean_entitlement "get-task-allow"
 set_boolean_entitlement "com.apple.developer.kernel.increased-memory-limit"
 set_boolean_entitlement "com.apple.developer.kernel.extended-virtual-addressing"
