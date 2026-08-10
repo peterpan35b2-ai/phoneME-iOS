@@ -322,6 +322,7 @@ Status FileSystem::configure(std::string sandbox_root,
     temporary_root_ = std::move(*temporary);
     next_handle_ = 1;
     configured_ = true;
+    mutation_generation_.store(0, std::memory_order_relaxed);
     return {};
 }
 
@@ -424,6 +425,9 @@ Result<i32> FileSystem::open(std::string_view virtual_path,
         static_cast<void>(::close(*descriptor));
         return std::unexpected(handle.error());
     }
+    if (create || truncate_file) {
+        mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    }
     return *handle;
 }
 
@@ -458,6 +462,9 @@ Result<usize> FileSystem::write(i32 handle,
                         "sandbox file write made no progress");
         }
         total += static_cast<usize>(count);
+    }
+    if (total > 0) {
+        mutation_generation_.fetch_add(1, std::memory_order_relaxed);
     }
     return total;
 }
@@ -608,19 +615,25 @@ Result<FileInfo> FileSystem::stat(std::string_view virtual_path) const {
 Status FileSystem::create_file(std::string_view virtual_path) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.create_file(*path);
+    auto result = sandbox_.create_file(*path);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::create_directory(std::string_view virtual_path) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.create_directory(*path);
+    auto result = sandbox_.create_directory(*path);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::remove(std::string_view virtual_path, bool recursive) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.remove(*path, recursive);
+    auto result = sandbox_.remove(*path, recursive);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::rename(std::string_view from, std::string_view to) {
@@ -628,27 +641,35 @@ Status FileSystem::rename(std::string_view from, std::string_view to) {
     auto destination = normalize_virtual_path(to);
     if (!source) return std::unexpected(source.error());
     if (!destination) return std::unexpected(destination.error());
-    return sandbox_.rename(*source, *destination);
+    auto result = sandbox_.rename(*source, *destination);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::truncate(std::string_view virtual_path, u64 length) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.truncate(*path, length);
+    auto result = sandbox_.truncate(*path, length);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::set_readable(std::string_view virtual_path,
                                 bool readable) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.set_readable(*path, readable);
+    auto result = sandbox_.set_readable(*path, readable);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Status FileSystem::set_writable(std::string_view virtual_path,
                                 bool writable) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.set_writable(*path, writable);
+    auto result = sandbox_.set_writable(*path, writable);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Result<std::vector<std::string>> FileSystem::list(
@@ -707,7 +728,9 @@ Status FileSystem::atomic_write(std::string_view virtual_path,
                                 std::span<const u8> contents) {
     auto path = normalize_virtual_path(virtual_path);
     if (!path) return std::unexpected(path.error());
-    return sandbox_.atomic_write(*path, contents);
+    auto result = sandbox_.atomic_write(*path, contents);
+    if (result) mutation_generation_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 Result<std::string> FileSystem::host_path(

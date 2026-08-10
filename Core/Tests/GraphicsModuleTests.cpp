@@ -1188,8 +1188,54 @@ void test_dirty_update_contract() {
     }
 }
 
+void test_graphics_store_lookup_cache_invalidation() {
+    phoneme::graphics::GraphicsStore store;
+
+    auto first = Image::create_mutable(4, 4);
+    require(first.has_value(), "create lookup-cache image");
+    require(store.attach_image(401U, std::move(*first)).has_value(),
+            "attach lookup-cache image");
+    require(store.attach_context(501U, 401U, false).has_value(),
+            "attach lookup-cache context");
+    require(store.image(401U).has_value(),
+            "prime image lookup cache");
+    require(store.context(501U).has_value(),
+            "prime context lookup cache");
+
+    store.erase_image(401U);
+    require(!store.image(401U).has_value(),
+            "erase invalidates cached image lookup");
+    require(!store.context(501U).has_value(),
+            "erase image invalidates cached target context lookup");
+
+    auto second = Image::create_mutable(4, 4);
+    require(second.has_value(), "create prune lookup-cache image");
+    require(store.attach_image(402U, std::move(*second)).has_value(),
+            "attach prune lookup-cache image");
+    require(store.attach_context(502U, 402U, false).has_value(),
+            "attach prune lookup-cache context");
+    require(store.image(402U).has_value() && store.context(502U).has_value(),
+            "prime prune lookup caches");
+    store.prune([](u64 key) { return key == 402U; });
+    require(store.image(402U).has_value(),
+            "prune preserves live cached image");
+    require(!store.context(502U).has_value(),
+            "prune invalidates dead cached context");
+
+    require(store.attach_context(503U, 402U, false).has_value(),
+            "reattach context before clear");
+    require(store.context(503U).has_value(),
+            "prime clear lookup cache");
+    store.clear();
+    require(!store.image(402U).has_value(),
+            "clear invalidates cached image lookup");
+    require(!store.context(503U).has_value(),
+            "clear invalidates cached context lookup");
+}
+
 void test_graphics_allocation_requests_gc() {
     phoneme::graphics::GraphicsStore store;
+    const usize baseline_bytes = store.estimated_bytes();
     require(!store.automatic_collection_due(),
             "fresh graphics store does not request collection");
 
@@ -1199,10 +1245,15 @@ void test_graphics_allocation_requests_gc() {
             "attach graphics-GC threshold image");
     require(store.automatic_collection_due(),
             "16 MiB of native image allocation requests Java GC pruning");
+    require(store.estimated_bytes() >= baseline_bytes + 16U * 1024U * 1024U,
+            "graphics store accounts retained native image bytes");
 
     store.prune([](u64) { return true; });
     require(!store.automatic_collection_due(),
             "graphics allocation counter resets after pruning");
+    store.erase_image(303U);
+    require_equal(store.estimated_bytes(), baseline_bytes,
+                  "graphics accounting releases erased native image bytes");
 }
 
 void test_hidden_render_suppression() {
@@ -1329,6 +1380,7 @@ int main() {
     test_jpeg_gif_and_format_dispatch();
     test_font_unicode_and_measurement();
     test_dirty_update_contract();
+    test_graphics_store_lookup_cache_invalidation();
     test_graphics_allocation_requests_gc();
     test_hidden_render_suppression();
     test_sprite_heavy_benchmark();

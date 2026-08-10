@@ -40,15 +40,45 @@ using Pixel = u32;
 // plane. Convert through that representation when publishing the emulated LCD
 // so host RGBA output matches the colors Java ME applications actually saw.
 [[nodiscard]] constexpr Pixel rgb565_roundtrip(Pixel pixel) noexcept {
-    const u8 red5 = static_cast<u8>(red(pixel) >> 3U);
-    const u8 green6 = static_cast<u8>(green(pixel) >> 2U);
-    const u8 blue5 = static_cast<u8>(blue(pixel) >> 3U);
-    const u8 expanded_red = static_cast<u8>((red5 << 3U) | (red5 >> 2U));
-    const u8 expanded_green = static_cast<u8>((green6 << 2U) | (green6 >> 4U));
-    const u8 expanded_blue = static_cast<u8>((blue5 << 3U) | (blue5 >> 2U));
-    return argb(alpha(pixel), expanded_red, expanded_green, expanded_blue);
+    // Preserve the high RGB565 bits in-place and replicate their MSBs into the
+    // discarded low bits. Besides being equivalent to the component-wise form,
+    // this maps to a handful of bitwise WASM operations and vectorizes cleanly
+    // with SIMD128 in full-row blits.
+    return (pixel & 0xFFF8FCF8U) |
+           ((pixel & 0x00E00000U) >> 5U) |
+           ((pixel & 0x0000C000U) >> 6U) |
+           ((pixel & 0x000000E0U) >> 5U);
 }
 
-[[nodiscard]] Pixel source_over(Pixel source, Pixel destination) noexcept;
+[[nodiscard]] inline Pixel source_over(Pixel source,
+                                       Pixel destination) noexcept {
+    const u32 source_alpha = alpha(source);
+    if (source_alpha == 0U) return destination;
+    if (source_alpha == 255U) return source;
+
+    const u32 destination_alpha = alpha(destination);
+    const u32 inverse_source = 255U - source_alpha;
+    const u32 output_alpha = source_alpha +
+        ((destination_alpha * inverse_source + 127U) / 255U);
+    if (output_alpha == 0U) return 0U;
+
+    const auto composite = [&](u32 source_component,
+                               u32 destination_component) -> u8 {
+        const u32 source_premultiplied = source_component * source_alpha;
+        const u32 destination_premultiplied =
+            (destination_component * destination_alpha * inverse_source +
+             127U) /
+            255U;
+        return static_cast<u8>((source_premultiplied +
+                                destination_premultiplied +
+                                output_alpha / 2U) /
+                               output_alpha);
+    };
+
+    return argb(static_cast<u8>(output_alpha),
+                composite(red(source), red(destination)),
+                composite(green(source), green(destination)),
+                composite(blue(source), blue(destination)));
+}
 
 } // namespace phoneme::graphics

@@ -35,6 +35,7 @@
 #include "phoneme/vm/NativeRootScope.hpp"
 #include "phoneme/vm/RootSet.hpp"
 #include "phoneme/vm/Scheduler.hpp"
+#include "phoneme/vm/SlotStorage.hpp"
 #include "phoneme/vm/TimerService.hpp"
 
 namespace phoneme::runtime
@@ -389,6 +390,32 @@ namespace phoneme::vm
       u64 resume_jit_nested_instructions{0U};
     };
 
+    struct TrivialGetterIntrinsic final
+    {
+      FieldLocation field;
+      bool is_static{false};
+    };
+
+    struct TransparentStringHash final
+    {
+      using is_transparent = void;
+      [[nodiscard]] usize operator()(std::string_view value) const noexcept {
+        return std::hash<std::string_view>{}(value);
+      }
+      [[nodiscard]] usize operator()(const std::string& value) const noexcept {
+        return (*this)(std::string_view(value));
+      }
+    };
+
+    struct TransparentStringEqual final
+    {
+      using is_transparent = void;
+      [[nodiscard]] bool operator()(std::string_view left,
+                                    std::string_view right) const noexcept {
+        return left == right;
+      }
+    };
+
     struct CharacterDrawSample final
     {
       u64 graphics_id{0};
@@ -563,6 +590,12 @@ namespace phoneme::vm
         bool has_receiver,
         std::optional<NativeMethodId> prebound_native_method = std::nullopt);
     void refresh_metadata_bindings_if_needed() noexcept;
+    [[nodiscard]] std::shared_ptr<const RuntimeMethod> cached_runtime_method(
+        MethodId method_id);
+    [[nodiscard]] Result<std::shared_ptr<const CachedMethodDescriptor>>
+    cached_method_descriptor(std::string_view descriptor);
+    [[nodiscard]] std::shared_ptr<const RuntimeClass> cached_runtime_class(
+        std::string_view class_name);
     [[nodiscard]] Result<OperandResolutionEntry*> operand_resolution_entry(
         MethodId method_id,
         u32 operand_index,
@@ -692,6 +725,9 @@ namespace phoneme::vm
     mutable std::mutex native_bindings_mutex_;
     u64 native_binding_generation_ {0U};
     std::unordered_map<const classfile::Method*, NativeMethodId> native_bindings_;
+    std::unordered_map<const classfile::Method*,
+                       std::optional<TrivialGetterIntrinsic>>
+        trivial_getter_intrinsics_;
     std::unordered_map<
         const classfile::ClassFile*,
         std::unordered_map<u32, std::shared_ptr<const FieldLocation>>>
@@ -738,6 +774,19 @@ namespace phoneme::vm
     std::optional<Error> serial_callback_failure_;
     MethodId operand_resolution_method_id_ {};
     std::shared_ptr<const RuntimeMethod> operand_resolution_method_;
+    std::unordered_map<MethodId,
+                       std::shared_ptr<const RuntimeMethod>,
+                       MetadataIdHash<MethodId>> runtime_method_bindings_;
+    std::unordered_map<std::string,
+                       std::shared_ptr<const CachedMethodDescriptor>,
+                       TransparentStringHash,
+                       TransparentStringEqual>
+        descriptor_bindings_;
+    std::unordered_map<std::string,
+                       std::shared_ptr<const RuntimeClass>,
+                       TransparentStringHash,
+                       TransparentStringEqual>
+        runtime_class_bindings_;
     BaselineJit jit_;
   };
 

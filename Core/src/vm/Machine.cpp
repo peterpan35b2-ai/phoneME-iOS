@@ -790,6 +790,23 @@ namespace phoneme::vm
             : MethodId {};
       }
 
+      [[nodiscard]] Result<OperandResolutionEntry*> operand_resolution_entry(
+          u32 operand_index,
+          usize bytecode_pc) const
+      {
+        if (resolved_.runtime == nullptr ||
+            resolved_.runtime->decoded == nullptr ||
+            resolved_.runtime->operand_resolutions == nullptr ||
+            operand_index == kInvalidDecodedIndex ||
+            bytecode_pc > static_cast<usize>(std::numeric_limits<u32>::max()))
+        {
+          return fail(ErrorCode::invalid_argument,
+                      "execution frame has no decoded operand resolution");
+        }
+        return resolved_.runtime->operand_resolutions->entry(
+            operand_index, static_cast<u32>(bytecode_pc));
+      }
+
       [[nodiscard]] const CachedMethodDescriptor* cached_descriptor() const noexcept
       {
         return resolved_.runtime != nullptr && resolved_.runtime->descriptor
@@ -4112,10 +4129,61 @@ namespace phoneme::vm
       field_bindings_.clear();
       direct_call_bindings_.clear();
       virtual_call_bindings_.clear();
+      trivial_getter_intrinsics_.clear();
       operand_resolution_method_id_ = {};
       operand_resolution_method_.reset();
+      runtime_method_bindings_.clear();
+      descriptor_bindings_.clear();
+      runtime_class_bindings_.clear();
       metadata_binding_generation_ = metadata_generation;
     }
+  }
+
+  std::shared_ptr<const RuntimeMethod>
+  Machine::cached_runtime_method(MethodId method_id)
+  {
+    if (!method_id.valid()) return nullptr;
+    if (const auto cached = runtime_method_bindings_.find(method_id);
+        cached != runtime_method_bindings_.end())
+    {
+      return cached->second;
+    }
+    auto runtime_method = classes_.metadata().find_method(method_id);
+    if (runtime_method != nullptr)
+    {
+      runtime_method_bindings_.emplace(method_id, runtime_method);
+    }
+    return runtime_method;
+  }
+
+  Result<std::shared_ptr<const CachedMethodDescriptor>>
+  Machine::cached_method_descriptor(std::string_view descriptor)
+  {
+    if (const auto cached = descriptor_bindings_.find(descriptor);
+        cached != descriptor_bindings_.end())
+    {
+      return cached->second;
+    }
+    auto resolved = classes_.metadata().method_descriptor(descriptor);
+    if (!resolved) return std::unexpected(resolved.error());
+    descriptor_bindings_.emplace(std::string(descriptor), *resolved);
+    return *resolved;
+  }
+
+  std::shared_ptr<const RuntimeClass>
+  Machine::cached_runtime_class(std::string_view class_name)
+  {
+    if (const auto cached = runtime_class_bindings_.find(class_name);
+        cached != runtime_class_bindings_.end())
+    {
+      return cached->second;
+    }
+    auto runtime_class = classes_.metadata().find_class(class_name);
+    if (runtime_class != nullptr)
+    {
+      runtime_class_bindings_.emplace(std::string(class_name), runtime_class);
+    }
+    return runtime_class;
   }
 
   Result<OperandResolutionEntry*>
@@ -4137,7 +4205,7 @@ namespace phoneme::vm
     }
     else
     {
-      runtime_method = classes_.metadata().find_method(method_id);
+      runtime_method = cached_runtime_method(method_id);
       operand_resolution_method_id_ = method_id;
       operand_resolution_method_ = runtime_method;
     }
@@ -8892,7 +8960,7 @@ namespace phoneme::vm
             return fail(ErrorCode::internal_error,
                         "boxed lambda native return has no wrapper object");
           }
-          auto stored = heap_.set_field(*wrapper, 0U, *completed_return);
+          auto stored = heap_.vm_set_field(*wrapper, 0U, *completed_return);
           if (!stored)
             return std::unexpected(stored.error());
         }
@@ -8924,6 +8992,7 @@ namespace phoneme::vm
               ? root_jit_instructions - root_jit_nested_instructions
               : 0U;
     }
+#if !defined(__EMSCRIPTEN__)
     if (const auto root_jit_budget =
             safe_jit_instruction_budget(invocation.method, instruction_budget);
         root_jit_budget.has_value() &&
@@ -9044,6 +9113,7 @@ namespace phoneme::vm
         }
       }
     }
+#endif
     auto root_frame = ExecutionFrame::make(std::move(invocation.method),
                                            invocation.descriptor->descriptor,
                                            invocation.arguments,
@@ -9237,7 +9307,7 @@ namespace phoneme::vm
       {
         prune_lambda_bindings();
         graphics_.prune([this](u64 object_key) {
-          return heap_.class_name(ObjectRef{object_key}).has_value();
+          return heap_.vm_class_name(ObjectRef{object_key}).has_value();
         });
       }
       return collected;
@@ -9295,6 +9365,100 @@ namespace phoneme::vm
       return heap_.allocate_array(std::string(class_name),
                                   length,
                                   initial_value);
+    };
+
+    const auto try_trivial_getter_intrinsic =
+        [this](const Invocation& candidate)
+        -> Result<std::optional<Value>>
+    {
+      if (!specialized_intrinsics_requested() ||
+          candidate.method.owner == nullptr ||
+          candidate.method.method == nullptr ||
+          !candidate.method.method->code.has_value() ||
+          candidate.return_override.has_value() ||
+          candidate.discard_return_value ||
+          candidate.return_reference_cast_target.has_value() ||
+          candidate.return_unboxing_target.has_value() ||
+          candidate.return_widening_target.has_value())
+      {
+        return std::optional<Value>{};
+      }
+
+      const classfile::Method* method = candidate.method.method;
+      auto cached = trivial_getter_intrinsics_.find(method);
+      if (cached == trivial_getter_intrinsics_.end())
+      {
+        std::optional<TrivialGetterIntrinsic> resolved;
+        const auto& code = method->code->bytecode;
+        const bool method_static = (method->access_flags & kAccStatic) != 0U;
+        const bool instance_shape = !method_static && candidate.has_receiver &&
+            candidate.arguments.size() == 1U && code.size() == 5U &&
+            code[0U] == 0x2AU && code[1U] == 0xB4U;
+        const bool static_shape = method_static && !candidate.has_receiver &&
+            candidate.arguments.empty() && code.size() == 4U &&
+            code[0U] == 0xB2U;
+        if (instance_shape || static_shape)
+        {
+          const usize cp_offset = instance_shape ? 2U : 1U;
+          const u16 cp_index = static_cast<u16>(
+              (static_cast<u16>(code[cp_offset]) << 8U) |
+              static_cast<u16>(code[cp_offset + 1U]));
+          auto reference = candidate.method.owner->member_reference(cp_index);
+          if (reference)
+          {
+            const std::string expected_method_descriptor =
+                std::string("()") + reference->descriptor;
+            u8 expected_return = 0U;
+            if (!reference->descriptor.empty())
+            {
+              switch (reference->descriptor.front())
+              {
+              case 'J': expected_return = 0xADU; break; // lreturn
+              case 'F': expected_return = 0xAEU; break; // freturn
+              case 'D': expected_return = 0xAFU; break; // dreturn
+              case 'L':
+              case '[': expected_return = 0xB0U; break; // areturn
+              default: expected_return = 0xACU; break;  // ireturn
+              }
+            }
+            const usize return_offset = instance_shape ? 4U : 3U;
+            if (method->descriptor == expected_method_descriptor &&
+                code[return_offset] == expected_return &&
+                (!static_shape ||
+                 reference->owner == candidate.method.owner->name()))
+            {
+              auto field = states_.resolve_field(
+                  reference->owner,
+                  reference->name,
+                  reference->descriptor,
+                  static_shape);
+              if (field)
+              {
+                resolved = TrivialGetterIntrinsic {
+                    .field = std::move(*field),
+                    .is_static = static_shape,
+                };
+              }
+            }
+          }
+        }
+        cached = trivial_getter_intrinsics_.emplace(
+            method, std::move(resolved)).first;
+      }
+      if (!cached->second.has_value()) return std::optional<Value>{};
+
+      const TrivialGetterIntrinsic& getter = *cached->second;
+      if (getter.is_static)
+      {
+        auto value = states_.static_field(getter.field);
+        if (!value) return std::unexpected(value.error());
+        return std::optional<Value>(*value);
+      }
+      auto receiver = candidate.arguments.front().as_reference();
+      if (!receiver || receiver->is_null()) return std::optional<Value>{};
+      auto value = heap_.vm_field(*receiver, getter.field.index);
+      if (!value) return std::unexpected(value.error());
+      return std::optional<Value>(*value);
     };
 
     struct RangeDecoderIntrinsicFields final
@@ -9496,8 +9660,8 @@ namespace phoneme::vm
       {
         return std::optional<Value>{};
       }
-      auto probability_count = heap_.array_length(*probabilities);
-      auto input_capacity = heap_.array_length(*input_bytes);
+      auto probability_count = heap_.vm_array_length(*probabilities);
+      auto input_capacity = heap_.vm_array_length(*input_bytes);
       if (!probability_count || !input_capacity ||
           static_cast<usize>(*probability_index) >= *probability_count ||
           static_cast<usize>(*input_length) > *input_capacity)
@@ -9702,13 +9866,13 @@ namespace phoneme::vm
       {
         return false;
       }
-      auto vector_class = heap_.class_name(*vector);
+      auto vector_class = heap_.vm_class_name(*vector);
       if (!vector_class || *vector_class != "java/util/Vector")
       {
         return false;
       }
-      auto data_value = heap_.field(*vector, 0U);
-      auto count_value = heap_.field(*vector, 1U);
+      auto data_value = heap_.vm_field(*vector, 0U);
+      auto count_value = heap_.vm_field(*vector, 1U);
       if (!data_value || !count_value) return false;
       auto data = data_value->as_reference();
       auto count = count_value->as_int();
@@ -9716,8 +9880,8 @@ namespace phoneme::vm
       {
         return false;
       }
-      auto data_length = heap_.array_length(*data);
-      auto mask_count = heap_.array_length(*masks);
+      auto data_length = heap_.vm_array_length(*data);
+      auto mask_count = heap_.vm_array_length(*masks);
       if (!data_length || !mask_count ||
           static_cast<usize>(*count) > *data_length)
       {
@@ -9747,15 +9911,15 @@ namespace phoneme::vm
         if (!element) return false;
         auto object = element->as_reference();
         if (!object || object->is_null()) return false;
-        auto object_class = heap_.class_name(*object);
+        auto object_class = heap_.vm_class_name(*object);
         if (!object_class || *object_class != owner.name()) return false;
-        auto input_value = heap_.field(*object, key_field->index);
-        auto shift_value = heap_.field(*object, shifts_field->index);
+        auto input_value = heap_.vm_field(*object, key_field->index);
+        auto shift_value = heap_.vm_field(*object, shifts_field->index);
         if (!input_value || !shift_value) return false;
         auto input = input_value->as_long();
         auto shifts = shift_value->as_reference();
         if (!input || !shifts || shifts->is_null()) return false;
-        auto shift_count = heap_.array_length(*shifts);
+        auto shift_count = heap_.vm_array_length(*shifts);
         if (!shift_count || *shift_count > mask_values.size()) return false;
 
         const u64 source = static_cast<u64>(*input);
@@ -9843,8 +10007,8 @@ namespace phoneme::vm
         // Preserve normal Java exception behavior for malformed/null inputs.
         return std::optional<Value>{};
       }
-      auto shift_count = heap_.array_length(*shift_reference);
-      auto mask_count = heap_.array_length(*masks);
+      auto shift_count = heap_.vm_array_length(*shift_reference);
+      auto mask_count = heap_.vm_array_length(*masks);
       if (!shift_count || !mask_count)
       {
         return std::optional<Value>{};
@@ -10006,7 +10170,7 @@ namespace phoneme::vm
             return fail(ErrorCode::internal_error,
                         "boxed lambda return has no wrapper object");
           }
-          auto stored = heap_.set_field(*wrapper, 0U, *value);
+          auto stored = heap_.vm_set_field(*wrapper, 0U, *value);
           if (!stored)
             return std::unexpected(stored.error());
         }
@@ -10049,7 +10213,7 @@ namespace phoneme::vm
                     "cannot dispatch a null Java throwable");
       }
       scheduler_.set_current_pending_exception(throwable);
-      auto throwable_class = heap_.class_name(throwable);
+      auto throwable_class = heap_.vm_class_name(throwable);
       if (!throwable_class)
       {
         return std::unexpected(throwable_class.error());
@@ -10073,7 +10237,7 @@ namespace phoneme::vm
                 frames.back().method().descriptor + " at bytecode " +
                 std::to_string(throw_pc);
       std::string throwable_message;
-      auto message_value = heap_.field(throwable, 0U);
+      auto message_value = heap_.vm_field(throwable, 0U);
       if (message_value)
       {
         auto message_reference = message_value->as_reference();
@@ -10295,6 +10459,7 @@ namespace phoneme::vm
                     "VM call stack exceeded its maximum depth");
       }
 
+#if !defined(__EMSCRIPTEN__)
       // Root-frame OSR: after a real backward edge has executed several times,
       // compile a side-effect-free loop entry from the interpreter's exact
       // physical JVM-slot state. This never restarts the method or replays its
@@ -10429,6 +10594,7 @@ namespace phoneme::vm
           }
         }
       }
+#endif
 
       ++executed;
       if (watchdog_instructions != std::numeric_limits<u64>::max())
@@ -10649,7 +10815,7 @@ namespace phoneme::vm
         {
           if (std::getenv("PHONEME_TRACE_ARRAY_BOUNDS") != nullptr)
           {
-            auto info = heap_.array_info(*array);
+            auto info = heap_.vm_array_info(*array);
             std::fprintf(stderr,
                          "[array-bounds] method=%s.%s%s pc=%zu "
                          "index=%d length=%zu\n",
@@ -10672,7 +10838,7 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
-        auto snapshot = heap_.array_element_snapshot(
+        auto snapshot = heap_.vm_array_element_snapshot(
             *array, static_cast<usize>(*index));
         if (!snapshot)
         {
@@ -10831,7 +10997,7 @@ namespace phoneme::vm
         HeapArrayKind store_kind {};
         if (opcode == 0x54)
         {
-          auto info = heap_.array_info(*array);
+          auto info = heap_.vm_array_info(*array);
           if (!info)
             return std::unexpected(info.error());
           if (element_index >= info->length)
@@ -10861,7 +11027,7 @@ namespace phoneme::vm
         }
         else if (opcode == 0x53)
         {
-          auto info = heap_.array_info(*array);
+          auto info = heap_.vm_array_info(*array);
           if (!info)
             return std::unexpected(info.error());
           if (element_index >= info->length)
@@ -10885,7 +11051,7 @@ namespace phoneme::vm
             return std::unexpected(stored_reference.error());
           if (!stored_reference->is_null())
           {
-            auto source_class = heap_.class_name(*stored_reference);
+            auto source_class = heap_.vm_class_name(*stored_reference);
             if (!source_class)
               return std::unexpected(source_class.error());
             auto assignable = classes_.is_assignable(
@@ -10927,7 +11093,7 @@ namespace phoneme::vm
           }
         }
 
-        auto stored = heap_.set_element_checked(
+        auto stored = heap_.vm_set_element_checked(
             *array, element_index, store_kind, *value);
         if (!stored)
         {
@@ -11880,9 +12046,8 @@ namespace phoneme::vm
         const u32 operand_index = frame.current_decoded_operand_index();
         if (method_id.valid() && operand_index != kInvalidDecodedIndex)
         {
-          auto cached_entry = operand_resolution_entry(method_id,
-                                                       operand_index,
-                                                       opcode_pc);
+          auto cached_entry = frame.operand_resolution_entry(
+              operand_index, opcode_pc);
           if (!cached_entry)
             return std::unexpected(cached_entry.error());
           OperandResolutionEntry& entry = **cached_entry;
@@ -12095,7 +12260,7 @@ namespace phoneme::vm
               return std::move(**raised);
             break;
           }
-          auto value = heap_.field(*object, field->index);
+          auto value = heap_.vm_field(*object, field->index);
           if (!value)
             return std::unexpected(value.error());
           auto pushed = frame.push(*value);
@@ -12121,7 +12286,7 @@ namespace phoneme::vm
               return std::move(**raised);
             break;
           }
-          auto stored = heap_.set_field(*object, field->index, *value);
+          auto stored = heap_.vm_set_field(*object, field->index, *value);
           if (!stored)
             return std::unexpected(stored.error());
         }
@@ -12167,8 +12332,7 @@ namespace phoneme::vm
                       "invoke opcode uses an incompatible constant kind");
         }
         const bool is_static = opcode == 0xB8;
-        auto descriptor = classes_.metadata().method_descriptor(
-            reference->descriptor);
+        auto descriptor = cached_method_descriptor(reference->descriptor);
         if (!descriptor)
           return std::unexpected(descriptor.error());
         if (interface_count.has_value())
@@ -12241,7 +12405,7 @@ namespace phoneme::vm
           auto source = arguments->front().as_reference();
           if (!source)
             return std::unexpected(source.error());
-          auto source_class = heap_.class_name(*source);
+          auto source_class = heap_.vm_class_name(*source);
           if (!source_class)
             return std::unexpected(source_class.error());
           if (!source_class->starts_with('['))
@@ -12494,7 +12658,7 @@ namespace phoneme::vm
             auto receiver = arguments->front().as_reference();
             if (!receiver)
               return std::unexpected(receiver.error());
-            auto runtime_class = heap_.class_name(*receiver);
+            auto runtime_class = heap_.vm_class_name(*receiver);
             if (!runtime_class)
               return std::unexpected(runtime_class.error());
             if (opcode == 0xB9)
@@ -12519,13 +12683,13 @@ namespace phoneme::vm
               }
             }
             dispatch_class = *runtime_class;
-            dispatch_metadata = classes_.metadata().find_class(dispatch_class);
+            dispatch_metadata = cached_runtime_class(dispatch_class);
             if (dispatch_metadata == nullptr)
             {
               auto loaded_dispatch_class = classes_.load(dispatch_class);
               if (!loaded_dispatch_class)
                 return std::unexpected(loaded_dispatch_class.error());
-              dispatch_metadata = classes_.metadata().find_class(dispatch_class);
+              dispatch_metadata = cached_runtime_class(dispatch_class);
             }
           }
           OperandResolutionEntry* direct_operand_entry = nullptr;
@@ -12543,10 +12707,8 @@ namespace phoneme::vm
             if (caller_method_id.valid() &&
                 caller_operand_index != kInvalidDecodedIndex)
             {
-              auto cached_entry = operand_resolution_entry(
-                  caller_method_id,
-                  caller_operand_index,
-                  opcode_pc);
+              auto cached_entry = frame.operand_resolution_entry(
+                  caller_operand_index, opcode_pc);
               if (!cached_entry)
                 return std::unexpected(cached_entry.error());
               OperandResolutionEntry& entry = **cached_entry;
@@ -12559,7 +12721,7 @@ namespace phoneme::vm
                   return fail(ErrorCode::internal_error,
                               "decoded direct call cache has wrong kind");
                 }
-                auto runtime_target = classes_.metadata().find_method(
+                auto runtime_target = cached_runtime_method(
                     entry.target_method);
                 if (runtime_target == nullptr)
                 {
@@ -12636,7 +12798,7 @@ namespace phoneme::vm
               legacy_direct_cache = &cache;
               if (cache.valid)
               {
-                auto runtime_target = classes_.metadata().find_method(
+                auto runtime_target = cached_runtime_method(
                     cache.target_method);
                 if (runtime_target != nullptr)
                 {
@@ -12670,10 +12832,8 @@ namespace phoneme::vm
             if (caller_method_id.valid() &&
                 caller_operand_index != kInvalidDecodedIndex)
             {
-              auto cached_entry = operand_resolution_entry(
-                  caller_method_id,
-                  caller_operand_index,
-                  opcode_pc);
+              auto cached_entry = frame.operand_resolution_entry(
+                  caller_operand_index, opcode_pc);
               if (!cached_entry)
                 return std::unexpected(cached_entry.error());
               OperandResolutionEntry& entry = **cached_entry;
@@ -12702,7 +12862,7 @@ namespace phoneme::vm
                 }
                 else
                 {
-                  auto runtime_target = classes_.metadata().find_method(
+                  auto runtime_target = cached_runtime_method(
                       entry.target_method);
                   if (runtime_target == nullptr)
                   {
@@ -12787,8 +12947,7 @@ namespace phoneme::vm
               const auto cached_method = cache.lookup(dispatch_metadata->id);
               if (cached_method.has_value())
               {
-                auto runtime_target = classes_.metadata().find_method(
-                    *cached_method);
+                auto runtime_target = cached_runtime_method(*cached_method);
                 if (runtime_target != nullptr)
                 {
                   inline_target = ResolvedMethod {
@@ -12965,6 +13124,27 @@ namespace phoneme::vm
         }
         if (!nested_is_native)
         {
+          auto trivial_getter = try_trivial_getter_intrinsic(*nested);
+          if (!trivial_getter)
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            return std::unexpected(trivial_getter.error());
+          }
+          if (trivial_getter->has_value())
+          {
+            auto released = release_synchronized_monitor(*nested_monitor);
+            if (!released)
+              return std::unexpected(released.error());
+            if (budget_mode == InstructionBudgetMode::progress_watchdog)
+              watchdog_instructions = 0U;
+            auto pushed = frame.push(**trivial_getter);
+            if (!pushed)
+              return std::unexpected(pushed.error());
+            break;
+          }
+
           auto range_decoded = try_range_decoder_bit_intrinsic(*nested);
           if (!range_decoded)
           {
@@ -13023,6 +13203,7 @@ namespace phoneme::vm
             break;
           }
 
+#if !defined(__EMSCRIPTEN__)
           // A progress-watchdog invocation must still be allowed to execute
           // hot nested Java methods through the JIT.  The compiled entry gets
           // the watchdog's remaining instruction budget below and reports its
@@ -13177,6 +13358,7 @@ namespace phoneme::vm
               break;
             }
           }
+#endif
         }
         if (nested_is_native)
         {
@@ -13353,7 +13535,7 @@ namespace phoneme::vm
                 return fail(ErrorCode::internal_error,
                             "boxed lambda native return has no wrapper object");
               }
-              auto stored = heap_.set_field(*wrapper, 0U, *nested_return);
+              auto stored = heap_.vm_set_field(*wrapper, 0U, *nested_return);
               if (!stored)
                 return std::unexpected(stored.error());
             }
@@ -13469,9 +13651,9 @@ namespace phoneme::vm
              capture_index < captures->size();
              ++capture_index)
         {
-          auto stored = heap_.set_field(*lambda,
-                                        capture_index,
-                                        (*captures)[capture_index]);
+          auto stored = heap_.vm_set_field(*lambda,
+                                           capture_index,
+                                           (*captures)[capture_index]);
           if (!stored)
             return std::unexpected(stored.error());
         }
@@ -13724,7 +13906,7 @@ namespace phoneme::vm
             return std::move(**raised);
           break;
         }
-        auto length = heap_.array_length(*array);
+        auto length = heap_.vm_array_length(*array);
         if (!length)
           return std::unexpected(length.error());
         if (*length > static_cast<usize>(std::numeric_limits<i32>::max()))
@@ -13824,7 +14006,7 @@ namespace phoneme::vm
           break;
         }
 
-        auto source_class = heap_.class_name(*reference);
+        auto source_class = heap_.vm_class_name(*reference);
         if (!source_class)
           return std::unexpected(source_class.error());
         auto assignable = classes_.is_assignable(*source_class,

@@ -59,7 +59,7 @@ void add(NativeMethodRegistry& registry,
     if (!mutable_stored) return std::unexpected(mutable_stored.error());
     auto attached = machine.graphics().attach_image(object->bits,
                                                     std::move(image));
-    if (!attached) return std::unexpected(attached.error());
+    if (!attached) return graphics_error(attached.error());
     return *object;
 }
 

@@ -14,7 +14,7 @@ interface WorkerReply {
   version?: string;
 }
 
-const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 const WORKER_MESSAGE_TIMEOUT_MS = 90 * 1000;
 
 let registration: ServiceWorkerRegistration | null = null;
@@ -77,6 +77,10 @@ async function runUpdateCheck() {
   dispatchUpdateReady(latestVersion);
 }
 
+export function getPendingPwaUpdateVersion() {
+  return announcedVersion;
+}
+
 export function checkForPwaUpdate() {
   if (!import.meta.env.PROD || !("serviceWorker" in navigator)) return Promise.resolve();
   if (checkInFlight) return checkInFlight;
@@ -104,13 +108,32 @@ export async function initPwa() {
   registration = await navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
   await navigator.serviceWorker.ready;
 
+  // Update monitoring must start before offline warm-up. If a newer deployment
+  // already exists, ENSURE_OFFLINE for this (older) build is expected to reject;
+  // that must never disable update detection for the lifetime of the page.
   const scheduleCheck = () => { void checkForPwaUpdate(); };
   window.addEventListener("online", scheduleCheck);
+  window.addEventListener("focus", scheduleCheck);
+  window.addEventListener("pageshow", scheduleCheck);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") scheduleCheck();
   });
   checkTimer = window.setInterval(scheduleCheck, UPDATE_CHECK_INTERVAL_MS);
   void checkTimer;
-
   scheduleCheck();
+
+  // Safari/iOS may finish page loading before a large service-worker install has
+  // fully warmed Cache Storage. Warm the currently running build opportunistically,
+  // but only while it is still the server's latest build. This task is deliberately
+  // detached from update monitoring so network/cache failures cannot disable it.
+  if (navigator.onLine) {
+    void (async () => {
+      await checkForPwaUpdate();
+      if (announcedVersion) return;
+      await requestWorker("ENSURE_OFFLINE", __PHONEME_BUILD_ID__);
+      if (navigator.storage?.persist) {
+        await navigator.storage.persist().catch(() => false);
+      }
+    })().catch((error) => console.warn("phoneME PWA offline warm-up failed", error));
+  }
 }

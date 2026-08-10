@@ -81,12 +81,12 @@ export const DEFAULT_GAME_PROFILE: WebGameProfile = {
 
 export function normalizeGameProfile(value?: Partial<WebGameProfile> | null): WebGameProfile {
   const profile = { ...DEFAULT_GAME_PROFILE, ...(value ?? {}) };
-  profile.screenWidth = Math.max(1, Math.round(profile.screenWidth));
-  profile.screenHeight = Math.max(1, Math.round(profile.screenHeight));
+  profile.screenWidth = Math.min(2_048, Math.max(1, Math.round(profile.screenWidth)));
+  profile.screenHeight = Math.min(2_048, Math.max(1, Math.round(profile.screenHeight)));
   profile.scalePercent = Math.min(300, Math.max(10, Math.round(profile.scalePercent)));
   profile.frameRateOverride = true;
   profile.frameRateLimit = 30;
-  profile.heapSizeMegabytes = Math.min(512, Math.max(1, Math.round(profile.heapSizeMegabytes)));
+  profile.heapSizeMegabytes = Math.min(192, Math.max(1, Math.round(profile.heapSizeMegabytes)));
   profile.fontSmall = Math.max(1, Math.round(profile.fontSmall));
   profile.fontMedium = Math.max(1, Math.round(profile.fontMedium));
   profile.fontLarge = Math.max(1, Math.round(profile.fontLarge));

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="${PHONEME_WASM_BUILD_DIR:-${ROOT_DIR}/Core/build/wasm}"
+COMPAT_BUILD_DIR="${PHONEME_WASM_COMPAT_BUILD_DIR:-${BUILD_DIR}-compat}"
 OUTPUT_DIR="${ROOT_DIR}/web/public/wasm"
 BUILD_TYPE="${PHONEME_WASM_BUILD_TYPE:-Release}"
 JOBS="${PHONEME_WASM_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
@@ -12,19 +13,27 @@ if ! command -v emcmake >/dev/null 2>&1; then
     exit 1
 fi
 
-emcmake cmake \
-    -S "${ROOT_DIR}/Core" \
-    -B "${BUILD_DIR}" \
-    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+build_variant() {
+    local build_dir="$1"
+    local simd="$2"
+    emcmake cmake \
+        -S "${ROOT_DIR}/Core" \
+        -B "${build_dir}" \
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+        -DPHONEME_ENABLE_DECODED_EXECUTION=ON \
+        -DPHONEME_ENABLE_LTO=ON \
+        -DPHONEME_WASM_SIMD="${simd}"
+    cmake --build "${build_dir}" --target phoneMEWeb --parallel "${JOBS}"
+    [[ -f "${build_dir}/phoneme.js" && -f "${build_dir}/phoneme.wasm" ]] || {
+        echo "error: WebAssembly build output is incomplete: ${build_dir}" >&2
+        exit 1
+    }
+}
 
-cmake --build "${BUILD_DIR}" --target phoneMEWeb --parallel "${JOBS}"
-
-SOURCE_JS="${BUILD_DIR}/phoneme.js"
-SOURCE_WASM="${BUILD_DIR}/phoneme.wasm"
-if [[ ! -f "${SOURCE_JS}" || ! -f "${SOURCE_WASM}" ]]; then
-    echo "error: WebAssembly build output is incomplete" >&2
-    exit 1
-fi
+# Modern browsers use SIMD. Safari/iOS 16.0-16.3 cannot even parse a module
+# containing v128 types, so publish a scalar build from the same source/exports.
+build_variant "${BUILD_DIR}" ON
+build_variant "${COMPAT_BUILD_DIR}" OFF
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -36,54 +45,64 @@ sha256_file() {
     fi
 }
 
-# Publish JS + WASM as one immutable versioned pair. The generated pthread glue
-# resolves phoneme.js relative to import.meta.url, so keeping both files in the
-# same versioned directory also prevents pthreads from mixing two builds.
-JS_HASH="$(sha256_file "${SOURCE_JS}")"
-WASM_HASH="$(sha256_file "${SOURCE_WASM}")"
-BUILD_ID="${JS_HASH:0:8}${WASM_HASH:0:8}"
-VERSION_NAME="build-${BUILD_ID}"
-VERSION_DIR="${OUTPUT_DIR}/${VERSION_NAME}"
-STAGING_DIR="${OUTPUT_DIR}/.${VERSION_NAME}.$$"
+publish_variant() {
+    local build_dir="$1"
+    local js_hash wasm_hash build_id version_name version_dir staging_dir
+    js_hash="$(sha256_file "${build_dir}/phoneme.js")"
+    wasm_hash="$(sha256_file "${build_dir}/phoneme.wasm")"
+    build_id="${js_hash:0:8}${wasm_hash:0:8}"
+    version_name="build-${build_id}"
+    version_dir="${OUTPUT_DIR}/${version_name}"
+    staging_dir="${OUTPUT_DIR}/.${version_name}.$$"
 
-rm -rf "${STAGING_DIR}"
-mkdir -p "${STAGING_DIR}"
-cp "${SOURCE_JS}" "${STAGING_DIR}/phoneme.js"
-cp "${SOURCE_WASM}" "${STAGING_DIR}/phoneme.wasm"
+    rm -rf "${staging_dir}"
+    mkdir -p "${staging_dir}"
+    cp "${build_dir}/phoneme.js" "${staging_dir}/phoneme.js"
+    cp "${build_dir}/phoneme.wasm" "${staging_dir}/phoneme.wasm"
 
-if [[ "${JS_HASH}" != "$(sha256_file "${STAGING_DIR}/phoneme.js")" || \
-      "${WASM_HASH}" != "$(sha256_file "${STAGING_DIR}/phoneme.wasm")" ]]; then
-    rm -rf "${STAGING_DIR}"
-    echo "error: WebAssembly staging verification failed" >&2
-    exit 1
-fi
+    if [[ "${js_hash}" != "$(sha256_file "${staging_dir}/phoneme.js")" || \
+          "${wasm_hash}" != "$(sha256_file "${staging_dir}/phoneme.wasm")" ]]; then
+        rm -rf "${staging_dir}"
+        echo "error: WebAssembly staging verification failed" >&2
+        exit 1
+    fi
 
-if [[ -d "${VERSION_DIR}" ]]; then
-    rm -rf "${STAGING_DIR}"
-else
-    mv "${STAGING_DIR}" "${VERSION_DIR}"
-fi
+    if [[ -d "${version_dir}" ]]; then
+        rm -rf "${staging_dir}"
+    else
+        mv "${staging_dir}" "${version_dir}"
+    fi
+    printf '%s\n' "${build_id}"
+}
 
-# The manifest is switched last, atomically. A page therefore sees either the
-# complete previous pair or the complete new pair, never new JS with old WASM.
+SIMD_BUILD_ID="$(publish_variant "${BUILD_DIR}")"
+COMPAT_BUILD_ID="$(publish_variant "${COMPAT_BUILD_DIR}")"
+SIMD_VERSION_NAME="build-${SIMD_BUILD_ID}"
+COMPAT_VERSION_NAME="build-${COMPAT_BUILD_ID}"
+COMBINED_VERSION="${SIMD_BUILD_ID}-${COMPAT_BUILD_ID}"
+
+# Switch the manifest last. A client sees a complete SIMD/scalar set from one
+# source revision, never a new frontend paired with a half-published core.
 MANIFEST_TMP="${OUTPUT_DIR}/.manifest.$$.json"
-printf '{"version":"%s","module":"%s/phoneme.js","wasm":"%s/phoneme.wasm"}\n' \
-    "${BUILD_ID}" "${VERSION_NAME}" "${VERSION_NAME}" > "${MANIFEST_TMP}"
+printf '{"version":"%s","module":"%s/phoneme.js","wasm":"%s/phoneme.wasm","compatModule":"%s/phoneme.js","compatWasm":"%s/phoneme.wasm"}\n' \
+    "${COMBINED_VERSION}" \
+    "${SIMD_VERSION_NAME}" "${SIMD_VERSION_NAME}" \
+    "${COMPAT_VERSION_NAME}" "${COMPAT_VERSION_NAME}" > "${MANIFEST_TMP}"
 mv "${MANIFEST_TMP}" "${OUTPUT_DIR}/manifest.json"
 
-# Keep fixed names for older deployed frontends. Each file replacement is
-# atomic; the current frontend uses manifest.json and never relies on this pair.
+# Fixed names are deliberately the scalar compatibility build. Old frontends
+# that predate the dual-build manifest therefore continue to boot on iOS 16.0.
 for artifact in phoneme.js phoneme.wasm; do
     legacy_tmp="${OUTPUT_DIR}/.${artifact}.$$"
-    cp "${BUILD_DIR}/${artifact}" "${legacy_tmp}"
+    cp "${COMPAT_BUILD_DIR}/${artifact}" "${legacy_tmp}"
     mv "${legacy_tmp}" "${OUTPUT_DIR}/${artifact}"
 done
 rm -f "${OUTPUT_DIR}/phoneme.worker.js"
 
-# Retain the current and one previous immutable pair so an already-open page
-# can still create a late pthread across one deployment/build transition.
+# Two variants per release; retain current + previous releases so already-open
+# pages can still create delayed pthread workers across one deployment switch.
 version_mtimes() {
-    if stat -f '%m %N' "${VERSION_DIR}" >/dev/null 2>&1; then
+    if stat -f '%m %N' "${OUTPUT_DIR}/${SIMD_VERSION_NAME}" >/dev/null 2>&1; then
         find "${OUTPUT_DIR}" -maxdepth 1 -type d -name 'build-*' -exec stat -f '%m %N' {} \;
     else
         find "${OUTPUT_DIR}" -maxdepth 1 -type d -name 'build-*' -exec stat -c '%Y %n' {} \;
@@ -91,10 +110,16 @@ version_mtimes() {
 }
 version_mtimes \
     | sort -rn \
-    | awk 'NR > 2 { sub(/^[0-9]+ /, ""); print }' \
+    | awk 'NR > 4 { sub(/^[0-9]+ /, ""); print }' \
     | while IFS= read -r old_version; do
         rm -rf "${old_version}"
       done
 
-printf 'Built phoneME WebAssembly %s:\n' "${BUILD_ID}"
-ls -lh "${VERSION_DIR}/phoneme.js" "${VERSION_DIR}/phoneme.wasm" "${OUTPUT_DIR}/manifest.json"
+printf 'Built phoneME WebAssembly SIMD %s and Safari-16 compatibility %s:\n' \
+    "${SIMD_BUILD_ID}" "${COMPAT_BUILD_ID}"
+ls -lh \
+    "${OUTPUT_DIR}/${SIMD_VERSION_NAME}/phoneme.js" \
+    "${OUTPUT_DIR}/${SIMD_VERSION_NAME}/phoneme.wasm" \
+    "${OUTPUT_DIR}/${COMPAT_VERSION_NAME}/phoneme.js" \
+    "${OUTPUT_DIR}/${COMPAT_VERSION_NAME}/phoneme.wasm" \
+    "${OUTPUT_DIR}/manifest.json"

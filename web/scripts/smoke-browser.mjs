@@ -9,6 +9,8 @@ const websocketProxyUrl = process.env.PHONEME_WEBSOCKET_PROXY_URL?.trim() || "";
 const holdMilliseconds = Math.max(0, Number.parseInt(process.env.PHONEME_SMOKE_HOLD_MS ?? "0", 10) || 0);
 const skipReload = process.env.PHONEME_SMOKE_SKIP_RELOAD === "1";
 const skipPlayerMenu = process.env.PHONEME_SMOKE_SKIP_PLAYER_MENU === "1";
+const showFps = process.env.PHONEME_SMOKE_SHOW_FPS === "1";
+const testOffline = process.env.PHONEME_SMOKE_OFFLINE === "1";
 const overrideMainClass = process.env.PHONEME_SMOKE_MAIN_CLASS?.trim() || "";
 const keySequence = (process.env.PHONEME_SMOKE_KEYS ?? "")
   .split(",")
@@ -16,6 +18,8 @@ const keySequence = (process.env.PHONEME_SMOKE_KEYS ?? "")
   .filter(Boolean);
 const keyDelayMilliseconds = Math.max(0, Number.parseInt(process.env.PHONEME_SMOKE_KEY_DELAY_MS ?? "0", 10) || 0);
 const screenshotPath = process.env.PHONEME_SMOKE_SCREENSHOT?.trim() || "";
+const forceWebGl = process.env.PHONEME_SMOKE_WEBGL === "1";
+const enableGpu = process.env.PHONEME_SMOKE_GPU === "1" || forceWebGl;
 const jarPath = path.resolve(
   customJarPath ??
     path.join(
@@ -41,7 +45,8 @@ const chrome = spawn(
   chromePath,
   [
     "--headless=new",
-    "--disable-gpu",
+    ...(enableGpu ? [] : ["--disable-gpu"]),
+    ...(forceWebGl ? ["--disable-features=WebGPU"] : []),
     "--no-first-run",
     "--no-default-browser-check",
     `--remote-debugging-port=${debuggingPort}`,
@@ -170,8 +175,10 @@ try {
   if (!manifestResponse.ok) throw new Error(`WASM manifest HTTP ${manifestResponse.status}`);
   const wasmManifest = await manifestResponse.json();
   if (!String(wasmManifest.module ?? "").startsWith("build-") ||
-      !String(wasmManifest.wasm ?? "").startsWith("build-")) {
-    throw new Error(`Invalid versioned WASM manifest: ${JSON.stringify(wasmManifest)}`);
+      !String(wasmManifest.wasm ?? "").startsWith("build-") ||
+      !String(wasmManifest.compatModule ?? "").startsWith("build-") ||
+      !String(wasmManifest.compatWasm ?? "").startsWith("build-")) {
+    throw new Error(`Invalid dual-build WASM manifest: ${JSON.stringify(wasmManifest)}`);
   }
   console.log("[smoke] runtime ready", wasmManifest.version);
   const documentNode = await command("DOM.getDocument", { depth: -1, pierce: true });
@@ -215,6 +222,18 @@ try {
     return true;
   })()`);
   await waitForExpression("[...document.querySelectorAll('button')].some((element) => element.textContent?.trim() === 'Bắt đầu')");
+  if (showFps) {
+    console.log("[smoke] enabling FPS overlay");
+    const enabled = await evaluate(`(() => {
+      const label = [...document.querySelectorAll('label')].find((element) =>
+        (element.textContent || '').includes('Hiện FPS'));
+      const input = label?.querySelector('input[type="checkbox"]');
+      if (!input) return false;
+      if (!input.checked) input.click();
+      return input.checked;
+    })()`);
+    if (!enabled) throw new Error("FPS profile switch not found");
+  }
   await evaluate(`(() => {
     const button = [...document.querySelectorAll('button')].find((element) => element.textContent?.trim() === 'Bắt đầu');
     if (!button) return false;
@@ -294,15 +313,21 @@ try {
     const value = await evaluate(`(() => {
       const canvas = document.querySelector('canvas.emulator-canvas');
       if (!canvas) return null;
-      const context = canvas.getContext('2d');
-      if (!context) return null;
-      const bytes = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      let hash = 2166136261 >>> 0;
-      for (let index = 0; index < bytes.length; index += 97) {
-        hash ^= bytes[index];
-        hash = Math.imul(hash, 16777619) >>> 0;
+      try {
+        const context = canvas.getContext('2d');
+        if (!context) return null;
+        const bytes = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let hash = 2166136261 >>> 0;
+        for (let index = 0; index < bytes.length; index += 97) {
+          hash ^= bytes[index];
+          hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        return hash.toString(16).padStart(8, '0');
+      } catch {
+        // A worker-owned OffscreenCanvas intentionally has no main-thread 2D
+        // context. Frame hashing is optional for those optimized render paths.
+        return null;
       }
-      return hash.toString(16).padStart(8, '0');
     })()`);
     frameHashes.push({ label, value });
   };
@@ -327,6 +352,15 @@ try {
     console.log(`[smoke] holding active MIDlet for ${holdMilliseconds} ms`);
     await sleep(holdMilliseconds);
   }
+
+  const measuredFps = showFps
+    ? await evaluate(`(() => {
+        const text = document.querySelector('.fps-overlay')?.textContent || '';
+        const match = text.match(/([0-9]+(?:\\.[0-9]+)?)/);
+        return match ? Number(match[1]) : null;
+      })()`)
+    : null;
+  if (showFps) console.log("[smoke] measured FPS", measuredFps);
 
   console.log("[smoke] exiting and relaunching MIDlet");
   await evaluate(`(() => {
@@ -370,6 +404,7 @@ try {
     throw new Error(`Browser exceptions after exit/relaunch: ${JSON.stringify(exceptions, null, 2)}`);
   }
   console.log("[smoke] runtime recovered after exit/relaunch");
+  await sleep(1_250);
 
   if (screenshotPath) {
     const dataUrl = await evaluate(`document.querySelector('canvas.emulator-canvas')?.toDataURL('image/png') || ''`);
@@ -381,6 +416,7 @@ try {
 
   const liveState = await evaluate(`(() => ({
     phase: document.querySelector('.app-root')?.getAttribute('data-runtime-phase') || '',
+    memory: Number(document.querySelector('.app-root')?.getAttribute('data-runtime-memory') || 0),
     live: document.querySelector('.sr-only')?.textContent || '',
     error: document.querySelector('.emulator-error')?.textContent || ''
   }))()`);
@@ -399,7 +435,42 @@ try {
     reload = "ready";
   }
 
-  console.log(JSON.stringify({ ok: true, jarPath, result, liveState, reload, networkEvents, frameHashes }, null, 2));
+  let offline = "skipped";
+  if (testOffline) {
+    console.log("[smoke] checking service worker before offline reload");
+    const serviceWorkerState = await waitForExpression(`(() => {
+      const controller = navigator.serviceWorker?.controller;
+      return controller ? { state: controller.state, scriptURL: controller.scriptURL } : null;
+    })()`, 30_000);
+    console.log("[smoke] service worker", JSON.stringify(serviceWorkerState));
+    await command("Network.emulateNetworkConditions", {
+      offline: true,
+      latency: 0,
+      downloadThroughput: 0,
+      uploadThroughput: 0,
+      connectionType: "none"
+    });
+    console.log("[smoke] reloading fully offline");
+    await command("Page.reload", { ignoreCache: false });
+    await waitForExpression(`(() => {
+      return document.querySelector('.app-root')?.getAttribute('data-runtime-phase') === 'ready' &&
+        Boolean(document.querySelector('.game-row'));
+    })()`, 30_000);
+    if (exceptions.length) {
+      throw new Error(`Browser exceptions after offline reload: ${JSON.stringify(exceptions, null, 2)}`);
+    }
+    offline = "ready";
+    console.log("[smoke] runtime recovered fully offline");
+    await command("Network.emulateNetworkConditions", {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+      connectionType: "wifi"
+    });
+  }
+
+  console.log(JSON.stringify({ ok: true, jarPath, result, liveState, measuredFps, reload, offline, networkEvents, frameHashes }, null, 2));
 } catch (error) {
   exitCode = 1;
   console.error(error instanceof Error ? error.stack : String(error));

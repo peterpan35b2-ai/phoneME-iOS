@@ -48,14 +48,22 @@ function toDataUrl(bytes: Uint8Array, mime: string) {
 }
 
 export async function readJarMetadata(file: File): Promise<JarMetadata> {
-  const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
-  const entries = new Map(
-    Object.entries(archive).map(([path, bytes]) => [path.toLowerCase(), { path, bytes }])
-  );
-  const manifestEntry = entries.get("meta-inf/manifest.mf");
-  if (!manifestEntry) throw new Error("JAR không có META-INF/MANIFEST.MF");
+  const MAX_JAR_BYTES = 64 * 1024 * 1024;
+  const MAX_MANIFEST_BYTES = 1024 * 1024;
+  if (file.size <= 0 || file.size > MAX_JAR_BYTES) {
+    throw new Error("JAR quá lớn để xử lý an toàn trong trình duyệt");
+  }
+  const jarBytes = new Uint8Array(await file.arrayBuffer());
+  const manifestArchive = unzipSync(jarBytes, {
+    filter: (entry) =>
+      entry.name.toLowerCase() === "meta-inf/manifest.mf" &&
+      entry.originalSize <= MAX_MANIFEST_BYTES
+  });
+  const manifestPair = Object.entries(manifestArchive)[0];
+  if (!manifestPair) throw new Error("JAR không có META-INF/MANIFEST.MF hợp lệ");
+  const [, manifestBytes] = manifestPair;
 
-  const attributes = parseManifest(decodeText(manifestEntry.bytes));
+  const attributes = parseManifest(decodeText(manifestBytes));
   const midlet = (attributes.get("MIDlet-1") ?? "")
     .split(",")
     .map((part) => part.trim());
@@ -66,13 +74,20 @@ export async function readJarMetadata(file: File): Promise<JarMetadata> {
   const vendor = attributes.get("MIDlet-Vendor")?.trim() || "Không rõ nhà phát hành";
   const version = attributes.get("MIDlet-Version")?.trim() || "";
   const rawIconPath = midlet[1]?.replace(/^\//, "").toLowerCase();
-  const iconEntry = rawIconPath ? entries.get(rawIconPath) : undefined;
+  let iconDataUrl: string | undefined;
+  if (rawIconPath) {
+    const iconArchive = unzipSync(jarBytes, {
+      filter: (entry) => entry.name.toLowerCase() === rawIconPath && entry.originalSize <= 512 * 1024
+    });
+    const iconPair = Object.entries(iconArchive)[0];
+    if (iconPair) iconDataUrl = toDataUrl(iconPair[1], extensionMime(iconPair[0]));
+  }
 
   return {
     title,
     vendor,
     version,
     mainClass,
-    iconDataUrl: iconEntry ? toDataUrl(iconEntry.bytes, extensionMime(iconEntry.path)) : undefined
+    iconDataUrl
   };
 }

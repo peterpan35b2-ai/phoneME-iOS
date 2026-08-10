@@ -1,3 +1,4 @@
+import { Zip, ZipDeflate } from "fflate";
 import type {
   GameEntry,
   JarMetadata,
@@ -50,12 +51,18 @@ type PhoneMEModule = {
   _phoneme_pause_midlet(runtime: number, appId: number): number;
   _phoneme_resume_midlet(runtime: number, appId: number): number;
   _phoneme_destroy_midlet(runtime: number, appId: number): number;
+  _phoneme_suspend(runtime: number): void;
+  _phoneme_resume(runtime: number): void;
   _phoneme_midlet_state(runtime: number, appId: number): number;
   _phoneme_midlet_used_memory(runtime: number, appId: number, timeout: number): bigint;
   _phoneme_send_key(runtime: number, keyCode: number, pressed: number): void;
   _phoneme_send_pointer(runtime: number, x: number, y: number, action: number): void;
   _phoneme_pump_events(runtime: number): void;
   _phoneme_copy_frame_rgba(runtime: number, destination: number, capacity: number, width: number, height: number, generation: number): number;
+  _phoneme_copy_frame_rgba_since(runtime: number, previousGeneration: bigint, destination: number, capacity: number, width: number, height: number, generation: number): number;
+  _phoneme_acquire_frame_rgba_since(runtime: number, previousGeneration: bigint, width: number, height: number, generation: number): number;
+  _phoneme_release_frame_rgba(runtime: number): void;
+  _phoneme_storage_generation?(runtime: number): bigint;
   _phoneme_copy_lcdui_image_rgba(runtime: number, componentId: number, destination: number, capacity: number, width: number, height: number, generation: number): number;
   _phoneme_web_poll_lcdui_event_json(runtime: number): number;
   _phoneme_web_error_name(code: number): number;
@@ -76,10 +83,39 @@ type WasmBuildManifest = {
   version: string;
   module: string;
   wasm: string;
+  compatModule?: string;
+  compatWasm?: string;
 };
+
+function supportsWasmSimd() {
+  try {
+    // A type-only module containing v128 is enough to detect the parser support
+    // Safari gained in 16.4, without executing any SIMD instruction.
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x06, 0x01, 0x60, 0x01, 0x7b, 0x00,
+    ]));
+  } catch {
+    return false;
+  }
+}
 
 export type FrameData = {
   pixels: Uint8ClampedArray<ArrayBuffer>;
+  width: number;
+  height: number;
+  generation: bigint;
+};
+
+export type FrameView = {
+  pixels: Uint8Array<ArrayBufferLike>;
+  width: number;
+  height: number;
+  generation: bigint;
+};
+
+type StagedFrame = {
+  byteCount: number;
   width: number;
   height: number;
   generation: bigint;
@@ -92,6 +128,14 @@ export type PhoneMEOptions = {
 
 const APP_ID = 1;
 const STORAGE_ROOT = "/phoneme";
+const STORAGE_FLUSH_DEBOUNCE_MS = 5_000;
+const MAX_WEB_JAVA_HEAP_MIB = 192;
+const MAX_JAR_BYTES = 64 * 1024 * 1024;
+const MAX_FRAME_DIMENSION = 2_048;
+const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+const MAX_MANAGED_EXPORT_BYTES = 512 * 1024 * 1024;
+const MAX_MANAGED_ARCHIVE_BYTES = 256 * 1024 * 1024;
+const MAX_MANAGED_EXPORT_FILES = 4_096;
 const RUNTIME_HOME = `${STORAGE_ROOT}/runtime`;
 const IMPORT_ROOT = `${STORAGE_ROOT}/imports`;
 const MANAGED_STORAGE_ROOTS: Record<ManagedStorageKind, string> = {
@@ -133,6 +177,8 @@ export class PhoneMEWebRuntime {
   private currentGame: GameEntry | null = null;
   private initialized = false;
   private flushPromise: Promise<void> | null = null;
+  private lastFlushedStorageGeneration = 0n;
+  private storageDirtySince = 0;
   private fatalErrorValue: Error | null = null;
   private restoreWebSocketRouting: (() => void) | null = null;
 
@@ -173,7 +219,7 @@ export class PhoneMEWebRuntime {
     try {
       this.module.FS.mount(
         this.module.FS.filesystems.IDBFS,
-        { autoPersist: true },
+        { autoPersist: false },
         STORAGE_ROOT
       );
     } catch (error) {
@@ -199,11 +245,16 @@ export class PhoneMEWebRuntime {
       "Cấu hình phím"
     );
     this.assertOk(this.module._phoneme_start_system(this.runtime), "Khởi động hệ thống J2ME");
+    this.lastFlushedStorageGeneration = this.storageGeneration() ?? 0n;
+    this.storageDirtySince = 0;
     this.initialized = true;
   }
 
   async installJar(file: File, metadata: JarMetadata): Promise<GameEntry> {
     const module = this.requireModule();
+    if (file.size <= 0 || file.size > MAX_JAR_BYTES) {
+      throw new Error("JAR quá lớn để cài đặt an toàn trên bản web");
+    }
     const id = crypto.randomUUID();
     const fileName = sanitizeName(file.name.toLowerCase().endsWith(".jar") ? file.name : `${file.name}.jar`);
     const path = `${IMPORT_ROOT}/${id}-${fileName}`;
@@ -252,6 +303,7 @@ export class PhoneMEWebRuntime {
 
   async launch(game: GameEntry, width: number, height: number) {
     const module = this.requireModule();
+    this.assertFrameDimensions(width, height);
     await module.pthreadPoolReady;
     if (this.currentGame) {
       module._phoneme_destroy_midlet(this.runtime, APP_ID);
@@ -270,6 +322,7 @@ export class PhoneMEWebRuntime {
 
   resize(width: number, height: number) {
     if (!this.currentGame) return;
+    this.assertFrameDimensions(width, height);
     this.assertOk(
       this.requireModule()._phoneme_set_foreground(this.runtime, APP_ID, width, height),
       "Đổi kích thước màn hình"
@@ -277,8 +330,12 @@ export class PhoneMEWebRuntime {
   }
 
   configureHeap(heapMegabytes: number) {
+    const safeHeapMegabytes = Math.min(
+      MAX_WEB_JAVA_HEAP_MIB,
+      Math.max(1, Math.round(heapMegabytes))
+    );
     this.assertOk(
-      this.requireModule()._phoneme_configure_app_heap(this.runtime, APP_ID, heapMegabytes),
+      this.requireModule()._phoneme_configure_app_heap(this.runtime, APP_ID, safeHeapMegabytes),
       "Cấu hình heap"
     );
   }
@@ -329,6 +386,12 @@ export class PhoneMEWebRuntime {
     this.assertOk(this.requireModule()._phoneme_resume_midlet(this.runtime, APP_ID), "Tiếp tục");
   }
 
+  setHostForeground(foreground: boolean) {
+    if (!this.ready || !this.currentGame) return;
+    if (foreground) this.requireModule()._phoneme_resume(this.runtime);
+    else this.requireModule()._phoneme_suspend(this.runtime);
+  }
+
   stopMidlet() {
     if (!this.currentGame) return;
     this.requireModule()._phoneme_destroy_midlet(this.runtime, APP_ID);
@@ -346,6 +409,15 @@ export class PhoneMEWebRuntime {
     return value < 0n ? 0 : Number(value);
   }
 
+  memoryStats() {
+    const module = this.module;
+    return {
+      appEstimatedBytes: this.currentGame && this.ready ? this.usedMemory() : 0,
+      wasmLinearBytes: module?.HEAPU8.buffer.byteLength ?? 0,
+      frameStagingBytes: this.frameCapacity
+    };
+  }
+
   sendKey(keyCode: number, pressed: boolean) {
     this.requireModule()._phoneme_send_key(this.runtime, keyCode, pressed ? 1 : 0);
   }
@@ -356,40 +428,71 @@ export class PhoneMEWebRuntime {
 
   pump() {
     this.requireModule()._phoneme_pump_events(this.runtime);
+    this.maybeFlushStorage();
   }
 
-  copyFrame(previousGeneration: bigint): FrameData | null {
+  copyFrame(previousGeneration: bigint, reusablePixels?: Uint8ClampedArray<ArrayBuffer> | null): FrameData | null {
     const module = this.requireModule();
+    const staged = this.stageChangedFrame(previousGeneration);
+    if (!staged) return null;
+    const pixels = reusablePixels && reusablePixels.byteLength >= staged.byteCount
+      ? new Uint8ClampedArray(reusablePixels.buffer, reusablePixels.byteOffset, staged.byteCount)
+      : new Uint8ClampedArray(staged.byteCount);
+    pixels.set(module.HEAPU8.subarray(this.framePointer, this.framePointer + staged.byteCount));
+    return {
+      pixels,
+      width: staged.width,
+      height: staged.height,
+      generation: staged.generation
+    };
+  }
+
+  acquireFrameView(previousGeneration: bigint): FrameView | null {
+    const module = this.requireModule();
+    this.maybeFlushStorage();
     const widthPointer = this.metadataPointer;
     const heightPointer = this.metadataPointer + 4;
     const generationPointer = this.metadataPointer + 8;
-    const required = module._phoneme_copy_frame_rgba(
+    const pixelsPointer = module._phoneme_acquire_frame_rgba_since(
       this.runtime,
-      0,
-      0,
+      previousGeneration,
       widthPointer,
       heightPointer,
       generationPointer
     );
-    const view = new DataView(module.HEAPU8.buffer);
-    const width = view.getInt32(widthPointer, true);
-    const height = view.getInt32(heightPointer, true);
-    const generation = view.getBigUint64(generationPointer, true);
-    if (required <= 0 || width <= 0 || height <= 0 || generation === previousGeneration) return null;
+    if (!pixelsPointer) return null;
 
-    this.ensureFrameCapacity(required);
-    const copied = module._phoneme_copy_frame_rgba(
-      this.runtime,
-      this.framePointer,
-      this.frameCapacity,
-      widthPointer,
-      heightPointer,
-      generationPointer
-    );
-    if (copied <= 0) return null;
-    const pixels = new Uint8ClampedArray(copied);
-    pixels.set(module.HEAPU8.subarray(this.framePointer, this.framePointer + copied));
-    return { pixels, width, height, generation };
+    try {
+      const view = new DataView(module.HEAPU8.buffer);
+      const width = view.getInt32(widthPointer, true);
+      const height = view.getInt32(heightPointer, true);
+      const generation = view.getBigUint64(generationPointer, true);
+      this.assertFrameDimensions(width, height);
+      return {
+        pixels: new Uint8Array(module.HEAPU8.buffer, pixelsPointer, width * height * 4),
+        width,
+        height,
+        generation
+      };
+    } catch (error) {
+      module._phoneme_release_frame_rgba(this.runtime);
+      throw error;
+    }
+  }
+
+  releaseFrameView() {
+    if (!this.module || !this.runtime) return;
+    this.module._phoneme_release_frame_rgba(this.runtime);
+  }
+
+  withFrameView<T>(previousGeneration: bigint, body: (frame: FrameView) => T): T | null {
+    const frame = this.acquireFrameView(previousGeneration);
+    if (!frame) return null;
+    try {
+      return body(frame);
+    } finally {
+      this.releaseFrameView();
+    }
   }
 
   copyLcduiImage(componentId: number): FrameData | null {
@@ -484,7 +587,13 @@ export class PhoneMEWebRuntime {
   async flushStorage() {
     if (!this.module) return;
     if (!this.flushPromise) {
-      this.flushPromise = this.syncFileSystem(false).finally(() => {
+      const generationBeforeFlush = this.runtime
+        ? (this.storageGeneration() ?? this.lastFlushedStorageGeneration)
+        : this.lastFlushedStorageGeneration;
+      this.flushPromise = this.syncFileSystem(false).then(() => {
+        this.lastFlushedStorageGeneration = generationBeforeFlush;
+        this.storageDirtySince = 0;
+      }).finally(() => {
         this.flushPromise = null;
       });
     }
@@ -534,6 +643,9 @@ export class PhoneMEWebRuntime {
     const stat = module.FS.stat(absolute);
     const name = basename(relative, kind === "rms" ? "rms" : "files");
     if (!module.FS.isDir(stat.mode)) {
+      if (Number(stat.size) > MAX_MANAGED_ARCHIVE_BYTES) {
+        throw new Error("Tệp quá lớn để tải xuống an toàn trong trình duyệt");
+      }
       return {
         name,
         isDirectory: false,
@@ -541,19 +653,79 @@ export class PhoneMEWebRuntime {
       };
     }
 
-    const files: ManagedStorageExport["files"] = [];
+    const entries: Array<{ absolutePath: string; archivePath: string; size: number }> = [];
+    let totalBytes = 0;
     const collect = (directory: string, archivePath: string) => {
       for (const child of module.FS.readdir(directory)) {
         if (child === "." || child === "..") continue;
         const childAbsolute = `${directory}/${child}`;
         const childArchivePath = archivePath ? `${archivePath}/${child}` : child;
         const childStat = module.FS.stat(childAbsolute);
-        if (module.FS.isDir(childStat.mode)) collect(childAbsolute, childArchivePath);
-        else files.push({ path: childArchivePath, data: new Uint8Array(module.FS.readFile(childAbsolute)) });
+        if (module.FS.isDir(childStat.mode)) {
+          collect(childAbsolute, childArchivePath);
+          continue;
+        }
+        if (entries.length >= MAX_MANAGED_EXPORT_FILES) {
+          throw new Error(`Thư mục có quá nhiều tệp để xuất an toàn (tối đa ${MAX_MANAGED_EXPORT_FILES})`);
+        }
+        const size = Math.max(0, Number(childStat.size));
+        if (size > MAX_MANAGED_ARCHIVE_BYTES) {
+          throw new Error(`Tệp ${childArchivePath} quá lớn để nén an toàn trong trình duyệt`);
+        }
+        totalBytes += size;
+        if (totalBytes > MAX_MANAGED_EXPORT_BYTES) {
+          throw new Error("Thư mục quá lớn để xuất trong một lần");
+        }
+        entries.push({ absolutePath: childAbsolute, archivePath: childArchivePath, size });
       }
     };
     collect(absolute, name);
-    return { name, isDirectory: true, files };
+
+    const archive = await new Promise<Blob>((resolve, reject) => {
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let emittedBytes = 0;
+      let settled = false;
+      const archiveStream = new Zip((error, chunk, final) => {
+        if (settled) return;
+        if (error) {
+          settled = true;
+          reject(error);
+          return;
+        }
+        if (chunk?.byteLength) {
+          emittedBytes += chunk.byteLength;
+          if (emittedBytes > MAX_MANAGED_ARCHIVE_BYTES) {
+            settled = true;
+            archiveStream.terminate();
+            reject(new Error("File ZIP vượt giới hạn bộ nhớ an toàn của trình duyệt"));
+            return;
+          }
+          chunks.push(chunk.slice());
+        }
+        if (final) {
+          settled = true;
+          resolve(new Blob(chunks, { type: "application/zip" }));
+        }
+      });
+
+      try {
+        for (const entry of entries) {
+          const zipEntry = new ZipDeflate(entry.archivePath, { level: 1 });
+          archiveStream.add(zipEntry);
+          // Read and compress one file at a time. Raw directory contents are
+          // never retained together, avoiding the previous folder-size RAM spike.
+          zipEntry.push(module.FS.readFile(entry.absolutePath), true);
+        }
+        archiveStream.end();
+      } catch (error) {
+        if (!settled) {
+          settled = true;
+          try { archiveStream.terminate(); } catch { /* best effort */ }
+          reject(error);
+        }
+      }
+    });
+    return { name, isDirectory: true, files: [], archive };
   }
 
   async importManagedStorageFiles(
@@ -564,7 +736,15 @@ export class PhoneMEWebRuntime {
     this.assertStorageMutationAllowed();
     const module = this.requireModule();
     const base = normalizeManagedPath(relativeDirectory);
+    let totalUploadBytes = 0;
     for (const upload of uploads) {
+      if (upload.file.size > MAX_MANAGED_ARCHIVE_BYTES) {
+        throw new Error(`Tệp ${upload.file.name} quá lớn để tải lên an toàn`);
+      }
+      totalUploadBytes += Math.max(0, upload.file.size);
+      if (totalUploadBytes > MAX_MANAGED_EXPORT_BYTES) {
+        throw new Error("Tổng dữ liệu tải lên quá lớn cho một lần thao tác");
+      }
       const child = normalizeManagedPath(upload.relativePath);
       if (!child) continue;
       const target = base ? `${base}/${child}` : child;
@@ -621,6 +801,8 @@ export class PhoneMEWebRuntime {
     this.initialized = false;
     this.currentGame = null;
     this.flushPromise = null;
+    this.lastFlushedStorageGeneration = 0n;
+    this.storageDirtySince = 0;
     this.fatalErrorValue = null;
     this.restoreWebSocketRouting?.();
     this.restoreWebSocketRouting = null;
@@ -690,13 +872,81 @@ export class PhoneMEWebRuntime {
     }
   }
 
+  private stageChangedFrame(previousGeneration: bigint): StagedFrame | null {
+    const module = this.requireModule();
+    this.maybeFlushStorage();
+    const widthPointer = this.metadataPointer;
+    const heightPointer = this.metadataPointer + 4;
+    const generationPointer = this.metadataPointer + 8;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const required = module._phoneme_copy_frame_rgba_since(
+        this.runtime,
+        previousGeneration,
+        this.framePointer,
+        this.frameCapacity,
+        widthPointer,
+        heightPointer,
+        generationPointer
+      );
+      if (required <= 0) return null;
+      if (!this.framePointer || required > this.frameCapacity) {
+        this.ensureFrameCapacity(required);
+        continue;
+      }
+
+      const view = new DataView(module.HEAPU8.buffer);
+      const width = view.getInt32(widthPointer, true);
+      const height = view.getInt32(heightPointer, true);
+      const generation = view.getBigUint64(generationPointer, true);
+      if (width <= 0 || height <= 0 || generation === previousGeneration) return null;
+      return { byteCount: required, width, height, generation };
+    }
+    throw new Error("Framebuffer thay đổi kích thước liên tục khi đang copy");
+  }
+
   private ensureFrameCapacity(required: number) {
     const module = this.requireModule();
+    if (!Number.isFinite(required) || required <= 0 || required > MAX_FRAME_BYTES) {
+      throw new Error("Framebuffer vượt giới hạn bộ nhớ an toàn của bản web");
+    }
     if (required <= this.frameCapacity) return;
     if (this.framePointer) module._free(this.framePointer);
     this.frameCapacity = Math.max(required, Math.ceil(required * 1.25));
     this.framePointer = module._malloc(this.frameCapacity);
     if (!this.framePointer) throw new Error("Không cấp phát được framebuffer WebAssembly");
+  }
+
+  private assertFrameDimensions(width: number, height: number) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) ||
+        width <= 0 || height <= 0 ||
+        width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION ||
+        width * height * 4 > MAX_FRAME_BYTES) {
+      throw new Error(`Kích thước màn hình web không hợp lệ: ${width}×${height}`);
+    }
+  }
+
+  private maybeFlushStorage() {
+    if (!this.module || !this.currentGame || this.flushPromise) return;
+    const generation = this.storageGeneration();
+    if (generation !== null && generation === this.lastFlushedStorageGeneration) {
+      this.storageDirtySince = 0;
+      return;
+    }
+    const now = performance.now();
+    if (this.storageDirtySince <= 0) {
+      this.storageDirtySince = now;
+      return;
+    }
+    if (now - this.storageDirtySince < STORAGE_FLUSH_DEBOUNCE_MS) return;
+    void this.flushStorage().catch(() => undefined);
+  }
+
+  private storageGeneration(): bigint | null {
+    if (!this.module || !this.runtime) return null;
+    const storageGeneration = this.module._phoneme_storage_generation;
+    if (typeof storageGeneration !== "function") return null;
+    return storageGeneration(this.runtime);
   }
 
   private ensureDirectory(path: string) {
@@ -725,8 +975,15 @@ export class PhoneMEWebRuntime {
       if (!manifest.version || !manifest.module || !manifest.wasm) {
         throw new Error("manifest WebAssembly không hợp lệ");
       }
-      const moduleUrl = new URL(manifest.module, manifestUrl).href;
-      const wasmUrl = new URL(manifest.wasm, manifestUrl).href;
+      const useSimd = supportsWasmSimd();
+      const selectedModule = useSimd
+        ? manifest.module
+        : (manifest.compatModule || "/wasm/phoneme.js");
+      const selectedWasm = useSimd
+        ? manifest.wasm
+        : (manifest.compatWasm || "/wasm/phoneme.wasm");
+      const moduleUrl = new URL(selectedModule, manifestUrl).href;
+      const wasmUrl = new URL(selectedWasm, manifestUrl).href;
       if (new URL(moduleUrl).origin !== globalThis.location.origin || new URL(wasmUrl).origin !== globalThis.location.origin) {
         throw new Error("manifest WebAssembly trỏ ra ngoài origin");
       }

@@ -1,12 +1,26 @@
 /// <reference lib="webworker" />
 
 import { PhoneMEWebRuntime } from "./phoneME";
+import { createFramePresenter, type FramePresenter } from "./framePresenter";
 import type { GameEntry, JarMetadata, ManagedStorageKind } from "./types";
 import { installWorkerMediaBridge, type MediaStatusMessage } from "./workerMediaBridge";
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const mediaBridge = installWorkerMediaBridge(scope);
 const runtime = new PhoneMEWebRuntime();
+const WORKER_MAX_FPS = 30;
+const WORKER_FRAME_INTERVAL_MS = 1000 / WORKER_MAX_FPS;
+const BACKGROUND_PUMP_INTERVAL_MS = 250;
+let recyclableFramePixels: Uint8ClampedArray<ArrayBuffer> | null = null;
+let framePresenter: FramePresenter | null = null;
+let renderLoopTimer = 0;
+let renderLoopRunning = false;
+let renderLoopForeground = true;
+let renderLoopGeneration = 0n;
+let renderLoopFrameCount = 0;
+let renderLoopLastReportAt = performance.now();
+let renderLoopWidth = 0;
+let renderLoopHeight = 0;
 
 type RequestMessage = {
   id: number;
@@ -47,6 +61,113 @@ function formatError(error: unknown) {
 
 function postLog(line: string, isError: boolean) {
   scope.postMessage({ event: "log", line, isError });
+}
+
+function stopRenderLoop() {
+  renderLoopRunning = false;
+  if (renderLoopTimer) clearTimeout(renderLoopTimer);
+  renderLoopTimer = 0;
+  renderLoopGeneration = 0n;
+  renderLoopFrameCount = 0;
+  renderLoopWidth = 0;
+  renderLoopHeight = 0;
+}
+
+function scheduleRenderLoop(delayMilliseconds: number) {
+  if (!renderLoopRunning) return;
+  if (renderLoopTimer) clearTimeout(renderLoopTimer);
+  renderLoopTimer = setTimeout(
+    runRenderLoop,
+    Math.max(0, delayMilliseconds)
+  ) as unknown as number;
+}
+
+function runRenderLoop() {
+  renderLoopTimer = 0;
+  if (!renderLoopRunning || !framePresenter || !runtime.activeGame) return;
+  const startedAt = performance.now();
+
+  try {
+    let presentedFrame: {
+      width: number;
+      height: number;
+      generation: bigint;
+      backend: FramePresenter["backend"];
+    } | null = null;
+
+    if (renderLoopForeground) {
+      runtime.withFrameView(renderLoopGeneration, (frame) => {
+        // The typed-array view points directly at the core's published RGBA
+        // buffer. withFrameView holds the framebuffer read lease only across
+        // this synchronous GPU upload and releases it immediately afterwards.
+        framePresenter!.present(frame);
+        renderLoopGeneration = frame.generation;
+        renderLoopFrameCount += 1;
+        if (frame.width !== renderLoopWidth || frame.height !== renderLoopHeight) {
+          renderLoopWidth = frame.width;
+          renderLoopHeight = frame.height;
+          presentedFrame = {
+            width: frame.width,
+            height: frame.height,
+            generation: frame.generation,
+            backend: framePresenter!.backend
+          };
+        }
+      });
+    } else {
+      // Keep low-frequency storage/LCDUI maintenance alive while presentation
+      // is suspended. Runtime::suspend disables Canvas work but Java timers,
+      // sockets and workers intentionally continue for online MIDlets.
+      runtime.pump();
+    }
+
+    const events = runtime.pollLcduiEvents();
+    const now = performance.now();
+    const shouldReportFrames = now - renderLoopLastReportAt >= 1000;
+    const renderedFrames = shouldReportFrames ? renderLoopFrameCount : 0;
+    if (shouldReportFrames) {
+      renderLoopFrameCount = 0;
+      renderLoopLastReportAt = now;
+    }
+    if (events.length || presentedFrame || renderedFrames > 0) {
+      scope.postMessage({
+        event: "runtimeTick",
+        events,
+        presentedFrame,
+        renderedFrames
+      });
+    }
+  } catch (error) {
+    const formatted = formatError(runtime.fatalError ?? error);
+    postLog(formatted, true);
+    if (runtime.fatalError) {
+      scope.postMessage({ event: "fatal", error: formatted });
+    } else {
+      scope.postMessage({
+        event: "runtimeTick",
+        events: [],
+        presentedFrame: null,
+        renderedFrames: 0,
+        error: formatted
+      });
+    }
+    stopRenderLoop();
+    return;
+  }
+
+  const elapsed = performance.now() - startedAt;
+  const interval = renderLoopForeground
+    ? WORKER_FRAME_INTERVAL_MS
+    : BACKGROUND_PUMP_INTERVAL_MS;
+  scheduleRenderLoop(Math.max(0, interval - elapsed));
+}
+
+function startRenderLoop() {
+  stopRenderLoop();
+  if (!framePresenter || !runtime.activeGame) return;
+  renderLoopRunning = true;
+  renderLoopLastReportAt = performance.now();
+  scheduleRenderLoop(0);
 }
 
 function frameTransfer(frame: ReturnType<PhoneMEWebRuntime["copyFrame"]>) {
@@ -126,15 +247,67 @@ async function handleRequest(message: RequestMessage) {
   case "stopMidlet":
     runtime.stopMidlet();
     return undefined;
+  case "attachCanvas": {
+    const canvas = payload.canvas as OffscreenCanvas | undefined;
+    if (!canvas) throw new Error("Không nhận được OffscreenCanvas cho renderer");
+    stopRenderLoop();
+    framePresenter?.dispose();
+    framePresenter = await createFramePresenter(canvas, Boolean(payload.filtering));
+    recyclableFramePixels = null;
+    renderLoopForeground = Boolean(payload.foreground ?? true);
+    runtime.setHostForeground(renderLoopForeground);
+    startRenderLoop();
+    return { backend: framePresenter.backend };
+  }
+  case "detachCanvas":
+    stopRenderLoop();
+    framePresenter?.dispose();
+    framePresenter = null;
+    return undefined;
+  case "setPresenterFiltering":
+    framePresenter?.setFiltering(Boolean(payload.enabled));
+    return undefined;
+  case "setPresenterForeground":
+    renderLoopForeground = Boolean(payload.foreground);
+    runtime.setHostForeground(renderLoopForeground);
+    if (renderLoopRunning) scheduleRenderLoop(0);
+    return undefined;
+  case "capturePresenter": {
+    if (!framePresenter) return null;
+    try {
+      const captured = await framePresenter.capture();
+      if (captured) return captured;
+    } catch {
+      // Some GPU canvas implementations do not expose their swapchain through
+      // convertToBlob(). Reconstruct only on explicit screenshot requests.
+    }
+    const frame = runtime.copyFrame(0n);
+    if (!frame || typeof OffscreenCanvas === "undefined") return null;
+    const screenshotCanvas = new OffscreenCanvas(frame.width, frame.height);
+    const context = screenshotCanvas.getContext("2d", { alpha: false });
+    if (!context) return null;
+    context.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    return await screenshotCanvas.convertToBlob({ type: "image/png" });
+  }
   case "tick": {
+    const incomingPixels = payload.recyclablePixels;
+    if (incomingPixels instanceof Uint8ClampedArray && incomingPixels.buffer.byteLength > 0) {
+      recyclableFramePixels = incomingPixels as Uint8ClampedArray<ArrayBuffer>;
+    }
+
     const includeFrame = Boolean(payload.includeFrame);
+    const previousGeneration = BigInt(payload.previousGeneration ?? 0);
+
     if (!includeFrame) runtime.pump();
     const frame = includeFrame
-      ? runtime.copyFrame(BigInt(payload.previousGeneration ?? 0))
+      ? runtime.copyFrame(previousGeneration, recyclableFramePixels)
       : null;
+    if (frame) recyclableFramePixels = null;
     return {
       events: runtime.pollLcduiEvents(),
-      frame
+      frame,
+      presentedFrame: null,
+      renderedFrames: 0
     };
   }
   case "copyLcduiImage":
@@ -187,6 +360,8 @@ async function handleRequest(message: RequestMessage) {
   case "flushStorage":
     await runtime.flushStorage();
     return undefined;
+  case "memoryStats":
+    return runtime.memoryStats();
   case "listManagedStorage":
     return await runtime.listManagedStorage(
       payload.kind as ManagedStorageKind,
@@ -223,14 +398,20 @@ async function handleRequest(message: RequestMessage) {
     return undefined;
   case "shutdown":
     try {
+      stopRenderLoop();
       runtime.stopMidlet();
       await runtime.flushStorage();
     } finally {
+      framePresenter?.dispose();
+      framePresenter = null;
       runtime.dispose();
       scope.close();
     }
     return undefined;
   case "dispose":
+    stopRenderLoop();
+    framePresenter?.dispose();
+    framePresenter = null;
     runtime.dispose();
     scope.close();
     return undefined;

@@ -230,6 +230,33 @@ Status Heap::set_field(ObjectRef reference, usize index, Value value) {
     return {};
 }
 
+Result<Value> Heap::vm_field(ObjectRef reference, usize index) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_field", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (object.is_array || index >= object.fields.size()) {
+        return fail(ErrorCode::out_of_range, "object field index is out of range");
+    }
+    return object.fields[index];
+}
+
+Status Heap::vm_set_field(ObjectRef reference, usize index, Value value) {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_set_field", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (object.is_array || index >= object.fields.size()) {
+        return fail(ErrorCode::out_of_range, "object field index is out of range");
+    }
+    object.fields[index] = value;
+    return {};
+}
+
 Result<Value> Heap::element(ObjectRef reference, usize index) const {
     PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
@@ -288,6 +315,34 @@ Result<HeapArrayInfo> Heap::array_info(ObjectRef reference) const {
     return info;
 }
 
+Result<HeapArrayInfo> Heap::vm_array_info(ObjectRef reference) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_array_info", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    const auto kind = object.array_kind;
+    if (!kind.has_value()) {
+        return fail(ErrorCode::invalid_state, "array has an invalid class descriptor");
+    }
+    HeapArrayInfo info {
+        .kind = *kind,
+        .length = object.elements.size(),
+    };
+    if (*kind == HeapArrayKind::reference) {
+        info.reference_component = reference_array_component(object.class_name);
+        if (info.reference_component.empty()) {
+            return fail(ErrorCode::invalid_state,
+                        "reference array has an invalid component descriptor");
+        }
+    }
+    return info;
+}
+
 Result<HeapArrayElementSnapshot> Heap::array_element_snapshot(
     ObjectRef reference,
     usize index) const {
@@ -297,6 +352,32 @@ Result<HeapArrayElementSnapshot> Heap::array_element_snapshot(
     if (!slot) {
         return heap_access_error(
             slot.error(), "Heap.array_element_snapshot", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    if (index >= object.elements.size()) {
+        return fail(ErrorCode::out_of_range, "array index is out of range");
+    }
+    const auto kind = object.array_kind;
+    if (!kind.has_value()) {
+        return fail(ErrorCode::invalid_state, "array has an invalid class descriptor");
+    }
+    return HeapArrayElementSnapshot {
+        .kind = *kind,
+        .value = object.elements[index],
+    };
+}
+
+Result<HeapArrayElementSnapshot> Heap::vm_array_element_snapshot(
+    ObjectRef reference,
+    usize index) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(
+            slot.error(), "Heap.vm_array_element_snapshot", reference);
     }
     const Object& object = slots_[*slot].object;
     if (!object.is_array) {
@@ -325,6 +406,32 @@ Status Heap::set_element_checked(ObjectRef reference,
     if (!slot) {
         return heap_access_error(
             slot.error(), "Heap.set_element_checked", reference);
+    }
+    Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    if (index >= object.elements.size()) {
+        return fail(ErrorCode::out_of_range, "array index is out of range");
+    }
+    const auto actual_kind = object.array_kind;
+    if (!actual_kind.has_value() || *actual_kind != expected_kind) {
+        return fail(ErrorCode::invalid_state,
+                    "array element kind does not match requested store");
+    }
+    object.elements[index] = value;
+    return {};
+}
+
+Status Heap::vm_set_element_checked(ObjectRef reference,
+                                    usize index,
+                                    HeapArrayKind expected_kind,
+                                    Value value) {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(
+            slot.error(), "Heap.vm_set_element_checked", reference);
     }
     Object& object = slots_[*slot].object;
     if (!object.is_array) {
@@ -521,12 +628,34 @@ Result<usize> Heap::array_length(ObjectRef reference) const {
     return object.elements.size();
 }
 
+Result<usize> Heap::vm_array_length(ObjectRef reference) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_array_length", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_array) {
+        return fail(ErrorCode::invalid_state, "object is not an array");
+    }
+    return object.elements.size();
+}
+
 Result<std::string> Heap::class_name(ObjectRef reference) const {
     PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
     auto slot = resolve_slot_unlocked(reference);
     if (!slot) {
         return heap_access_error(slot.error(), "Heap.class_name", reference);
+    }
+    return slots_[*slot].object.class_name;
+}
+
+Result<std::string> Heap::vm_class_name(ObjectRef reference) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_class_name", reference);
     }
     return slots_[*slot].object.class_name;
 }

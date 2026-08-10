@@ -243,8 +243,16 @@ Status Image::set_pixel(i32 x,
     Pixel& destination =
         pixels_[static_cast<usize>(y) * static_cast<usize>(width_) +
                 static_cast<usize>(x)];
-    const Pixel composited = rgb565_roundtrip(
-        blend ? source_over(pixel_value, destination) : pixel_value);
+    Pixel composited = destination;
+    if (!blend) {
+        composited = rgb565_roundtrip(pixel_value);
+    } else {
+        const u8 source_alpha = alpha(pixel_value);
+        if (source_alpha == 0U) return {};
+        composited = source_alpha == 255U
+            ? rgb565_roundtrip(pixel_value)
+            : rgb565_roundtrip(source_over(pixel_value, destination));
+    }
     if (composited != destination) {
         destination = composited;
         mark_dirty_region(x, y, 1, 1);

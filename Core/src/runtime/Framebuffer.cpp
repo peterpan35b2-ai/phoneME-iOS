@@ -122,6 +122,46 @@ namespace phoneme::runtime
     return result;
   }
 
+  std::optional<FrameMetadata> Framebuffer::copy_rgba_since(
+      u64 previous_generation,
+      std::span<u8> destination) const noexcept
+  {
+    std::scoped_lock lock(mutex_);
+    if (generation_ == previous_generation)
+    {
+      return std::nullopt;
+    }
+    const FrameMetadata result{
+        .dimensions = dimensions_,
+        .generation = generation_,
+        .byte_count = rgba_.size(),
+    };
+    if (!rgba_.empty() && destination.size() >= rgba_.size())
+    {
+      std::copy(rgba_.begin(), rgba_.end(), destination.begin());
+    }
+    return result;
+  }
+
+  std::optional<Framebuffer::ReadLease> Framebuffer::acquire_rgba_since(
+      u64 previous_generation) const noexcept
+  {
+    std::unique_lock lock(mutex_);
+    if (generation_ == previous_generation || rgba_.empty())
+    {
+      return std::nullopt;
+    }
+    const FrameMetadata metadata{
+        .dimensions = dimensions_,
+        .generation = generation_,
+        .byte_count = rgba_.size(),
+    };
+    return ReadLease(
+        std::move(lock),
+        metadata,
+        std::span<const u8>(rgba_.data(), rgba_.size()));
+  }
+
   FrameSnapshot Framebuffer::snapshot() const
   {
     std::scoped_lock lock(mutex_);

@@ -85,6 +85,11 @@ struct AppHeapConfig final {
     usize maximum_bytes {64U * 1024U * 1024U};
 };
 
+struct FrameReadView final {
+    const u8* pixels {nullptr};
+    FrameMetadata metadata;
+};
+
 class Runtime final {
 public:
     Runtime();
@@ -196,6 +201,13 @@ public:
     [[nodiscard]] FrameMetadata frame_metadata();
     [[nodiscard]] FrameMetadata copy_current_frame_rgba(
         std::span<u8> destination) const noexcept;
+    [[nodiscard]] std::optional<FrameMetadata> copy_current_frame_rgba_since(
+        u64 previous_generation,
+        std::span<u8> destination) const noexcept;
+    [[nodiscard]] std::optional<FrameReadView> acquire_current_frame_rgba_since(
+        u64 previous_generation) noexcept;
+    void release_current_frame_rgba() noexcept;
+    [[nodiscard]] u64 storage_generation() noexcept;
     [[nodiscard]] FrameMetadata copy_lcdui_image_rgba(
         i32 component_id,
         std::span<u8> destination);
@@ -263,6 +275,7 @@ private:
     AppId foreground_app_id_ {};
     u64 sequence_ {0};
     Framebuffer framebuffer_;
+    std::optional<Framebuffer::ReadLease> frame_read_lease_;
     ConcurrentQueue<InputEvent> input_queue_;
     ConcurrentQueue<UiEvent> ui_queue_;
     std::shared_ptr<UiTranslationReplayState> ui_translation_replay_;

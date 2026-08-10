@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -67,6 +68,9 @@ public:
     [[nodiscard]] Result<std::vector<RecordSnapshot>> snapshot(
         std::string_view name);
     [[nodiscard]] Result<usize> available_bytes(std::string_view name);
+    [[nodiscard]] u64 mutation_generation() const noexcept {
+        return mutation_generation_.load(std::memory_order_relaxed);
+    }
 
     void set_fault_injector(RecordStoreFaultInjector injector);
     void clear_fault_injector();
@@ -114,6 +118,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Store> stores_;
     RecordStoreFaultInjector fault_injector_;
+    mutable std::atomic<u64> mutation_generation_ {0};
 };
 
 } // namespace phoneme::runtime

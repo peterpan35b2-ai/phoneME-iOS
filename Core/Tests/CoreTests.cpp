@@ -8901,6 +8901,11 @@ void test_framebuffer_sizes() {
     auto frame = framebuffer.snapshot();
     require(frame.rgba.size() == 320U * 240U * 4U,
             "framebuffer uses exact RGBA byte count");
+    const auto initial_generation = frame.generation;
+    std::vector<phoneme::u8> unchanged(frame.rgba.size(), 3U);
+    require(!framebuffer.copy_rgba_since(initial_generation, unchanged).has_value(),
+            "skip framebuffer copy when generation is unchanged");
+
     std::vector<phoneme::u8> replacement(320U * 240U * 4U, 7U);
     const auto before_exchange = framebuffer.metadata().generation;
     require(framebuffer.replace_exchange({320, 240}, replacement).has_value(),
@@ -8911,6 +8916,20 @@ void test_framebuffer_sizes() {
     require(frame.generation == before_exchange + 1U &&
                 !frame.rgba.empty() && frame.rgba.front() == 7U,
             "framebuffer exchange publishes the replacement pixels");
+    std::vector<phoneme::u8> too_small(4U, 0U);
+    const auto changed_metadata = framebuffer.copy_rgba_since(
+        before_exchange, too_small);
+    require(changed_metadata.has_value() &&
+                changed_metadata->byte_count == frame.rgba.size() &&
+                too_small.front() == 0U,
+            "changed-frame query reports required capacity without partial copy");
+    std::vector<phoneme::u8> copied(frame.rgba.size(), 0U);
+    const auto copied_metadata = framebuffer.copy_rgba_since(
+        before_exchange, copied);
+    require(copied_metadata.has_value() &&
+                copied_metadata->generation == frame.generation &&
+                copied.front() == 7U,
+            "changed-frame copy publishes pixels under one framebuffer lock");
     require(!framebuffer.resize({0, 240}).has_value(),
             "reject zero framebuffer width");
 }

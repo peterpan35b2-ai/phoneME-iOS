@@ -381,6 +381,28 @@ int32_t phoneme_copy_frame_rgba(PhoneMERuntimeRef runtime,
                                 int32_t* width,
                                 int32_t* height,
                                 uint64_t* generation);
+/* Web/display fast path: pump once and copy only when generation changed.
+ * Returns 0 when unchanged, otherwise the required RGBA byte count. If the
+ * supplied capacity is smaller than that count, metadata is still returned
+ * and the caller can grow its persistent staging buffer and retry. */
+int32_t phoneme_copy_frame_rgba_since(PhoneMERuntimeRef runtime,
+                                      uint64_t previous_generation,
+                                      uint8_t* destination,
+                                      int32_t capacity,
+                                      int32_t* width,
+                                      int32_t* height,
+                                      uint64_t* generation);
+/* Zero-copy display path. The returned pointer remains valid until
+ * phoneme_release_frame_rgba() and must not be retained after that call. */
+const uint8_t* phoneme_acquire_frame_rgba_since(PhoneMERuntimeRef runtime,
+                                                uint64_t previous_generation,
+                                                int32_t* width,
+                                                int32_t* height,
+                                                uint64_t* generation);
+void phoneme_release_frame_rgba(PhoneMERuntimeRef runtime);
+/* Monotonic generation for persistent FileConnection/RMS mutations of the
+ * foreground MIDlet. Used by web hosts to skip redundant IDBFS syncs. */
+uint64_t phoneme_storage_generation(PhoneMERuntimeRef runtime);
 int32_t phoneme_poll_lcdui_event(PhoneMERuntimeRef runtime,
                                  PhoneMELCDUIEvent* event_out);
 void phoneme_lcdui_select_command(PhoneMERuntimeRef runtime,

@@ -34,13 +34,15 @@ import {
   VisibilityOffRounded,
   VisibilityRounded
 } from "@mui/icons-material";
+import { createFramePresenter, type FramePresenter } from "./framePresenter";
 import { applyLcduiEvents, EMPTY_LCDUI_STATE, LCDUICommandBar, NativeLcduiView, type LcduiState } from "./lcdui";
-import type { PhoneMEWebRuntime } from "./phoneMEClient";
+import type { PhoneMEWebRuntime, RuntimeTick } from "./phoneMEClient";
 import type { GameEntry, RuntimeSnapshot } from "./types";
 import type { TranslationSourceLanguage, VirtualKeyboardType, WebGameProfile } from "./webProfile";
 
 const WEB_MAX_FPS = 30;
 const HOST_FRAME_INTERVAL_MS = 1000 / WEB_MAX_FPS;
+const BACKGROUND_HOST_POLL_INTERVAL_MS = 250;
 const POINTER_MOVE_INTERVAL_MS = 1000 / 60;
 const POINTER_PRESSED = 1;
 const POINTER_RELEASED = 2;
@@ -101,7 +103,8 @@ type KeyControl = {
 type KeyboardEditMode = "none" | "position" | "size";
 
 type KeyboardDefinition = {
-  columns: number;
+  metricColumns: number;
+  contentColumns: number;
   rows: number;
   keyHeightFactor: number;
   controls: KeyControl[];
@@ -161,7 +164,8 @@ function keyboardDefinition(type: VirtualKeyboardType): KeyboardDefinition {
   if (type === "numbersArrows" || type === "arrowsNumbers") {
     const numbersFirst = type === "numbersArrows";
     return {
-      columns: 6,
+      metricColumns: 6,
+      contentColumns: 6,
       rows: 4,
       keyHeightFactor: 0.75,
       controls: [
@@ -173,7 +177,8 @@ function keyboardDefinition(type: VirtualKeyboardType): KeyboardDefinition {
 
   if (type === "numbers") {
     return {
-      columns: 5,
+      metricColumns: 6,
+      contentColumns: 5,
       rows: 4,
       keyHeightFactor: 0.75,
       controls: [
@@ -186,7 +191,8 @@ function keyboardDefinition(type: VirtualKeyboardType): KeyboardDefinition {
 
   if (type === "arrows") {
     return {
-      columns: 5,
+      metricColumns: 6,
+      contentColumns: 5,
       rows: 3,
       keyHeightFactor: 0.75,
       controls: [
@@ -221,7 +227,7 @@ function keyboardDefinition(type: VirtualKeyboardType): KeyboardDefinition {
   } else {
     numberControls(0).forEach((control) => controls.push({ ...control, row: control.row + 1 }));
   }
-  return { columns: 3, rows: 5, keyHeightFactor: 0.5625, controls };
+  return { metricColumns: 3, contentColumns: 3, rows: 5, keyHeightFactor: 0.5625, controls };
 }
 
 class HostKeyInputCoordinator {
@@ -382,22 +388,30 @@ function VirtualKeypad({ inputCoordinator, profile, surfaceWidth, surfaceHeight,
     scaleWidth: number;
     scaleHeight: number;
   } | null>(null);
-  const isPhone = profile.virtualKeyboardType === "phone" || profile.virtualKeyboardType === "phoneArrows";
-  const isSplit = profile.virtualKeyboardType === "numbersArrows" || profile.virtualKeyboardType === "arrowsNumbers";
-  const minSide = Math.max(1, Math.min(surfaceWidth, surfaceHeight));
-  const maxSide = Math.max(surfaceWidth, surfaceHeight);
-  const landscape = surfaceWidth > surfaceHeight;
-  const nonWide = maxSide / minSide < 2;
-  const keySize = isPhone
-    ? minSide / 6
-    : nonWide || landscape
-      ? maxSide / 12
-      : minSide / 6.5;
-  const keyWidth = isPhone ? keySize * 2 : keySize;
-  const keyHeight = isPhone ? keySize * 0.75 : keySize;
-  const gridWidth = isSplit ? surfaceWidth : keyWidth * definition.columns;
-  const gridHeight = keyHeight * definition.rows;
-  const startX = isSplit ? 0 : (surfaceWidth - gridWidth) / 2;
+  // Keep web keypad geometry in lockstep with KeypadView.swift. The native app
+  // lays controls out inside a bottom keyboard frame, sizes keys from the
+  // layout's metric column count, and uses a real 4...8pt gap between keys.
+  const layoutWidth = Math.max(surfaceWidth - 12, 0);
+  const layoutHeight = surfaceWidth > surfaceHeight
+    ? Math.min(surfaceHeight * 0.50, 280)
+    : Math.min(surfaceHeight * 0.42, 320);
+  const layoutLeft = (surfaceWidth - layoutWidth) / 2;
+  const layoutTop = surfaceHeight - layoutHeight - 8;
+  const gap = Math.min(8, Math.max(4, layoutWidth / 82));
+  const keyWidth = Math.max(
+    28,
+    (layoutWidth - gap * (definition.metricColumns - 1)) / definition.metricColumns
+  );
+  const availableHeight = Math.max(
+    28,
+    (layoutHeight - gap * (definition.rows - 1)) / definition.rows
+  );
+  const keyHeight = Math.min(keyWidth * definition.keyHeightFactor, availableHeight);
+  const contentWidth = keyWidth * definition.contentColumns
+    + gap * (definition.contentColumns - 1);
+  const contentHeight = keyHeight * definition.rows + gap * (definition.rows - 1);
+  const startX = layoutLeft + (layoutWidth - contentWidth) / 2;
+  const startY = layoutTop + layoutHeight - contentHeight;
   const hidden = new Set(profile.hiddenKeyboardControlIds);
 
   const beginEdit = (event: React.PointerEvent<HTMLDivElement>, control: KeyControl) => {
@@ -468,18 +482,14 @@ function VirtualKeypad({ inputCoordinator, profile, surfaceWidth, surfaceHeight,
     className={`virtual-keypad-overlay ${editMode !== "none" ? "keyboard-editing" : ""}`}
     data-layout={profile.virtualKeyboardType}
     style={{
-      height: gridHeight,
+      height: surfaceHeight,
       "--keyboard-opacity": editMode === "none" ? profile.keyboardOpacity : 1
     } as React.CSSProperties}
   >
-    <Box className="virtual-key-grid" style={{ width: surfaceWidth, height: gridHeight }}>
+    <Box className="virtual-key-grid" style={{ width: surfaceWidth, height: surfaceHeight }}>
       {definition.controls.filter((control) => !hidden.has(control.id)).map((control) => {
-        const baseLeft = isSplit
-          ? control.column < 3
-            ? control.column * keyWidth
-            : surfaceWidth - (6 - control.column) * keyWidth
-          : startX + control.column * keyWidth;
-        const baseTop = control.row * keyHeight;
+        const baseLeft = startX + control.column * (keyWidth + gap);
+        const baseTop = startY + control.row * (keyHeight + gap);
         const offset = profile.keyboardControlOffsets[control.id] ?? { x: 0, y: 0 };
         const scale = profile.keyboardGroupScales[control.groupId] ?? { width: 1, height: 1 };
         const width = keyWidth * scale.width;
@@ -571,6 +581,8 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   const surfaceRef = useRef<HTMLDivElement>(null);
   const generationRef = useRef(0n);
   const frameCounterRef = useRef({ count: 0, startedAt: performance.now() });
+  const telemetryRef = useRef({ fps: 0, width: profile.screenWidth, height: profile.screenHeight });
+  const mainPresenterRef = useRef<FramePresenter | null>(null);
   const inputCoordinator = useMemo(() => new HostKeyInputCoordinator(runtime), [runtime]);
   const activePointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const lastPointerMoveAtRef = useRef(0);
@@ -583,6 +595,7 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   const [fpsValue, setFpsValue] = useState(0);
   const [runtimeError, setRuntimeError] = useState("");
   const [sessionReady, setSessionReady] = useState(false);
+  const [presentationReady, setPresentationReady] = useState(false);
   const [showKeypad, setShowKeypad] = useState(profile.showVirtualKeyboard);
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const [keyboardMenuAnchor, setKeyboardMenuAnchor] = useState<HTMLElement | null>(null);
@@ -784,46 +797,197 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
     };
   }, [inputCoordinator]);
 
+  const recordRenderedFrames = useCallback((count: number) => {
+    if (!profile.showFPS || count <= 0) return;
+    const now = performance.now();
+    frameCounterRef.current.count += count;
+    const elapsed = now - frameCounterRef.current.startedAt;
+    if (elapsed < 1000) return;
+    setFpsValue(frameCounterRef.current.count * 1000 / Math.max(1, elapsed));
+    frameCounterRef.current = { count: 0, startedAt: now };
+  }, [profile.showFPS]);
+
+  const applyRuntimeTick = useCallback((result: RuntimeTick) => {
+    if (result.error) {
+      setRuntimeError(result.error);
+      onSnapshot({ phase: "error", message: result.error, fps: 0, usedMemory: 0, frameWidth: frameSize.width, frameHeight: frameSize.height });
+      return;
+    }
+    if (result.events.length) {
+      setLcdui((current) => applyLcduiEvents(current, result.events));
+    }
+    const presentedFrame = result.presentedFrame;
+    if (presentedFrame) {
+      generationRef.current = presentedFrame.generation;
+      setFrameSize((current) =>
+        current.width === presentedFrame.width && current.height === presentedFrame.height
+          ? current
+          : { width: presentedFrame.width, height: presentedFrame.height }
+      );
+    }
+    if (result.renderedFrames) recordRenderedFrames(result.renderedFrames);
+
+    const frame = result.frame;
+    const presenter = mainPresenterRef.current;
+    if (frame) {
+      try {
+        if (presenter) {
+          generationRef.current = frame.generation;
+          setFrameSize((current) =>
+            current.width === frame.width && current.height === frame.height
+              ? current
+              : { width: frame.width, height: frame.height }
+          );
+          presenter.present(frame);
+          recordRenderedFrames(1);
+        }
+      } finally {
+        // No-op for Worker presentation. On the iOS 16 direct path this
+        // releases the core framebuffer read lease immediately after upload.
+        runtime.releaseFrameView();
+      }
+    }
+  }, [frameSize.height, frameSize.width, onSnapshot, recordRenderedFrames, runtime]);
+
+  useEffect(() => {
+    frameCounterRef.current = { count: 0, startedAt: performance.now() };
+    if (!profile.showFPS) setFpsValue(0);
+  }, [profile.showFPS, sessionReady]);
+
+  useEffect(() => {
+    telemetryRef.current = {
+      fps: fpsValue,
+      width: frameSize.width,
+      height: frameSize.height
+    };
+  }, [fpsValue, frameSize.height, frameSize.width]);
+
+  useEffect(() => {
+    if (!sessionReady || runtimeError) return;
+    let active = true;
+    let timer = 0;
+    const sample = async () => {
+      try {
+        const stats = await runtime.memoryStats();
+        if (!active) return;
+        const current = telemetryRef.current;
+        onSnapshot({
+          phase: "running",
+          message: `Đang chạy ${game.title}`,
+          fps: current.fps,
+          usedMemory: stats.totalTrackedBytes,
+          frameWidth: current.width,
+          frameHeight: current.height
+        });
+      } catch {
+        // Memory telemetry is diagnostic only and must never stop a MIDlet.
+      }
+      if (active) timer = window.setTimeout(() => void sample(), 2_000);
+    };
+    timer = window.setTimeout(() => void sample(), 1_000);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [game.title, onSnapshot, runtime, runtimeError, sessionReady]);
+
   useEffect(() => {
     if (!sessionReady) return;
-    let timer = 0;
+    return runtime.subscribeRuntimeTicks(applyRuntimeTick);
+  }, [applyRuntimeTick, runtime, sessionReady]);
+
+  useEffect(() => {
+    if (!sessionReady || hasNativeScreen) {
+      setPresentationReady(false);
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
     let active = true;
-    let nextTickAt = performance.now();
-    let lastStatsAt = nextTickAt;
-    frameCounterRef.current = { count: 0, startedAt: nextTickAt };
+    setPresentationReady(false);
+
+    void (async () => {
+      try {
+        const workerBackend = await runtime.attachWorkerCanvas(canvas, profile.filtering);
+        if (!active) {
+          if (workerBackend) runtime.detachWorkerCanvas();
+          return;
+        }
+        if (workerBackend) {
+          setPresentationReady(true);
+          return;
+        }
+
+        const presenter = await createFramePresenter(canvas, profile.filtering);
+        if (!active) {
+          presenter.dispose();
+          return;
+        }
+        mainPresenterRef.current = presenter;
+        setPresentationReady(true);
+      } catch (error) {
+        if (!active) return;
+        setRuntimeError(error instanceof Error ? error.message : String(error));
+      }
+    })();
+
+    return () => {
+      active = false;
+      mainPresenterRef.current?.dispose();
+      mainPresenterRef.current = null;
+      runtime.detachWorkerCanvas();
+    };
+  }, [hasNativeScreen, runtime, sessionReady]);
+
+  useEffect(() => {
+    mainPresenterRef.current?.setFiltering(profile.filtering);
+    runtime.setPresenterFiltering(profile.filtering);
+  }, [profile.filtering, runtime]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const updateForeground = () => {
+      runtime.setPresenterForeground(document.visibilityState !== "hidden");
+    };
+    updateForeground();
+    document.addEventListener("visibilitychange", updateForeground);
+    return () => document.removeEventListener("visibilitychange", updateForeground);
+  }, [runtime, sessionReady]);
+
+  useEffect(() => {
+    if (!sessionReady || runtime.presentationRunsInWorker) return;
+    let timer = 0;
+    let animationFrame = 0;
+    let active = true;
+    let lastHostTickAt = 0;
 
     const scheduleNext = () => {
       if (!active) return;
-      const now = performance.now();
-      nextTickAt += HOST_FRAME_INTERVAL_MS;
-      if (nextTickAt < now) nextTickAt = now;
-      timer = window.setTimeout(tick, Math.max(0, nextTickAt - now));
+      if (document.visibilityState === "hidden") {
+        timer = window.setTimeout(() => void tick(performance.now()), BACKGROUND_HOST_POLL_INTERVAL_MS);
+      } else {
+        animationFrame = window.requestAnimationFrame((now) => void tick(now));
+      }
     };
 
-    const tick = async () => {
+    const tick = async (now: number) => {
       if (!active) return;
+      const visible = document.visibilityState !== "hidden";
+      if (visible && lastHostTickAt > 0 && now - lastHostTickAt < HOST_FRAME_INTERVAL_MS - 1) {
+        scheduleNext();
+        return;
+      }
+      lastHostTickAt = now;
+
       if (!runtimeError) {
         try {
-          const includeFrame = !hasNativeScreen && document.visibilityState !== "hidden";
+          const includeFrame = !hasNativeScreen && visible && presentationReady;
           const result = await runtime.tick(generationRef.current, includeFrame);
-          if (!active) return;
-          if (result.events.length) setLcdui((current) => applyLcduiEvents(current, result.events));
-          const frame = result.frame;
-          const canvas = canvasRef.current;
-          if (frame && canvas) {
-            generationRef.current = frame.generation;
-            if (canvas.width !== frame.width || canvas.height !== frame.height) {
-              canvas.width = frame.width;
-              canvas.height = frame.height;
-              setFrameSize({ width: frame.width, height: frame.height });
-            }
-            canvas.getContext("2d", { alpha: false })?.putImageData(
-              new ImageData(frame.pixels, frame.width, frame.height),
-              0,
-              0
-            );
-            if (profile.showFPS) frameCounterRef.current.count += 1;
+          if (!active) {
+            runtime.releaseFrameView();
+            return;
           }
+          applyRuntimeTick(result);
         } catch (error) {
           if (active) {
             const message = error instanceof Error ? error.message : String(error);
@@ -840,23 +1004,17 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
         }
       }
 
-      const now = performance.now();
-      if (profile.showFPS && now - lastStatsAt >= 1000) {
-        const elapsed = Math.max(1, now - frameCounterRef.current.startedAt);
-        const fps = frameCounterRef.current.count * 1000 / elapsed;
-        setFpsValue(fps);
-        frameCounterRef.current = { count: 0, startedAt: now };
-        lastStatsAt = now;
-      }
       scheduleNext();
     };
 
-    timer = window.setTimeout(tick, 0);
+    scheduleNext();
     return () => {
       active = false;
+      runtime.releaseFrameView();
       window.clearTimeout(timer);
+      window.cancelAnimationFrame(animationFrame);
     };
-  }, [frameSize.height, frameSize.width, hasNativeScreen, onSnapshot, profile.showFPS, runtime, runtimeError, sessionReady]);
+  }, [applyRuntimeTick, frameSize.height, frameSize.width, hasNativeScreen, onSnapshot, presentationReady, runtime, runtimeError, sessionReady]);
 
   const stop = () => {
     setShowExitConfirmation(false);
@@ -867,9 +1025,13 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
 
   const saveScreenshot = () => {
     setMenuAnchor(null);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.toBlob((blob) => {
+    void (async () => {
+      let blob = await runtime.capturePresentedFrame();
+      if (!blob && mainPresenterRef.current) blob = await mainPresenterRef.current.capture();
+      if (!blob) {
+        const canvas = canvasRef.current;
+        if (canvas) blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      }
       if (!blob) return;
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -877,7 +1039,7 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
       anchor.download = `${game.title.replace(/[^a-z0-9_-]+/gi, "-") || "phoneme"}.png`;
       anchor.click();
       URL.revokeObjectURL(url);
-    }, "image/png");
+    })();
   };
 
   const toggleKeypad = () => {
@@ -1000,13 +1162,14 @@ export function EmulatorScreen({ runtime, game, profile, translationProvider, on
   };
 
   const pointerPosition = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = event.currentTarget;
-    const bounds = canvas.getBoundingClientRect();
+    const bounds = event.currentTarget.getBoundingClientRect();
     const width = Math.max(bounds.width, 1);
     const height = Math.max(bounds.height, 1);
+    const frameWidth = Math.max(1, frameSize.width);
+    const frameHeight = Math.max(1, frameSize.height);
     return {
-      x: Math.max(0, Math.min(canvas.width - 1, Math.floor((event.clientX - bounds.left) * canvas.width / width))),
-      y: Math.max(0, Math.min(canvas.height - 1, Math.floor((event.clientY - bounds.top) * canvas.height / height)))
+      x: Math.max(0, Math.min(frameWidth - 1, Math.floor((event.clientX - bounds.left) * frameWidth / width))),
+      y: Math.max(0, Math.min(frameHeight - 1, Math.floor((event.clientY - bounds.top) * frameHeight / height)))
     };
   };
 

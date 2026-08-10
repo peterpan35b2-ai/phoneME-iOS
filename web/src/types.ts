@@ -17,6 +17,7 @@ export type ManagedStorageExport = {
     path: string;
     data: Uint8Array<ArrayBuffer>;
   }>;
+  archive?: Blob;
 };
 
 export type ThemePreference = "system" | "light" | "dark";

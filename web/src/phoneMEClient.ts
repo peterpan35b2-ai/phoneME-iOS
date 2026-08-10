@@ -1,8 +1,10 @@
 import {
   PhoneMEWebRuntime as DirectPhoneMEWebRuntime,
   type FrameData,
+  type FrameView,
   type PhoneMEOptions
 } from "./phoneME";
+import type { FramePresenterBackend } from "./framePresenter";
 import type {
   GameEntry,
   JarMetadata,
@@ -25,7 +27,15 @@ type WorkerResponse = {
   result?: unknown;
   error?: string;
   fatal?: boolean;
-  event?: "log" | "media" | "fatal";
+  event?: "log" | "media" | "fatal" | "runtimeTick";
+  events?: LcduiEvent[];
+  presentedFrame?: {
+    width: number;
+    height: number;
+    generation: bigint;
+    backend: FramePresenterBackend;
+  } | null;
+  renderedFrames?: number;
   line?: string;
   isError?: boolean;
   action?: string;
@@ -48,9 +58,27 @@ type PendingRequest = {
   timeout: number;
 };
 
+export type RuntimeMemoryStats = {
+  appEstimatedBytes: number;
+  wasmLinearBytes: number;
+  frameStagingBytes: number;
+  mediaCompressedBytes: number;
+  mediaDecodedBytes: number;
+  mediaEntries: number;
+  totalTrackedBytes: number;
+};
+
 export type RuntimeTick = {
   events: LcduiEvent[];
-  frame: FrameData | null;
+  frame: FrameData | FrameView | null;
+  error?: string;
+  presentedFrame?: {
+    width: number;
+    height: number;
+    generation: bigint;
+    backend: FramePresenterBackend;
+  } | null;
+  renderedFrames?: number;
 };
 
 function isIOS16WebKit() {
@@ -80,6 +108,15 @@ export class PhoneMEWebRuntime {
   private onLog?: PhoneMEOptions["onLog"];
   private mediaHandles = new Map<number, number>();
   private mediaStatusTimer: number | null = null;
+  private recyclableFramePixels: Uint8ClampedArray<ArrayBuffer> | null = null;
+  private workerPresenterAttached = false;
+  private workerPresenterAttaching = false;
+  private workerPresenterBackend: FramePresenterBackend | null = null;
+  private workerTickEvents: LcduiEvent[] = [];
+  private workerTickPresentedFrame: RuntimeTick["presentedFrame"] = null;
+  private workerTickRenderedFrames = 0;
+  private workerTickError = "";
+  private runtimeTickListeners = new Set<(tick: RuntimeTick) => void>();
 
   get ready() {
     return this.initialized && (this.worker !== null || this.directRuntime?.ready === true);
@@ -87,6 +124,10 @@ export class PhoneMEWebRuntime {
 
   get activeGame() {
     return this.directRuntime?.activeGame ?? this.currentGameValue;
+  }
+
+  get presentationRunsInWorker() {
+    return this.workerPresenterAttached;
   }
 
   async initialize(options?: PhoneMEOptions) {
@@ -250,28 +291,174 @@ export class PhoneMEWebRuntime {
   }
 
   endAppSession() {
+    if (this.directRuntime) {
+      // iOS 16 runs the Emscripten pthread runtime on the browser UI thread.
+      // Calling C++ destruction here can synchronously pthread_join a stuck
+      // MIDlet worker and freeze Safari. Flush storage, abandon the module, and
+      // reload the document so WebKit tears down the whole pthread agent safely.
+      const directRuntime = this.directRuntime;
+      this.directRuntime = null;
+      this.clearMediaBridgeState();
+      this.recyclableFramePixels = null;
+      this.initialized = false;
+      this.currentGameValue = null;
+      try { directRuntime.setHostForeground(false); } catch { /* best effort */ }
+      void directRuntime.flushStorage()
+        .catch(() => undefined)
+        .finally(() => globalThis.location?.reload());
+      return;
+    }
     this.invalidateRuntime(new Error("Phiên ứng dụng phoneME đã kết thúc"), true, true);
   }
 
   async tick(previousGeneration: bigint, includeFrame: boolean): Promise<RuntimeTick> {
-    if (!this.ready || !this.activeGame) return { events: [], frame: null };
+    if (!this.ready || !this.activeGame) return { events: [], frame: null, presentedFrame: null };
+
     if (this.directRuntime) {
-      if (!includeFrame) this.directRuntime.pump();
+      if (!includeFrame) {
+        this.directRuntime.releaseFrameView();
+        this.directRuntime.pump();
+      }
+      const frame = includeFrame
+        ? this.directRuntime.acquireFrameView(previousGeneration)
+        : null;
       return {
         events: this.directRuntime.pollLcduiEvents(),
-        frame: includeFrame ? this.directRuntime.copyFrame(previousGeneration) : null
+        frame,
+        presentedFrame: null
       };
     }
-    return await this.request<RuntimeTick>("tick", {
+
+    if (this.workerPresenterAttaching) {
+      return { events: [], frame: null, presentedFrame: null, renderedFrames: 0 };
+    }
+
+    if (this.workerPresenterAttached) {
+      return this.drainWorkerTick();
+    }
+
+    const recyclablePixels = this.recyclableFramePixels;
+    this.recyclableFramePixels = null;
+    const transferablePixels = recyclablePixels?.buffer.byteLength ? recyclablePixels : null;
+    const result = await this.request<RuntimeTick>("tick", {
       previousGeneration,
-      includeFrame
-    });
+      includeFrame,
+      presentFrame: false,
+      recyclablePixels: transferablePixels
+    }, transferablePixels ? [transferablePixels.buffer] : []);
+    if (result.frame?.pixels instanceof Uint8ClampedArray) {
+      this.recyclableFramePixels = result.frame.pixels;
+    } else if (recyclablePixels && !transferablePixels) {
+      this.recyclableFramePixels = recyclablePixels;
+    }
+    return result;
+  }
+
+  async attachWorkerCanvas(
+    canvas: HTMLCanvasElement,
+    filtering: boolean
+  ): Promise<FramePresenterBackend | null> {
+    if (!this.worker || this.directRuntime || this.workerPresenterAttached) {
+      return this.workerPresenterBackend;
+    }
+    const transferableCanvas = canvas as HTMLCanvasElement & {
+      transferControlToOffscreen?: () => OffscreenCanvas;
+    };
+    if (typeof transferableCanvas.transferControlToOffscreen !== "function") return null;
+
+    this.workerPresenterAttaching = true;
+    try {
+      const offscreen = transferableCanvas.transferControlToOffscreen();
+      const result = await this.request<{ backend: FramePresenterBackend }>(
+        "attachCanvas",
+        { canvas: offscreen, filtering, foreground: document.visibilityState !== "hidden" },
+        [offscreen]
+      );
+      this.workerPresenterAttached = true;
+      this.workerPresenterBackend = result.backend;
+      this.recyclableFramePixels = null;
+      this.workerTickEvents = [];
+      this.workerTickPresentedFrame = null;
+      this.workerTickRenderedFrames = 0;
+      this.workerTickError = "";
+      this.onLog?.(`Renderer web: ${result.backend.toUpperCase()} trong Worker.`, false);
+      return result.backend;
+    } finally {
+      this.workerPresenterAttaching = false;
+    }
+  }
+
+  detachWorkerCanvas() {
+    if (!this.workerPresenterAttached && !this.workerPresenterAttaching) return;
+    if (this.worker) this.notify("detachCanvas");
+    this.workerPresenterAttached = false;
+    this.workerPresenterAttaching = false;
+    this.workerPresenterBackend = null;
+    this.workerTickEvents = [];
+    this.workerTickPresentedFrame = null;
+    this.workerTickRenderedFrames = 0;
+    this.workerTickError = "";
+  }
+
+  setPresenterFiltering(enabled: boolean) {
+    if (!this.workerPresenterAttached || !this.worker) return;
+    this.notify("setPresenterFiltering", { enabled });
+  }
+
+  releaseFrameView() {
+    this.directRuntime?.releaseFrameView();
+  }
+
+  setPresenterForeground(foreground: boolean) {
+    if (this.directRuntime) {
+      this.directRuntime.setHostForeground(foreground);
+      return;
+    }
+    if (!this.worker) return;
+    this.notify("setPresenterForeground", { foreground });
+  }
+
+  subscribeRuntimeTicks(listener: (tick: RuntimeTick) => void) {
+    this.runtimeTickListeners.add(listener);
+    if (this.workerTickEvents.length || this.workerTickPresentedFrame || this.workerTickRenderedFrames > 0 || this.workerTickError) {
+      queueMicrotask(() => {
+        if (this.runtimeTickListeners.has(listener)) listener(this.drainWorkerTick());
+      });
+    }
+    return () => {
+      this.runtimeTickListeners.delete(listener);
+    };
+  }
+
+  async capturePresentedFrame(): Promise<Blob | null> {
+    if (!this.workerPresenterAttached || !this.worker) return null;
+    return await this.request<Blob | null>("capturePresenter");
   }
 
   async copyLcduiImage(componentId: number): Promise<FrameData | null> {
     if (!this.ready || !this.activeGame) return null;
     if (this.directRuntime) return this.directRuntime.copyLcduiImage(componentId);
     return await this.request<FrameData | null>("copyLcduiImage", { componentId });
+  }
+
+  async memoryStats(): Promise<RuntimeMemoryStats> {
+    const core = this.directRuntime
+      ? this.directRuntime.memoryStats()
+      : this.worker
+        ? await this.request<{
+            appEstimatedBytes: number;
+            wasmLinearBytes: number;
+            frameStagingBytes: number;
+          }>("memoryStats")
+        : { appEstimatedBytes: 0, wasmLinearBytes: 0, frameStagingBytes: 0 };
+    const media = installWebMediaBridge().memoryUsage();
+    return {
+      ...core,
+      mediaCompressedBytes: media.compressedBytes,
+      mediaDecodedBytes: media.decodedBytes,
+      mediaEntries: media.entries,
+      totalTrackedBytes: core.wasmLinearBytes + media.totalBytes
+    };
   }
 
   sendKey(keyCode: number, pressed: boolean) {
@@ -403,6 +590,17 @@ export class PhoneMEWebRuntime {
   }
 
   dispose() {
+    if (this.directRuntime) {
+      // Page teardown on the iOS 16 compatibility path must never synchronously
+      // join Java pthreads on Safari's main thread. The document owner will
+      // release the abandoned module when the page is destroyed/reloaded.
+      try { this.directRuntime.setHostForeground(false); } catch { /* best effort */ }
+      this.directRuntime = null;
+      this.clearMediaBridgeState();
+      this.initialized = false;
+      this.currentGameValue = null;
+      return;
+    }
     this.invalidateRuntime(new Error("phoneME Web runtime đã đóng"), true);
   }
 
@@ -410,7 +608,7 @@ export class PhoneMEWebRuntime {
     if (!this.ready) await this.initialize();
   }
 
-  private request<T = void>(type: string, payload?: unknown): Promise<T> {
+  private request<T = void>(type: string, payload?: unknown, transfer: Transferable[] = []): Promise<T> {
     const worker = this.worker;
     if (!worker) return Promise.reject(new Error("phoneME Web chưa sẵn sàng"));
     const id = ++this.nextRequestId;
@@ -422,7 +620,7 @@ export class PhoneMEWebRuntime {
         this.pending.delete(id);
         const error = new Error(`phoneME Web không phản hồi khi xử lý ${type}`);
         pending.reject(error);
-        this.invalidateRuntime(error);
+        if (type !== "memoryStats") this.invalidateRuntime(error);
       }, timeoutMilliseconds);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
@@ -430,7 +628,7 @@ export class PhoneMEWebRuntime {
         timeout
       });
       try {
-        worker.postMessage({ id, type, payload } satisfies WorkerRequest);
+        worker.postMessage({ id, type, payload } satisfies WorkerRequest, transfer);
       } catch (error) {
         const pending = this.pending.get(id);
         if (pending) window.clearTimeout(pending.timeout);
@@ -450,7 +648,8 @@ export class PhoneMEWebRuntime {
     case "uninstall": return 30_000;
     case "flushStorage":
     case "listManagedStorage":
-    case "readManagedStorageFile": return 10_000;
+    case "readManagedStorageFile":
+    case "memoryStats": return 10_000;
     case "exportManagedStorage":
     case "importManagedStorageFiles":
     case "createManagedStorageDirectory":
@@ -463,6 +662,21 @@ export class PhoneMEWebRuntime {
     this.worker?.postMessage({ id: 0, type, payload } satisfies WorkerRequest);
   }
 
+  private drainWorkerTick(): RuntimeTick {
+    const result: RuntimeTick = {
+      events: this.workerTickEvents,
+      frame: null,
+      presentedFrame: this.workerTickPresentedFrame,
+      renderedFrames: this.workerTickRenderedFrames,
+      error: this.workerTickError || undefined
+    };
+    this.workerTickEvents = [];
+    this.workerTickPresentedFrame = null;
+    this.workerTickRenderedFrames = 0;
+    this.workerTickError = "";
+    return result;
+  }
+
   private handleMessage = (event: MessageEvent<WorkerResponse>) => {
     const message = event.data;
     if (message.event === "log") {
@@ -473,9 +687,29 @@ export class PhoneMEWebRuntime {
       this.handleMediaCommand(message);
       return;
     }
+    if (message.event === "runtimeTick") {
+      if (message.events?.length) {
+        this.workerTickEvents.push(...message.events);
+        if (this.workerTickEvents.length > 2048) {
+          this.workerTickEvents.splice(0, this.workerTickEvents.length - 2048);
+        }
+      }
+      if (message.presentedFrame) this.workerTickPresentedFrame = message.presentedFrame;
+      this.workerTickRenderedFrames += Math.max(0, Number(message.renderedFrames ?? 0));
+      if (message.error) this.workerTickError = message.error;
+      if (this.runtimeTickListeners.size > 0) {
+        const tick = this.drainWorkerTick();
+        for (const listener of this.runtimeTickListeners) listener(tick);
+      }
+      return;
+    }
     if (message.event === "fatal") {
       const error = new Error(message.error || "phoneME Web Worker đã dừng do lỗi nghiêm trọng");
       this.onLog?.(error.message, true);
+      if (this.runtimeTickListeners.size > 0) {
+        const tick: RuntimeTick = { events: [], frame: null, error: error.message };
+        for (const listener of this.runtimeTickListeners) listener(tick);
+      }
       this.invalidateRuntime(error);
       return;
     }
@@ -553,24 +787,36 @@ export class PhoneMEWebRuntime {
         this.mediaStatusTimer = null;
         return;
       }
-      for (const handle of this.mediaHandles.keys()) this.postMediaStatus(handle);
-    }, 200);
+      let needsPolling = false;
+      for (const handle of this.mediaHandles.keys()) {
+        needsPolling = this.postMediaStatus(handle) || needsPolling;
+      }
+      if (!needsPolling && this.mediaStatusTimer !== null) {
+        window.clearInterval(this.mediaStatusTimer);
+        this.mediaStatusTimer = null;
+      }
+    }, 500);
   }
 
   private postMediaStatus(logicalHandle: number) {
     const worker = this.worker;
     const nativeHandle = this.mediaHandles.get(logicalHandle);
-    if (!worker || !nativeHandle) return;
+    if (!worker || !nativeHandle) return false;
     const bridge = installWebMediaBridge();
+    const duration = bridge.getDuration(nativeHandle);
+    const playing = Boolean(bridge.isPlaying(nativeHandle));
+    const ended = Boolean(bridge.hasEnded(nativeHandle));
+    const error = Boolean(bridge.hasError(nativeHandle));
     worker.postMessage({
       event: "mediaStatus",
       handle: logicalHandle,
-      duration: bridge.getDuration(nativeHandle),
+      duration,
       time: bridge.getTime(nativeHandle),
-      playing: Boolean(bridge.isPlaying(nativeHandle)),
-      ended: Boolean(bridge.hasEnded(nativeHandle)),
-      error: Boolean(bridge.hasError(nativeHandle))
+      playing,
+      ended,
+      error
     });
+    return playing || (duration < 0 && !ended && !error);
   }
 
   private clearMediaBridgeState() {
@@ -592,6 +838,14 @@ export class PhoneMEWebRuntime {
 
   private invalidateRuntime(reason: Error, notifyWorker = false, gracefulWorkerShutdown = false) {
     this.clearMediaBridgeState();
+    this.recyclableFramePixels = null;
+    this.workerPresenterAttached = false;
+    this.workerPresenterAttaching = false;
+    this.workerPresenterBackend = null;
+    this.workerTickEvents = [];
+    this.workerTickPresentedFrame = null;
+    this.workerTickRenderedFrames = 0;
+    this.workerTickError = "";
     const directRuntime = this.directRuntime;
     this.directRuntime = null;
     if (directRuntime) {

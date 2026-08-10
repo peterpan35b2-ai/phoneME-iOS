@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <span>
 #include <string>
@@ -65,6 +66,9 @@ public:
     [[nodiscard]] Status configure(std::string sandbox_root,
                                    std::string temporary_root);
     [[nodiscard]] bool configured() const noexcept;
+    [[nodiscard]] u64 mutation_generation() const noexcept {
+        return mutation_generation_.load(std::memory_order_relaxed);
+    }
 
     [[nodiscard]] Result<i32> open(std::string_view virtual_path,
                                    OpenMode mode,
@@ -139,6 +143,7 @@ private:
     std::unordered_map<i32, Handle> handles_;
     i32 next_handle_ {1};
     bool configured_ {false};
+    std::atomic<u64> mutation_generation_ {0};
 };
 
 } // namespace phoneme::filesystem

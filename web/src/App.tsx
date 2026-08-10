@@ -55,11 +55,16 @@ import {
   TuneRounded,
   UploadRounded
 } from "@mui/icons-material";
-import { zip } from "fflate";
 import { EmulatorScreen } from "./EmulatorScreen";
 import { readJarMetadata } from "./jarMetadata";
 import { PhoneMEWebRuntime } from "./phoneMEClient";
-import { applyPwaUpdate, PWA_UPDATE_READY_EVENT, type PwaUpdateReadyDetail } from "./pwa";
+import {
+  applyPwaUpdate,
+  checkForPwaUpdate,
+  getPendingPwaUpdateVersion,
+  PWA_UPDATE_READY_EVENT,
+  type PwaUpdateReadyDetail
+} from "./pwa";
 import { createPhoneMETheme, appbarThemeColor } from "./theme";
 import type {
   GameEntry,
@@ -95,7 +100,7 @@ const SCREEN_PROFILES = [
   { label: "360 × 640", width: 360, height: 640 }
 ];
 
-const HEAP_PRESETS = [16, 32, 64, 96, 128, 256, 512];
+const HEAP_PRESETS = [16, 32, 64, 96, 128, 160, 192];
 
 type AppSettings = {
   theme: ThemePreference;
@@ -186,8 +191,8 @@ function formatStorageSize(bytes: number) {
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
-function downloadBytes(bytes: Uint8Array<ArrayBuffer>, fileName: string, contentType = "application/octet-stream") {
-  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = fileName;
@@ -198,13 +203,8 @@ function downloadBytes(bytes: Uint8Array<ArrayBuffer>, fileName: string, content
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-function createZip(files: Record<string, Uint8Array>) {
-  return new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
-    zip(files, { level: 6 }, (error, data) => {
-      if (error) reject(error);
-      else resolve(data);
-    });
-  });
+function downloadBytes(bytes: Uint8Array<ArrayBuffer>, fileName: string, contentType = "application/octet-stream") {
+  downloadBlob(new Blob([bytes], { type: contentType }), fileName);
 }
 
 function StorageManagerView({ runtime, games, initialKind = "files" }: {
@@ -278,10 +278,8 @@ function StorageManagerView({ runtime, games, initialKind = "files" }: {
         if (!file) throw new Error("Tệp không có dữ liệu");
         downloadBytes(file.data, exported.name);
       } else {
-        const archiveFiles: Record<string, Uint8Array> = {};
-        for (const file of exported.files) archiveFiles[file.path] = file.data;
-        const archive = await createZip(archiveFiles);
-        downloadBytes(archive, `${exported.name}.zip`, "application/zip");
+        if (!exported.archive) throw new Error("Không tạo được file ZIP");
+        downloadBlob(exported.archive, `${exported.name}.zip`);
       }
       setNotice({ severity: "success", message: exported.isDirectory ? "Đã tạo file ZIP" : "Đã tải tệp" });
     } catch (error) {
@@ -810,6 +808,9 @@ export default function App() {
       if (detail?.version) setPwaUpdateVersion(detail.version);
     };
     window.addEventListener(PWA_UPDATE_READY_EVENT, onUpdateReady);
+    const pendingVersion = getPendingPwaUpdateVersion();
+    if (pendingVersion) setPwaUpdateVersion(pendingVersion);
+    void checkForPwaUpdate();
     return () => window.removeEventListener(PWA_UPDATE_READY_EVENT, onUpdateReady);
   }, []);
 
@@ -1006,6 +1007,7 @@ export default function App() {
     <Box
       className={`app-root ${draftProfile.filtering ? "smooth" : "pixelated"}`}
       data-runtime-phase={runtimeSnapshot.phase}
+      data-runtime-memory={Math.max(0, Math.round(runtimeSnapshot.usedMemory))}
     >
       <input
         ref={importInputRef}

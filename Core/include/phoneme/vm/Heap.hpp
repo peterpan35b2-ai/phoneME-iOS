@@ -11,6 +11,8 @@
 
 namespace phoneme::vm {
 
+class Machine;
+
 struct HeapLimits final {
     usize maximum_objects {1'000'000};
     usize maximum_bytes {64U * 1024U * 1024U};
@@ -135,6 +137,29 @@ public:
     [[nodiscard]] HeapStats stats() const noexcept;
 
 private:
+    friend class Machine;
+
+    // Fast bytecode-engine accessors. These intentionally skip Heap::mutex_
+    // because Machine::execute() already serializes Java execution through the
+    // per-VM execution gate. They must only be called from Machine while that
+    // gate is held; public/native/host callers continue to use the locked API.
+    [[nodiscard]] Result<Value> vm_field(ObjectRef reference,
+                                         usize index) const;
+    [[nodiscard]] Status vm_set_field(ObjectRef reference,
+                                      usize index,
+                                      Value value);
+    [[nodiscard]] Result<HeapArrayInfo> vm_array_info(
+        ObjectRef reference) const;
+    [[nodiscard]] Result<HeapArrayElementSnapshot> vm_array_element_snapshot(
+        ObjectRef reference,
+        usize index) const;
+    [[nodiscard]] Status vm_set_element_checked(ObjectRef reference,
+                                                usize index,
+                                                HeapArrayKind expected_kind,
+                                                Value value);
+    [[nodiscard]] Result<usize> vm_array_length(ObjectRef reference) const;
+    [[nodiscard]] Result<std::string> vm_class_name(ObjectRef reference) const;
+
     struct Object final {
         std::string class_name;
         std::vector<Value> fields;

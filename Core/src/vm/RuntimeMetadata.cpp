@@ -391,8 +391,7 @@ std::shared_ptr<const RuntimeMethod> RuntimeMetadata::find_method(
 }
 
 u64 RuntimeMetadata::generation() const noexcept {
-    std::scoped_lock lock(mutex_);
-    return generation_;
+    return generation_.load(std::memory_order_acquire);
 }
 
 void RuntimeMetadata::clear() noexcept {
@@ -437,8 +436,10 @@ ClassId RuntimeMetadata::class_id_unlocked(
 }
 
 void RuntimeMetadata::advance_generation_unlocked() noexcept {
-    if (generation_ == std::numeric_limits<u64>::max()) generation_ = 1U;
-    else ++generation_;
+    const u64 current = generation_.load(std::memory_order_relaxed);
+    generation_.store(
+        current == std::numeric_limits<u64>::max() ? 1U : current + 1U,
+        std::memory_order_release);
 }
 
 } // namespace phoneme::vm

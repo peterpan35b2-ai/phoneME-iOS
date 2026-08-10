@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { onRequestPost as handleHttpBridge } from "./functions/api/http.js";
@@ -20,19 +23,64 @@ function phoneMEBuildMetadata(): Plugin {
   };
 }
 
+function renderIosAppIconPngs() {
+  const svg = new TextDecoder().decode(readFileSync(iosAppIconUrl));
+  const payload = svg.match(/base64,([^\"]+)\"\/>/)?.[1];
+  if (!payload) throw new Error("AppIcon.svg không chứa PNG payload");
+
+  const binary = atob(payload);
+  const sourceBytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) sourceBytes[index] = binary.charCodeAt(index);
+
+  const root = mkdtempSync(join(tmpdir(), "phoneme-pwa-icon-"));
+  try {
+    const sourcePng = join(root, "source.png");
+    const sourceJpg = join(root, "source.jpg");
+    const scaledJpg = join(root, "scaled.jpg");
+    const paddedJpg = join(root, "padded.jpg");
+    const app1024 = join(root, "app-icon-1024.png");
+    writeFileSync(sourcePng, sourceBytes);
+
+    const sips = (...args: string[]) => execFileSync("/usr/bin/sips", args, { stdio: "ignore" });
+    sips("-s", "format", "jpeg", sourcePng, "--out", sourceJpg);
+    sips("--resampleHeight", "820", sourceJpg, "--out", scaledJpg);
+    sips("--padToHeightWidth", "1024", "1024", "--padColor", "FFFFFF", scaledJpg, "--out", paddedJpg);
+    sips("-s", "format", "png", paddedJpg, "--out", app1024);
+
+    const result: Record<number, Uint8Array> = {};
+    for (const size of [180, 192, 512]) {
+      const output = join(root, `app-icon-${size}.png`);
+      sips("--resampleHeightWidth", String(size), String(size), app1024, "--out", output);
+      result[size] = readFileSync(output);
+    }
+    return result;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function phoneMEAppIcon(): Plugin {
-  const readIcon = () => readFileSync(iosAppIconUrl);
+  const svgIcon = readFileSync(iosAppIconUrl);
+  const pngIcons = renderIosAppIconPngs();
   const install = (middlewares: { use: (handler: (req: any, res: any, next: () => void) => void) => void }) => {
     middlewares.use((req, res, next) => {
       const pathname = String(req.url ?? "").split("?", 1)[0];
-      if (pathname !== "/app-icon.svg") {
+      if (pathname === "/app-icon.svg") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+        res.setHeader("Cache-Control", "public, max-age=3600");
+        res.end(svgIcon);
+        return;
+      }
+      const match = pathname.match(/^\/app-icon-(180|192|512)\.png$/);
+      if (!match) {
         next();
         return;
       }
       res.statusCode = 200;
-      res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+      res.setHeader("Content-Type", "image/png");
       res.setHeader("Cache-Control", "public, max-age=3600");
-      res.end(readIcon());
+      res.end(pngIcons[Number(match[1])]);
     });
   };
 
@@ -41,11 +89,10 @@ function phoneMEAppIcon(): Plugin {
     configureServer(server) { install(server.middlewares); },
     configurePreviewServer(server) { install(server.middlewares); },
     generateBundle() {
-      this.emitFile({
-        type: "asset",
-        fileName: "app-icon.svg",
-        source: readIcon()
-      });
+      this.emitFile({ type: "asset", fileName: "app-icon.svg", source: svgIcon });
+      for (const [size, source] of Object.entries(pngIcons)) {
+        this.emitFile({ type: "asset", fileName: `app-icon-${size}.png`, source });
+      }
     }
   };
 }

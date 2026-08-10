@@ -9,7 +9,9 @@
     "build": "npm run build:wasm && tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "preview": "vite preview",
-    "test:browser": "node scripts/smoke-browser.mjs"
+    "test:browser": "node scripts/smoke-browser.mjs",
+    "deploy:pages": "npx -y wrangler@4.120.0 pages deploy --branch=main",
+    "deploy": "npm run build && npm run deploy:pages"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

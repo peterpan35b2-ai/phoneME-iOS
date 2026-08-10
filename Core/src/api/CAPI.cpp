@@ -846,6 +846,69 @@ int32_t phoneme_copy_frame_rgba(PhoneMERuntimeRef runtime,
     return frame_byte_count(frame, width, height, generation);
 }
 
+int32_t phoneme_copy_frame_rgba_since(PhoneMERuntimeRef runtime,
+                                      uint64_t previous_generation,
+                                      uint8_t* destination,
+                                      int32_t capacity,
+                                      int32_t* width,
+                                      int32_t* height,
+                                      uint64_t* generation) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) {
+        return 0;
+    }
+
+    instance->pump_events();
+    std::span<std::uint8_t> output;
+    if (destination != nullptr && capacity > 0) {
+        output = std::span<std::uint8_t>(
+            destination,
+            static_cast<std::size_t>(capacity));
+    }
+    const auto frame = instance->copy_current_frame_rgba_since(
+        previous_generation,
+        output);
+    if (!frame.has_value()) {
+        return 0;
+    }
+    return frame_byte_count(*frame, width, height, generation);
+}
+
+const uint8_t* phoneme_acquire_frame_rgba_since(
+    PhoneMERuntimeRef runtime,
+    uint64_t previous_generation,
+    int32_t* width,
+    int32_t* height,
+    uint64_t* generation) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) return nullptr;
+
+    // A leaked lease from an interrupted host frame must never block the VM
+    // pump that produces the next frame.
+    instance->release_current_frame_rgba();
+    instance->pump_events();
+    const auto frame = instance->acquire_current_frame_rgba_since(
+        previous_generation);
+    if (!frame.has_value()) return nullptr;
+    if (width != nullptr) width[0] = frame->metadata.dimensions.width;
+    if (height != nullptr) height[0] = frame->metadata.dimensions.height;
+    if (generation != nullptr) generation[0] = frame->metadata.generation;
+    return frame->pixels;
+}
+
+void phoneme_release_frame_rgba(PhoneMERuntimeRef runtime) {
+    if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
+        instance->release_current_frame_rgba();
+    }
+}
+
+uint64_t phoneme_storage_generation(PhoneMERuntimeRef runtime) {
+    if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
+        return instance->storage_generation();
+    }
+    return 0;
+}
+
 int32_t phoneme_poll_lcdui_event(PhoneMERuntimeRef runtime,
                                  PhoneMELCDUIEvent* event_out) {
     Runtime* instance = cast_runtime(runtime);

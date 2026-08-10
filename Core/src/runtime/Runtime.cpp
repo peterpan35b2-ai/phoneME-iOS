@@ -2515,7 +2515,11 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
         vm = app->vm;
     }
     if (vm != nullptr) {
-        std::scoped_lock vm_operation(vm->operation_mutex);
+        std::unique_lock vm_operation(vm->operation_mutex, std::try_to_lock);
+        if (!vm_operation.owns_lock()) {
+            return static_cast<i64>(std::min<usize>(
+                estimated, static_cast<usize>(std::numeric_limits<i64>::max())));
+        }
         const usize heap_bytes = vm->machine.heap().estimated_bytes();
         if (heap_bytes > std::numeric_limits<usize>::max() - estimated) {
             return std::numeric_limits<i64>::max();
@@ -2526,6 +2530,16 @@ i64 Runtime::app_used_memory(AppId app_id) const noexcept {
             return std::numeric_limits<i64>::max();
         }
         estimated += canvas_bytes;
+        const usize graphics_bytes = vm->machine.graphics().estimated_bytes();
+        if (graphics_bytes > std::numeric_limits<usize>::max() - estimated) {
+            return std::numeric_limits<i64>::max();
+        }
+        estimated += graphics_bytes;
+        const usize frame_scratch_bytes = vm->frame_rgba_scratch.capacity();
+        if (frame_scratch_bytes > std::numeric_limits<usize>::max() - estimated) {
+            return std::numeric_limits<i64>::max();
+        }
+        estimated += frame_scratch_bytes;
     }
     if (estimated > static_cast<usize>(std::numeric_limits<i64>::max())) {
         return std::numeric_limits<i64>::max();
@@ -2807,6 +2821,45 @@ FrameMetadata Runtime::copy_current_frame_rgba(
     return framebuffer_.copy_rgba(destination);
 }
 
+std::optional<FrameMetadata> Runtime::copy_current_frame_rgba_since(
+    u64 previous_generation,
+    std::span<u8> destination) const noexcept {
+    return framebuffer_.copy_rgba_since(previous_generation, destination);
+}
+
+std::optional<FrameReadView> Runtime::acquire_current_frame_rgba_since(
+    u64 previous_generation) noexcept {
+    frame_read_lease_.reset();
+    auto lease = framebuffer_.acquire_rgba_since(previous_generation);
+    if (!lease) return std::nullopt;
+    const FrameMetadata metadata = lease->metadata();
+    const auto pixels = lease->pixels();
+    frame_read_lease_.emplace(std::move(*lease));
+    return FrameReadView {
+        .pixels = pixels.data(),
+        .metadata = metadata,
+    };
+}
+
+void Runtime::release_current_frame_rgba() noexcept {
+    frame_read_lease_.reset();
+}
+
+u64 Runtime::storage_generation() noexcept {
+    std::shared_ptr<ApplicationVM> vm;
+    {
+        std::unique_lock lock(mutex_);
+        const App* app = find_app_unlocked(foreground_app_id_);
+        if (app != nullptr && app->vm != nullptr &&
+            (app->state == AppState::active || app->state == AppState::paused)) {
+            vm = app->vm;
+        }
+    }
+    if (vm == nullptr) return 0;
+    return vm->machine.filesystem().mutation_generation() +
+           vm->machine.record_stores().mutation_generation();
+}
+
 FrameMetadata Runtime::copy_lcdui_image_rgba(
     i32 component_id,
     std::span<u8> destination) {
@@ -2995,7 +3048,11 @@ void Runtime::dispatch_input() {
                                            event->third,
                                            event->sequence);
             }
-            auto pumped = vm->canvas.pump();
+            // Host input must not block behind a long Java render turn. The
+            // event is already stored in CanvasRuntime's synchronized queue;
+            // process it immediately only when the VM execution gate is free.
+            // A busy VM will consume it on the next regular host pump.
+            auto pumped = vm->canvas.try_pump();
             if (!pumped) {
                 std::unique_lock lock(mutex_);
                 App* app = find_app_unlocked(event->app_id);

@@ -17,6 +17,8 @@ type MediaEntry = {
   error: boolean;
   offsetSeconds: number;
   startedAt: number;
+  decodedBytes: number;
+  lastTouchedAt: number;
 };
 
 type MidiNote = {
@@ -27,10 +29,17 @@ type MidiNote = {
 };
 
 const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
+const MAX_TOTAL_MEDIA_BYTES = 128 * 1024 * 1024;
+const MAX_DECODED_MEDIA_BYTES = 96 * 1024 * 1024;
 const MAX_MIDI_SECONDS = 10 * 60;
 const MIDI_SAMPLE_RATE = 22_050;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+function audioBufferBytes(buffer?: AudioBuffer) {
+  if (!buffer) return 0;
+  return buffer.length * Math.max(1, buffer.numberOfChannels) * 4;
+}
 
 function normalizeContentType(value: string) {
   return value.split(";", 1)[0].trim().toLowerCase();
@@ -264,6 +273,8 @@ class PhoneMEWebMediaBridge {
   private entries = new Map<number, MediaEntry>();
   private tones = new Set<OscillatorNode>();
   private nextHandle = 1;
+  private decodeQueue: Promise<void> = Promise.resolve();
+  private contextPrimed = false;
 
   constructor() {
     const unlock = () => { void this.unlock(); };
@@ -277,11 +288,12 @@ class PhoneMEWebMediaBridge {
 
   createData(data: Uint8Array, contentType: string) {
     if (!data?.byteLength || data.byteLength > MAX_MEDIA_BYTES) return 0;
+    if (!this.ensureBudget(data.byteLength, 0)) return 0;
     const handle = this.allocateHandle();
     const entry: MediaEntry = {
       handle,
       contentType: normalizeContentType(contentType),
-      bytes: data.slice(),
+      bytes: data,
       loopCount: 1,
       volume: 100,
       muted: false,
@@ -290,7 +302,9 @@ class PhoneMEWebMediaBridge {
       ended: false,
       error: false,
       offsetSeconds: 0,
-      startedAt: 0
+      startedAt: 0,
+      decodedBytes: 0,
+      lastTouchedAt: performance.now()
     };
     this.entries.set(handle, entry);
     this.prepare(entry);
@@ -312,7 +326,9 @@ class PhoneMEWebMediaBridge {
       ended: false,
       error: false,
       offsetSeconds: 0,
-      startedAt: 0
+      startedAt: 0,
+      decodedBytes: 0,
+      lastTouchedAt: performance.now()
     };
     this.entries.set(handle, entry);
     this.prepare(entry);
@@ -322,6 +338,7 @@ class PhoneMEWebMediaBridge {
   start(handle: number) {
     const entry = this.entries.get(handle);
     if (!entry) return 0;
+    entry.lastTouchedAt = performance.now();
     entry.desiredStart = true;
     entry.ended = false;
     entry.error = false;
@@ -336,6 +353,7 @@ class PhoneMEWebMediaBridge {
   stop(handle: number) {
     const entry = this.entries.get(handle);
     if (!entry) return 0;
+    entry.lastTouchedAt = performance.now();
     entry.desiredStart = false;
     this.captureOffset(entry);
     this.stopSource(entry, false);
@@ -360,6 +378,8 @@ class PhoneMEWebMediaBridge {
       this.stopSource(entry, false);
     }
     this.entries.clear();
+    this.decodeQueue = Promise.resolve();
+    this.contextPrimed = false;
     for (const oscillator of this.tones) {
       oscillator.onended = null;
       try { oscillator.stop(); } catch { /* Already stopped. */ }
@@ -432,6 +452,21 @@ class PhoneMEWebMediaBridge {
     return this.entries.get(handle)?.error ? 1 : 0;
   }
 
+  memoryUsage() {
+    let compressedBytes = 0;
+    let decodedBytes = 0;
+    for (const entry of this.entries.values()) {
+      compressedBytes += entry.bytes?.byteLength ?? 0;
+      decodedBytes += entry.decodedBytes;
+    }
+    return {
+      entries: this.entries.size,
+      compressedBytes,
+      decodedBytes,
+      totalBytes: compressedBytes + decodedBytes
+    };
+  }
+
   playTone(note: number, durationMilliseconds: number, volume: number) {
     if (note < 0 || note > 127 || durationMilliseconds <= 0) return 0;
     const context = this.ensureContext();
@@ -457,13 +492,17 @@ class PhoneMEWebMediaBridge {
   async unlock() {
     const context = this.ensureContext();
     if (context.state !== "running") await context.resume();
-    if (context.state === "running") {
-      const buffer = context.createBuffer(1, 1, context.sampleRate);
-      const source = context.createBufferSource();
-      source.buffer = buffer;
-      source.connect(context.destination);
-      source.start();
-    }
+    if (context.state !== "running" || this.contextPrimed) return;
+    this.contextPrimed = true;
+    const buffer = context.createBuffer(1, 1, context.sampleRate);
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+    source.onended = () => {
+      source.onended = null;
+      try { source.disconnect(); } catch { /* Already disconnected. */ }
+    };
+    source.start();
   }
 
   private allocateHandle() {
@@ -478,6 +517,7 @@ class PhoneMEWebMediaBridge {
       const Constructor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Constructor) throw new Error("Web Audio API is unavailable");
       this.context = new Constructor({ latencyHint: "interactive" });
+      this.contextPrimed = false;
     }
     return this.context;
   }
@@ -486,30 +526,48 @@ class PhoneMEWebMediaBridge {
     if (entry.loading || entry.buffer || entry.error) return;
     const abortController = entry.bytes ? undefined : new AbortController();
     entry.abortController = abortController;
-    entry.loading = (async () => {
+    const decode = async () => {
+      if (this.entries.get(entry.handle) !== entry) return;
       try {
         const context = this.ensureContext();
         const bytes = entry.bytes ?? await fetchMediaBytes(entry.locator!, abortController?.signal);
+        if (this.entries.get(entry.handle) !== entry) return;
+        let decoded: AudioBuffer;
         if (isMidiType(entry.contentType, entry.locator)) {
-          entry.buffer = renderMidi(context, bytes);
+          decoded = renderMidi(context, bytes);
         } else {
           const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-          entry.buffer = await context.decodeAudioData(copy);
+          decoded = await context.decodeAudioData(copy);
         }
+        if (this.entries.get(entry.handle) !== entry) return;
+        const decodedBytes = audioBufferBytes(decoded);
+        if (!this.ensureBudget(0, decodedBytes, entry.handle)) {
+          throw new Error("Media decode vượt ngân sách bộ nhớ an toàn");
+        }
+        entry.buffer = decoded;
+        entry.decodedBytes = decodedBytes;
+        entry.lastTouchedAt = performance.now();
         if (entry.desiredStart) this.startPrepared(entry);
       } catch (error) {
-        entry.error = true;
-        entry.playing = false;
-        entry.desiredStart = false;
+        if (this.entries.get(entry.handle) === entry) {
+          entry.error = true;
+          entry.playing = false;
+          entry.desiredStart = false;
+        }
         console.warn("phoneME media decode failed", error);
       } finally {
         if (entry.abortController === abortController) entry.abortController = undefined;
-        entry.loading = undefined;
       }
-    })();
+    };
+    const queued = this.decodeQueue.catch(() => undefined).then(decode);
+    entry.loading = queued.finally(() => {
+      if (entry.loading) entry.loading = undefined;
+    });
+    this.decodeQueue = entry.loading.catch(() => undefined);
   }
 
   private startPrepared(entry: MediaEntry) {
+    entry.lastTouchedAt = performance.now();
     const context = this.ensureContext();
     const buffer = entry.buffer;
     if (!buffer) return 1;
@@ -537,6 +595,7 @@ class PhoneMEWebMediaBridge {
       entry.source = undefined;
       entry.gain = undefined;
       entry.playing = false;
+      entry.lastTouchedAt = performance.now();
       if (entry.desiredStart) {
         entry.offsetSeconds = duration;
         entry.ended = true;
@@ -569,6 +628,7 @@ class PhoneMEWebMediaBridge {
   }
 
   private stopSource(entry: MediaEntry, ended: boolean) {
+    entry.lastTouchedAt = performance.now();
     const source = entry.source;
     entry.source = undefined;
     entry.gain = undefined;
@@ -579,6 +639,31 @@ class PhoneMEWebMediaBridge {
       try { source.disconnect(); } catch { /* Already disconnected. */ }
     }
     if (ended) entry.ended = true;
+  }
+
+  private ensureBudget(extraCompressedBytes: number, extraDecodedBytes: number, excludeHandle = 0) {
+    const fits = () => {
+      const usage = this.memoryUsage();
+      return usage.decodedBytes + extraDecodedBytes <= MAX_DECODED_MEDIA_BYTES &&
+        usage.totalBytes + extraCompressedBytes + extraDecodedBytes <= MAX_TOTAL_MEDIA_BYTES;
+    };
+    if (fits()) return true;
+
+    const candidates = [...this.entries.values()]
+      .filter((candidate) =>
+        candidate.handle !== excludeHandle &&
+        Boolean(candidate.buffer) &&
+        !candidate.playing &&
+        !candidate.desiredStart &&
+        !candidate.source &&
+        !candidate.loading)
+      .sort((left, right) => left.lastTouchedAt - right.lastTouchedAt);
+    for (const candidate of candidates) {
+      candidate.buffer = undefined;
+      candidate.decodedBytes = 0;
+      if (fits()) return true;
+    }
+    return fits();
   }
 
   private applyGain(entry: MediaEntry) {

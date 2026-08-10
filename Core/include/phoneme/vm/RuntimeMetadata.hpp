@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -188,7 +189,7 @@ private:
     void advance_generation_unlocked() noexcept;
 
     mutable std::mutex mutex_;
-    u64 generation_ {1};
+    std::atomic<u64> generation_ {1U};
     u32 next_class_id_ {1};
     u32 next_method_id_ {1};
     std::unordered_map<std::string,

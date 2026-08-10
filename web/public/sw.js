@@ -1,4 +1,4 @@
-const CACHE_SCHEMA = "v5";
+const CACHE_SCHEMA = "v9";
 const SHELL_PREFIX = `phoneme-shell-${CACHE_SCHEMA}-`;
 const RUNTIME_PREFIX = `phoneme-runtime-${CACHE_SCHEMA}-`;
 const META_CACHE = `phoneme-meta-${CACHE_SCHEMA}`;
@@ -42,18 +42,21 @@ async function putFresh(cache, url, cacheKey) {
 }
 
 function collectFrontendAssets(manifest) {
-  const urls = new Set();
+  const required = new Set();
+  const optional = new Set();
   for (const entry of Object.values(manifest || {})) {
     if (!entry || typeof entry !== "object") continue;
-    if (typeof entry.file === "string") urls.add(`/${entry.file.replace(/^\//, "")}`);
+    if (entry.isEntry && typeof entry.file === "string") {
+      required.add(`/${entry.file.replace(/^\//, "")}`);
+    }
     for (const css of Array.isArray(entry.css) ? entry.css : []) {
-      if (typeof css === "string") urls.add(`/${css.replace(/^\//, "")}`);
+      if (typeof css === "string") required.add(`/${css.replace(/^\//, "")}`);
     }
     for (const asset of Array.isArray(entry.assets) ? entry.assets : []) {
-      if (typeof asset === "string") urls.add(`/${asset.replace(/^\//, "")}`);
+      if (typeof asset === "string") optional.add(`/${asset.replace(/^\//, "")}`);
     }
   }
-  return [...urls];
+  return { required: [...required], optional: [...optional] };
 }
 
 function discoverBundledAssetUrls(text) {
@@ -87,18 +90,18 @@ async function precacheBuild(expectedVersion) {
     throw new Error("WASM manifest không hợp lệ");
   }
   const wasmManifestUrl = new URL("/wasm/manifest.json", self.location.origin);
-  const wasmUrls = [
-    new URL(wasmManifest.module, wasmManifestUrl).href,
-    new URL(wasmManifest.wasm, wasmManifestUrl).href
-  ];
+  const wasmEntries = [wasmManifest.module, wasmManifest.wasm];
+  if (typeof wasmManifest.compatModule === "string") wasmEntries.push(wasmManifest.compatModule);
+  if (typeof wasmManifest.compatWasm === "string") wasmEntries.push(wasmManifest.compatWasm);
+  const wasmUrls = wasmEntries.map((entry) => new URL(entry, wasmManifestUrl).href);
   if (wasmUrls.some((url) => new URL(url).origin !== self.location.origin)) {
     throw new Error("WASM manifest trỏ ra ngoài origin");
   }
 
-  for (const url of ["/", "/manifest.webmanifest", "/app-icon.svg"]) {
+  for (const url of ["/", "/manifest.webmanifest", "/app-icon-180.png", "/app-icon-192.png", "/app-icon-512.png"]) {
     await putFresh(shell, url);
   }
-  const frontendQueue = [...frontendAssets];
+  const frontendQueue = [...frontendAssets.required];
   const queuedFrontend = new Set(frontendQueue);
   for (let index = 0; index < frontendQueue.length; index += 1) {
     const url = frontendQueue[index];
@@ -114,6 +117,11 @@ async function precacheBuild(expectedVersion) {
   for (const url of wasmUrls) {
     await putFresh(runtime, url);
   }
+
+  // Fonts and other non-critical assets must never make Safari/iOS reject the
+  // whole service-worker install. Cache them opportunistically after the app,
+  // worker and WASM core are safely available offline.
+  await Promise.allSettled(frontendAssets.optional.map((url) => putFresh(shell, url)));
 
   return version;
 }
@@ -171,6 +179,28 @@ self.addEventListener("message", (event) => {
   const data = event.data || {};
   const port = event.ports && event.ports[0];
   const reply = (payload) => { if (port) port.postMessage(payload); };
+
+  if (data.type === "ENSURE_OFFLINE") {
+    event.waitUntil((async () => {
+      try {
+        const version = await precacheBuild(data.version);
+        await setActiveBuild(version);
+        await cleanupBuildCaches(version);
+        reply({ ok: true, version });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Older clients used to block their entire update monitor on this call.
+        // If their build became stale while the page was open, let that client
+        // continue bootstrapping so its version check can announce the update.
+        if (data.version && message.startsWith("Build trên server đã đổi từ ")) {
+          reply({ ok: true, version: String(data.version), stale: true });
+          return;
+        }
+        reply({ ok: false, error: message });
+      }
+    })());
+    return;
+  }
 
   if (data.type === "PREPARE_UPDATE") {
     event.waitUntil((async () => {

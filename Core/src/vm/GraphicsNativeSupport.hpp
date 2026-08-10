@@ -193,6 +193,9 @@ namespace phoneme::vm::graphics_native {
     if (error.code == ErrorCode::out_of_range) {
         return fail_java(std::string(java_class), error.message);
     }
+    if (error.code == ErrorCode::overflow) {
+        return fail_java("java/lang/OutOfMemoryError", error.message);
+    }
     return fail_java(std::string(java_class), error.message);
 }
 

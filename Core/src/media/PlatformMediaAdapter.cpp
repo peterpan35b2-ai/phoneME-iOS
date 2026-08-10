@@ -60,7 +60,7 @@ int32_t phoneme_ios_media_create_data(const uint8_t* data,
                                       const char* content_type) {
     return MAIN_THREAD_EM_ASM_INT({
         const bridge = globalThis.__phoneMEMediaBridge;
-        if (!bridge || !$0 || $1 <= 0) return 0;
+        if (!bridge || !$0 || $1 <= 0 || $1 > 64 * 1024 * 1024) return 0;
         const bytes = HEAPU8.slice($0, $0 + $1);
         return bridge.createData(bytes, UTF8ToString($2)) | 0;
     }, data, length, content_type);

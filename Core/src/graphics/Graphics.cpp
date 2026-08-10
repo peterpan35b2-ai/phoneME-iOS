@@ -58,33 +58,59 @@ constexpr double kPi = 3.14159265358979323846;
     return !empty(intersect(left, right));
 }
 
-[[nodiscard]] std::pair<i32, i32> transformed_source_coordinate(
-    i32 destination_x,
-    i32 destination_y,
+struct TransformSteps final {
+    i32 base_x {0};
+    i32 base_y {0};
+    i32 column_x {1};
+    i32 column_y {0};
+    i32 row_x {0};
+    i32 row_y {1};
+};
+
+[[nodiscard]] constexpr TransformSteps transform_steps(
     i32 width,
     i32 height,
     Transform transform) noexcept {
     switch (transform) {
     case Transform::none:
-        return {destination_x, destination_y};
+        return {};
     case Transform::mirror_rotate_180:
-        return {destination_x, height - 1 - destination_y};
+        return {.base_y = height - 1, .row_y = -1};
     case Transform::mirror:
-        return {width - 1 - destination_x, destination_y};
+        return {.base_x = width - 1, .column_x = -1};
     case Transform::rotate_180:
-        return {width - 1 - destination_x,
-                height - 1 - destination_y};
+        return {.base_x = width - 1, .base_y = height - 1,
+                .column_x = -1, .row_y = -1};
     case Transform::mirror_rotate_270:
-        return {destination_y, destination_x};
+        return {.column_x = 0, .column_y = 1,
+                .row_x = 1, .row_y = 0};
     case Transform::rotate_90:
-        return {destination_y, height - 1 - destination_x};
+        return {.base_y = height - 1,
+                .column_x = 0, .column_y = -1,
+                .row_x = 1, .row_y = 0};
     case Transform::rotate_270:
-        return {width - 1 - destination_y, destination_x};
+        return {.base_x = width - 1,
+                .column_x = 0, .column_y = 1,
+                .row_x = -1, .row_y = 0};
     case Transform::mirror_rotate_90:
-        return {width - 1 - destination_y,
-                height - 1 - destination_x};
+        return {.base_x = width - 1, .base_y = height - 1,
+                .column_x = 0, .column_y = -1,
+                .row_x = -1, .row_y = 0};
     }
-    return {destination_x, destination_y};
+    return {};
+}
+
+[[nodiscard]] inline bool composite_device_pixel(
+    Pixel source,
+    Pixel& destination) noexcept {
+    const u8 source_alpha = alpha(source);
+    if (source_alpha == 0U) return false;
+    const Pixel composited = source_alpha == 255U
+        ? rgb565_roundtrip(source)
+        : rgb565_roundtrip(source_over(source, destination));
+    if (composited == destination) return false;
+    destination = composited;
+    return true;
 }
 
 [[nodiscard]] Status require_mutable(const Image& image) {
@@ -926,12 +952,7 @@ Status draw_image(Image& target,
                 ? snapshot[source_offset + column]
                 : source_pixels[source_offset + column];
             Pixel& destination = target_pixels[destination_offset + column];
-            const Pixel composited = rgb565_roundtrip(
-                source_over(pixel_value, destination));
-            if (composited != destination) {
-                destination = composited;
-                changed = true;
-            }
+            changed = composite_device_pixel(pixel_value, destination) || changed;
         }
     }
     if (changed) {
@@ -1023,45 +1044,47 @@ Status draw_region(Image& target,
     auto target_pixels = target.mutable_pixels();
     const auto source_pixels = source.pixels();
     const usize target_stride = static_cast<usize>(target.width());
-    const usize source_stride = static_cast<usize>(source.width());
-    const usize region_width = static_cast<usize>(width);
+    const i64 source_stride = needs_snapshot
+        ? static_cast<i64>(width)
+        : static_cast<i64>(source.width());
+    const Pixel* source_base = needs_snapshot
+        ? snapshot.data()
+        : source_pixels.data() +
+            static_cast<usize>(source_y) * static_cast<usize>(source.width()) +
+            static_cast<usize>(source_x);
+
+    // Transform is affine with coefficients in {-1, 0, 1}. Resolve it once per
+    // blit and advance a signed source index instead of switching and
+    // recomputing x/y for every destination pixel.
+    const TransformSteps steps = transform_steps(width, height, transform_value);
+    const i64 first_local_x = static_cast<i64>(visible.x) - placement.x;
+    const i64 first_local_y = static_cast<i64>(visible.y) - placement.y;
+    const i64 first_source_x = steps.base_x +
+        static_cast<i64>(steps.column_x) * first_local_x +
+        static_cast<i64>(steps.row_x) * first_local_y;
+    const i64 first_source_y = steps.base_y +
+        static_cast<i64>(steps.column_y) * first_local_x +
+        static_cast<i64>(steps.row_y) * first_local_y;
+    const i64 column_step =
+        static_cast<i64>(steps.column_y) * source_stride + steps.column_x;
+    const i64 row_step =
+        static_cast<i64>(steps.row_y) * source_stride + steps.row_x;
+    i64 row_source_index = first_source_y * source_stride + first_source_x;
+
     bool changed = false;
-    for (i32 destination_y = visible.y;
-         destination_y < visible.y + visible.height;
-         ++destination_y) {
-        const i32 transformed_y = static_cast<i32>(
-            static_cast<i64>(destination_y) - placement.y);
-        const usize destination_row =
-            static_cast<usize>(destination_y) * target_stride;
-        for (i32 destination_x = visible.x;
-             destination_x < visible.x + visible.width;
-             ++destination_x) {
-            const i32 transformed_x = static_cast<i32>(
-                static_cast<i64>(destination_x) - placement.x);
-            const auto [local_source_x, local_source_y] =
-                transformed_source_coordinate(transformed_x,
-                                              transformed_y,
-                                              width,
-                                              height,
-                                              transform_value);
-            const usize source_index = needs_snapshot
-                ? static_cast<usize>(local_source_y) * region_width +
-                    static_cast<usize>(local_source_x)
-                : static_cast<usize>(source_y + local_source_y) *
-                        source_stride +
-                    static_cast<usize>(source_x + local_source_x);
-            const Pixel pixel_value = needs_snapshot
-                ? snapshot[source_index]
-                : source_pixels[source_index];
+    for (i32 row = 0; row < visible.height; ++row) {
+        const usize destination_offset =
+            static_cast<usize>(visible.y + row) * target_stride +
+            static_cast<usize>(visible.x);
+        i64 source_index = row_source_index;
+        for (i32 column = 0; column < visible.width; ++column) {
+            const Pixel pixel_value = source_base[static_cast<usize>(source_index)];
             Pixel& destination = target_pixels[
-                destination_row + static_cast<usize>(destination_x)];
-            const Pixel composited = rgb565_roundtrip(
-                source_over(pixel_value, destination));
-            if (composited != destination) {
-                destination = composited;
-                changed = true;
-            }
+                destination_offset + static_cast<usize>(column)];
+            changed = composite_device_pixel(pixel_value, destination) || changed;
+            source_index += column_step;
         }
+        row_source_index += row_step;
     }
     if (changed) {
         target.mark_dirty_region(
@@ -1135,30 +1158,42 @@ Status draw_rgb(Image& target,
     const i32 absolute_x = saturated_add(x, context.translate_x);
     const i32 absolute_y = saturated_add(y, context.translate_y);
     const Rect visible = intersect(
-        Rect {.x = absolute_x, .y = absolute_y,
-              .width = width, .height = height},
-        context.clip);
-    for (i32 destination_y = visible.y;
-         destination_y < visible.y + visible.height;
-         ++destination_y) {
-        const i32 source_row = static_cast<i32>(
-            static_cast<i64>(destination_y) - absolute_y);
-        const i64 row_start = static_cast<i64>(offset) +
-                              static_cast<i64>(source_row) * scan_length;
-        for (i32 destination_x = visible.x;
-             destination_x < visible.x + visible.width;
-             ++destination_x) {
-            const i32 source_column = static_cast<i32>(
-                static_cast<i64>(destination_x) - absolute_x);
-            Pixel pixel_value = pixels[static_cast<usize>(
-                row_start + source_column)];
-            if (!process_alpha) pixel_value = opaque(pixel_value);
-            auto stored = target.set_pixel(destination_x,
-                                           destination_y,
-                                           pixel_value,
-                                           process_alpha);
-            if (!stored) return stored;
+        intersect(Rect {.x = absolute_x, .y = absolute_y,
+                        .width = width, .height = height},
+                  context.clip),
+        target_bounds(target));
+    if (empty(visible)) return {};
+
+    auto target_pixels = target.mutable_pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    const i64 first_source_column = static_cast<i64>(visible.x) - absolute_x;
+    const i64 first_source_row = static_cast<i64>(visible.y) - absolute_y;
+    bool changed = false;
+    for (i32 row = 0; row < visible.height; ++row) {
+        const i64 source_index = static_cast<i64>(offset) +
+            (first_source_row + row) * scan_length + first_source_column;
+        const usize destination_offset =
+            static_cast<usize>(visible.y + row) * target_stride +
+            static_cast<usize>(visible.x);
+        for (i32 column = 0; column < visible.width; ++column) {
+            const Pixel pixel_value = pixels[static_cast<usize>(
+                source_index + column)];
+            Pixel& destination = target_pixels[
+                destination_offset + static_cast<usize>(column)];
+            if (process_alpha) {
+                changed = composite_device_pixel(pixel_value, destination) || changed;
+            } else {
+                const Pixel device_pixel = rgb565_roundtrip(opaque(pixel_value));
+                if (device_pixel != destination) {
+                    destination = device_pixel;
+                    changed = true;
+                }
+            }
         }
+    }
+    if (changed) {
+        target.mark_dirty_region(
+            visible.x, visible.y, visible.width, visible.height);
     }
     return {};
 }

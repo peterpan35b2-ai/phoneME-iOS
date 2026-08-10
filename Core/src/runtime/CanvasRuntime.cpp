@@ -284,12 +284,14 @@ void CanvasRuntime::enqueue_key(i32 key_code, bool pressed, u64 sequence) {
         .second = pressed ? 1 : 0,
         .sequence = sequence,
     };
+    std::scoped_lock input_lock(inputs_mutex_);
     const auto position = std::upper_bound(
         inputs_.begin(), inputs_.end(), sequence,
         [](u64 value, const PendingInput& candidate) {
             return value < candidate.sequence;
         });
     inputs_.insert(position, input);
+    pending_input_count_.store(inputs_.size(), std::memory_order_relaxed);
 }
 
 void CanvasRuntime::enqueue_host_key(i32 key_code,
@@ -301,12 +303,14 @@ void CanvasRuntime::enqueue_host_key(i32 key_code,
         .second = pressed ? 1 : 0,
         .sequence = sequence,
     };
+    std::scoped_lock input_lock(inputs_mutex_);
     const auto position = std::upper_bound(
         inputs_.begin(), inputs_.end(), sequence,
         [](u64 value, const PendingInput& candidate) {
             return value < candidate.sequence;
         });
     inputs_.insert(position, input);
+    pending_input_count_.store(inputs_.size(), std::memory_order_relaxed);
 }
 
 void CanvasRuntime::enqueue_pointer(i32 x,
@@ -324,12 +328,14 @@ void CanvasRuntime::enqueue_pointer(i32 x,
         .third = action,
         .sequence = sequence,
     };
+    std::scoped_lock input_lock(inputs_mutex_);
     const auto position = std::upper_bound(
         inputs_.begin(), inputs_.end(), sequence,
         [](u64 value, const PendingInput& candidate) {
             return value < candidate.sequence;
         });
     inputs_.insert(position, input);
+    pending_input_count_.store(inputs_.size(), std::memory_order_relaxed);
 }
 
 Status CanvasRuntime::pump() {
@@ -416,7 +422,8 @@ usize CanvasRuntime::estimated_bytes() const noexcept {
     usize total = sizeof(*this);
     total += canvases_.size() * sizeof(CanvasState);
     total += canvas_order_.capacity() * sizeof(u64);
-    total += inputs_.size() * sizeof(PendingInput);
+    total += pending_input_count_.load(std::memory_order_relaxed) *
+             sizeof(PendingInput);
     total += visibility_changes_.size() * sizeof(VisibilityChange);
     for (const auto& [key, state] : canvases_) {
         (void)key;
@@ -829,9 +836,15 @@ Status CanvasRuntime::process_size_changes() {
 }
 
 Status CanvasRuntime::process_inputs() {
-    while (!inputs_.empty()) {
-        const PendingInput input = inputs_.front();
-        inputs_.pop_front();
+    while (true) {
+        PendingInput input;
+        {
+            std::scoped_lock input_lock(inputs_mutex_);
+            if (inputs_.empty()) break;
+            input = inputs_.front();
+            inputs_.pop_front();
+            pending_input_count_.store(inputs_.size(), std::memory_order_relaxed);
+        }
         (void)input.sequence;
 
         CanvasState* state = active_visible_state();

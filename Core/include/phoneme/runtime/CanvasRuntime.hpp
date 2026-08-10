@@ -1,9 +1,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -205,7 +207,9 @@ private:
     std::unordered_map<u64, CanvasState> canvases_;
     std::vector<u64> canvas_order_;
     std::optional<u64> active_canvas_;
+    mutable std::mutex inputs_mutex_;
     std::deque<PendingInput> inputs_;
+    std::atomic<usize> pending_input_count_ {0U};
     std::deque<VisibilityChange> visibility_changes_;
     bool host_foreground_ {false};
     bool host_rendering_enabled_ {true};
