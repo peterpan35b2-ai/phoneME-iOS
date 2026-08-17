@@ -525,13 +525,15 @@ int main(int argc, char** argv) {
                 phoneme::runtime::AppState::active,
             "restored MIDlet remains active after hide and reopen");
     runtime.send_pointer(1, 2, 1);
-    require(runtime.app_state(throw_app_id) == phoneme::runtime::AppState::error,
-            "uncaught input callback exception is isolated to the MIDlet");
+    require(runtime.app_state(throw_app_id) ==
+                phoneme::runtime::AppState::active,
+            "uncaught input callback exception is reported without killing "
+            "the MIDlet");
     require(runtime.destroy_midlet(throw_app_id).has_value(),
             "forced destroy ignores hideNotify exceptions");
     require(runtime.app_state(throw_app_id) ==
                 phoneme::runtime::AppState::destroyed,
-            "forced destroy releases a callback-failed MIDlet");
+            "forced destroy releases a MIDlet with callback failures");
 
     std::cout << "Canvas graphics runtime tests passed\n";
     return 0;

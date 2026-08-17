@@ -107,6 +107,15 @@ struct AutoplayState final {
     phoneme::i32 active_key {0};
     bool key_down {false};
     Clock::time_point release_at {};
+    // Optional pointer tap script parsed from
+    // PHONEME_HARNESS_POINTER_TAPS="delay_ms:x,y;delay_ms:x,y;..."
+    struct Tap final {
+        phoneme::i32 delay_ms {0};
+        phoneme::i32 x {0};
+        phoneme::i32 y {0};
+    };
+    std::vector<Tap> taps;
+    phoneme::usize tap_index {0};
     Clock::time_point next_action_at {};
 };
 
@@ -119,6 +128,31 @@ struct AutoplayState final {
         return std::nullopt;
     }
     return parsed;
+}
+
+void parse_pointer_taps(AutoplayState& state) {
+    const char* script = std::getenv("PHONEME_HARNESS_POINTER_TAPS");
+    if (script == nullptr || script[0] == '\0') return;
+    std::string_view text {script};
+    while (!text.empty()) {
+        const auto entry = text.substr(0, std::min(text.find(';'), text.size()));
+        text = text.size() > entry.size() ? text.substr(entry.size() + 1) :
+                                           std::string_view {};
+        // entry = delay_ms:x,y
+        const auto delay_end = entry.find(':');
+        const auto coord = delay_end == std::string_view::npos ?
+            std::string_view {} : entry.substr(delay_end + 1);
+        const auto comma = coord.find(',');
+        if (delay_end == std::string_view::npos || comma == std::string_view::npos) {
+            continue;
+        }
+        const auto delay = parse_i32(entry.substr(0, delay_end));
+        const auto x = parse_i32(coord.substr(0, comma));
+        const auto y = parse_i32(coord.substr(comma + 1));
+        if (delay && x && y) {
+            state.taps.push_back({*delay, *x, *y});
+        }
+    }
 }
 
 [[nodiscard]] bool parse_options(int argc,
@@ -681,6 +715,24 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
     }
     if (state.key_down || now < state.next_action_at) return;
 
+    if (!state.taps.empty()) {
+        if (state.tap_index >= state.taps.size()) return;
+        const auto tap = state.taps[state.tap_index++];
+        state.next_action_at = now +
+            std::chrono::milliseconds(options.input_interval_ms);
+        runtime.send_pointer(tap.x, tap.y, 1);
+        runtime.send_pointer(tap.x, tap.y, 2);
+        result.key_events_sent += 2;
+        record_input_action(result,
+                            "pointer-tap:" + std::to_string(tap.x) + "," +
+                                std::to_string(tap.y) + " (after " +
+                                std::to_string(tap.delay_ms) + "ms)");
+        add_milestone(result, "autoplay-pointer");
+        // honor per-tap delay before the next tap
+        state.next_action_at += std::chrono::milliseconds(tap.delay_ms);
+        return;
+    }
+
     if (run_lcdui_action(runtime, state, result)) {
         state.next_action_at = now +
             std::chrono::milliseconds(options.input_interval_ms);
@@ -806,6 +858,7 @@ void autoplay_tick(phoneme::runtime::Runtime& runtime,
 [[nodiscard]] int run(const Options& options) {
     HarnessResult result;
     AutoplayState autoplay;
+    parse_pointer_taps(autoplay);
     const auto started_at = Clock::now();
     auto last_progress_at = started_at;
     phoneme::u64 last_frame_hash = 0;

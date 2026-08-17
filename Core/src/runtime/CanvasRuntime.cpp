@@ -36,7 +36,7 @@ constexpr auto kInitialAutomaticPaintGrace =
 constexpr auto kWorkerInitialAutomaticPaintGrace =
     std::chrono::milliseconds(1500);
 constexpr usize kMaximumRepeatsPerPump = 8U;
-constexpr u64 kCanvasCallbackInstructionBudget = 750'000U;
+constexpr u64 kCanvasCallbackInstructionBudget = 5'000'000U;
 constexpr u64 kCanvasPaintWatchdogInstructionBudget = 5'000'000U;
 
 class ScopedCharacterTranslationFrame final {
@@ -1184,11 +1184,16 @@ Status CanvasRuntime::invoke_void(
                                            method_name,
                                            descriptor,
                                            arguments,
-                                           kCanvasCallbackInstructionBudget);
+                                           kCanvasCallbackInstructionBudget,
+                                           vm::InstructionBudgetMode::progress_watchdog);
     if (!result) {
-        if (result.error().code == ErrorCode::invalid_state &&
-            result.error().message.starts_with(
-                "VM instruction budget was exhausted")) {
+        const bool budget_exhausted =
+            result.error().code == ErrorCode::invalid_state &&
+            (result.error().message.starts_with(
+                 "VM instruction budget was exhausted") ||
+             result.error().message.starts_with(
+                 "VM progress watchdog was exhausted"));
+        if (budget_exhausted) {
             std::string diagnostic = "callback ";
             diagnostic.append(method_name);
             diagnostic.append(descriptor);
@@ -1210,17 +1215,10 @@ Status CanvasRuntime::invoke_void(
         message += " from " + result->exception_context;
     }
     append_canvas_diagnostic(machine_, message);
-    // phoneME's LCDUI implementation catches Throwable from showNotify() and
-    // hideNotify() through Display.handleThrowable(). A host visibility edge
-    // must therefore remain recoverable; otherwise hiding an app poisons the
-    // isolate and the next foreground activation fails with system-start -6.
     if (exception_policy == CallbackExceptionPolicy::report_and_continue) {
         return {};
     }
 
-    // Input and paint callback failures remain fatal. Continuing after those
-    // callbacks leaves the game loop partially mutated and commonly presents
-    // as a frozen screen that no longer accepts input.
     return fail_java(*throwable, std::move(message));
 }
 
@@ -1234,7 +1232,8 @@ Status CanvasRuntime::invoke_key_callback(CanvasState& state,
                        "javax/microedition/lcdui/Canvas",
                        method,
                        "(I)V",
-                       arguments);
+                       arguments,
+                       CallbackExceptionPolicy::report_and_continue);
 }
 
 Status CanvasRuntime::invoke_pointer_callback(CanvasState& state,
@@ -1249,7 +1248,8 @@ Status CanvasRuntime::invoke_pointer_callback(CanvasState& state,
                        "javax/microedition/lcdui/Canvas",
                        method,
                        "(II)V",
-                       arguments);
+                       arguments,
+                       CallbackExceptionPolicy::report_and_continue);
 }
 
 Status CanvasRuntime::update_effective_visibility(CanvasState& state) {

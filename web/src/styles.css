@@ -235,6 +235,13 @@ button, input, textarea, select { font: inherit; }
   text-align: center;
 }
 .empty-library > svg { margin-bottom: 8px; font-size: 56px; color: var(--mui-palette-primary-main); }
+.empty-library .state-error-icon { color: var(--mui-palette-error-main); }
+.empty-library .MuiButton-root { margin-top: 12px; border-radius: 999px; }
+.runtime-state-detail {
+  max-width: min(100%, 480px);
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
 .drop-overlay {
   position: fixed;
   inset: 64px 0 0;

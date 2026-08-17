@@ -1,4 +1,4 @@
-const CACHE_SCHEMA = "v9";
+const CACHE_SCHEMA = "v10";
 const SHELL_PREFIX = `phoneme-shell-${CACHE_SCHEMA}-`;
 const RUNTIME_PREFIX = `phoneme-runtime-${CACHE_SCHEMA}-`;
 const META_CACHE = `phoneme-meta-${CACHE_SCHEMA}`;
@@ -29,15 +29,49 @@ async function setActiveBuild(version) {
   }));
 }
 
+function supportsWasmSimd() {
+  try {
+    // Same type-only v128 probe the frontend uses; a device that cannot parse
+    // this never requests the SIMD build, so the SW must not precache it.
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x06, 0x01, 0x60, 0x01, 0x7b, 0x00,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
+function isImmutableAssetUrl(url) {
+  return url.startsWith("/wasm/build-") || url.startsWith("/assets/");
+}
+
 async function fetchFresh(url) {
   const response = await fetch(url, { cache: "reload", credentials: "same-origin" });
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
   return response;
 }
 
+// Content-hashed assets never change in place, so a copy already in Cache
+// Storage — even under a previous build's cache — is byte-identical to what
+// the server would return. Reusing it keeps ENSURE_OFFLINE warm-ups and
+// frontend-only deploys from re-downloading the multi-megabyte core and every
+// font subset on each page load.
 async function putFresh(cache, url, cacheKey) {
+  const key = cacheKey || url;
+  if (isImmutableAssetUrl(url)) {
+    if (await cache.match(key)) return;
+    for (const name of await caches.keys()) {
+      if (name === META_CACHE || (!name.startsWith("phoneme-shell-") && !name.startsWith("phoneme-runtime-"))) continue;
+      const cached = await (await caches.open(name)).match(url);
+      if (cached) {
+        await cache.put(key, cached);
+        return;
+      }
+    }
+  }
   const response = await fetchFresh(url);
-  await cache.put(cacheKey || url, response.clone());
+  await cache.put(key, response.clone());
   return response;
 }
 
@@ -90,9 +124,12 @@ async function precacheBuild(expectedVersion) {
     throw new Error("WASM manifest không hợp lệ");
   }
   const wasmManifestUrl = new URL("/wasm/manifest.json", self.location.origin);
-  const wasmEntries = [wasmManifest.module, wasmManifest.wasm];
-  if (typeof wasmManifest.compatModule === "string") wasmEntries.push(wasmManifest.compatModule);
-  if (typeof wasmManifest.compatWasm === "string") wasmEntries.push(wasmManifest.compatWasm);
+  // Precache only the build this device can execute (same SIMD probe the
+  // frontend runs). The other variant, if ever requested, is cached on demand
+  // by the fetch handler. Halves the first-install download.
+  const wasmEntries = supportsWasmSimd()
+    ? [wasmManifest.module, wasmManifest.wasm]
+    : [wasmManifest.compatModule || wasmManifest.module, wasmManifest.compatWasm || wasmManifest.wasm];
   const wasmUrls = wasmEntries.map((entry) => new URL(entry, wasmManifestUrl).href);
   if (wasmUrls.some((url) => new URL(url).origin !== self.location.origin)) {
     throw new Error("WASM manifest trỏ ra ngoài origin");
@@ -106,10 +143,14 @@ async function precacheBuild(expectedVersion) {
   for (let index = 0; index < frontendQueue.length; index += 1) {
     const url = frontendQueue[index];
     const response = await putFresh(shell, url);
-    if (!url.endsWith(".js") && !url.endsWith(".css")) continue;
+    if (!response || (!url.endsWith(".js") && !url.endsWith(".css"))) continue;
     const text = await response.clone().text();
     for (const discovered of discoverBundledAssetUrls(text)) {
       if (queuedFrontend.has(discovered)) continue;
+      // Only follow code/CSS references (lazy chunks). Font subsets and other
+      // assets must stay best-effort: a failed fetch must never abort install,
+      // and entry.assets already caches them opportunistically.
+      if (!discovered.endsWith(".js") && !discovered.endsWith(".css")) continue;
       queuedFrontend.add(discovered);
       frontendQueue.push(discovered);
     }

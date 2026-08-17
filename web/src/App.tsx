@@ -36,10 +36,12 @@ import {
   BusinessRounded,
   CalendarMonthRounded,
   CheckRounded,
+  CloseRounded,
   CreateNewFolderRounded,
   DeleteOutlineRounded,
   DownloadRounded,
   EditRounded,
+  ErrorOutlineRounded,
   FolderRounded,
   GamepadRounded,
   InsertDriveFileRounded,
@@ -70,6 +72,7 @@ import type {
   GameEntry,
   ManagedStorageEntry,
   ManagedStorageKind,
+  RuntimePhase,
   RuntimeSnapshot,
   ThemePreference,
   ViewId
@@ -433,6 +436,10 @@ function LibraryView({
   onSearchTextChange,
   sort,
   descending,
+  runtimePhase,
+  runtimeMessage,
+  onRetryRuntime,
+  onImport,
   onLaunch,
   onContextMenu,
   onFiles
@@ -442,6 +449,10 @@ function LibraryView({
   onSearchTextChange: (value: string) => void;
   sort: LibrarySort;
   descending: boolean;
+  runtimePhase: RuntimePhase;
+  runtimeMessage: string;
+  onRetryRuntime: () => void;
+  onImport: () => void;
   onLaunch: (game: GameEntry) => void;
   onContextMenu: (game: GameEntry, anchor: HTMLElement) => void;
   onFiles: (files: File[]) => void;
@@ -497,7 +508,10 @@ function LibraryView({
           placeholder="Tìm ứng dụng"
           slotProps={{
             input: {
-              startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>
+              startAdornment: <InputAdornment position="start"><SearchRounded fontSize="small" /></InputAdornment>,
+              endAdornment: searchText ? <InputAdornment position="end">
+                <IconButton size="small" aria-label="Xóa tìm kiếm" onClick={() => onSearchTextChange("")}><CloseRounded fontSize="small" /></IconButton>
+              </InputAdornment> : undefined
             }
           }}
         />
@@ -554,10 +568,23 @@ function LibraryView({
           <Typography variant="body2" color="text.secondary">Không có ứng dụng phù hợp bộ lọc hiện tại.</Typography>
         </Box>}
       </Box>
-    </> : <Box className="empty-library">
+    </> : runtimePhase === "error" ? <Box className="empty-library">
+      <ErrorOutlineRounded className="state-error-icon" />
+      <Typography variant="h6">Không nạp được lõi phoneME</Typography>
+      <Typography className="runtime-state-detail" color="text.secondary">{runtimeMessage}</Typography>
+      <Button variant="contained" startIcon={<RestartAltRounded />} onClick={onRetryRuntime}>Thử lại</Button>
+    </Box> : runtimePhase === "loading" || runtimePhase === "idle" ? <Box className="empty-library">
+      <CircularProgress size={40} disableShrink />
+      <Typography variant="h6">Đang nạp phoneME</Typography>
+      <Typography className="runtime-state-detail" color="text.secondary">
+        Lần đầu tải lõi WebAssembly có thể mất vài giây; các lần sau được cache.
+      </Typography>
+    </Box> : <Box className="empty-library">
       <GamepadRounded />
       <Typography variant="h6">Không có ứng dụng</Typography>
       <Typography color="text.secondary">Nhập file JAR J2ME để thêm vào thư viện.</Typography>
+      <Button variant="contained" size="large" startIcon={<AddRounded />} onClick={onImport}>Nhập file JAR</Button>
+      <Typography variant="body2" color="text.secondary">hoặc kéo thả file JAR vào đây</Typography>
     </Box>}
 
     {dragging ? <Box className="drop-overlay"><Typography variant="h6">Thả file JAR để nhập</Typography></Box> : null}
@@ -785,6 +812,7 @@ export default function App() {
   const [pwaUpdateVersion, setPwaUpdateVersion] = useState<string | null>(null);
   const [pwaUpdating, setPwaUpdating] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [initAttempt, setInitAttempt] = useState(0);
 
   const paletteMode = settings.theme === "system" ? (prefersDark ? "dark" : "light") : settings.theme;
   const theme = useMemo(() => createPhoneMETheme(paletteMode), [paletteMode]);
@@ -850,6 +878,7 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    setRuntimeSnapshot(EMPTY_SNAPSHOT);
     const options = {
       websocketProxyUrl: settings.websocketProxyUrl || undefined,
       onLog: (line: string, error: boolean) => {
@@ -892,7 +921,7 @@ export default function App() {
       runtime.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtime]);
+  }, [initAttempt, runtime]);
 
   useEffect(() => {
     if (!settings.keepScreenOn || !("wakeLock" in navigator)) return;
@@ -1068,6 +1097,10 @@ export default function App() {
           onSearchTextChange={setSearchText}
           sort={libraryPreferences.sort}
           descending={libraryPreferences.descending}
+          runtimePhase={runtimeSnapshot.phase}
+          runtimeMessage={runtimeSnapshot.message}
+          onRetryRuntime={() => setInitAttempt((attempt) => attempt + 1)}
+          onImport={() => importInputRef.current?.click()}
           onLaunch={openGame}
           onContextMenu={(game, anchor) => { setContextGame(game); setContextMenuAnchor(anchor); }}
           onFiles={(files) => void importFiles(files)}
