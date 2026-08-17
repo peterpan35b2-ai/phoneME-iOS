@@ -252,44 +252,35 @@ int main(int argc, char** argv) {
                 statistics.stack_cached_methods > 0U,
             "JIT benchmark exercises ARM64 register caches");
 
-    // Budget-safepoint resume: an effectively unbounded scheduler budget is
-    // clamped to one native window, so a loop larger than the window must
-    // deopt at a bytecode boundary, resume interpreted, and still produce the
-    // exact wrapping sum. This is the regression test for
-    // JitRuntimeOperation::budget_safepoint.
+    // An effectively unbounded scheduler budget must not directly admit a
+    // loop method into the ARM64 JIT.  The scheduler remains interpreted while
+    // finite helpers below it can still JIT.  This is the safety regression
+    // test for iOS game loops: the sumLoop body is already hot/compiled from the
+    // benchmark above, so an unbounded invocation must complete without
+    // executing or deoptimizing that compiled entry.
     {
-        constexpr phoneme::i32 kHugeLimit = 240'000'000;
-        const phoneme::u64 wrapping = [] {
-            phoneme::u64 total = 0U;
-            for (phoneme::u64 index = 0U;
-                 index <= static_cast<phoneme::u64>(kHugeLimit);
-                 ++index) {
-                total += index;
-            }
-            return total;
-        }();
-        const phoneme::i32 kHugeExpected =
-            static_cast<phoneme::i32>(static_cast<phoneme::u32>(
-                wrapping & 0xFFFF'FFFFULL));
-        const phoneme::vm::Value huge_argument =
-            phoneme::vm::Value::from_int(kHugeLimit);
+        constexpr phoneme::i32 kGuardedLimit = 1'000;
+        const phoneme::i32 kGuardedExpected =
+            (kGuardedLimit * (kGuardedLimit + 1)) / 2;
+        const phoneme::vm::Value guarded_argument =
+            phoneme::vm::Value::from_int(kGuardedLimit);
         const auto before = jit.jit_statistics();
-        auto huge_result = jit.invoke_static(
+        auto guarded_result = jit.invoke_static(
             "corefixture/JitOps",
             "sumLoop",
             "(I)I",
-            std::span<const phoneme::vm::Value>(&huge_argument, 1U),
+            std::span<const phoneme::vm::Value>(&guarded_argument, 1U),
             std::numeric_limits<phoneme::u64>::max());
         const auto after = jit.jit_statistics();
-        require(huge_result.has_value() &&
-                    huge_result->completed_normally() &&
-                    huge_result->return_value.has_value() &&
-                    huge_result->return_value->as_int().value_or(0) ==
-                        kHugeExpected,
-                "budget-clamped unbounded execution resumes correctly");
-        require(after.deoptimized_executions >
-                    before.deoptimized_executions,
-                "budget window exhaustion deoptimizes the compiled entry");
+        require(guarded_result.has_value() &&
+                    guarded_result->completed_normally() &&
+                    guarded_result->return_value.has_value() &&
+                    guarded_result->return_value->as_int().value_or(0) ==
+                        kGuardedExpected,
+                "unbounded loop invocation completes in the interpreter");
+        require(after.executed_methods == before.executed_methods &&
+                    after.deoptimized_executions == before.deoptimized_executions,
+                "unbounded loop invocation does not enter compiled code");
     }
 
     const double speedup = jit_run.elapsed_nanoseconds == 0U

@@ -53,6 +53,7 @@ constexpr u32 kDefaultStartupCompileLimit = 3U;
 constexpr u32 kMaximumStartupCompileLimit = 256U;
 constexpr u64 kDefaultStartupCompileBudgetNanoseconds = 3'000'000U;
 constexpr u32 kStartupDeoptRetireThreshold = 2U;
+constexpr u32 kNormalDeoptRetireThreshold = 16U;
 constexpr u64 kMaximumStartupCompileBudgetMilliseconds = 1'000U;
 constexpr u64 kDefaultCodeCacheBytes = 16U * 1024U * 1024U;
 constexpr u64 kMinimumCodeCacheBytes = 1U * 1024U * 1024U;
@@ -9239,17 +9240,10 @@ public:
                 }
                 const u32 deopt_retire_threshold = startup_mode()
                     ? kStartupDeoptRetireThreshold
-                    : 16U;
-                if (deopt_state.has_value()) {
-                    return std::optional<JitExecutionResult>(JitExecutionResult {
-                        .return_value = std::nullopt,
-                        .exception = std::nullopt,
-                        .exception_bci = 0U,
-                        .bytecode_instructions = executed,
-                        .deopt_state = std::move(deopt_state),
-                    });
-                }
-                if (entry.deopt_count >= deopt_retire_threshold) {
+                    : kNormalDeoptRetireThreshold;
+                const bool retire_entry =
+                    entry.deopt_count >= deopt_retire_threshold;
+                if (retire_entry) {
                     const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
                     if (trace_value != nullptr && *trace_value != '\0' &&
                         std::string_view(trace_value) != "0") {
@@ -9263,6 +9257,15 @@ public:
                     release_compiled_entry(entry);
                     entry.rejected = true;
                     ++stats_.rejected_methods;
+                }
+                if (deopt_state.has_value()) {
+                    return std::optional<JitExecutionResult>(JitExecutionResult {
+                        .return_value = std::nullopt,
+                        .exception = std::nullopt,
+                        .exception_bci = 0U,
+                        .bytecode_instructions = executed,
+                        .deopt_state = std::move(deopt_state),
+                    });
                 }
                 return std::optional<JitExecutionResult>{};
             }
@@ -9594,10 +9597,53 @@ public:
             if (runtime_status == JitRuntimeStatus::deoptimize ||
                 runtime_status == JitRuntimeStatus::unsupported_call ||
                 runtime_status == JitRuntimeStatus::success) {
+                ++entry.deopt_count;
                 auto deopt_state = decode_deopt_state(
                     *entry.compiled, dispatch_context, bytecode_pc);
+                const u32 deopt_retire_threshold = startup_mode()
+                    ? kStartupDeoptRetireThreshold
+                    : kNormalDeoptRetireThreshold;
+                const bool retire_entry =
+                    runtime_status == JitRuntimeStatus::unsupported_call ||
+                    entry.deopt_count >= deopt_retire_threshold;
+                if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
+                    trace_value != nullptr && *trace_value != '\0' &&
+                    std::string_view(trace_value) != "0") {
+                    std::fprintf(stderr,
+                                 "[phoneMEJIT] osr-deopt %s.%s%s bci=%u "
+                                 "status=%u bytecodes=%u count=%u\n",
+                                 owner.name().c_str(),
+                                 method.name.c_str(),
+                                 method.descriptor.c_str(),
+                                 static_cast<unsigned>(entry_bci),
+                                 static_cast<unsigned>(runtime_status),
+                                 static_cast<unsigned>(executed),
+                                 static_cast<unsigned>(entry.deopt_count));
+                }
+                if (retire_entry) {
+                    if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
+                        trace_value != nullptr && *trace_value != '\0' &&
+                        std::string_view(trace_value) != "0") {
+                        std::fprintf(stderr,
+                                     "[phoneMEJIT] osr-retire %s.%s%s after=%u deopts\n",
+                                     owner.name().c_str(),
+                                     method.name.c_str(),
+                                     method.descriptor.c_str(),
+                                     static_cast<unsigned>(entry.deopt_count));
+                    }
+                    // Machine deliberately retries OSR quickly after a precise
+                    // resume. Without retirement, a loop whose OSR entry always
+                    // hits the same unsupported/unbounded call can bounce back
+                    // into native code every few backedges for the lifetime of
+                    // the loop. Long trajectory loops (Army2 uses up to 800
+                    // simulation steps per candidate shot) amplify that into an
+                    // apparent hard freeze on iOS.
+                    release_compiled_entry(entry);
+                    entry.rejected = true;
+                    ++stats_.rejected_methods;
+                }
+                ++stats_.osr_fallbacks;
                 if (deopt_state.has_value()) {
-                    ++stats_.osr_fallbacks;
                     return std::optional<JitExecutionResult>(JitExecutionResult {
                         .return_value = std::nullopt,
                         .exception = std::nullopt,
@@ -9606,7 +9652,6 @@ public:
                         .deopt_state = std::move(deopt_state),
                     });
                 }
-                ++stats_.osr_fallbacks;
                 return std::optional<JitExecutionResult>{};
             }
 
@@ -9640,6 +9685,7 @@ public:
             case JitRuntimeStatus::unsupported_call:
                 break;
             }
+            entry.deopt_count = 0U;
             ++stats_.executed_methods;
             ++stats_.osr_executions;
             return std::optional<JitExecutionResult>(JitExecutionResult {
@@ -9670,6 +9716,7 @@ public:
                             "JIT OSR returned an unsupported value kind");
             }
         }
+        entry.deopt_count = 0U;
         ++stats_.executed_methods;
         ++stats_.osr_executions;
         if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");

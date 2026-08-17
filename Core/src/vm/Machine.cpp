@@ -5918,13 +5918,16 @@ namespace phoneme::vm
   }
 
   std::optional<u64> Machine::safe_jit_instruction_budget(
-      const ResolvedMethod&,
+      const ResolvedMethod& target,
       u64 requested_budget)
   {
     const u64 native_limit = BaselineJit::maximum_instruction_budget();
     if (requested_budget <= native_limit)
       return requested_budget;
 
+    const auto bounded_cost = bounded_jit_invocation_cost(target, 0U);
+    if (!bounded_cost.has_value() || *bounded_cost > native_limit)
+      return std::nullopt;
     return native_limit;
   }
 

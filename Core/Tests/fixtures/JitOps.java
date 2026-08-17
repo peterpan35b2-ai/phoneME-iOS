@@ -333,6 +333,23 @@ public final class JitOps {
         return total;
     }
 
+    public static int osrUnboundedCallLoop(int[] counter, int limit) {
+        int total = 0;
+        for (int index = 0; index < limit; index++) {
+            counter[0] = counter[0] + 1;
+            total += loopIdentity(index);
+        }
+        return total;
+    }
+
+    private static int loopIdentity(int value) {
+        int result = value;
+        for (int pass = 0; pass < 1; pass++) {
+            result += pass;
+        }
+        return result;
+    }
+
     public static final class Allocated {
         public int value;
 

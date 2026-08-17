@@ -24,6 +24,7 @@
 #include "phoneme/runtime/Runtime.hpp"
 #include "phoneme/runtime/SuiteStore.hpp"
 #include "phoneme/security/PermissionPolicy.hpp"
+#include "phoneme/vm/BaselineJit.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/ClassRepository.hpp"
@@ -828,6 +829,76 @@ void test_baseline_jit(const std::string& fixture_jar) {
         restore_threshold();
         std::cout << "JIT executable memory unavailable; backend tests skipped\n";
         return;
+    }
+
+    {
+        phoneme::vm::ClassRepository retire_classes;
+        require(retire_classes.add_archive(fixture_jar).has_value(),
+                "add JIT fixture archive for precise-deopt retirement test");
+        auto target = retire_classes.resolve_method(
+            "corefixture/JitOps",
+            "objectAllocationFallback",
+            "()Ljava/lang/Object;");
+        require(target.has_value() && target->owner != nullptr &&
+                    target->method != nullptr && target->runtime != nullptr &&
+                    target->runtime->descriptor != nullptr,
+                "resolve allocation method for precise-deopt retirement test");
+
+        phoneme::vm::BaselineJit retire_jit(true);
+        retire_jit.set_startup_mode(false);
+        const auto force_precise_deopt =
+            [](void*, phoneme::vm::JitRuntimeOperation,
+               phoneme::u64, phoneme::u64, phoneme::u64, phoneme::u64,
+               const phoneme::u64*, phoneme::u64*) -> phoneme::u32 {
+            return static_cast<phoneme::u32>(
+                phoneme::vm::JitRuntimeStatus::deoptimize);
+        };
+        const phoneme::vm::JitRuntimeHooks hooks {
+            .context = nullptr,
+            .dispatch = force_precise_deopt,
+            .publish_roots = nullptr,
+        };
+        const auto before = retire_jit.statistics();
+        constexpr phoneme::u32 kNormalDeoptRetireThreshold = 16U;
+        for (phoneme::u32 pass = 0U;
+             pass < kNormalDeoptRetireThreshold;
+             ++pass) {
+            auto execution = retire_jit.try_execute(
+                target->runtime->id,
+                *target->owner,
+                *target->method,
+                *target->runtime->descriptor,
+                std::span<const phoneme::vm::Value>{},
+                false,
+                10'000U,
+                hooks,
+                target->owner);
+            require(execution.has_value() && execution->has_value() &&
+                        (*execution)->deopt_state.has_value(),
+                    "JIT preserves precise deopt state through retirement threshold");
+        }
+        const auto retired = retire_jit.statistics();
+        require(retired.deoptimized_executions ==
+                    before.deoptimized_executions +
+                        kNormalDeoptRetireThreshold &&
+                    retired.rejected_methods == before.rejected_methods + 1U,
+                "JIT retires a method after repeated precise deoptimizations");
+
+        auto post_retire = retire_jit.try_execute(
+            target->runtime->id,
+            *target->owner,
+            *target->method,
+            *target->runtime->descriptor,
+            std::span<const phoneme::vm::Value>{},
+            false,
+            10'000U,
+            hooks,
+            target->owner);
+        const auto after = retire_jit.statistics();
+        require(post_retire.has_value() && !post_retire->has_value() &&
+                    after.deoptimized_executions ==
+                        retired.deoptimized_executions,
+                "retired precise-deopt method stays interpreted instead of thrashing");
     }
 
     {
@@ -3141,6 +3212,50 @@ void test_baseline_jit(const std::string& fixture_jar) {
     require(call_osr_after.osr_attempts > call_osr_before.osr_attempts &&
                 call_osr_after.osr_executions > call_osr_before.osr_executions,
             "JIT OSR remains native across bounded invoke bytecodes");
+
+    // A caller OSR entry that reaches an unbounded nested loop must deopt so
+    // the interpreter can execute that call. Because unsupported_call is a
+    // deterministic pre-execution decision, the OSR entry must retire on that
+    // first precise deopt instead of bouncing every few backedges for the rest
+    // of a long loop.
+    phoneme::vm::ClassRepository osr_retire_classes;
+    require(osr_retire_classes.add_archive(fixture_jar).has_value(),
+            "add JIT fixture archive for repeated OSR-deopt retirement test");
+    phoneme::vm::Machine osr_retire_machine(osr_retire_classes);
+    osr_retire_machine.configure_jit(true);
+    osr_retire_machine.configure_jit_startup(true);
+    auto osr_retire_counter = osr_retire_machine.heap().allocate_array(
+        "[I", 1U, phoneme::vm::Value::from_int(0));
+    require(osr_retire_counter.has_value(),
+            "allocate counter array for repeated OSR-deopt retirement test");
+    const std::array<phoneme::vm::Value, 2> osr_retire_arguments {
+        phoneme::vm::Value::from_reference(*osr_retire_counter),
+        phoneme::vm::Value::from_int(4'096),
+    };
+    const auto osr_retire_before = osr_retire_machine.jit_statistics();
+    auto osr_retire_result = osr_retire_machine.invoke_static(
+        "corefixture/JitOps",
+        "osrUnboundedCallLoop",
+        "([II)I",
+        osr_retire_arguments);
+    const auto osr_retire_after = osr_retire_machine.jit_statistics();
+    auto osr_retire_counter_value = osr_retire_machine.heap().element(
+        *osr_retire_counter, 0U);
+    require(osr_retire_result.has_value() &&
+                osr_retire_result->completed_normally() &&
+                osr_retire_result->return_value.has_value() &&
+                osr_retire_result->return_value->as_int().value_or(-1) ==
+                    8'386'560 &&
+                osr_retire_counter_value.has_value() &&
+                osr_retire_counter_value->as_int().value_or(-1) == 4'096,
+            "repeated OSR deopt resumes preserve loop result and side effects");
+    constexpr phoneme::u64 kUnsupportedCallRetireDeopts = 1U;
+    require(osr_retire_after.deoptimized_executions ==
+                osr_retire_before.deoptimized_executions +
+                    kUnsupportedCallRetireDeopts &&
+                osr_retire_after.rejected_methods >=
+                    osr_retire_before.rejected_methods + 1U,
+            "OSR unsupported call retires immediately after precise deopt");
     restore_threshold();
 }
 
