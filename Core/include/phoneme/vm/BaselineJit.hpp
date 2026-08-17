@@ -116,6 +116,7 @@ enum class JitRuntimeStatus : u32 {
     budget_exhausted = 7,
     unsupported_call = 8,
     fatal_runtime_error = 9,
+    retryable_call = 10,
 };
 
 enum class JitExceptionKind : u8 {
@@ -148,6 +149,22 @@ struct JitRuntimeHooks final {
     void* context {nullptr};
     JitRuntimeDispatch dispatch {nullptr};
     JitRootPublisher publish_roots {nullptr};
+};
+
+struct JitInlineTarget final {
+    std::shared_ptr<const classfile::ClassFile> owner;
+    const classfile::Method* method {nullptr};
+};
+
+using JitInlineResolver = std::optional<JitInlineTarget> (*)(
+    void* context,
+    std::string_view owner,
+    std::string_view name,
+    std::string_view descriptor);
+
+struct JitInlineResolverHooks final {
+    void* context {nullptr};
+    JitInlineResolver resolve {nullptr};
 };
 
 struct JitDeoptState final {
@@ -249,6 +266,7 @@ public:
 
     void set_enabled(bool enabled) noexcept;
     void set_startup_mode(bool enabled) noexcept;
+    void set_inline_resolver(JitInlineResolverHooks hooks) noexcept;
     void refresh_availability() noexcept;
     void clear_cache() noexcept;
     [[nodiscard]] Status configure_profile(std::string path);

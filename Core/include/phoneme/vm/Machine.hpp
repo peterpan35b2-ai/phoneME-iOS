@@ -406,6 +406,31 @@ namespace phoneme::vm
       bool is_static{false};
     };
 
+    struct TiledAlphaCollisionIntrinsic final
+    {
+      FieldLocation tiles;
+      FieldLocation tile_x;
+      FieldLocation tile_y;
+      FieldLocation tile_width;
+      FieldLocation tile_height;
+      FieldLocation tile_silk_collision;
+      FieldLocation tile_pixels;
+      std::string tile_class;
+    };
+
+    struct ProjectileCollisionIntrinsic final
+    {
+      FieldLocation players;
+      FieldLocation team;
+      FieldLocation hp;
+      FieldLocation invisible;
+      FieldLocation state;
+      FieldLocation x;
+      FieldLocation y;
+      std::string player_class;
+      std::string boss_class;
+    };
+
     struct TransparentStringHash final
     {
       using is_transparent = void;
@@ -696,6 +721,15 @@ namespace phoneme::vm
     [[nodiscard]] Result<Value> unbox_lambda_value(
         Value value,
         JavaTypeKind target_kind);
+    [[nodiscard]] Result<std::optional<Value>>
+    try_tiled_alpha_collision_intrinsic(const ResolvedMethod& method,
+                                        i32 x,
+                                        i32 y);
+    [[nodiscard]] Result<std::optional<Value>>
+    try_projectile_collision_intrinsic(const ResolvedMethod& method,
+                                       i32 x,
+                                       i32 y,
+                                       ObjectRef shooter);
     void prune_lambda_bindings();
 
     ClassRepository &classes_;
@@ -745,6 +779,12 @@ namespace phoneme::vm
     std::unordered_map<const classfile::Method*,
                        std::optional<TrivialGetterIntrinsic>>
         trivial_getter_intrinsics_;
+    std::unordered_map<const classfile::Method*,
+                       std::optional<TiledAlphaCollisionIntrinsic>>
+        tiled_alpha_collision_intrinsics_;
+    std::unordered_map<const classfile::Method*,
+                       std::optional<ProjectileCollisionIntrinsic>>
+        projectile_collision_intrinsics_;
     std::unordered_map<
         const classfile::ClassFile*,
         std::unordered_map<u32, std::shared_ptr<const FieldLocation>>>

@@ -48,11 +48,13 @@ void add(NativeMethodRegistry& registry,
          std::string owner,
          std::string name,
          std::string descriptor,
-         NativeMethod method) {
+         NativeMethod method,
+         NativeJitPolicy jit_policy = NativeJitPolicy::conservative) {
     auto registered = registry.register_method(std::move(owner),
                                                std::move(name),
                                                std::move(descriptor),
-                                               std::move(method));
+                                               std::move(method),
+                                               jit_policy);
     if (!registered) {
         std::terminate();
     }
@@ -1390,7 +1392,7 @@ void register_vector(NativeMethodRegistry& registry) {
             auto count = int_field(machine, *object, kVectorCountField);
             if (!count) return std::unexpected(count.error());
             return std::optional<Value>(Value::from_int(*count));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
     add(registry, "java/util/Vector", "capacity", "()I",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1402,7 +1404,7 @@ void register_vector(NativeMethodRegistry& registry) {
             if (!length) return std::unexpected(length.error());
             return std::optional<Value>(Value::from_int(
                 static_cast<i32>(*length)));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
     add(registry, "java/util/Vector", "ensureCapacity", "(I)V",
         [](Machine& machine, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {
@@ -1484,7 +1486,7 @@ void register_vector(NativeMethodRegistry& registry) {
             auto count = int_field(machine, *object, kVectorCountField);
             if (!count) return std::unexpected(count.error());
             return std::optional<Value>(Value::from_int(*count == 0 ? 1 : 0));
-        });
+        }, NativeJitPolicy::synchronous_bounded);
     add(registry, "java/util/Vector", "copyInto",
         "([Ljava/lang/Object;)V",
         [](Machine& machine, std::span<const Value> arguments)
@@ -1589,7 +1591,7 @@ void register_vector(NativeMethodRegistry& registry) {
                 *data, static_cast<usize>(*index));
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(*value);
-        });
+        }, NativeJitPolicy::synchronous_bounded);
     const auto add_edge = [&registry](const char* name, bool last) {
         add(registry, "java/util/Vector", name, "()Ljava/lang/Object;",
             [last](Machine& machine, std::span<const Value> arguments)

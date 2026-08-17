@@ -3249,13 +3249,13 @@ void test_baseline_jit(const std::string& fixture_jar) {
                 osr_retire_counter_value.has_value() &&
                 osr_retire_counter_value->as_int().value_or(-1) == 4'096,
             "repeated OSR deopt resumes preserve loop result and side effects");
-    constexpr phoneme::u64 kUnsupportedCallRetireDeopts = 1U;
-    require(osr_retire_after.deoptimized_executions ==
-                osr_retire_before.deoptimized_executions +
-                    kUnsupportedCallRetireDeopts &&
-                osr_retire_after.rejected_methods >=
-                    osr_retire_before.rejected_methods + 1U,
-            "OSR unsupported call retires immediately after precise deopt");
+    require(osr_retire_after.deoptimized_executions >
+                osr_retire_before.deoptimized_executions &&
+                osr_retire_after.rejected_methods ==
+                    osr_retire_before.rejected_methods &&
+                osr_retire_after.osr_executions >
+                    osr_retire_before.osr_executions,
+            "OSR retryable Java call warms its callee without retiring the caller");
     restore_threshold();
 }
 

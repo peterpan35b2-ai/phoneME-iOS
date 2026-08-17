@@ -54,6 +54,7 @@ constexpr u32 kMaximumStartupCompileLimit = 256U;
 constexpr u64 kDefaultStartupCompileBudgetNanoseconds = 3'000'000U;
 constexpr u32 kStartupDeoptRetireThreshold = 2U;
 constexpr u32 kNormalDeoptRetireThreshold = 16U;
+constexpr u32 kRetryableCallRetireThreshold = 64U;
 constexpr u64 kMaximumStartupCompileBudgetMilliseconds = 1'000U;
 constexpr u64 kDefaultCodeCacheBytes = 16U * 1024U * 1024U;
 constexpr u64 kMinimumCodeCacheBytes = 1U * 1024U * 1024U;
@@ -820,7 +821,8 @@ struct RuntimeDispatchContext final {
                                                  result_bits);
     const auto runtime_status = static_cast<JitRuntimeStatus>(status);
     if (runtime_status == JitRuntimeStatus::deoptimize ||
-        runtime_status == JitRuntimeStatus::unsupported_call) {
+        runtime_status == JitRuntimeStatus::unsupported_call ||
+        runtime_status == JitRuntimeStatus::retryable_call) {
         execution->capture_deopt_frame(frame_base);
     }
     return status;
@@ -2681,6 +2683,7 @@ enum class InlineRecipeKind : u8 {
     binary_int,
     unary_int,
     int_right_constant,
+    rect_contains_int,
     identity_long,
     binary_long,
     unary_long,
@@ -4847,6 +4850,48 @@ compute_constant_flow(
             .has_receiver = has_receiver,
         };
     }
+    // Common collision/UI predicate:
+    //   x >= left && x < left + width && y >= top && y < top + height
+    // Recognize the bytecode shape rather than a class/method name so callers
+    // from any already-initialized class can eliminate millions of tiny
+    // runtime-dispatch calls without changing Java overflow semantics.
+    if (method.descriptor == "(IIIIII)Z" && decoded->size() == 20U) {
+        const auto local_is = [&](usize index, u32 local) {
+            return int_local((*decoded)[index]).value_or(
+                std::numeric_limits<u32>::max()) == argument_base + local;
+        };
+        const usize false_pc = (*decoded)[18].pc;
+        const usize return_pc = (*decoded)[19].pc;
+        const auto branches_to_false = [&](usize index, u8 opcode) {
+            return (*decoded)[index].opcode == opcode &&
+                (*decoded)[index].branch_target.has_value() &&
+                *(*decoded)[index].branch_target == false_pc;
+        };
+        const bool shape =
+            local_is(0U, 0U) && local_is(1U, 2U) &&
+            branches_to_false(2U, 0xA1U) && // if_icmplt
+            local_is(3U, 0U) && local_is(4U, 2U) && local_is(5U, 4U) &&
+            (*decoded)[6].opcode == 0x60U &&
+            branches_to_false(7U, 0xA2U) && // if_icmpge
+            local_is(8U, 1U) && local_is(9U, 3U) &&
+            branches_to_false(10U, 0xA1U) &&
+            local_is(11U, 1U) && local_is(12U, 3U) && local_is(13U, 5U) &&
+            (*decoded)[14].opcode == 0x60U &&
+            branches_to_false(15U, 0xA2U) &&
+            pushed_constant((*decoded)[16]).value_or(-1) == 1 &&
+            (*decoded)[17].opcode == 0xA7U &&
+            (*decoded)[17].branch_target.has_value() &&
+            *(*decoded)[17].branch_target == return_pc &&
+            pushed_constant((*decoded)[18]).value_or(-1) == 0 &&
+            (*decoded)[19].opcode == 0xACU;
+        if (shape) {
+            return InlineRecipe {
+                .kind = InlineRecipeKind::rect_contains_int,
+                .nested_bytecode_cost = 20U,
+                .has_receiver = has_receiver,
+            };
+        }
+    }
     if (method.descriptor == "(J)J") {
         if (decoded->size() == 2U &&
             long_local((*decoded)[0]).value_or(std::numeric_limits<u32>::max()) ==
@@ -4986,7 +5031,8 @@ compute_constant_flow(
     const classfile::Method& method,
     const CachedMethodDescriptor& descriptor,
     bool has_receiver,
-    ExecutableArena& executable_arena) {
+    ExecutableArena& executable_arena,
+    JitInlineResolverHooks inline_resolver) {
     if (!method.code.has_value()) {
         return reject_attempt(JitRejectReason::missing_code);
     }
@@ -5121,10 +5167,35 @@ compute_constant_flow(
         }
         auto reference = owner.member_reference(
             static_cast<u16>(instruction.local_index));
-        if (!reference || reference->owner != owner.name()) continue;
-        const classfile::Method* callee = owner.find_method(
-            reference->name, reference->descriptor);
-        if (callee == nullptr || callee == &method ||
+        if (!reference) continue;
+        std::shared_ptr<const classfile::ClassFile> cross_owner;
+        const classfile::ClassFile* callee_owner = &owner;
+        const classfile::Method* callee = nullptr;
+        if (reference->owner == owner.name()) {
+            callee = owner.find_method(reference->name, reference->descriptor);
+        } else {
+            // Cross-class inlining is restricted to invokestatic and delegated
+            // to Machine's resolver. The resolver only exposes targets whose
+            // declaring class has already completed initialization, preserving
+            // the JVM's active-use class initialization semantics.
+            if (instruction.opcode != 0xB8U || inline_resolver.resolve == nullptr) {
+                continue;
+            }
+            auto target = inline_resolver.resolve(
+                inline_resolver.context,
+                reference->owner,
+                reference->name,
+                reference->descriptor);
+            if (!target.has_value() || target->owner == nullptr ||
+                target->method == nullptr) {
+                continue;
+            }
+            cross_owner = std::move(target->owner);
+            callee_owner = cross_owner.get();
+            callee = target->method;
+        }
+        if (callee == nullptr ||
+            (callee_owner == &owner && callee == &method) ||
             (callee->access_flags & (0x0020U | 0x0100U | 0x0400U)) != 0U) {
             continue;
         }
@@ -5135,7 +5206,7 @@ compute_constant_flow(
             (owner.access_flags() & 0x0010U) == 0U) {
             continue;
         }
-        auto recipe = analyze_inline_recipe(owner, *callee);
+        auto recipe = analyze_inline_recipe(*callee_owner, *callee);
         if (!recipe.has_value()) continue;
         if (instruction.opcode == 0xB7U || instruction.opcode == 0xB6U) {
             // Only inline an instance leaf when the receiver is the caller's
@@ -7018,6 +7089,70 @@ compute_constant_flow(
                         emitted = emit_inline_right_constant(
                             recipe.opcode, recipe.constant);
                         break;
+                    case InlineRecipeKind::rect_contains_int: {
+                        if (depth < 6U ||
+                            !pop_register(kScratchLeft) ||     // height
+                            !pop_register(kScratchRight) ||    // width
+                            !pop_register(kScratchThird) ||    // top
+                            !pop_register(kScratchFourth) ||   // left
+                            !pop_register(kScratchMetadata)) { // y
+                            return {};
+                        }
+                        std::array<std::pair<usize, Arm64Condition>, 4U>
+                            false_branches {};
+                        emitter.compare_w(kScratchMetadata, kScratchThird);
+                        false_branches[0U] = {
+                            emitter.emit_conditional_branch_placeholder(
+                                Arm64Condition::less_than),
+                            Arm64Condition::less_than,
+                        };
+                        // Java int addition wraps naturally in a W register.
+                        emitter.add_w(kScratchThird,
+                                      kScratchThird,
+                                      kScratchLeft);
+                        emitter.compare_w(kScratchMetadata, kScratchThird);
+                        false_branches[1U] = {
+                            emitter.emit_conditional_branch_placeholder(
+                                Arm64Condition::greater_equal),
+                            Arm64Condition::greater_equal,
+                        };
+
+                        // height is dead now, so reuse kScratchLeft for x.
+                        if (!pop_register(kScratchLeft)) return {};
+                        emitter.compare_w(kScratchLeft, kScratchFourth);
+                        false_branches[2U] = {
+                            emitter.emit_conditional_branch_placeholder(
+                                Arm64Condition::less_than),
+                            Arm64Condition::less_than,
+                        };
+                        emitter.add_w(kScratchFourth,
+                                      kScratchFourth,
+                                      kScratchRight);
+                        emitter.compare_w(kScratchLeft, kScratchFourth);
+                        false_branches[3U] = {
+                            emitter.emit_conditional_branch_placeholder(
+                                Arm64Condition::greater_equal),
+                            Arm64Condition::greater_equal,
+                        };
+
+                        emitter.move_imm32(kScratchMetadata, 1U);
+                        const usize done_branch =
+                            emitter.emit_branch_placeholder();
+                        const usize false_position = emitter.position();
+                        emitter.move_imm32(kScratchMetadata, 0U);
+                        const usize done_position = emitter.position();
+                        for (const auto& [patch, condition] : false_branches) {
+                            if (!emitter.patch_conditional_branch(
+                                    patch, false_position, condition)) {
+                                return {};
+                            }
+                        }
+                        if (!emitter.patch_branch(done_branch, done_position)) {
+                            return {};
+                        }
+                        emitted = push_register(kScratchMetadata);
+                        break;
+                    }
                     case InlineRecipeKind::identity_long:
                         if (depth < 2U) return {};
                         break;
@@ -8766,6 +8901,10 @@ public:
         refresh_availability();
     }
 
+    void set_inline_resolver(JitInlineResolverHooks hooks) noexcept {
+        inline_resolver_ = hooks;
+    }
+
     void set_startup_mode(bool value) noexcept {
         const bool previous = startup_mode_.exchange(
             value, std::memory_order_acq_rel);
@@ -9029,7 +9168,8 @@ public:
             const auto compile_started = std::chrono::steady_clock::now();
             ++stats_.compile_attempts;
             CompileAttempt attempt = compile_scalar_method(
-                owner, method, descriptor, has_receiver, executable_arena_);
+                owner, method, descriptor, has_receiver, executable_arena_,
+                inline_resolver_);
             const u64 compile_elapsed_nanoseconds = static_cast<u64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - compile_started).count());
@@ -9077,6 +9217,7 @@ public:
             update_executable_arena_statistics();
             entry.compiled = std::move(*attempt.method);
             entry.deopt_count = 0U;
+            entry.retryable_call_count = 0U;
             entry.last_used_tick = ++use_tick_;
             ++stats_.compiled_methods;
             stats_.osr_compiled_entries += entry.compiled->osr_entries.size();
@@ -9219,6 +9360,39 @@ public:
                 }
                 return std::optional<JitExecutionResult>{};
             }
+            case JitRuntimeStatus::retryable_call: {
+                ++stats_.unsupported_fallbacks;
+                if (entry.retryable_call_count != std::numeric_limits<u32>::max()) {
+                    ++entry.retryable_call_count;
+                }
+                auto deopt_state = decode_deopt_state(
+                    *entry.compiled, dispatch_context, exception_bci);
+                if (entry.retryable_call_count >= kRetryableCallRetireThreshold) {
+                    if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
+                        trace_value != nullptr && *trace_value != '\0' &&
+                        std::string_view(trace_value) != "0") {
+                        std::fprintf(stderr,
+                                     "[phoneMEJIT] retire %s.%s%s after=%u retryable-calls\n",
+                                     owner.name().c_str(),
+                                     method.name.c_str(),
+                                     method.descriptor.c_str(),
+                                     static_cast<unsigned>(entry.retryable_call_count));
+                    }
+                    release_compiled_entry(entry);
+                    entry.rejected = true;
+                    ++stats_.rejected_methods;
+                }
+                if (deopt_state.has_value()) {
+                    return std::optional<JitExecutionResult>(JitExecutionResult {
+                        .return_value = std::nullopt,
+                        .exception = std::nullopt,
+                        .exception_bci = 0U,
+                        .bytecode_instructions = executed,
+                        .deopt_state = std::move(deopt_state),
+                    });
+                }
+                return std::optional<JitExecutionResult>{};
+            }
             case JitRuntimeStatus::success:
             case JitRuntimeStatus::deoptimize: {
                 ++stats_.unsupported_fallbacks;
@@ -9291,6 +9465,7 @@ public:
                     "JIT nested invocation exhausted instruction budget");
             }
             entry.deopt_count = 0U;
+            entry.retryable_call_count = 0U;
             ++stats_.executed_methods;
             return std::optional<JitExecutionResult>(JitExecutionResult {
                 .return_value = std::nullopt,
@@ -9321,6 +9496,7 @@ public:
             }
         }
         entry.deopt_count = 0U;
+        entry.retryable_call_count = 0U;
         ++stats_.executed_methods;
         const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
         if (trace_value != nullptr && *trace_value != '\0' &&
@@ -9449,7 +9625,8 @@ public:
             const auto compile_started = std::chrono::steady_clock::now();
             ++stats_.compile_attempts;
             CompileAttempt attempt = compile_scalar_method(
-                owner, method, descriptor, has_receiver, executable_arena_);
+                owner, method, descriptor, has_receiver, executable_arena_,
+                inline_resolver_);
             stats_.compile_time_nanoseconds += static_cast<u64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - compile_started).count());
@@ -9494,6 +9671,7 @@ public:
             update_executable_arena_statistics();
             entry.compiled = std::move(*attempt.method);
             entry.deopt_count = 0U;
+            entry.retryable_call_count = 0U;
             entry.last_used_tick = ++use_tick_;
             ++stats_.compiled_methods;
             stats_.osr_compiled_entries += entry.compiled->osr_entries.size();
@@ -9596,16 +9774,27 @@ public:
             const u32 bytecode_pc = static_cast<u32>(result_bits >> 32U);
             if (runtime_status == JitRuntimeStatus::deoptimize ||
                 runtime_status == JitRuntimeStatus::unsupported_call ||
+                runtime_status == JitRuntimeStatus::retryable_call ||
                 runtime_status == JitRuntimeStatus::success) {
-                ++entry.deopt_count;
+                const bool retryable_call =
+                    runtime_status == JitRuntimeStatus::retryable_call;
+                if (retryable_call) {
+                    if (entry.retryable_call_count !=
+                        std::numeric_limits<u32>::max()) {
+                        ++entry.retryable_call_count;
+                    }
+                } else {
+                    ++entry.deopt_count;
+                }
                 auto deopt_state = decode_deopt_state(
                     *entry.compiled, dispatch_context, bytecode_pc);
                 const u32 deopt_retire_threshold = startup_mode()
                     ? kStartupDeoptRetireThreshold
                     : kNormalDeoptRetireThreshold;
-                const bool retire_entry =
-                    runtime_status == JitRuntimeStatus::unsupported_call ||
-                    entry.deopt_count >= deopt_retire_threshold;
+                const bool retire_entry = retryable_call
+                    ? entry.retryable_call_count >= kRetryableCallRetireThreshold
+                    : (runtime_status == JitRuntimeStatus::unsupported_call ||
+                       entry.deopt_count >= deopt_retire_threshold);
                 if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
                     trace_value != nullptr && *trace_value != '\0' &&
                     std::string_view(trace_value) != "0") {
@@ -9618,7 +9807,9 @@ public:
                                  static_cast<unsigned>(entry_bci),
                                  static_cast<unsigned>(runtime_status),
                                  static_cast<unsigned>(executed),
-                                 static_cast<unsigned>(entry.deopt_count));
+                                 static_cast<unsigned>(retryable_call
+                                     ? entry.retryable_call_count
+                                     : entry.deopt_count));
                 }
                 if (retire_entry) {
                     if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
@@ -9635,8 +9826,7 @@ public:
                     // resume. Without retirement, a loop whose OSR entry always
                     // hits the same unsupported/unbounded call can bounce back
                     // into native code every few backedges for the lifetime of
-                    // the loop. Long trajectory loops (Army2 uses up to 800
-                    // simulation steps per candidate shot) amplify that into an
+                    // the loop. Long trajectory loops amplify that into an
                     // apparent hard freeze on iOS.
                     release_compiled_entry(entry);
                     entry.rejected = true;
@@ -9683,9 +9873,11 @@ public:
             case JitRuntimeStatus::success:
             case JitRuntimeStatus::deoptimize:
             case JitRuntimeStatus::unsupported_call:
+            case JitRuntimeStatus::retryable_call:
                 break;
             }
             entry.deopt_count = 0U;
+            entry.retryable_call_count = 0U;
             ++stats_.executed_methods;
             ++stats_.osr_executions;
             return std::optional<JitExecutionResult>(JitExecutionResult {
@@ -9717,6 +9909,7 @@ public:
             }
         }
         entry.deopt_count = 0U;
+        entry.retryable_call_count = 0U;
         ++stats_.executed_methods;
         ++stats_.osr_executions;
         if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
@@ -9903,6 +10096,7 @@ private:
         u32 observed_calls {0};
         u32 compilation_threshold {0};
         u32 deopt_count {0};
+        u32 retryable_call_count {0};
         u32 osr_pending_polls {0};
         bool rejected {false};
         bool loop_candidate {false};
@@ -10014,7 +10208,8 @@ private:
                                                 *snapshot_method,
                                                 task.descriptor,
                                                 task.has_receiver,
-                                                background_executable_arena_);
+                                                background_executable_arena_,
+                                                inline_resolver_);
             }
             const u64 elapsed = static_cast<u64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -10157,6 +10352,7 @@ private:
             stats_.code_cache_bytes = code_cache_bytes_;
             entry.compiled = std::move(*completed.attempt.method);
             entry.deopt_count = 0U;
+            entry.retryable_call_count = 0U;
             entry.last_used_tick = ++use_tick_;
             ++stats_.compiled_methods;
             ++stats_.background_compile_published;
@@ -10233,6 +10429,7 @@ private:
     bool enabled_ {true};
     std::atomic<bool> startup_mode_ {false};
     JitAvailability availability_ {JitAvailability::unavailable};
+    JitInlineResolverHooks inline_resolver_ {};
     u32 hot_threshold_ {kDefaultHotThreshold};
     u32 startup_hot_threshold_ {kDefaultStartupHotThreshold};
     u32 startup_loop_bytecode_threshold_ {
@@ -10263,6 +10460,10 @@ void BaselineJit::set_enabled(bool enabled) noexcept {
 
 void BaselineJit::set_startup_mode(bool enabled) noexcept {
     impl_->set_startup_mode(enabled);
+}
+
+void BaselineJit::set_inline_resolver(JitInlineResolverHooks hooks) noexcept {
+    impl_->set_inline_resolver(hooks);
 }
 
 void BaselineJit::refresh_availability() noexcept {

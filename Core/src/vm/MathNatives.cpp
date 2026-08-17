@@ -19,10 +19,12 @@ void add(NativeMethodRegistry& registry,
          std::string name,
          std::string descriptor,
          NativeMethod method) {
-    auto registered = registry.register_method("java/lang/Math",
-                                               std::move(name),
-                                               std::move(descriptor),
-                                               std::move(method));
+    auto registered = registry.register_method(
+        "java/lang/Math",
+        std::move(name),
+        std::move(descriptor),
+        std::move(method),
+        NativeJitPolicy::synchronous_bounded);
     if (!registered) {
         std::terminate();
     }

@@ -566,6 +566,261 @@ namespace phoneme::vm
                   "unsupported primitive widening conversion");
     }
 
+    [[nodiscard]] u16 bytecode_cp_index(
+        const std::vector<u8>& code,
+        usize opcode_offset) noexcept
+    {
+      if (opcode_offset + 2U >= code.size()) return 0U;
+      return static_cast<u16>(
+          (static_cast<u16>(code[opcode_offset + 1U]) << 8U) |
+          static_cast<u16>(code[opcode_offset + 2U]));
+    }
+
+    [[nodiscard]] bool matches_rect_contains_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(IIIIII)Z" || !method.code.has_value())
+      {
+        return false;
+      }
+      static constexpr std::array<u8, 32> kPattern {{
+          0x1AU, 0x1CU, 0xA1U, 0x00U, 0x1CU,
+          0x1AU, 0x1CU, 0x15U, 0x04U, 0x60U,
+          0xA2U, 0x00U, 0x14U,
+          0x1BU, 0x1DU, 0xA1U, 0x00U, 0x0FU,
+          0x1BU, 0x1DU, 0x15U, 0x05U, 0x60U,
+          0xA2U, 0x00U, 0x07U,
+          0x04U, 0xA7U, 0x00U, 0x04U, 0x03U, 0xACU,
+      }};
+      return method.code->bytecode ==
+          std::vector<u8>(kPattern.begin(), kPattern.end());
+    }
+
+    [[nodiscard]] bool matches_alpha_land_intrinsic(
+        const classfile::ClassFile& owner,
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(I)Z" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 13U ||
+          code[0U] != 0x1AU || code[1U] != 0x12U ||
+          code[3U] != 0x7EU || code[4U] != 0x99U ||
+          code[7U] != 0x04U || code[8U] != 0xA7U ||
+          code[11U] != 0x03U || code[12U] != 0xACU)
+      {
+        return false;
+      }
+      auto constant = owner.constant(static_cast<u16>(code[2U]));
+      if (!constant || (*constant)->kind != classfile::ConstantKind::integer)
+        return false;
+      return static_cast<i32>(static_cast<u32>((*constant)->bits)) ==
+          static_cast<i32>(0xFF00'0000U);
+    }
+
+    [[nodiscard]] bool matches_tiled_alpha_collision_scan(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) != 0U ||
+          method.descriptor != "(II)Z" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 84U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0x03U}, {1U, 0x3EU}, {2U, 0x1DU}, {3U, 0xB2U},
+          {6U, 0xB6U}, {9U, 0xA2U}, {12U, 0xB2U}, {15U, 0x1DU},
+          {16U, 0xB6U}, {19U, 0xC0U}, {22U, 0x3AU}, {23U, 0x04U},
+          {24U, 0x1BU}, {25U, 0x1CU}, {26U, 0x19U}, {27U, 0x04U},
+          {28U, 0xB4U}, {31U, 0x19U}, {32U, 0x04U}, {33U, 0xB4U},
+          {36U, 0x19U}, {37U, 0x04U}, {38U, 0xB4U}, {41U, 0x19U},
+          {42U, 0x04U}, {43U, 0xB4U}, {46U, 0xB8U}, {49U, 0x99U},
+          {52U, 0x19U}, {53U, 0x04U}, {54U, 0x1BU}, {55U, 0x19U},
+          {56U, 0x04U}, {57U, 0xB4U}, {60U, 0x64U}, {61U, 0x1CU},
+          {62U, 0x19U}, {63U, 0x04U}, {64U, 0xB4U}, {67U, 0x64U},
+          {68U, 0xB6U}, {71U, 0x99U}, {74U, 0x04U}, {75U, 0xACU},
+          {76U, 0x84U}, {77U, 0x03U}, {78U, 0x01U}, {79U, 0xA7U},
+          {82U, 0x03U}, {83U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return bytecode_cp_index(code, 3U) == bytecode_cp_index(code, 12U) &&
+          bytecode_cp_index(code, 28U) == bytecode_cp_index(code, 57U) &&
+          bytecode_cp_index(code, 33U) == bytecode_cp_index(code, 64U);
+    }
+
+    [[nodiscard]] bool matches_pixel_collision_intrinsic(
+        const classfile::ClassFile& owner,
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) != 0U ||
+          method.descriptor != "(II)Z" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 51U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0x1BU}, {1U, 0x9BU}, {4U, 0x1CU}, {5U, 0x9BU},
+          {8U, 0x1BU}, {9U, 0x2AU}, {10U, 0xB4U}, {13U, 0xA2U},
+          {16U, 0x1CU}, {17U, 0x2AU}, {18U, 0xB4U}, {21U, 0xA1U},
+          {24U, 0x03U}, {25U, 0xACU}, {26U, 0x2AU}, {27U, 0xB4U},
+          {30U, 0x9AU}, {33U, 0x2AU}, {34U, 0x1BU}, {35U, 0x1CU},
+          {36U, 0xB6U}, {39U, 0xB8U}, {42U, 0x99U}, {45U, 0x04U},
+          {46U, 0xA7U}, {49U, 0x03U}, {50U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      auto get_pixel = owner.member_reference(bytecode_cp_index(code, 36U));
+      auto land = owner.member_reference(bytecode_cp_index(code, 39U));
+      return get_pixel && land &&
+          get_pixel->kind == classfile::ConstantKind::method_ref &&
+          get_pixel->descriptor == "(II)I" &&
+          land->kind == classfile::ConstantKind::method_ref &&
+          land->descriptor == "(I)Z";
+    }
+
+    [[nodiscard]] bool matches_pixel_getter_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) != 0U ||
+          method.descriptor != "(II)I" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 14U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0x2AU}, {1U, 0xB4U}, {4U, 0x1CU}, {5U, 0x2AU},
+          {6U, 0xB4U}, {9U, 0x68U}, {10U, 0x1BU}, {11U, 0x60U},
+          {12U, 0x2EU}, {13U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return true;
+    }
+
+    [[nodiscard]] bool matches_projectile_collision_scan(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(IILplayer/CPlayer;)Z" ||
+          !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 105U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0xB2U}, {3U, 0xC7U}, {6U, 0x03U}, {7U, 0xACU},
+          {8U, 0x03U}, {9U, 0x3EU}, {10U, 0x1DU}, {11U, 0xB2U},
+          {14U, 0xBEU}, {15U, 0xA2U}, {18U, 0xB2U}, {21U, 0x1DU},
+          {22U, 0x32U}, {23U, 0x3AU}, {24U, 0x04U}, {25U, 0x19U},
+          {26U, 0x04U}, {27U, 0xC6U}, {30U, 0x19U}, {31U, 0x04U},
+          {32U, 0x2CU}, {33U, 0xA5U}, {36U, 0x19U}, {37U, 0x04U},
+          {38U, 0xB8U}, {41U, 0x99U}, {44U, 0x2CU}, {45U, 0xC6U},
+          {48U, 0x19U}, {49U, 0x04U}, {50U, 0xB4U}, {53U, 0x2CU},
+          {54U, 0xB4U}, {57U, 0x9FU}, {60U, 0x19U}, {61U, 0x04U},
+          {62U, 0xB4U}, {65U, 0x9EU}, {68U, 0x19U}, {69U, 0x04U},
+          {70U, 0xB6U}, {73U, 0x08U}, {74U, 0x9FU}, {77U, 0x19U},
+          {78U, 0x04U}, {79U, 0xB4U}, {82U, 0x9AU}, {85U, 0x19U},
+          {86U, 0x04U}, {87U, 0x1AU}, {88U, 0x1BU}, {89U, 0xB8U},
+          {92U, 0x99U}, {95U, 0x04U}, {96U, 0xACU}, {97U, 0x84U},
+          {98U, 0x03U}, {99U, 0x01U}, {100U, 0xA7U},
+          {103U, 0x03U}, {104U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return bytecode_cp_index(code, 0U) == bytecode_cp_index(code, 11U) &&
+          bytecode_cp_index(code, 0U) == bytecode_cp_index(code, 18U);
+    }
+
+    [[nodiscard]] bool matches_damageable_target_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(Lplayer/CPlayer;)Z" ||
+          !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 22U) return false;
+      static constexpr std::pair<usize, u8> kFixed[] = {
+          {0U, 0x2AU}, {1U, 0xC1U}, {4U, 0x99U}, {7U, 0x2AU},
+          {8U, 0xB4U}, {11U, 0x10U}, {12U, 17U}, {13U, 0x9FU},
+          {16U, 0x04U}, {17U, 0xA7U}, {20U, 0x03U}, {21U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kFixed)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return true;
+    }
+
+    [[nodiscard]] bool matches_state_getter_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) != 0U ||
+          method.descriptor != "()B" || !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      return code.size() == 5U && code[0U] == 0x2AU &&
+          code[1U] == 0xB4U && code[4U] == 0xACU;
+    }
+
+    [[nodiscard]] bool matches_non_boss_projectile_hitbox_intrinsic(
+        const classfile::Method& method) noexcept
+    {
+      if ((method.access_flags & kAccStatic) == 0U ||
+          method.descriptor != "(Lplayer/CPlayer;II)Z" ||
+          !method.code.has_value())
+      {
+        return false;
+      }
+      const auto& code = method.code->bytecode;
+      if (code.size() != 625U || code[0U] != 0x2AU ||
+          code[1U] != 0xC1U || code[4U] != 0x99U)
+      {
+        return false;
+      }
+      static constexpr std::pair<usize, u8> kTail[] = {
+          {562U, 0x2AU}, {563U, 0xB4U}, {566U, 0x10U}, {567U, 12U},
+          {568U, 0x64U}, {569U, 0x3EU}, {570U, 0x2AU}, {571U, 0xB4U},
+          {574U, 0x10U}, {575U, 26U}, {576U, 0x64U}, {577U, 0x36U},
+          {578U, 0x04U}, {579U, 0x2AU}, {580U, 0xB4U},
+          {583U, 0x10U}, {584U, 12U}, {585U, 0x60U}, {586U, 0x36U},
+          {587U, 0x05U}, {588U, 0x2AU}, {589U, 0xB4U},
+          {592U, 0x05U}, {593U, 0x60U}, {594U, 0x36U}, {595U, 0x06U},
+          {596U, 0x1BU}, {597U, 0x1DU}, {598U, 0xA1U},
+          {601U, 0x1BU}, {602U, 0x15U}, {603U, 0x05U}, {604U, 0xA3U},
+          {607U, 0x1CU}, {608U, 0x15U}, {609U, 0x04U}, {610U, 0xA1U},
+          {613U, 0x1CU}, {614U, 0x15U}, {615U, 0x06U}, {616U, 0xA3U},
+          {619U, 0x04U}, {620U, 0xA7U}, {623U, 0x03U}, {624U, 0xACU},
+      };
+      for (const auto& [offset, expected] : kTail)
+      {
+        if (code[offset] != expected) return false;
+      }
+      return bytecode_cp_index(code, 563U) == bytecode_cp_index(code, 580U) &&
+          bytecode_cp_index(code, 571U) == bytecode_cp_index(code, 589U);
+    }
+
     [[nodiscard]] bool matches_long_bit_permutation_intrinsic(
         const classfile::Method& method) noexcept
     {
@@ -2311,6 +2566,33 @@ namespace phoneme::vm
     });
 
     register_core_natives(natives_);
+
+    // Cross-class JIT inlining is only legal after the target class has
+    // completed JVM initialization. The resolver is also used by the
+    // background compiler, so keep the existing class-init -> repository lock
+    // ordering used by bounded_jit_invocation_cost().
+    jit_.set_inline_resolver(JitInlineResolverHooks {
+        .context = this,
+        .resolve = [](void* context,
+                      std::string_view owner,
+                      std::string_view name,
+                      std::string_view descriptor)
+            -> std::optional<JitInlineTarget> {
+          auto* machine = static_cast<Machine*>(context);
+          std::scoped_lock initialization_lock(
+              machine->class_initialization_mutex_);
+          auto target = machine->classes_.resolve_method(
+              owner, name, descriptor);
+          if (!target || target->owner == nullptr || target->method == nullptr ||
+              !machine->initialized_classes_.contains(target->owner->name())) {
+            return std::nullopt;
+          }
+          return JitInlineTarget {
+              .owner = std::move(target->owner),
+              .method = target->method,
+          };
+        },
+    });
 
     // CLDC bootstrap classes are initialized by the VM before application
     // class initialization begins. Treating them as ordinary game classes
@@ -4265,6 +4547,8 @@ namespace phoneme::vm
       direct_call_bindings_.clear();
       virtual_call_bindings_.clear();
       trivial_getter_intrinsics_.clear();
+      tiled_alpha_collision_intrinsics_.clear();
+      projectile_collision_intrinsics_.clear();
       operand_resolution_method_id_ = {};
       operand_resolution_method_.reset();
       runtime_method_bindings_.clear();
@@ -5650,6 +5934,7 @@ namespace phoneme::vm
     case JitRuntimeStatus::budget_exhausted:
     case JitRuntimeStatus::unsupported_call:
     case JitRuntimeStatus::fatal_runtime_error:
+    case JitRuntimeStatus::retryable_call:
       break;
     }
     if (!implicit_exception_class.empty())
@@ -7097,6 +7382,101 @@ namespace phoneme::vm
       }
 
       const u64 nested_budget = first;
+
+      // Vector accessors sit in some of the hottest MIDP collision/render
+      // loops. Going through full virtual resolution + NativeMethodRegistry for
+      // size()/elementAt() can cost more than the actual Java loop when called
+      // hundreds of thousands of times from JIT code. These are exact fast
+      // paths for the built-in Vector layout; they preserve null/bounds errors
+      // and do not execute Java bytecode, so nested budget consumption is zero.
+      if (operation == JitRuntimeOperation::invoke_virtual &&
+          operands->receiver.has_value() &&
+          reference->owner == "java/util/Vector")
+      {
+        const ObjectRef vector = *operands->receiver;
+        const auto java_exception = [this, result_bits](
+            std::string_view class_name,
+            std::string_view message) -> u32
+        {
+          auto throwable = create_throwable(class_name, message);
+          if (!throwable)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          *result_bits = throwable->bits;
+          return static_cast<u32>(JitRuntimeStatus::java_throwable);
+        };
+        if (reference->name == "size" && reference->descriptor == "()I")
+        {
+          auto count = heap_.vm_field(vector, 1U);
+          if (!count)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto value = count->as_int();
+          if (!value)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          *result_bits = static_cast<u64>(static_cast<u32>(*value));
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+        if (reference->name == "isEmpty" &&
+            reference->descriptor == "()Z")
+        {
+          auto count = heap_.vm_field(vector, 1U);
+          if (!count)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto value = count->as_int();
+          if (!value)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          *result_bits = *value == 0 ? 1U : 0U;
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+        if (reference->name == "capacity" &&
+            reference->descriptor == "()I")
+        {
+          auto data_value = heap_.vm_field(vector, 0U);
+          if (!data_value)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto data = data_value->as_reference();
+          if (!data || data->is_null())
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto length = heap_.vm_array_length(*data);
+          if (!length ||
+              *length > static_cast<usize>(std::numeric_limits<i32>::max()))
+          {
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          }
+          *result_bits = static_cast<u64>(static_cast<u32>(
+              static_cast<i32>(*length)));
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+        if (reference->name == "elementAt" &&
+            reference->descriptor == "(I)Ljava/lang/Object;" &&
+            operands->arguments.size() == 1U)
+        {
+          auto index = operands->arguments[0U].as_int();
+          auto count_value = heap_.vm_field(vector, 1U);
+          auto data_value = heap_.vm_field(vector, 0U);
+          if (!index || !count_value || !data_value)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto count = count_value->as_int();
+          auto data = data_value->as_reference();
+          if (!count || !data || data->is_null())
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          if (*index < 0 || *index >= *count)
+          {
+            return java_exception(
+                "java/lang/ArrayIndexOutOfBoundsException",
+                "Vector index is out of range");
+          }
+          auto value = heap_.vm_array_element_snapshot(
+              *data, static_cast<usize>(*index));
+          if (!value || value->kind != HeapArrayKind::reference)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto reference_value = value->value.as_reference();
+          if (!reference_value)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          *result_bits = reference_value->bits;
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+      }
+
       if (operation == JitRuntimeOperation::invoke_interface &&
           operands->receiver.has_value())
       {
@@ -7330,28 +7710,47 @@ namespace phoneme::vm
         if (!initialized_classes_.contains(reference->owner))
           return static_cast<u32>(JitRuntimeStatus::deoptimize);
       }
-      const auto bounded_cost = bounded_jit_invocation_cost(
-          *resolved_target, 0U);
-      if (!bounded_cost.has_value() || *bounded_cost > nested_budget)
+
+      if (operation == JitRuntimeOperation::invoke_virtual &&
+          operands->arguments.size() == 2U)
       {
-        if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
-            trace_value != nullptr && *trace_value != '\0' &&
-            std::string_view(trace_value) != "0")
+        auto x = operands->arguments[0U].as_int();
+        auto y = operands->arguments[1U].as_int();
+        if (x && y)
         {
-          std::fprintf(stderr,
-                       "[phoneMEJIT] predeopt-call %s.%s%s budget=%llu "
-                       "bound=%s\n",
-                       reference->owner.c_str(),
-                       reference->name.c_str(),
-                       reference->descriptor.c_str(),
-                       static_cast<unsigned long long>(nested_budget),
-                       bounded_cost.has_value() ? "over" : "unbounded");
+          auto collision = try_tiled_alpha_collision_intrinsic(
+              *resolved_target, *x, *y);
+          if (!collision)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          if (collision->has_value())
+          {
+            if (!encode_value(**collision))
+              return static_cast<u32>(JitRuntimeStatus::deoptimize);
+            return static_cast<u32>(JitRuntimeStatus::success);
+          }
         }
-        // No callee bytecode has executed yet. Mark this separately from a
-        // transient deopt so the compiled caller can be retired immediately
-        // after its exact interpreter-resume state has been captured.
-        return static_cast<u32>(JitRuntimeStatus::unsupported_call);
       }
+      if (operation == JitRuntimeOperation::invoke_static &&
+          operands->arguments.size() == 3U)
+      {
+        auto x = operands->arguments[0U].as_int();
+        auto y = operands->arguments[1U].as_int();
+        auto shooter = operands->arguments[2U].as_reference();
+        if (x && y && shooter)
+        {
+          auto projectile = try_projectile_collision_intrinsic(
+              *resolved_target, *x, *y, *shooter);
+          if (!projectile)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          if (projectile->has_value())
+          {
+            if (!encode_value(**projectile))
+              return static_cast<u32>(JitRuntimeStatus::deoptimize);
+            return static_cast<u32>(JitRuntimeStatus::success);
+          }
+        }
+      }
+
       // Fast JIT-to-JIT chain for an already compiled method. Runtime-helper
       // callees receive a nested GC/deopt context rooted through the compiled
       // caller. If the callee deoptimizes after a side effect, resume the
@@ -7550,6 +7949,38 @@ namespace phoneme::vm
           }
           return static_cast<u32>(JitRuntimeStatus::success);
         }
+      }
+
+      // No cached native body was available. Only now require the conservative
+      // bounded-call proof before entering the callee through the interpreter.
+      // Keeping this check ahead of try_execute_cached made hot virtual helpers
+      // impossible to chain: a method could already be safely compiled with
+      // its own budget guards and precise deopt state, yet the caller was
+      // rejected because the source-level call tree contained a virtual call.
+      const auto bounded_cost = bounded_jit_invocation_cost(
+          *resolved_target, 0U);
+      if (!bounded_cost.has_value() || *bounded_cost > nested_budget)
+      {
+        if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
+            trace_value != nullptr && *trace_value != '\0' &&
+            std::string_view(trace_value) != "0")
+        {
+          std::fprintf(stderr,
+                       "[phoneMEJIT] predeopt-call %s.%s%s budget=%llu "
+                       "bound=%s\n",
+                       reference->owner.c_str(),
+                       reference->name.c_str(),
+                       reference->descriptor.c_str(),
+                       static_cast<unsigned long long>(nested_budget),
+                       bounded_cost.has_value() ? "over" : "unbounded");
+        }
+        // Java bytecode may become a valid cached JIT target after this first
+        // interpreter fallback. Treat that as a transient precise deopt so the
+        // caller can retry later. Conservative native/abstract targets cannot
+        // acquire such a compiled body and remain permanently unsupported.
+        return static_cast<u32>(resolved_target->method->code.has_value()
+            ? JitRuntimeStatus::retryable_call
+            : JitRuntimeStatus::unsupported_call);
       }
 
       // Execute the resolved target through the normal VM entry path. The
@@ -8757,6 +9188,494 @@ namespace phoneme::vm
     if (!payload)
       return std::unexpected(payload.error());
     return widen_primitive_value(*payload, *source_kind, target_kind);
+  }
+
+  Result<std::optional<Value>> Machine::try_tiled_alpha_collision_intrinsic(
+      const ResolvedMethod& method,
+      i32 x,
+      i32 y)
+  {
+    if (!specialized_intrinsics_requested() || method.owner == nullptr ||
+        method.method == nullptr || !method.method->code.has_value() ||
+        !matches_tiled_alpha_collision_scan(*method.method))
+    {
+      return std::optional<Value>{};
+    }
+
+    auto cached = tiled_alpha_collision_intrinsics_.find(method.method);
+    if (cached == tiled_alpha_collision_intrinsics_.end())
+    {
+      std::optional<TiledAlphaCollisionIntrinsic> resolved;
+      u32 resolution_stage = 0U;
+      const auto& owner = *method.owner;
+      const auto& code = method.method->code->bytecode;
+      const auto same_member = [](const classfile::MemberReference& left,
+                                  const classfile::MemberReference& right) {
+        return left.kind == right.kind && left.owner == right.owner &&
+            left.name == right.name && left.descriptor == right.descriptor;
+      };
+
+      auto maps = owner.member_reference(bytecode_cp_index(code, 3U));
+      auto size = owner.member_reference(bytecode_cp_index(code, 6U));
+      auto element_at = owner.member_reference(bytecode_cp_index(code, 16U));
+      auto tile_class = owner.class_name_constant(bytecode_cp_index(code, 19U));
+      auto tile_x = owner.member_reference(bytecode_cp_index(code, 28U));
+      auto tile_y = owner.member_reference(bytecode_cp_index(code, 33U));
+      auto tile_width = owner.member_reference(bytecode_cp_index(code, 38U));
+      auto tile_height = owner.member_reference(bytecode_cp_index(code, 43U));
+      auto rect = owner.member_reference(bytecode_cp_index(code, 46U));
+      auto collision = owner.member_reference(bytecode_cp_index(code, 68U));
+
+      const bool scan_refs_valid =
+          maps && size && element_at && tile_class && tile_x && tile_y &&
+          tile_width && tile_height && rect && collision &&
+          maps->kind == classfile::ConstantKind::field_ref &&
+          maps->descriptor == "Ljava/util/Vector;" &&
+          size->kind == classfile::ConstantKind::method_ref &&
+          size->owner == "java/util/Vector" && size->name == "size" &&
+          size->descriptor == "()I" &&
+          element_at->kind == classfile::ConstantKind::method_ref &&
+          element_at->owner == "java/util/Vector" &&
+          element_at->name == "elementAt" &&
+          element_at->descriptor == "(I)Ljava/lang/Object;" &&
+          tile_x->kind == classfile::ConstantKind::field_ref &&
+          tile_y->kind == classfile::ConstantKind::field_ref &&
+          tile_width->kind == classfile::ConstantKind::field_ref &&
+          tile_height->kind == classfile::ConstantKind::field_ref &&
+          tile_x->owner == *tile_class && tile_y->owner == *tile_class &&
+          tile_width->owner == *tile_class &&
+          tile_height->owner == *tile_class &&
+          tile_x->descriptor == "I" && tile_y->descriptor == "I" &&
+          tile_width->descriptor == "I" && tile_height->descriptor == "I" &&
+          rect->kind == classfile::ConstantKind::method_ref &&
+          rect->descriptor == "(IIIIII)Z" &&
+          collision->kind == classfile::ConstantKind::method_ref &&
+          collision->owner == *tile_class &&
+          collision->descriptor == "(II)Z";
+
+      if (scan_refs_valid)
+      {
+        resolution_stage = 1U;
+        auto rect_target = classes_.resolve_method(
+            rect->owner, rect->name, rect->descriptor);
+        auto collision_target = classes_.resolve_method(
+            collision->owner, collision->name, collision->descriptor);
+        if (rect_target && collision_target &&
+            rect_target->owner != nullptr && rect_target->method != nullptr &&
+            collision_target->owner != nullptr &&
+            collision_target->method != nullptr &&
+            matches_rect_contains_intrinsic(*rect_target->method) &&
+            matches_pixel_collision_intrinsic(
+                *collision_target->owner, *collision_target->method))
+        {
+          resolution_stage = 2U;
+          const auto& collision_code =
+              collision_target->method->code->bytecode;
+          auto collision_width = collision_target->owner->member_reference(
+              bytecode_cp_index(collision_code, 10U));
+          auto collision_height = collision_target->owner->member_reference(
+              bytecode_cp_index(collision_code, 18U));
+          auto silk = collision_target->owner->member_reference(
+              bytecode_cp_index(collision_code, 27U));
+          auto get_pixel = collision_target->owner->member_reference(
+              bytecode_cp_index(collision_code, 36U));
+          auto land = collision_target->owner->member_reference(
+              bytecode_cp_index(collision_code, 39U));
+
+          if (collision_width && collision_height && silk && get_pixel && land &&
+              same_member(*collision_width, *tile_width) &&
+              same_member(*collision_height, *tile_height) &&
+              silk->kind == classfile::ConstantKind::field_ref &&
+              silk->owner == *tile_class && silk->descriptor == "Z" &&
+              get_pixel->kind == classfile::ConstantKind::method_ref &&
+              get_pixel->owner == *tile_class &&
+              get_pixel->descriptor == "(II)I" &&
+              land->kind == classfile::ConstantKind::method_ref &&
+              land->descriptor == "(I)Z")
+          {
+            auto get_pixel_target = classes_.resolve_method(
+                get_pixel->owner, get_pixel->name, get_pixel->descriptor);
+            auto land_target = classes_.resolve_method(
+                land->owner, land->name, land->descriptor);
+            if (get_pixel_target && land_target &&
+                get_pixel_target->owner != nullptr &&
+                get_pixel_target->method != nullptr &&
+                land_target->owner != nullptr && land_target->method != nullptr &&
+                matches_pixel_getter_intrinsic(*get_pixel_target->method) &&
+                matches_alpha_land_intrinsic(
+                    *land_target->owner, *land_target->method))
+            {
+              resolution_stage = 3U;
+              const auto& getter_code =
+                  get_pixel_target->method->code->bytecode;
+              auto pixels = get_pixel_target->owner->member_reference(
+                  bytecode_cp_index(getter_code, 1U));
+              auto getter_width = get_pixel_target->owner->member_reference(
+                  bytecode_cp_index(getter_code, 6U));
+              if (pixels && getter_width &&
+                  pixels->kind == classfile::ConstantKind::field_ref &&
+                  pixels->owner == *tile_class && pixels->descriptor == "[I" &&
+                  same_member(*getter_width, *tile_width))
+              {
+                auto maps_field = states_.resolve_field(
+                    maps->owner, maps->name, maps->descriptor, true);
+                auto x_field = states_.resolve_field(
+                    tile_x->owner, tile_x->name, tile_x->descriptor, false);
+                auto y_field = states_.resolve_field(
+                    tile_y->owner, tile_y->name, tile_y->descriptor, false);
+                auto width_field = states_.resolve_field(
+                    tile_width->owner, tile_width->name,
+                    tile_width->descriptor, false);
+                auto height_field = states_.resolve_field(
+                    tile_height->owner, tile_height->name,
+                    tile_height->descriptor, false);
+                auto silk_field = states_.resolve_field(
+                    silk->owner, silk->name, silk->descriptor, false);
+                auto pixels_field = states_.resolve_field(
+                    pixels->owner, pixels->name, pixels->descriptor, false);
+                if (maps_field && x_field && y_field && width_field &&
+                    height_field && silk_field && pixels_field)
+                {
+                  resolution_stage = 4U;
+                  resolved = TiledAlphaCollisionIntrinsic {
+                      .tiles = std::move(*maps_field),
+                      .tile_x = std::move(*x_field),
+                      .tile_y = std::move(*y_field),
+                      .tile_width = std::move(*width_field),
+                      .tile_height = std::move(*height_field),
+                      .tile_silk_collision = std::move(*silk_field),
+                      .tile_pixels = std::move(*pixels_field),
+                      .tile_class = *tile_class,
+                  };
+                }
+              }
+            }
+          }
+        }
+      }
+      if (const char* trace_value = std::getenv("PHONEME_JIT_TRACE");
+          trace_value != nullptr && *trace_value != '\0' &&
+          std::string_view(trace_value) != "0")
+      {
+        std::fprintf(stderr,
+                     "[phoneMEJIT] tiled-alpha-intrinsic %s.%s%s stage=%u enabled=%d\n",
+                     method.owner->name().c_str(),
+                     method.method->name.c_str(),
+                     method.method->descriptor.c_str(),
+                     static_cast<unsigned>(resolution_stage),
+                     resolved.has_value() ? 1 : 0);
+      }
+      cached = tiled_alpha_collision_intrinsics_.emplace(
+          method.method, std::move(resolved)).first;
+    }
+
+    if (!cached->second.has_value()) return std::optional<Value>{};
+    const TiledAlphaCollisionIntrinsic& intrinsic = *cached->second;
+    auto tiles_value = states_.static_field(intrinsic.tiles);
+    if (!tiles_value) return std::unexpected(tiles_value.error());
+    auto tiles = tiles_value->as_reference();
+    if (!tiles || tiles->is_null()) return std::optional<Value>{};
+
+    // Built-in java.util.Vector layout: Object[] elementData, int elementCount.
+    auto data_value = heap_.vm_field(*tiles, 0U);
+    auto count_value = heap_.vm_field(*tiles, 1U);
+    if (!data_value || !count_value) return std::optional<Value>{};
+    auto data = data_value->as_reference();
+    auto count = count_value->as_int();
+    if (!data || data->is_null() || !count || *count < 0)
+      return std::optional<Value>{};
+
+    const auto wrapping_add = [](i32 left, i32 right) noexcept {
+      return static_cast<i32>(static_cast<u32>(left) +
+                              static_cast<u32>(right));
+    };
+    const auto wrapping_sub = [](i32 left, i32 right) noexcept {
+      return static_cast<i32>(static_cast<u32>(left) -
+                              static_cast<u32>(right));
+    };
+    const auto int_field = [this](ObjectRef object,
+                                  const FieldLocation& field)
+        -> std::optional<i32>
+    {
+      auto value = heap_.vm_field(object, field.index);
+      if (!value) return std::nullopt;
+      auto integer = value->as_int();
+      if (!integer) return std::nullopt;
+      return *integer;
+    };
+
+    for (i32 index = 0; index < *count; ++index)
+    {
+      auto tile_value = heap_.vm_array_element_snapshot(
+          *data, static_cast<usize>(index));
+      if (!tile_value || tile_value->kind != HeapArrayKind::reference)
+        return std::optional<Value>{};
+      auto tile = tile_value->value.as_reference();
+      if (!tile || tile->is_null()) return std::optional<Value>{};
+      auto runtime_class = heap_.vm_class_name(*tile);
+      if (!runtime_class) return std::optional<Value>{};
+      if (*runtime_class != intrinsic.tile_class)
+      {
+        auto compatible = classes_.is_assignable(
+            *runtime_class, intrinsic.tile_class);
+        if (!compatible || !*compatible) return std::optional<Value>{};
+      }
+
+      const auto tile_x = int_field(*tile, intrinsic.tile_x);
+      const auto tile_y = int_field(*tile, intrinsic.tile_y);
+      const auto width = int_field(*tile, intrinsic.tile_width);
+      const auto height = int_field(*tile, intrinsic.tile_height);
+      if (!tile_x || !tile_y || !width || !height)
+        return std::optional<Value>{};
+      const i32 right = wrapping_add(*tile_x, *width);
+      const i32 bottom = wrapping_add(*tile_y, *height);
+      if (x < *tile_x || x >= right || y < *tile_y || y >= bottom)
+        continue;
+
+      const i32 local_x = wrapping_sub(x, *tile_x);
+      const i32 local_y = wrapping_sub(y, *tile_y);
+      if (local_x < 0 || local_y < 0 || local_x >= *width ||
+          local_y >= *height)
+      {
+        return std::optional<Value>{};
+      }
+      const auto silk = int_field(*tile, intrinsic.tile_silk_collision);
+      if (!silk) return std::optional<Value>{};
+      if (*silk != 0) return std::optional<Value>(Value::from_int(1));
+
+      auto pixels_value = heap_.vm_field(*tile, intrinsic.tile_pixels.index);
+      if (!pixels_value) return std::optional<Value>{};
+      auto pixels = pixels_value->as_reference();
+      if (!pixels || pixels->is_null()) return std::optional<Value>{};
+      const i64 pixel_index_64 =
+          static_cast<i64>(local_y) * static_cast<i64>(*width) +
+          static_cast<i64>(local_x);
+      if (pixel_index_64 < 0 ||
+          static_cast<u64>(pixel_index_64) >
+              static_cast<u64>(std::numeric_limits<usize>::max()))
+      {
+        return std::optional<Value>{};
+      }
+      auto pixel = heap_.vm_array_element_snapshot(
+          *pixels, static_cast<usize>(pixel_index_64));
+      if (!pixel || pixel->kind != HeapArrayKind::integer)
+        return std::optional<Value>{};
+      auto color = pixel->value.as_int();
+      if (!color) return std::optional<Value>{};
+      return std::optional<Value>(Value::from_int(
+          (static_cast<u32>(*color) & 0xFF00'0000U) != 0U ? 1 : 0));
+    }
+    return std::optional<Value>(Value::from_int(0));
+  }
+
+  Result<std::optional<Value>> Machine::try_projectile_collision_intrinsic(
+      const ResolvedMethod& method,
+      i32 x,
+      i32 y,
+      ObjectRef shooter)
+  {
+    if (!specialized_intrinsics_requested() || method.owner == nullptr ||
+        method.method == nullptr || !method.method->code.has_value() ||
+        !matches_projectile_collision_scan(*method.method))
+    {
+      return std::optional<Value>{};
+    }
+
+    auto cached = projectile_collision_intrinsics_.find(method.method);
+    if (cached == projectile_collision_intrinsics_.end())
+    {
+      std::optional<ProjectileCollisionIntrinsic> resolved;
+      const auto& owner = *method.owner;
+      const auto& code = method.method->code->bytecode;
+      auto players = owner.member_reference(bytecode_cp_index(code, 0U));
+      auto damageable = owner.member_reference(bytecode_cp_index(code, 38U));
+      auto team = owner.member_reference(bytecode_cp_index(code, 50U));
+      auto hp = owner.member_reference(bytecode_cp_index(code, 62U));
+      auto get_state = owner.member_reference(bytecode_cp_index(code, 70U));
+      auto invisible = owner.member_reference(bytecode_cp_index(code, 79U));
+      auto hitbox = owner.member_reference(bytecode_cp_index(code, 89U));
+
+      if (players && damageable && team && hp && get_state && invisible && hitbox &&
+          players->kind == classfile::ConstantKind::field_ref &&
+          players->descriptor.size() > 3U &&
+          players->descriptor.starts_with("[L") &&
+          players->descriptor.back() == ';' &&
+          damageable->kind == classfile::ConstantKind::method_ref &&
+          damageable->descriptor == "(Lplayer/CPlayer;)Z" &&
+          team->kind == classfile::ConstantKind::field_ref &&
+          team->descriptor == "Z" &&
+          hp->kind == classfile::ConstantKind::field_ref && hp->descriptor == "I" &&
+          get_state->kind == classfile::ConstantKind::method_ref &&
+          get_state->descriptor == "()B" &&
+          invisible->kind == classfile::ConstantKind::field_ref &&
+          invisible->descriptor == "Z" &&
+          hitbox->kind == classfile::ConstantKind::method_ref &&
+          hitbox->descriptor == "(Lplayer/CPlayer;II)Z")
+      {
+        const std::string player_class = players->descriptor.substr(
+            2U, players->descriptor.size() - 3U);
+        if (team->owner == player_class && hp->owner == player_class &&
+            invisible->owner == player_class)
+        {
+          auto damageable_target = classes_.resolve_method(
+              damageable->owner, damageable->name, damageable->descriptor);
+          auto state_target = classes_.resolve_method(
+              get_state->owner, get_state->name, get_state->descriptor);
+          auto hitbox_target = classes_.resolve_method(
+              hitbox->owner, hitbox->name, hitbox->descriptor);
+          if (damageable_target && state_target && hitbox_target &&
+              damageable_target->owner != nullptr &&
+              damageable_target->method != nullptr &&
+              state_target->owner != nullptr && state_target->method != nullptr &&
+              hitbox_target->owner != nullptr && hitbox_target->method != nullptr &&
+              matches_damageable_target_intrinsic(*damageable_target->method) &&
+              matches_state_getter_intrinsic(*state_target->method) &&
+              matches_non_boss_projectile_hitbox_intrinsic(
+                  *hitbox_target->method))
+          {
+            const auto& damageable_code =
+                damageable_target->method->code->bytecode;
+            const auto& state_code = state_target->method->code->bytecode;
+            const auto& hitbox_code = hitbox_target->method->code->bytecode;
+            auto damageable_boss = damageable_target->owner->class_name_constant(
+                bytecode_cp_index(damageable_code, 1U));
+            auto hitbox_boss = hitbox_target->owner->class_name_constant(
+                bytecode_cp_index(hitbox_code, 1U));
+            auto state_field_ref = state_target->owner->member_reference(
+                bytecode_cp_index(state_code, 1U));
+            auto x_ref = hitbox_target->owner->member_reference(
+                bytecode_cp_index(hitbox_code, 563U));
+            auto y_ref = hitbox_target->owner->member_reference(
+                bytecode_cp_index(hitbox_code, 571U));
+            if (damageable_boss && hitbox_boss &&
+                *damageable_boss == *hitbox_boss && state_field_ref && x_ref && y_ref &&
+                state_field_ref->kind == classfile::ConstantKind::field_ref &&
+                state_field_ref->owner == player_class &&
+                state_field_ref->descriptor == "B" &&
+                x_ref->kind == classfile::ConstantKind::field_ref &&
+                x_ref->owner == player_class && x_ref->descriptor == "I" &&
+                y_ref->kind == classfile::ConstantKind::field_ref &&
+                y_ref->owner == player_class && y_ref->descriptor == "I")
+            {
+              auto players_field = states_.resolve_field(
+                  players->owner, players->name, players->descriptor, true);
+              auto team_field = states_.resolve_field(
+                  team->owner, team->name, team->descriptor, false);
+              auto hp_field = states_.resolve_field(
+                  hp->owner, hp->name, hp->descriptor, false);
+              auto invisible_field = states_.resolve_field(
+                  invisible->owner, invisible->name, invisible->descriptor, false);
+              auto state_field = states_.resolve_field(
+                  state_field_ref->owner, state_field_ref->name,
+                  state_field_ref->descriptor, false);
+              auto x_field = states_.resolve_field(
+                  x_ref->owner, x_ref->name, x_ref->descriptor, false);
+              auto y_field = states_.resolve_field(
+                  y_ref->owner, y_ref->name, y_ref->descriptor, false);
+              if (players_field && team_field && hp_field && invisible_field &&
+                  state_field && x_field && y_field)
+              {
+                resolved = ProjectileCollisionIntrinsic {
+                    .players = std::move(*players_field),
+                    .team = std::move(*team_field),
+                    .hp = std::move(*hp_field),
+                    .invisible = std::move(*invisible_field),
+                    .state = std::move(*state_field),
+                    .x = std::move(*x_field),
+                    .y = std::move(*y_field),
+                    .player_class = player_class,
+                    .boss_class = *damageable_boss,
+                };
+              }
+            }
+          }
+        }
+      }
+      cached = projectile_collision_intrinsics_.emplace(
+          method.method, std::move(resolved)).first;
+    }
+
+    if (!cached->second.has_value()) return std::optional<Value>{};
+    const ProjectileCollisionIntrinsic& intrinsic = *cached->second;
+    auto players_value = states_.static_field(intrinsic.players);
+    if (!players_value) return std::unexpected(players_value.error());
+    auto players = players_value->as_reference();
+    if (!players) return std::unexpected(players.error());
+    if (players->is_null())
+      return std::optional<Value>(Value::from_int(0));
+
+    auto player_count = heap_.vm_array_length(*players);
+    if (!player_count) return std::optional<Value>{};
+    const auto int_field = [this](ObjectRef object,
+                                  const FieldLocation& field)
+        -> std::optional<i32>
+    {
+      auto value = heap_.vm_field(object, field.index);
+      if (!value) return std::nullopt;
+      auto integer = value->as_int();
+      if (!integer) return std::nullopt;
+      return *integer;
+    };
+    const auto wrapping_add = [](i32 left, i32 right) noexcept {
+      return static_cast<i32>(static_cast<u32>(left) +
+                              static_cast<u32>(right));
+    };
+    const auto wrapping_sub = [](i32 left, i32 right) noexcept {
+      return static_cast<i32>(static_cast<u32>(left) -
+                              static_cast<u32>(right));
+    };
+
+    std::optional<i32> shooter_team;
+    if (!shooter.is_null())
+    {
+      auto shooter_class = heap_.vm_class_name(shooter);
+      if (!shooter_class) return std::optional<Value>{};
+      auto compatible = classes_.is_assignable(
+          *shooter_class, intrinsic.player_class);
+      if (!compatible || !*compatible) return std::optional<Value>{};
+      shooter_team = int_field(shooter, intrinsic.team);
+      if (!shooter_team.has_value()) return std::optional<Value>{};
+    }
+
+    for (usize index = 0U; index < *player_count; ++index)
+    {
+      auto target_value = heap_.vm_array_element_snapshot(*players, index);
+      if (!target_value || target_value->kind != HeapArrayKind::reference)
+        return std::optional<Value>{};
+      auto target = target_value->value.as_reference();
+      if (!target) return std::optional<Value>{};
+      if (target->is_null() || *target == shooter) continue;
+
+      auto target_class = heap_.vm_class_name(*target);
+      if (!target_class) return std::optional<Value>{};
+      if (*target_class != intrinsic.player_class)
+      {
+        // Boss hitboxes and arbitrary CPlayer subclasses can override state or
+        // require gun-specific geometry. Preserve their Java dispatch exactly.
+        return std::optional<Value>{};
+      }
+
+      const auto target_team = int_field(*target, intrinsic.team);
+      const auto hp = int_field(*target, intrinsic.hp);
+      const auto state = int_field(*target, intrinsic.state);
+      const auto invisible = int_field(*target, intrinsic.invisible);
+      if (!target_team || !hp || !state || !invisible)
+        return std::optional<Value>{};
+      if (shooter_team.has_value() && *target_team == *shooter_team)
+        continue;
+      if (*hp <= 0 || *state == 5 || *invisible != 0) continue;
+
+      const auto target_x = int_field(*target, intrinsic.x);
+      const auto target_y = int_field(*target, intrinsic.y);
+      if (!target_x || !target_y) return std::optional<Value>{};
+      const i32 left = wrapping_sub(*target_x, 12);
+      const i32 top = wrapping_sub(*target_y, 26);
+      const i32 right = wrapping_add(*target_x, 12);
+      const i32 bottom = wrapping_add(*target_y, 2);
+      if (x >= left && x <= right && y >= top && y <= bottom)
+        return std::optional<Value>(Value::from_int(1));
+    }
+    return std::optional<Value>(Value::from_int(0));
   }
 
   void Machine::prune_lambda_bindings()
@@ -13186,6 +14105,67 @@ namespace phoneme::vm
         }
         if (!nested_is_native)
         {
+          if (nested->has_receiver && nested->arguments.size() == 3U)
+          {
+            auto x = nested->arguments[1U].as_int();
+            auto y = nested->arguments[2U].as_int();
+            if (x && y)
+            {
+              auto collision = try_tiled_alpha_collision_intrinsic(
+                  nested->method, *x, *y);
+              if (!collision)
+              {
+                auto released = release_synchronized_monitor(*nested_monitor);
+                if (!released)
+                  return std::unexpected(released.error());
+                return std::unexpected(collision.error());
+              }
+              if (collision->has_value())
+              {
+                auto released = release_synchronized_monitor(*nested_monitor);
+                if (!released)
+                  return std::unexpected(released.error());
+                if (budget_mode == InstructionBudgetMode::progress_watchdog)
+                  watchdog_instructions = 0U;
+                auto pushed = frame.push(**collision);
+                if (!pushed)
+                  return std::unexpected(pushed.error());
+                break;
+              }
+            }
+          }
+
+          if (!nested->has_receiver && nested->arguments.size() == 3U)
+          {
+            auto x = nested->arguments[0U].as_int();
+            auto y = nested->arguments[1U].as_int();
+            auto shooter = nested->arguments[2U].as_reference();
+            if (x && y && shooter)
+            {
+              auto projectile = try_projectile_collision_intrinsic(
+                  nested->method, *x, *y, *shooter);
+              if (!projectile)
+              {
+                auto released = release_synchronized_monitor(*nested_monitor);
+                if (!released)
+                  return std::unexpected(released.error());
+                return std::unexpected(projectile.error());
+              }
+              if (projectile->has_value())
+              {
+                auto released = release_synchronized_monitor(*nested_monitor);
+                if (!released)
+                  return std::unexpected(released.error());
+                if (budget_mode == InstructionBudgetMode::progress_watchdog)
+                  watchdog_instructions = 0U;
+                auto pushed = frame.push(**projectile);
+                if (!pushed)
+                  return std::unexpected(pushed.error());
+                break;
+              }
+            }
+          }
+
           auto trivial_getter = try_trivial_getter_intrinsic(*nested);
           if (!trivial_getter)
           {
