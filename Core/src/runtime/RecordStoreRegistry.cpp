@@ -370,6 +370,11 @@ Status RecordStoreRegistry::close(std::string_view name) {
                     "RMS store is already closed");
     }
     --(*store)->open_count;
+    if ((*store)->open_count == 0U && (*store)->pending_persist) {
+        auto persisted = persist_unlocked(**store);
+        if (!persisted) return persisted;
+        (*store)->pending_persist = false;
+    }
     return {};
 }
 
@@ -569,7 +574,7 @@ Result<i32> RecordStoreRegistry::add_record(
     (*store)->last_modified_ms = next_modified_time(
         (*store)->last_modified_ms);
     (*store)->storage_format = kCurrentFormatVersion;
-    auto persisted = persist_unlocked(**store);
+    auto persisted = commit_mutation_unlocked(**store);
     if (!persisted) {
         (*store)->records.erase(id);
         (*store)->next_record_id = previous_next_id;
@@ -615,7 +620,7 @@ Status RecordStoreRegistry::set_record(std::string_view name,
     (*store)->last_modified_ms = next_modified_time(
         (*store)->last_modified_ms);
     (*store)->storage_format = kCurrentFormatVersion;
-    auto persisted = persist_unlocked(**store);
+    auto persisted = commit_mutation_unlocked(**store);
     if (!persisted) {
         record->second.swap(replacement);
         (*store)->version = previous_version;
@@ -649,7 +654,7 @@ Status RecordStoreRegistry::delete_record(std::string_view name,
     (*store)->last_modified_ms = next_modified_time(
         (*store)->last_modified_ms);
     (*store)->storage_format = kCurrentFormatVersion;
-    auto persisted = persist_unlocked(**store);
+    auto persisted = commit_mutation_unlocked(**store);
     if (!persisted) {
         (*store)->records.insert(std::move(removed));
         (*store)->version = previous_version;
@@ -937,6 +942,50 @@ Result<RecordStoreRegistry::Store> RecordStoreRegistry::recover_file_unlocked(
         }
     }
     return std::move(selected->store);
+}
+
+Status RecordStoreRegistry::commit_mutation_unlocked(Store& store) const {
+    if (!write_through_) {
+        if (!store.pending_persist) {
+            store.pending_persist = true;
+            store.pending_since = std::chrono::steady_clock::now();
+        }
+        return {};
+    }
+    return persist_unlocked(store);
+}
+
+void RecordStoreRegistry::set_write_through(bool enabled) noexcept {
+    std::scoped_lock lock(mutex_);
+    write_through_ = enabled;
+}
+
+void RecordStoreRegistry::flush_pending() {
+    std::scoped_lock lock(mutex_);
+    // ponytail: fixed 250ms pending window flushed on the VM thread; an
+    // async flusher thread would shave the remaining hitch but costs a
+    // thread on every platform including wasm.
+    constexpr auto kPendingFlushDelay = std::chrono::milliseconds(250);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& [name, store] : stores_) {
+        (void)name;
+        if (!store.pending_persist || store.open_count == 0U) continue;
+        if (now - store.pending_since < kPendingFlushDelay) continue;
+        if (persist_unlocked(store).has_value())
+            store.pending_persist = false;
+    }
+}
+
+Status RecordStoreRegistry::flush_all() {
+    std::scoped_lock lock(mutex_);
+    for (auto& [name, store] : stores_) {
+        (void)name;
+        if (!store.pending_persist) continue;
+        auto persisted = persist_unlocked(store);
+        if (!persisted) return persisted;
+        store.pending_persist = false;
+    }
+    return {};
 }
 
 Status RecordStoreRegistry::persist_unlocked(const Store& store) const {

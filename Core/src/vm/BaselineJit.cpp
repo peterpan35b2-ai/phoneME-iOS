@@ -5574,19 +5574,6 @@ compute_constant_flow(
     u64 unrolled_int_array_loops = 0U;
     u64 register_cached_stores_elided = 0U;
 
-    const auto emit_budget_guard = [&](u32 cost) {
-        while (cost != 0U) {
-            const u32 chunk = std::min(cost, 4'095U);
-            emitter.compare_imm_w(kBudgetRemaining, chunk);
-            budget_patches.push_back(
-                emitter.emit_conditional_branch_placeholder(
-                    Arm64Condition::unsigned_lower));
-            emitter.sub_imm_w(kBudgetRemaining,
-                              kBudgetRemaining,
-                              chunk);
-            cost -= chunk;
-        }
-    };
 
     const auto emit_normal_return = [&](bool has_value,
                                         u32 result_register) {
@@ -5748,6 +5735,49 @@ compute_constant_flow(
                        kRuntimeResultOffset);
     };
 
+    // Budget exhaustion routes through a runtime call so the dispatch
+    // trampoline captures an exact deopt frame at this pc. The interpreter
+    // then resumes the method at the boundary instead of unwinding, which is
+    // what lets scheduler-owned entries with effectively unbounded budgets
+    // still enter compiled code (see Machine::safe_jit_instruction_budget).
+    const auto emit_budget_guard = [&](u32 cost, u32 bytecode_pc) -> bool {
+        // The guard's runtime call needs the dispatch trampoline so the deopt
+        // frame is captured at this pc. Without it a budget exhaustion would
+        // fall into the no-state deopt path and re-execute side effects.
+        requires_runtime_dispatch = true;
+        std::vector<usize> exhausted_branches;
+        while (cost != 0U) {
+            const u32 chunk = std::min(cost, 4'095U);
+            emitter.compare_imm_w(kBudgetRemaining, chunk);
+            exhausted_branches.push_back(
+                emitter.emit_conditional_branch_placeholder(
+                    Arm64Condition::unsigned_lower));
+            emitter.sub_imm_w(kBudgetRemaining,
+                              kBudgetRemaining,
+                              chunk);
+            cost -= chunk;
+        }
+        if (exhausted_branches.empty()) return true;
+        const usize continue_branch = emitter.emit_branch_placeholder();
+        const usize slow_path = emitter.position();
+        emit_runtime_call(JitRuntimeOperation::budget_safepoint,
+                          0U,
+                          31U,
+                          31U,
+                          31U,
+                          bytecode_pc);
+        terminal_deopt_patches.push_back(emitter.emit_branch_placeholder());
+        const usize resume_position = emitter.position();
+        if (!emitter.patch_branch(continue_branch, resume_position))
+            return false;
+        for (const usize branch : exhausted_branches) {
+            if (!emitter.patch_conditional_branch(
+                    branch, slow_path, Arm64Condition::unsigned_lower))
+                return false;
+        }
+        return true;
+    };
+
     for (usize instruction_index = 0;
          instruction_index < decoded->size();
          ++instruction_index) {
@@ -5891,7 +5921,9 @@ compute_constant_flow(
                     emitter.emit_conditional_branch_placeholder(
                         Arm64Condition::less_than);
 
-                emit_budget_guard(reduction.iteration_bytecodes * 4U);
+                if (!emit_budget_guard(reduction.iteration_bytecodes * 4U,
+                                        static_cast<u32>(instruction.pc)))
+                    return {};
                 emit_element_address();
                 emitter.load_w(kScratchRight, kScratchLeft, 0U);
                 emitter.add_w(*total_register,
@@ -5928,7 +5960,9 @@ compute_constant_flow(
                 const usize tail_done =
                     emitter.emit_conditional_branch_placeholder(
                         Arm64Condition::greater_equal);
-                emit_budget_guard(reduction.iteration_bytecodes);
+                if (!emit_budget_guard(reduction.iteration_bytecodes,
+                                        static_cast<u32>(instruction.pc)))
+                    return {};
                 emit_element_address();
                 emitter.load_w(kScratchRight, kScratchLeft, 0U);
                 emitter.add_w(*total_register,
@@ -5952,7 +5986,9 @@ compute_constant_flow(
                         Arm64Condition::greater_equal)) {
                     return {};
                 }
-                emit_budget_guard(reduction.final_check_bytecodes);
+                if (!emit_budget_guard(reduction.final_check_bytecodes,
+                                        static_cast<u32>(instruction.pc)))
+                    return {};
                 branch_patches.push_back(BranchPatch {
                     .kind = BranchPatch::Kind::unconditional,
                     .native_index = emitter.emit_branch_placeholder(),
@@ -5963,8 +5999,10 @@ compute_constant_flow(
             }
         }
 
-        emit_budget_guard(
-            optimization_plan.block_budget_costs[instruction_index]);
+        if (!emit_budget_guard(
+                optimization_plan.block_budget_costs[instruction_index],
+                static_cast<u32>(instruction.pc)))
+            return {};
 
         u32 depth = active_safepoint_depth;
         const auto push_register = [&](u32 source) -> bool {
@@ -6777,7 +6815,9 @@ compute_constant_flow(
                 const auto inline_found = inline_recipes.find(instruction_index);
                 if (inline_found != inline_recipes.end()) {
                     const InlineRecipe& recipe = inline_found->second;
-                    emit_budget_guard(recipe.nested_bytecode_cost);
+                    if (!emit_budget_guard(recipe.nested_bytecode_cost,
+                                            static_cast<u32>(instruction.pc)))
+                        return {};
                     const auto emit_inline_binary = [&](u8 opcode) -> bool {
                         switch (opcode) {
                         case 0x60U:

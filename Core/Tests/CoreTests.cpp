@@ -2970,6 +2970,22 @@ void test_baseline_jit(const std::string& fixture_jar) {
     require(legacy_jsr_runtime.has_value(),
             "publish legacy jsr runtime metadata");
     phoneme::vm::BaselineJit legacy_jsr_jit(true);
+    // Budget guards now route exhaustion through a dispatch call so a deopt
+    // frame can be captured, so even this dispatch-free method needs hooks.
+    // The stub treats every runtime operation as a deoptimization request,
+    // which the budget path never reaches inside this tiny budget.
+    const auto legacy_jsr_dispatch =
+        [](void*, phoneme::vm::JitRuntimeOperation, phoneme::u64,
+           phoneme::u64, phoneme::u64, phoneme::u64,
+           const phoneme::u64*, phoneme::u64*) -> phoneme::u32 {
+        return static_cast<phoneme::u32>(
+            phoneme::vm::JitRuntimeStatus::deoptimize);
+    };
+    const phoneme::vm::JitRuntimeHooks legacy_jsr_hooks {
+        .context = nullptr,
+        .dispatch = legacy_jsr_dispatch,
+        .publish_roots = nullptr,
+    };
     auto legacy_jsr_result = legacy_jsr_jit.try_execute(
         (*legacy_jsr_runtime)->id,
         *legacy_jsr_owner,
@@ -2977,7 +2993,8 @@ void test_baseline_jit(const std::string& fixture_jar) {
         *(*legacy_jsr_runtime)->descriptor,
         std::span<const phoneme::vm::Value>{},
         false,
-        1'000U);
+        1'000U,
+        legacy_jsr_hooks);
     require(legacy_jsr_result.has_value() &&
                 legacy_jsr_result->has_value() &&
                 (*legacy_jsr_result)->return_value.has_value(),

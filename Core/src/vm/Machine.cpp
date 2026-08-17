@@ -2287,6 +2287,11 @@ namespace phoneme::vm
     if (!security_configured)
       std::abort();
 
+    // Per-mutation RMS persistence (full-store serialize + two fsyncs) turns
+    // save-heavy games into a slideshow. Deferred mode batches writes; see
+    // RecordStoreRegistry::flush_pending for the durability window.
+    record_stores_.set_write_through(false);
+
     connections_.set_blocking_hooks(network::NetworkBlockingHooks {
         .before_block = [this] {
           scheduler_.set_current_state(JavaThreadState::blocked_io);
@@ -2343,6 +2348,86 @@ namespace phoneme::vm
     // the class-initialization condition.
     class_initialization_condition_.notify_all();
     scheduler_.shutdown(&monitors_);
+    static_cast<void>(record_stores_.flush_all());
+    dump_performance_summary_if_requested();
+  }
+
+  void Machine::dump_performance_summary_if_requested() noexcept
+  {
+    if (const char* dump = std::getenv("PHONEME_DUMP_PERF");
+        dump == nullptr || *dump == '\0' || std::strcmp(dump, "0") == 0)
+      return;
+#if PHONEME_ENABLE_VM_PROFILING
+    const auto counters = PerformanceCounters::snapshot();
+    std::fprintf(stderr, "[phoneME-perf] bytecodes=%llu invocations=%llu "
+                         "native_invocations=%llu exceptions=%llu "
+                         "budget_exits=%llu\n",
+                 static_cast<unsigned long long>(counters.executed_bytecodes),
+                 static_cast<unsigned long long>(counters.method_invocations),
+                 static_cast<unsigned long long>(counters.native_invocations),
+                 static_cast<unsigned long long>(counters.exception_dispatches),
+                 static_cast<unsigned long long>(
+                     counters.instruction_budget_exits));
+    std::fprintf(stderr,
+                 "[phoneME-perf] gc count=%llu total_ms=%.1f max_pause_ms=%.1f "
+                 "objects_scanned=%llu reclaimed=%llu\n",
+                 static_cast<unsigned long long>(counters.gc_count),
+                 static_cast<double>(counters.gc_total_nanoseconds) / 1.0e6,
+                 static_cast<double>(counters.gc_max_pause_nanoseconds) /
+                     1.0e6,
+                 static_cast<unsigned long long>(counters.gc_objects_scanned),
+                 static_cast<unsigned long long>(
+                     counters.gc_objects_reclaimed));
+    std::fprintf(stderr, "[phoneME-perf] allocations bytes=%llu "
+                         "failed=%llu heap_locked=%llu heap_fast=%llu\n",
+                 static_cast<unsigned long long>(
+                     counters.allocated_bytes_by_kind[static_cast<usize>(
+                         AllocationPayloadKind::object)]) +
+                     counters.allocated_bytes_by_kind[static_cast<usize>(
+                         AllocationPayloadKind::array)] +
+                     counters.allocated_bytes_by_kind[static_cast<usize>(
+                         AllocationPayloadKind::string_payload)],
+                 static_cast<unsigned long long>(counters.failed_allocations),
+                 static_cast<unsigned long long>(
+                     counters.public_locked_heap_operations),
+                 static_cast<unsigned long long>(
+                     counters.vm_fast_heap_operations));
+    std::fprintf(stderr,
+                 "[phoneME-perf] inline_cache vhit=%llu vmiss=%llu "
+                 "dhit=%llu dmiss=%llu field_hit=%llu field_miss=%llu\n",
+                 static_cast<unsigned long long>(
+                     counters.virtual_inline_cache_hits),
+                 static_cast<unsigned long long>(
+                     counters.virtual_inline_cache_misses),
+                 static_cast<unsigned long long>(
+                     counters.direct_call_cache_hits),
+                 static_cast<unsigned long long>(
+                     counters.direct_call_cache_misses),
+                 static_cast<unsigned long long>(
+                     counters.field_resolution_hits),
+                 static_cast<unsigned long long>(
+                     counters.field_resolution_misses));
+    const JitStatistics jit = jit_statistics();
+    std::fprintf(stderr,
+                 "[phoneME-perf] jit attempts=%llu compiled=%llu "
+                 "executed_methods=%llu rejected=%llu deopt=%llu "
+                 "compile_ms=%.1f exec_ms=%.1f osr=%llu\n",
+                 static_cast<unsigned long long>(jit.compile_attempts),
+                 static_cast<unsigned long long>(jit.compiled_methods),
+                 static_cast<unsigned long long>(jit.executed_methods),
+                 static_cast<unsigned long long>(jit.rejected_methods),
+                 static_cast<unsigned long long>(jit.deoptimized_executions),
+                 static_cast<double>(jit.compile_time_nanoseconds) / 1.0e6,
+                 static_cast<double>(jit.execution_time_nanoseconds) / 1.0e6,
+                 static_cast<unsigned long long>(jit.osr_executions));
+    for (usize reason = 0U; reason < kJitRejectReasonCount; ++reason)
+      if (jit.reject_reasons[reason] != 0U)
+        std::fprintf(stderr, "[phoneME-perf] jit reject %s=%llu\n",
+                     jit_reject_reason_name(
+                         static_cast<JitRejectReason>(reason)).data(),
+                     static_cast<unsigned long long>(
+                         jit.reject_reasons[reason]));
+#endif  // PHONEME_ENABLE_VM_PROFILING
   }
 
   void Machine::begin_character_translation_frame() noexcept
@@ -3336,6 +3421,50 @@ namespace phoneme::vm
     return pin_native_root(*object);
   }
 
+  Result<ObjectRef> Machine::cached_resource_byte_array(
+      std::string_view resource_name)
+  {
+    if (const auto iterator = resource_array_cache_.find(
+            std::string(resource_name));
+        iterator != resource_array_cache_.end() &&
+        !iterator->second.is_null())
+    {
+      return iterator->second;
+    }
+    auto bytes = classes_.read_resource(resource_name);
+    if (!bytes) return std::unexpected(bytes.error());
+    auto array = heap_.allocate_array(
+        "[B", bytes->size(), Value::from_int(0));
+    if (!array && array.error().code == ErrorCode::overflow) {
+      auto collected = collect_garbage();
+      if (!collected) return std::unexpected(collected.error());
+      array = heap_.allocate_array("[B", bytes->size(), Value::from_int(0));
+    }
+    if (!array) return std::unexpected(array.error());
+    auto bytes_stored = heap_.write_byte_array(*array, 0U, *bytes);
+    if (!bytes_stored) return std::unexpected(bytes_stored.error());
+
+    while (resource_array_cache_payload_bytes_ + bytes->size() >
+               kResourceArrayCachePayloadLimit &&
+           !resource_array_cache_order_.empty())
+    {
+      const std::string& oldest = resource_array_cache_order_.front();
+      const auto evicted = resource_array_cache_.find(oldest);
+      if (evicted != resource_array_cache_.end())
+      {
+        if (const auto size = heap_.array_length(evicted->second); size)
+          resource_array_cache_payload_bytes_ -=
+              static_cast<u64>(*size);
+        resource_array_cache_.erase(evicted);
+      }
+      resource_array_cache_order_.pop_front();
+    }
+    resource_array_cache_payload_bytes_ += bytes->size();
+    resource_array_cache_order_.emplace_back(resource_name);
+    resource_array_cache_[std::string(resource_name)] = *array;
+    return *array;
+  }
+
   Status Machine::collect_garbage()
   {
     std::scoped_lock execution_lock(execution_mutex_);
@@ -3348,6 +3477,12 @@ namespace phoneme::vm
     for (const auto &[value, reference] : interned_strings_)
     {
       (void)value;
+      if (!reference.is_null())
+        roots.push_back(reference);
+    }
+    for (const auto &[path, reference] : resource_array_cache_)
+    {
+      (void)path;
       if (!reference.is_null())
         roots.push_back(reference);
     }
@@ -5430,6 +5565,14 @@ namespace phoneme::vm
       *consumed_instructions = 0U;
     }
 
+    if (operation == JitRuntimeOperation::budget_safepoint)
+    {
+      // Compiled code ran out of its native budget window. The trampoline
+      // captures the deopt frame for this pc; returning deoptimize makes the
+      // entry path hand back a resumable JitDeoptState instead of failing.
+      return static_cast<u32>(JitRuntimeStatus::deoptimize);
+    }
+
     if (operation == JitRuntimeOperation::match_exception_handler)
     {
       if (no_safepoint || execution->method == nullptr ||
@@ -5616,8 +5759,11 @@ namespace phoneme::vm
     }
 
     const DecodedMethod& decoded = *target.runtime->decoded;
-    if (!decoded.exception_handlers.empty())
-      return std::nullopt;
+    // Methods with exception handlers participate: compiled callees dispatch
+    // their own handlers through match_exception_handler, and an escaping
+    // throwable returns java_throwable so the compiled caller's exception
+    // stub selects its own handler. Loops, natives and synchronized methods
+    // still make the cost unbounded and are rejected below.
 
     u64 maximum_cost = static_cast<u64>(decoded.instructions.size());
     for (usize instruction_index = 0U;
@@ -5772,23 +5918,13 @@ namespace phoneme::vm
   }
 
   std::optional<u64> Machine::safe_jit_instruction_budget(
-      const ResolvedMethod& target,
+      const ResolvedMethod&,
       u64 requested_budget)
   {
     const u64 native_limit = BaselineJit::maximum_instruction_budget();
     if (requested_budget <= native_limit)
       return requested_budget;
 
-    // Scheduler-owned Thread.run entries intentionally use an effectively
-    // unbounded VM budget. The ARM64 ABI cannot encode that value, but simply
-    // rejecting it also disables JIT for every finite helper reached from the
-    // long-lived interpreter loop. Admit only methods whose complete Java call
-    // tree is statically proven acyclic/non-blocking and fits in one native
-    // budget window. This preserves scheduler safety: an unbounded loop never
-    // enters native code without a resumable budget safepoint.
-    const auto bounded_cost = bounded_jit_invocation_cost(target, 0U);
-    if (!bounded_cost.has_value() || *bounded_cost > native_limit)
-      return std::nullopt;
     return native_limit;
   }
 
@@ -6007,6 +6143,10 @@ namespace phoneme::vm
       // The trampoline handles this operation because it needs the current
       // compiled method's exception table. Reaching the generic dispatcher is
       // therefore a safe deoptimization request.
+      return static_cast<u32>(JitRuntimeStatus::deoptimize);
+    case JitRuntimeOperation::budget_safepoint:
+      // Handled in jit_runtime_dispatch_callback; the generic dispatcher
+      // never sees it. Treat an accidental arrival as a resumable deopt.
       return static_cast<u32>(JitRuntimeStatus::deoptimize);
     case JitRuntimeOperation::monitor_enter:
     {
@@ -9280,6 +9420,12 @@ namespace phoneme::vm
         if (!reference.is_null())
           garbage_collection_roots.push_back(reference);
       }
+      for (const auto &[path, reference] : resource_array_cache_)
+      {
+        (void)path;
+        if (!reference.is_null())
+          garbage_collection_roots.push_back(reference);
+      }
       for (const auto &[class_name, reference] : class_mirrors_)
       {
         (void)class_name;
@@ -10385,6 +10531,7 @@ namespace phoneme::vm
       }
       if (garbage_collection_poll_boundary)
       {
+        record_stores_.flush_pending();
         do
         {
           if (next_garbage_collection_poll >

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -75,6 +76,15 @@ public:
     void set_fault_injector(RecordStoreFaultInjector injector);
     void clear_fault_injector();
 
+    // Write-through mode persists synchronously on every mutation (default,
+    // keeps the fault-rollback contract used by tests). Deferred mode marks
+    // stores dirty instead; flush_pending() persists dirty stores once the
+    // pending window elapses, close()/flush_all() force a flush. The VM uses
+    // deferred mode so per-record fsync pairs cannot stall the game thread.
+    void set_write_through(bool enabled) noexcept;
+    void flush_pending();
+    [[nodiscard]] Status flush_all();
+
 private:
     struct Store final {
         std::string name;
@@ -84,6 +94,8 @@ private:
         i64 last_modified_ms {0};
         usize open_count {0};
         std::map<i32, std::vector<u8>> records;
+        bool pending_persist {false};
+        std::chrono::steady_clock::time_point pending_since {};
     };
 
     [[nodiscard]] static Status validate_name(std::string_view name);
@@ -96,6 +108,7 @@ private:
         const std::string& canonical_path,
         std::optional<std::string_view> expected_name = std::nullopt) const;
     [[nodiscard]] Status persist_unlocked(const Store& store) const;
+    [[nodiscard]] Status commit_mutation_unlocked(Store& store) const;
     [[nodiscard]] Status sync_directory_unlocked(
         bool inject_fault = true) const;
     [[nodiscard]] Status scavenge_delete_tombstones_unlocked() const;
@@ -114,6 +127,7 @@ private:
     [[nodiscard]] static i64 current_time_millis() noexcept;
 
     usize quota_bytes_ {0};
+    bool write_through_ {true};
     std::string root_directory_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Store> stores_;

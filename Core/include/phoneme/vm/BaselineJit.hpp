@@ -102,6 +102,7 @@ enum class JitRuntimeOperation : u32 {
     arithmetic_exception = 39,
     invoke_dynamic = 40,
     array_payload_lease = 41,
+    budget_safepoint = 42,
 };
 
 enum class JitRuntimeStatus : u32 {

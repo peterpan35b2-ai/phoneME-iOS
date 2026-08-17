@@ -146,6 +146,11 @@ namespace phoneme::vm
     ~Machine();
     void shutdown() noexcept;
 
+  private:
+    void dump_performance_summary_if_requested() noexcept;
+
+  public:
+
     Machine(const Machine &) = delete;
     Machine &operator=(const Machine &) = delete;
 
@@ -302,6 +307,11 @@ namespace phoneme::vm
     }
     [[nodiscard]] Result<NativeRootScope> allocate_pinned_instance(
         std::string_view class_name);
+    // Returns a cached, pinned byte[] holding the archive resource payload.
+    // ByteArrayInputStream exposes no buffer mutation, so sharing the array
+    // between calls is safe; each caller still gets a fresh stream object.
+    [[nodiscard]] Result<ObjectRef> cached_resource_byte_array(
+        std::string_view resource_name);
     void append_console(std::u16string_view text);
     [[nodiscard]] const std::u16string& console_output() const noexcept {
       return console_output_;
@@ -718,6 +728,13 @@ namespace phoneme::vm
     media::MediaService media_;
     network::ConnectionRegistry connections_;
     std::unordered_map<std::u16string, ObjectRef> interned_strings_;
+
+    // ponytail: byte[] still stores 16-byte Values, so the heap cost is 16x
+    // the payload budget; track payload bytes when arrays get raw storage.
+    static constexpr u64 kResourceArrayCachePayloadLimit = 8ULL * 1024ULL * 1024ULL;
+    std::unordered_map<std::string, ObjectRef> resource_array_cache_;
+    std::deque<std::string> resource_array_cache_order_;
+    u64 resource_array_cache_payload_bytes_ {0};
     std::unordered_map<std::string, ObjectRef> class_mirrors_;
     std::unordered_map<i32, ObjectRef> ui_components_;
     std::unordered_map<u64, LambdaBinding> lambda_bindings_;

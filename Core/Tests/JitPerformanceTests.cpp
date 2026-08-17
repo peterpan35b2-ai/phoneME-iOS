@@ -221,10 +221,12 @@ int main(int argc, char** argv) {
                 jit_store_run.checksum == expected_store_checksum,
             "JIT and interpreter array-store checksums match");
     if (phoneme::vm::PerformanceCounters::enabled()) {
-        require(jit_store_counters.public_locked_heap_operations <
-                    interpreter_store_counters.public_locked_heap_operations &&
-                    jit_store_counters.public_locked_heap_operations <=
-                        static_cast<phoneme::u64>(kArrayTimedIterations * 2 + 8),
+        // The interpreter's own stores moved to lock-free vm_fast accessors,
+        // so its locked-op count is 0 and a jit<interp comparison can never
+        // hold. The absolute bound is what actually proves the store lease is
+        // keeping hot element stores off the locked heap path.
+        require(jit_store_counters.public_locked_heap_operations <=
+                    static_cast<phoneme::u64>(kArrayTimedIterations * 2 + 8),
                 "JIT primitive store lease keeps hot element stores lock-free");
     }
     std::cout << "store_locked_heap_ops interpreter="
@@ -237,8 +239,10 @@ int main(int argc, char** argv) {
                 statistics.array_bounds_checks_eliminated > 0U,
             "JIT benchmark exercises proven array-loop lease optimization");
     if (phoneme::vm::PerformanceCounters::enabled()) {
-        require(jit_array_counters.public_locked_heap_operations <
-                    interpreter_array_counters.public_locked_heap_operations,
+        // Interpreter array loads also use lock-free accessors now; the lease
+        // bound proves the JIT keeps hot loops off the locked heap path.
+        require(jit_array_counters.public_locked_heap_operations <=
+                    static_cast<phoneme::u64>(kArrayTimedIterations * 2 + 8),
                 "JIT array loop lease reduces public heap lock operations");
     }
     require(statistics.compiled_methods > 0U &&
@@ -247,6 +251,46 @@ int main(int argc, char** argv) {
     require(statistics.register_cached_methods > 0U &&
                 statistics.stack_cached_methods > 0U,
             "JIT benchmark exercises ARM64 register caches");
+
+    // Budget-safepoint resume: an effectively unbounded scheduler budget is
+    // clamped to one native window, so a loop larger than the window must
+    // deopt at a bytecode boundary, resume interpreted, and still produce the
+    // exact wrapping sum. This is the regression test for
+    // JitRuntimeOperation::budget_safepoint.
+    {
+        constexpr phoneme::i32 kHugeLimit = 240'000'000;
+        const phoneme::u64 wrapping = [] {
+            phoneme::u64 total = 0U;
+            for (phoneme::u64 index = 0U;
+                 index <= static_cast<phoneme::u64>(kHugeLimit);
+                 ++index) {
+                total += index;
+            }
+            return total;
+        }();
+        const phoneme::i32 kHugeExpected =
+            static_cast<phoneme::i32>(static_cast<phoneme::u32>(
+                wrapping & 0xFFFF'FFFFULL));
+        const phoneme::vm::Value huge_argument =
+            phoneme::vm::Value::from_int(kHugeLimit);
+        const auto before = jit.jit_statistics();
+        auto huge_result = jit.invoke_static(
+            "corefixture/JitOps",
+            "sumLoop",
+            "(I)I",
+            std::span<const phoneme::vm::Value>(&huge_argument, 1U),
+            std::numeric_limits<phoneme::u64>::max());
+        const auto after = jit.jit_statistics();
+        require(huge_result.has_value() &&
+                    huge_result->completed_normally() &&
+                    huge_result->return_value.has_value() &&
+                    huge_result->return_value->as_int().value_or(0) ==
+                        kHugeExpected,
+                "budget-clamped unbounded execution resumes correctly");
+        require(after.deoptimized_executions >
+                    before.deoptimized_executions,
+                "budget window exhaustion deoptimizes the compiled entry");
+    }
 
     const double speedup = jit_run.elapsed_nanoseconds == 0U
         ? 0.0

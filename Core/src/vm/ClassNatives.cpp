@@ -131,6 +131,10 @@ void add(NativeMethodRegistry& registry,
     return result;
 }
 
+[[nodiscard]] Result<ObjectRef> attach_byte_input_stream(
+    Machine& machine,
+    ObjectRef buffer);
+
 [[nodiscard]] Result<ObjectRef> create_byte_input_stream(
     Machine& machine,
     std::span<const phoneme::u8> bytes) {
@@ -148,6 +152,16 @@ void add(NativeMethodRegistry& registry,
 
     auto bytes_stored = machine.heap().write_byte_array(*array, 0U, bytes);
     if (!bytes_stored) return std::unexpected(bytes_stored.error());
+    return attach_byte_input_stream(machine, *array);
+}
+
+[[nodiscard]] Result<ObjectRef> attach_byte_input_stream(
+    Machine& machine,
+    ObjectRef buffer) {
+    auto array_root = machine.pin_native_root(buffer);
+    if (!array_root) return std::unexpected(array_root.error());
+    auto length = machine.heap().array_length(buffer);
+    if (!length) return std::unexpected(length.error());
 
     auto stream_root = machine.allocate_pinned_instance(
         "java/io/ByteArrayInputStream");
@@ -155,14 +169,14 @@ void add(NativeMethodRegistry& registry,
     auto stream = stream_root->get();
     if (!stream) return std::unexpected(stream.error());
     auto buffer_stored = machine.heap().set_field(
-        *stream, kByteInputBufferField, Value::from_reference(*array));
+        *stream, kByteInputBufferField, Value::from_reference(buffer));
     auto position_stored = machine.heap().set_field(
         *stream, kByteInputPositionField, Value::from_int(0));
     auto mark_stored = machine.heap().set_field(
         *stream, kByteInputMarkField, Value::from_int(0));
     auto count_stored = machine.heap().set_field(
         *stream, kByteInputCountField,
-        Value::from_int(static_cast<i32>(bytes.size())));
+        Value::from_int(static_cast<i32>(*length)));
     if (!buffer_stored) return std::unexpected(buffer_stored.error());
     if (!position_stored) return std::unexpected(position_stored.error());
     if (!mark_stored) return std::unexpected(mark_stored.error());
@@ -698,7 +712,11 @@ void register_class_natives(NativeMethodRegistry& registry) {
                 }
                 path.append(*resource);
             }
-            auto bytes = machine.classes().read_resource(path);
+            auto bytes = machine.cached_resource_byte_array(path);
+            if (std::getenv("PHONEME_TRACE_RESOURCE") != nullptr && bytes) {
+                std::fprintf(stderr, "[resource-read] %s (fresh)\n",
+                             path.c_str());
+            }
             if (!bytes && bytes.error().code == ErrorCode::class_not_found &&
                 absolute && !class_name->empty() &&
                 class_name->front() != '[') {
@@ -717,7 +735,7 @@ void register_class_natives(NativeMethodRegistry& registry) {
                                         resource->end());
                     if (package_path != path) {
                         auto package_bytes =
-                            machine.classes().read_resource(package_path);
+                            machine.cached_resource_byte_array(package_path);
                         if (package_bytes) {
                             path = std::move(package_path);
                             bytes = std::move(package_bytes);
@@ -742,7 +760,7 @@ void register_class_natives(NativeMethodRegistry& registry) {
                                      bytes.error().message);
                 return std::unexpected(bytes.error());
             }
-            auto stream = create_byte_input_stream(machine, *bytes);
+            auto stream = attach_byte_input_stream(machine, *bytes);
             if (!stream) return std::unexpected(stream.error());
             return std::optional<Value>(Value::from_reference(*stream));
         });
