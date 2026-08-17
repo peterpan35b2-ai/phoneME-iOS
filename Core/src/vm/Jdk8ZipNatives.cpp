@@ -21,6 +21,13 @@ constexpr usize kOutputDelegateField = 0U;
 constexpr usize kOutputDataField = 1U;
 constexpr usize kOutputSizeField = 2U;
 constexpr usize kOutputClosedField = 3U;
+constexpr usize kInflaterInputField = 0U;
+constexpr usize kInflaterOutputField = 1U;
+constexpr usize kInflaterOffsetField = 2U;
+constexpr usize kInflaterFinishedField = 3U;
+constexpr usize kInflaterNeedsInputField = 4U;
+constexpr usize kInflaterNeedsDictionaryField = 5U;
+constexpr usize kInflaterEndedField = 6U;
 constexpr usize kInitialOutputCapacity = 512U;
 constexpr usize kZlibChunkSize = 8192U;
 
@@ -446,11 +453,240 @@ void register_gzip_output(NativeMethodRegistry& registry) {
         });
 }
 
+void register_inflater(NativeMethodRegistry& registry) {
+    add(registry, "java/util/zip/Inflater", "<init>", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto input_stored = set_reference_field(
+                machine, *object, kInflaterInputField, {});
+            auto output_stored = set_reference_field(
+                machine, *object, kInflaterOutputField, {});
+            auto offset_stored = set_int_field(
+                machine, *object, kInflaterOffsetField, 0);
+            auto finished_stored = set_int_field(
+                machine, *object, kInflaterFinishedField, 0);
+            auto needs_input_stored = set_int_field(
+                machine, *object, kInflaterNeedsInputField, 1);
+            auto dictionary_stored = set_int_field(
+                machine, *object, kInflaterNeedsDictionaryField, 0);
+            auto ended_stored = set_int_field(
+                machine, *object, kInflaterEndedField, 0);
+            if (!input_stored) return std::unexpected(input_stored.error());
+            if (!output_stored) return std::unexpected(output_stored.error());
+            if (!offset_stored) return std::unexpected(offset_stored.error());
+            if (!finished_stored) return std::unexpected(finished_stored.error());
+            if (!needs_input_stored) {
+                return std::unexpected(needs_input_stored.error());
+            }
+            if (!dictionary_stored) {
+                return std::unexpected(dictionary_stored.error());
+            }
+            if (!ended_stored) return std::unexpected(ended_stored.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, "java/util/zip/Inflater", "setInput", "([B)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto input = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!input) return std::unexpected(input.error());
+            auto ended = int_field(machine, *object, kInflaterEndedField);
+            if (!ended) return std::unexpected(ended.error());
+            if (*ended != 0) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Inflater has been ended");
+            }
+            auto input_stored = set_reference_field(
+                machine, *object, kInflaterInputField, *input);
+            auto output_stored = set_reference_field(
+                machine, *object, kInflaterOutputField, {});
+            auto offset_stored = set_int_field(
+                machine, *object, kInflaterOffsetField, 0);
+            auto finished_stored = set_int_field(
+                machine, *object, kInflaterFinishedField, 0);
+            auto needs_input_stored = set_int_field(
+                machine, *object, kInflaterNeedsInputField, 0);
+            auto dictionary_stored = set_int_field(
+                machine, *object, kInflaterNeedsDictionaryField, 0);
+            if (!input_stored) return std::unexpected(input_stored.error());
+            if (!output_stored) return std::unexpected(output_stored.error());
+            if (!offset_stored) return std::unexpected(offset_stored.error());
+            if (!finished_stored) return std::unexpected(finished_stored.error());
+            if (!needs_input_stored) {
+                return std::unexpected(needs_input_stored.error());
+            }
+            if (!dictionary_stored) {
+                return std::unexpected(dictionary_stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, "java/util/zip/Inflater", "inflate", "([B)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto destination = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!destination) return std::unexpected(destination.error());
+            auto ended = int_field(machine, *object, kInflaterEndedField);
+            if (!ended) return std::unexpected(ended.error());
+            if (*ended != 0) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Inflater has been ended");
+            }
+            auto output = reference_field(machine, *object, kInflaterOutputField);
+            if (!output) return std::unexpected(output.error());
+            if (output->is_null()) {
+                auto input = reference_field(machine, *object, kInflaterInputField);
+                if (!input) return std::unexpected(input.error());
+                if (input->is_null()) {
+                    auto marked = set_int_field(
+                        machine, *object, kInflaterNeedsInputField, 1);
+                    if (!marked) return std::unexpected(marked.error());
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                auto input_length = machine.heap().array_length(*input);
+                if (!input_length) return std::unexpected(input_length.error());
+                auto compressed = machine.heap().read_byte_array(
+                    *input, 0U, *input_length);
+                if (!compressed) return std::unexpected(compressed.error());
+                if (compressed->size() > static_cast<usize>(
+                        std::numeric_limits<uInt>::max())) {
+                    return fail_java("java/util/zip/DataFormatException",
+                                     "Inflater input is too large");
+                }
+
+                z_stream stream {};
+                stream.next_in = compressed->empty()
+                    ? nullptr
+                    : reinterpret_cast<Bytef*>(compressed->data());
+                stream.avail_in = static_cast<uInt>(compressed->size());
+                if (inflateInit(&stream) != Z_OK) {
+                    return fail_java("java/util/zip/DataFormatException",
+                                     "Cannot initialize inflater");
+                }
+                std::vector<u8> inflated;
+                std::array<u8, kZlibChunkSize> chunk {};
+                int status = Z_OK;
+                while (status == Z_OK) {
+                    stream.next_out = reinterpret_cast<Bytef*>(chunk.data());
+                    stream.avail_out = static_cast<uInt>(chunk.size());
+                    status = ::inflate(&stream, Z_NO_FLUSH);
+                    const usize produced = chunk.size() - stream.avail_out;
+                    inflated.insert(
+                        inflated.end(), chunk.begin(),
+                        chunk.begin() + static_cast<std::ptrdiff_t>(produced));
+                }
+                if (status == Z_NEED_DICT) {
+                    inflateEnd(&stream);
+                    auto marked = set_int_field(
+                        machine, *object, kInflaterNeedsDictionaryField, 1);
+                    if (!marked) return std::unexpected(marked.error());
+                    return std::optional<Value>(Value::from_int(0));
+                }
+                if (status != Z_STREAM_END) {
+                    const bool consumed_input = stream.avail_in == 0U;
+                    inflateEnd(&stream);
+                    if (consumed_input && status == Z_BUF_ERROR) {
+                        auto marked = set_int_field(
+                            machine, *object, kInflaterNeedsInputField, 1);
+                        if (!marked) return std::unexpected(marked.error());
+                        return std::optional<Value>(Value::from_int(0));
+                    }
+                    return fail_java("java/util/zip/DataFormatException",
+                                     "Invalid zlib stream");
+                }
+                inflateEnd(&stream);
+
+                auto data = allocate_byte_array(machine, inflated.size());
+                if (!data) return std::unexpected(data.error());
+                auto data_root = machine.pin_native_root(*data);
+                if (!data_root) return std::unexpected(data_root.error());
+                auto written = machine.heap().write_byte_array(*data, 0U, inflated);
+                if (!written) return std::unexpected(written.error());
+                auto stored = set_reference_field(
+                    machine, *object, kInflaterOutputField, *data);
+                if (!stored) return std::unexpected(stored.error());
+                output = *data;
+            }
+
+            auto destination_length = machine.heap().array_length(*destination);
+            auto output_length = machine.heap().array_length(*output);
+            auto offset = int_field(machine, *object, kInflaterOffsetField);
+            if (!destination_length) {
+                return std::unexpected(destination_length.error());
+            }
+            if (!output_length) return std::unexpected(output_length.error());
+            if (!offset) return std::unexpected(offset.error());
+            if (*offset < 0 || static_cast<usize>(*offset) > *output_length) {
+                return fail(ErrorCode::invalid_state,
+                            "Inflater output position is invalid");
+            }
+            const usize remaining =
+                *output_length - static_cast<usize>(*offset);
+            const usize count = std::min(remaining, *destination_length);
+            if (count != 0U) {
+                auto copied = machine.heap().copy_array_range(
+                    *output, static_cast<usize>(*offset), *destination,
+                    0U, count);
+                if (!copied) return std::unexpected(copied.error());
+            }
+            const usize next = static_cast<usize>(*offset) + count;
+            auto offset_stored = set_int_field(
+                machine, *object, kInflaterOffsetField,
+                static_cast<i32>(next));
+            auto finished_stored = set_int_field(
+                machine, *object, kInflaterFinishedField,
+                next == *output_length ? 1 : 0);
+            if (!offset_stored) return std::unexpected(offset_stored.error());
+            if (!finished_stored) return std::unexpected(finished_stored.error());
+            return std::optional<Value>(
+                Value::from_int(static_cast<i32>(count)));
+        });
+
+    const auto flag = [&registry](const char* name, usize field) {
+        add(registry, "java/util/zip/Inflater", name, "()Z",
+            [field](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = receiver(arguments);
+                if (!object) return std::unexpected(object.error());
+                auto value = int_field(machine, *object, field);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(
+                    Value::from_int(*value != 0 ? 1 : 0));
+            });
+    };
+    flag("finished", kInflaterFinishedField);
+    flag("needsInput", kInflaterNeedsInputField);
+    flag("needsDictionary", kInflaterNeedsDictionaryField);
+
+    add(registry, "java/util/zip/Inflater", "end", "()V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto ended = set_int_field(machine, *object, kInflaterEndedField, 1);
+            auto input_cleared = set_reference_field(
+                machine, *object, kInflaterInputField, {});
+            auto output_cleared = set_reference_field(
+                machine, *object, kInflaterOutputField, {});
+            if (!ended) return std::unexpected(ended.error());
+            if (!input_cleared) return std::unexpected(input_cleared.error());
+            if (!output_cleared) return std::unexpected(output_cleared.error());
+            return std::optional<Value> {};
+        });
+}
+
 } // namespace
 
 void register_jdk8_zip_natives(NativeMethodRegistry& registry) {
     register_gzip_input(registry);
     register_gzip_output(registry);
+    register_inflater(registry);
 }
 
 } // namespace phoneme::vm

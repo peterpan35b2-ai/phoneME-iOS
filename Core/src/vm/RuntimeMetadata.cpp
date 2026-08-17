@@ -4,7 +4,6 @@
 #include <limits>
 #include <utility>
 
-#include "phoneme/vm/ClassLayout.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
 
 namespace phoneme::vm {
@@ -24,28 +23,6 @@ Status OperandResolutionEntry::begin(
     return {};
 }
 
-Status OperandResolutionEntry::resolve_field(
-    std::shared_ptr<const FieldLocation> resolved_field) {
-    if (state != OperandResolutionState::resolving ||
-        kind != OperandResolutionKind::field || resolved_field == nullptr) {
-        return fail(ErrorCode::invalid_state,
-                    "decoded field resolution completed in an invalid state");
-    }
-    field = std::move(resolved_field);
-    target_method = {};
-    receiver_class = {};
-    target_native_method = {};
-    native_generation = 0U;
-    native_binding_cached = false;
-    target_class = {};
-    target_class_file.reset();
-    target_class_name.clear();
-    target_array_name.clear();
-    failure.reset();
-    state = OperandResolutionState::resolved;
-    return {};
-}
-
 Status OperandResolutionEntry::resolve_direct_call(
     MethodId resolved_method,
     NativeMethodId resolved_native_method,
@@ -56,7 +33,6 @@ Status OperandResolutionEntry::resolve_direct_call(
         return fail(ErrorCode::invalid_state,
                     "decoded direct call completed in an invalid state");
     }
-    field.reset();
     target_method = resolved_method;
     receiver_class = {};
     target_native_method = resolved_native_method;
@@ -94,7 +70,6 @@ Status OperandResolutionEntry::resolve_virtual_call(
         return fail(ErrorCode::invalid_state,
                     "decoded virtual call completed in an invalid state");
     }
-    field.reset();
     target_method = resolved_method;
     target_native_method = resolved_native_method;
     native_generation = resolved_native_generation;
@@ -141,7 +116,6 @@ Status OperandResolutionEntry::resolve_class_reference(
         return fail(ErrorCode::invalid_state,
                     "decoded class reference metadata is inconsistent");
     }
-    field.reset();
     target_method = {};
     receiver_class = {};
     target_native_method = {};
@@ -163,7 +137,6 @@ Status OperandResolutionEntry::fail_resolution(Error error) {
         return fail(ErrorCode::invalid_state,
                     "decoded operand failure was cached in an invalid state");
     }
-    field.reset();
     target_method = {};
     if (kind != OperandResolutionKind::virtual_call)
         receiver_class = {};
@@ -182,7 +155,6 @@ Status OperandResolutionEntry::fail_resolution(Error error) {
 void OperandResolutionEntry::reset() noexcept {
     state = OperandResolutionState::unresolved;
     kind = OperandResolutionKind::none;
-    field.reset();
     target_method = {};
     receiver_class = {};
     target_native_method = {};

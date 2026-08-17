@@ -9,7 +9,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "phoneme/base/Types.hpp"
 #include "phoneme/vm/Machine.hpp"
@@ -18,6 +20,8 @@
 namespace phoneme::vm {
 namespace {
 
+constexpr u16 kAccPublic = 0x0001U;
+constexpr u16 kAccStatic = 0x0008U;
 constexpr u16 kAccInterface = 0x0200U;
 constexpr usize kByteInputBufferField = 0;
 constexpr usize kByteInputPositionField = 1;
@@ -30,6 +34,10 @@ constexpr usize kReflectFieldDeclaringClassField = 0;
 constexpr usize kReflectFieldNameField = 1;
 constexpr usize kReflectFieldDescriptorField = 2;
 constexpr usize kReflectFieldModifiersField = 3;
+constexpr usize kReflectMethodDeclaringClassField = 0;
+constexpr usize kReflectMethodNameField = 1;
+constexpr usize kReflectMethodDescriptorField = 2;
+constexpr usize kReflectMethodModifiersField = 3;
 
 void add(NativeMethodRegistry& registry,
          std::string owner,
@@ -239,6 +247,122 @@ void add(NativeMethodRegistry& registry,
     return boxed->return_value->as_reference();
 }
 
+[[nodiscard]] std::string descriptor_for_class_name(
+    std::string_view class_name) {
+    if (class_name.size() == 1U && is_primitive_name(class_name)) {
+        return std::string(class_name);
+    }
+    if (!class_name.empty() && class_name.front() == '[') {
+        return std::string(class_name);
+    }
+    std::string descriptor;
+    descriptor.reserve(class_name.size() + 2U);
+    descriptor.push_back('L');
+    descriptor.append(class_name);
+    descriptor.push_back(';');
+    return descriptor;
+}
+
+[[nodiscard]] Result<std::vector<std::string>> method_parameter_descriptors(
+    std::string_view descriptor) {
+    if (descriptor.empty() || descriptor.front() != '(') {
+        return fail(ErrorCode::malformed_class,
+                    "reflection method descriptor is malformed");
+    }
+    std::vector<std::string> parameters;
+    usize cursor = 1U;
+    while (cursor < descriptor.size() && descriptor[cursor] != ')') {
+        const usize start = cursor;
+        while (cursor < descriptor.size() && descriptor[cursor] == '[') {
+            ++cursor;
+        }
+        if (cursor >= descriptor.size()) {
+            return fail(ErrorCode::malformed_class,
+                        "reflection array descriptor is truncated");
+        }
+        if (descriptor[cursor] == 'L') {
+            const usize end = descriptor.find(';', cursor + 1U);
+            if (end == std::string_view::npos) {
+                return fail(ErrorCode::malformed_class,
+                            "reflection reference descriptor is truncated");
+            }
+            cursor = end + 1U;
+        } else {
+            if (std::string_view("ZBCSIJFD").find(descriptor[cursor]) ==
+                std::string_view::npos) {
+                return fail(ErrorCode::malformed_class,
+                            "reflection parameter descriptor is invalid");
+            }
+            ++cursor;
+        }
+        parameters.emplace_back(descriptor.substr(start, cursor - start));
+    }
+    if (cursor >= descriptor.size() || descriptor[cursor] != ')') {
+        return fail(ErrorCode::malformed_class,
+                    "reflection method descriptor has no return type");
+    }
+    return parameters;
+}
+
+[[nodiscard]] Result<std::string_view> method_return_descriptor(
+    std::string_view descriptor) {
+    const usize closing = descriptor.find(')');
+    if (closing == std::string_view::npos || closing + 1U >= descriptor.size()) {
+        return fail(ErrorCode::malformed_class,
+                    "reflection method descriptor has no return type");
+    }
+    return descriptor.substr(closing + 1U);
+}
+
+[[nodiscard]] Result<Value> unbox_reflect_argument(
+    Machine& machine,
+    ObjectRef value,
+    std::string_view descriptor) {
+    if (descriptor.empty()) {
+        return fail(ErrorCode::malformed_class,
+                    "reflection argument descriptor is empty");
+    }
+    if (descriptor.front() == 'L' || descriptor.front() == '[') {
+        return Value::from_reference(value);
+    }
+    if (value.is_null()) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "null cannot be converted to a primitive argument");
+    }
+    std::string_view owner;
+    std::string_view method_name;
+    std::string_view method_descriptor;
+    switch (descriptor.front()) {
+    case 'Z': owner = "java/lang/Boolean"; method_name = "booleanValue";
+              method_descriptor = "()Z"; break;
+    case 'B': owner = "java/lang/Byte"; method_name = "byteValue";
+              method_descriptor = "()B"; break;
+    case 'C': owner = "java/lang/Character"; method_name = "charValue";
+              method_descriptor = "()C"; break;
+    case 'S': owner = "java/lang/Short"; method_name = "shortValue";
+              method_descriptor = "()S"; break;
+    case 'I': owner = "java/lang/Integer"; method_name = "intValue";
+              method_descriptor = "()I"; break;
+    case 'J': owner = "java/lang/Long"; method_name = "longValue";
+              method_descriptor = "()J"; break;
+    case 'F': owner = "java/lang/Float"; method_name = "floatValue";
+              method_descriptor = "()F"; break;
+    case 'D': owner = "java/lang/Double"; method_name = "doubleValue";
+              method_descriptor = "()D"; break;
+    default:
+        return fail(ErrorCode::malformed_class,
+                    "unsupported reflection primitive descriptor");
+    }
+    auto unboxed = machine.invoke_instance(
+        value, owner, method_name, method_descriptor);
+    if (!unboxed) return std::unexpected(unboxed.error());
+    if (unboxed->throwable.has_value() || !unboxed->return_value.has_value()) {
+        return fail_java("java/lang/IllegalArgumentException",
+                         "reflection argument cannot be unboxed");
+    }
+    return *unboxed->return_value;
+}
+
 [[nodiscard]] Result<std::string> array_component_name(
     std::string_view array_name) {
     if (array_name.empty() || array_name.front() != '[' ||
@@ -273,6 +397,71 @@ void register_class_natives(NativeMethodRegistry& registry) {
             auto mirror = machine.class_mirror(*class_name);
             if (!mirror) return std::unexpected(mirror.error());
             return std::optional<Value>(Value::from_reference(*mirror));
+        });
+
+    add(registry, "java/lang/Class", "getClassLoader",
+        "()Ljava/lang/ClassLoader;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto mirror = receiver(arguments);
+            if (!mirror) return std::unexpected(mirror.error());
+            auto class_name = machine.mirrored_class_name(*mirror);
+            if (!class_name) return std::unexpected(class_name.error());
+            auto loader = machine.class_states().allocate_instance(
+                machine.heap(), "java/lang/ClassLoader");
+            if (!loader) return std::unexpected(loader.error());
+            return std::optional<Value>(Value::from_reference(*loader));
+        });
+
+    add(registry, "java/lang/ClassLoader", "<init>", "()V",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto loader = receiver(arguments);
+            if (!loader) return std::unexpected(loader.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, "java/lang/ClassLoader", "getResourceAsStream",
+        "(Ljava/lang/String;)Ljava/io/InputStream;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto loader = receiver(arguments);
+            if (!loader) return std::unexpected(loader.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "ClassLoader resource name is missing");
+            }
+            auto name = arguments[1].as_reference();
+            if (!name || name->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "ClassLoader resource name is null");
+            }
+            auto resource = utf8_text(machine, *name);
+            if (!resource) return std::unexpected(resource.error());
+            if (resource->empty()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            std::string path = *resource;
+            while (!path.empty() && path.front() == '/') {
+                path.erase(path.begin());
+            }
+            if (path.empty()) {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            auto bytes = machine.classes().read_resource(path);
+            if (!bytes) {
+                if (bytes.error().code == ErrorCode::class_not_found) {
+                    return std::optional<Value>(Value::from_reference({}));
+                }
+                if (bytes.error().code == ErrorCode::invalid_argument) {
+                    return fail_java("java/lang/SecurityException",
+                                     bytes.error().message);
+                }
+                return std::unexpected(bytes.error());
+            }
+            auto stream = create_byte_input_stream(machine, *bytes);
+            if (!stream) return std::unexpected(stream.error());
+            return std::optional<Value>(Value::from_reference(*stream));
         });
 
     add(registry, "java/lang/Class", "getName", "()Ljava/lang/String;",
@@ -713,6 +902,123 @@ void register_class_natives(NativeMethodRegistry& registry) {
     add(registry, "java/net/URI", "getPath", "()Ljava/lang/String;", uri_path);
     add(registry, "java/net/URI", "toString", "()Ljava/lang/String;", uri_path);
 
+    add(registry, "java/lang/Class", "getMethod",
+        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto mirror = receiver(arguments);
+            if (!mirror) return std::unexpected(mirror.error());
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Class.getMethod arguments are missing");
+            }
+            auto requested_name = arguments[1].as_reference();
+            auto parameter_types = arguments[2].as_reference();
+            if (!requested_name || requested_name->is_null() ||
+                !parameter_types || parameter_types->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Class.getMethod argument is null");
+            }
+            auto name = utf8_text(machine, *requested_name);
+            auto class_name = machine.mirrored_class_name(*mirror);
+            if (!name) return std::unexpected(name.error());
+            if (!class_name) return std::unexpected(class_name.error());
+
+            auto parameter_count = machine.heap().array_length(*parameter_types);
+            if (!parameter_count) return std::unexpected(parameter_count.error());
+            std::string parameter_prefix("(");
+            for (usize index = 0U; index < *parameter_count; ++index) {
+                auto value = machine.heap().element(*parameter_types, index);
+                if (!value) return std::unexpected(value.error());
+                auto parameter_mirror = value->as_reference();
+                if (!parameter_mirror || parameter_mirror->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "Class.getMethod parameter type is null");
+                }
+                auto parameter_name =
+                    machine.mirrored_class_name(*parameter_mirror);
+                if (!parameter_name) {
+                    return std::unexpected(parameter_name.error());
+                }
+                parameter_prefix.append(
+                    descriptor_for_class_name(*parameter_name));
+            }
+            parameter_prefix.push_back(')');
+
+            std::vector<std::string> pending {*class_name};
+            std::unordered_set<std::string> visited;
+            std::shared_ptr<const classfile::ClassFile> declaring_class;
+            const classfile::Method* matched = nullptr;
+            while (!pending.empty() && matched == nullptr) {
+                std::string current = std::move(pending.back());
+                pending.pop_back();
+                if (!visited.insert(current).second) continue;
+                auto loaded = machine.classes().load(current);
+                if (!loaded) return std::unexpected(loaded.error());
+                for (const auto& candidate : (*loaded)->methods()) {
+                    if (candidate.name != *name ||
+                        (candidate.access_flags & kAccPublic) == 0U ||
+                        !candidate.descriptor.starts_with(parameter_prefix)) {
+                        continue;
+                    }
+                    matched = &candidate;
+                    declaring_class = *loaded;
+                    break;
+                }
+                if (matched != nullptr) break;
+                if (!(*loaded)->super_name().empty()) {
+                    pending.push_back((*loaded)->super_name());
+                }
+                for (const auto& interface_name : (*loaded)->interfaces()) {
+                    pending.push_back(interface_name);
+                }
+            }
+            if (matched == nullptr || !declaring_class) {
+                return fail_java("java/lang/NoSuchMethodException", *name);
+            }
+
+            auto declaring_mirror =
+                machine.class_mirror(declaring_class->name());
+            if (!declaring_mirror) {
+                return std::unexpected(declaring_mirror.error());
+            }
+            auto descriptor_string = create_string(
+                machine, ascii_text(matched->descriptor));
+            if (!descriptor_string) {
+                return std::unexpected(descriptor_string.error());
+            }
+            auto descriptor_root = machine.pin_native_root(*descriptor_string);
+            if (!descriptor_root) {
+                return std::unexpected(descriptor_root.error());
+            }
+            auto method = machine.class_states().allocate_instance(
+                machine.heap(), "java/lang/reflect/Method");
+            if (!method) return std::unexpected(method.error());
+            auto declaring_stored = machine.heap().set_field(
+                *method, kReflectMethodDeclaringClassField,
+                Value::from_reference(*declaring_mirror));
+            auto name_stored = machine.heap().set_field(
+                *method, kReflectMethodNameField,
+                Value::from_reference(*requested_name));
+            auto descriptor_stored = machine.heap().set_field(
+                *method, kReflectMethodDescriptorField,
+                Value::from_reference(*descriptor_string));
+            auto modifiers_stored = machine.heap().set_field(
+                *method, kReflectMethodModifiersField,
+                Value::from_int(static_cast<i32>(matched->access_flags)));
+            if (!declaring_stored) {
+                return std::unexpected(declaring_stored.error());
+            }
+            if (!name_stored) return std::unexpected(name_stored.error());
+            if (!descriptor_stored) {
+                return std::unexpected(descriptor_stored.error());
+            }
+            if (!modifiers_stored) {
+                return std::unexpected(modifiers_stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*method));
+        });
+
     add(registry, "java/lang/Class", "getDeclaredField",
         "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -920,6 +1226,138 @@ void register_class_natives(NativeMethodRegistry& registry) {
             if (!boxed) return std::unexpected(boxed.error());
             return std::optional<Value>(Value::from_reference(*boxed));
         });
+    add(registry, "java/lang/reflect/Method", "getModifiers", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto method = receiver(arguments);
+            if (!method) return std::unexpected(method.error());
+            auto modifiers = machine.heap().field(
+                *method, kReflectMethodModifiersField);
+            if (!modifiers) return std::unexpected(modifiers.error());
+            return std::optional<Value>(*modifiers);
+        });
+    add(registry, "java/lang/reflect/Method", "invoke",
+        "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto method = receiver(arguments);
+            if (!method) return std::unexpected(method.error());
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Method.invoke arguments are missing");
+            }
+            auto declaring_value = machine.heap().field(
+                *method, kReflectMethodDeclaringClassField);
+            auto name_value = machine.heap().field(
+                *method, kReflectMethodNameField);
+            auto descriptor_value = machine.heap().field(
+                *method, kReflectMethodDescriptorField);
+            auto modifiers_value = machine.heap().field(
+                *method, kReflectMethodModifiersField);
+            if (!declaring_value) {
+                return std::unexpected(declaring_value.error());
+            }
+            if (!name_value) return std::unexpected(name_value.error());
+            if (!descriptor_value) {
+                return std::unexpected(descriptor_value.error());
+            }
+            if (!modifiers_value) {
+                return std::unexpected(modifiers_value.error());
+            }
+            auto declaring = declaring_value->as_reference();
+            auto name_ref = name_value->as_reference();
+            auto descriptor_ref = descriptor_value->as_reference();
+            auto modifiers = modifiers_value->as_int();
+            if (!declaring) return std::unexpected(declaring.error());
+            if (!name_ref) return std::unexpected(name_ref.error());
+            if (!descriptor_ref) {
+                return std::unexpected(descriptor_ref.error());
+            }
+            if (!modifiers) return std::unexpected(modifiers.error());
+            auto class_name = machine.mirrored_class_name(*declaring);
+            auto name = utf8_text(machine, *name_ref);
+            auto descriptor = utf8_text(machine, *descriptor_ref);
+            if (!class_name) return std::unexpected(class_name.error());
+            if (!name) return std::unexpected(name.error());
+            if (!descriptor) return std::unexpected(descriptor.error());
+
+            auto parameters = method_parameter_descriptors(*descriptor);
+            if (!parameters) return std::unexpected(parameters.error());
+            auto supplied_arguments = arguments[2].as_reference();
+            if (!supplied_arguments) {
+                return std::unexpected(supplied_arguments.error());
+            }
+            usize supplied_count = 0U;
+            if (!supplied_arguments->is_null()) {
+                auto length = machine.heap().array_length(*supplied_arguments);
+                if (!length) return std::unexpected(length.error());
+                supplied_count = *length;
+            }
+            if (supplied_count != parameters->size()) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Method.invoke argument count mismatch");
+            }
+
+            std::vector<Value> call_arguments;
+            call_arguments.reserve(parameters->size());
+            for (usize index = 0U; index < parameters->size(); ++index) {
+                auto supplied = machine.heap().element(
+                    *supplied_arguments, index);
+                if (!supplied) return std::unexpected(supplied.error());
+                auto reference = supplied->as_reference();
+                if (!reference) return std::unexpected(reference.error());
+                auto converted = unbox_reflect_argument(
+                    machine, *reference, (*parameters)[index]);
+                if (!converted) return std::unexpected(converted.error());
+                call_arguments.push_back(*converted);
+            }
+
+            Result<ExecutionResult> invoked = fail(
+                ErrorCode::invalid_state, "reflection invocation not started");
+            if ((*modifiers & kAccStatic) != 0) {
+                invoked = machine.invoke_static(
+                    *class_name, *name, *descriptor, call_arguments);
+            } else {
+                auto target = arguments[1].as_reference();
+                if (!target) return std::unexpected(target.error());
+                if (target->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "Method.invoke target is null");
+                }
+                auto compatible = machine.object_is_instance(
+                    *target, *class_name);
+                if (!compatible) return std::unexpected(compatible.error());
+                if (!*compatible) {
+                    return fail_java("java/lang/IllegalArgumentException",
+                                     "Method.invoke target has wrong class");
+                }
+                invoked = machine.invoke_instance(
+                    *target, *class_name, *name, *descriptor, call_arguments);
+            }
+            if (!invoked) return std::unexpected(invoked.error());
+            if (invoked->throwable.has_value()) {
+                auto throwable = machine.heap().class_name(*invoked->throwable);
+                if (!throwable) return std::unexpected(throwable.error());
+                return fail_java(*throwable,
+                                 "reflected method threw an exception");
+            }
+            auto return_descriptor = method_return_descriptor(*descriptor);
+            if (!return_descriptor) {
+                return std::unexpected(return_descriptor.error());
+            }
+            if (*return_descriptor == "V") {
+                return std::optional<Value>(Value::from_reference({}));
+            }
+            if (!invoked->return_value.has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "reflected method returned no value");
+            }
+            auto boxed = box_reflect_value(
+                machine, *invoked->return_value, *return_descriptor);
+            if (!boxed) return std::unexpected(boxed.error());
+            return std::optional<Value>(Value::from_reference(*boxed));
+        });
+
     add(registry, "java/lang/reflect/Modifier", "isStatic", "(I)Z",
         [](Machine&, std::span<const Value> arguments)
             -> Result<std::optional<Value>> {

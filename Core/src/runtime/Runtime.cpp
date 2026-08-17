@@ -392,9 +392,13 @@ struct LCDUIImageSource final {
         .generation = static_cast<u64>(std::max(*generation, 0)),
     };
 }
-// Obfuscated Gameloft constructors can synchronously range-decode most of the
-// asset pack before startApp. This remains finite launch work, but routinely
-// exceeds the generic callback guard used for paint/input handlers.
+// MIDlet constructors and lifecycle callbacks can synchronously parse or
+// decrypt multi-megabyte resource tables. A lifetime-wide instruction cap
+// produces false positives for that finite work (for example a linear byte
+// scan before AES decryption). These values are progress-watchdog windows:
+// native/intrinsic/JIT call completions reset the window while a genuinely
+// non-progressing Java loop remains bounded. Machine also keeps the watchdog's
+// 32x absolute safety ceiling.
 constexpr u64 kMidletConstructorInstructionBudget = 200'000'000U;
 constexpr u64 kMidletLifecycleInstructionBudget = 100'000'000U;
 // Forced teardown is best-effort cleanup, not application work. Keep the
@@ -1601,7 +1605,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
             application_vm->machine.scheduler());
         auto constructor = application_vm->machine.invoke_instance(
             *receiver, main_class, "<init>", "()V", {},
-            kMidletConstructorInstructionBudget);
+            kMidletConstructorInstructionBudget,
+            vm::InstructionBudgetMode::progress_watchdog);
         if (!constructor) return fail_start(constructor.error());
         auto completion = require_normal_completion(application_vm->machine,
                                                     *constructor,
@@ -1644,7 +1649,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
             if (!stop_token.stop_requested()) {
                 auto started = lifecycle_vm->machine.invoke_instance(
                     receiver, main_class, "startApp", "()V", {},
-                    kMidletLifecycleInstructionBudget);
+                    kMidletLifecycleInstructionBudget,
+                    vm::InstructionBudgetMode::progress_watchdog);
                 if (!started) {
                     failure = started.error();
                 } else {
@@ -1700,7 +1706,8 @@ Status Runtime::start_midlet(SuiteId suite_id,
             if (!stop_token.stop_requested()) {
                 auto started = lifecycle_vm->machine.invoke_instance(
                     receiver, main_class, "startApp", "()V", {},
-                    kMidletLifecycleInstructionBudget);
+                    kMidletLifecycleInstructionBudget,
+                    vm::InstructionBudgetMode::progress_watchdog);
                 if (!started) {
                     failure = started.error();
                 } else {
@@ -2084,10 +2091,14 @@ Status Runtime::pause_midlet(AppId app_id) {
     };
 
     std::scoped_lock vm_operation(vm->operation_mutex);
-    auto paused = vm->machine.invoke_instance(vm->midlet,
-                                               main_class,
-                                               "pauseApp",
-                                               "()V");
+    auto paused = vm->machine.invoke_instance(
+        vm->midlet,
+        main_class,
+        "pauseApp",
+        "()V",
+        {},
+        kMidletLifecycleInstructionBudget,
+        vm::InstructionBudgetMode::progress_watchdog);
     if (!paused) return fail_lifecycle(paused.error());
     auto completion = require_normal_completion(vm->machine,
                                                 *paused,
@@ -2177,10 +2188,14 @@ Status Runtime::resume_midlet(AppId app_id) {
     };
 
     std::scoped_lock vm_operation(vm->operation_mutex);
-    auto resumed = vm->machine.invoke_instance(vm->midlet,
-                                                main_class,
-                                                "startApp",
-                                                "()V");
+    auto resumed = vm->machine.invoke_instance(
+        vm->midlet,
+        main_class,
+        "startApp",
+        "()V",
+        {},
+        kMidletLifecycleInstructionBudget,
+        vm::InstructionBudgetMode::progress_watchdog);
     if (!resumed) return fail_lifecycle(resumed.error());
     auto completion = require_normal_completion(vm->machine,
                                                 *resumed,

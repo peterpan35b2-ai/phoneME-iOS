@@ -424,10 +424,19 @@ using namespace builtin;
     }};
     for (const Hierarchy& entry : hierarchy) {
         if (name == entry.name) {
-            return make_class(entry.name, entry.super_name, kOrdinary, {}, {
+            std::vector<classfile::Method> constructors {
                 method(kPublic, "<init>", "()V"),
                 method(kPublic, "<init>", "(Ljava/lang/String;)V"),
-            });
+            };
+            if (name == "java/io/IOException") {
+                constructors.push_back(method(
+                    kPublic, "<init>",
+                    "(Ljava/lang/String;Ljava/lang/Throwable;)V"));
+                constructors.push_back(method(
+                    kPublic, "<init>", "(Ljava/lang/Throwable;)V"));
+            }
+            return make_class(entry.name, entry.super_name, kOrdinary, {},
+                              std::move(constructors));
         }
     }
 

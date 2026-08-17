@@ -3233,6 +3233,34 @@ void register_core_natives(NativeMethodRegistry& registry) {
 
     add(registry,
         "java/lang/Runtime",
+        "maxMemory",
+        "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            return std::optional<Value>(Value::from_long(
+                static_cast<i64>(machine.heap().stats().maximum_bytes)));
+        });
+
+    add(registry,
+        "java/lang/Integer",
+        "bitCount",
+        "(I)I",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            if (arguments.size() != 1U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Integer.bitCount expects one argument");
+            }
+            auto value = arguments[0].as_int();
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(Value::from_int(static_cast<i32>(
+                std::popcount(static_cast<u32>(*value)))));
+        });
+
+    add(registry,
+        "java/lang/Runtime",
         "gc",
         "()V",
         [](Machine& machine, std::span<const Value> arguments)

@@ -11776,8 +11776,15 @@ namespace phoneme::vm
         auto left = pop_int(frame);
         if (!offset || !right || !left)
         {
-          return fail(ErrorCode::malformed_class,
-                      "invalid integer comparison branch");
+          return fail(
+              ErrorCode::malformed_class,
+              "invalid integer comparison branch in " +
+                  frame.owner().name() + "." + frame.method().name +
+                  frame.method().descriptor + " at bytecode " +
+                  std::to_string(opcode_pc) +
+                  " (offset=" + (offset ? std::string("ok") : "invalid") +
+                  ", right=" + (right ? std::string("ok") : "invalid") +
+                  ", left=" + (left ? std::string("ok") : "invalid") + ")");
         }
         if (test_int_compare(opcode, *left, *right))
         {
@@ -12041,144 +12048,49 @@ namespace phoneme::vm
           return std::unexpected(index.error());
         const bool is_static = opcode == 0xB2 || opcode == 0xB3;
         refresh_metadata_bindings_if_needed();
+        // FieldLocation contains a Machine-local FieldId and therefore must
+        // never be cached in RuntimeMetadata, which is shared by every Machine
+        // using the same ClassRepository. Keep field bindings scoped to this
+        // Machine; decoded bytecode may still cache machine-neutral method and
+        // class linkage in the shared operand side table.
+        const u32 binding_key =
+            (static_cast<u32>(*index) << 1U) | (is_static ? 1U : 0U);
+        auto &owner_bindings = field_bindings_[&frame.owner()];
         std::shared_ptr<const FieldLocation> field;
-        const MethodId method_id = frame.runtime_method_id();
-        const u32 operand_index = frame.current_decoded_operand_index();
-        if (method_id.valid() && operand_index != kInvalidDecodedIndex)
+        if (const auto cached = owner_bindings.find(binding_key);
+            cached != owner_bindings.end())
         {
-          auto cached_entry = frame.operand_resolution_entry(
-              operand_index, opcode_pc);
-          if (!cached_entry)
-            return std::unexpected(cached_entry.error());
-          OperandResolutionEntry& entry = **cached_entry;
-          if (entry.state == OperandResolutionState::resolved)
+          PerformanceCounters::record_operand_resolution(true);
+          field = cached->second;
+        }
+        else
+        {
+          PerformanceCounters::record_operand_resolution(false);
+          auto reference = frame.owner().member_reference(*index);
+          if (!reference)
+            return std::unexpected(reference.error());
+          if (reference->kind != classfile::ConstantKind::field_ref)
           {
-            if (entry.kind != OperandResolutionKind::field ||
-                entry.field == nullptr)
-            {
-              return fail(ErrorCode::internal_error,
-                          "decoded field operand cache has wrong kind");
-            }
-            PerformanceCounters::record_operand_resolution(true);
-            field = entry.field;
+            return fail(ErrorCode::malformed_class,
+                        "field opcode references a non-field constant");
           }
-          else if (entry.state == OperandResolutionState::failed)
+          auto resolved = states_.resolve_field(reference->owner,
+                                                reference->name,
+                                                reference->descriptor,
+                                                is_static);
+          if (!resolved)
           {
-            if (entry.kind != OperandResolutionKind::field ||
-                !entry.failure.has_value())
-            {
-              return fail(ErrorCode::internal_error,
-                          "decoded failed field operand has no error");
-            }
-            PerformanceCounters::record_operand_resolution(true);
             PerformanceCounters::record_operand_resolution_failure();
-            auto raised = raise_resolution_error(*entry.failure, opcode_pc);
+            auto raised = raise_resolution_error(stable_linkage_error(
+                resolved.error(), OperandResolutionKind::field), opcode_pc);
             if (!raised)
               return std::unexpected(raised.error());
             if (raised->has_value())
               return std::move(**raised);
             break;
           }
-          else if (entry.state == OperandResolutionState::resolving)
-          {
-            return fail(ErrorCode::invalid_state,
-                        "recursive decoded field resolution");
-          }
-          else
-          {
-            PerformanceCounters::record_operand_resolution(false);
-            auto began = entry.begin(OperandResolutionKind::field);
-            if (!began)
-              return std::unexpected(began.error());
-            const auto cache_failure = [&](Error error)
-                -> Result<std::optional<ExecutionResult>>
-            {
-              auto cached = entry.fail_resolution(stable_linkage_error(
-                  std::move(error), OperandResolutionKind::field));
-              if (!cached)
-                return std::unexpected(cached.error());
-              PerformanceCounters::record_operand_resolution_failure();
-              return raise_resolution_error(*entry.failure, opcode_pc);
-            };
-            auto reference = frame.owner().member_reference(*index);
-            if (!reference)
-            {
-              auto raised = cache_failure(reference.error());
-              if (!raised)
-                return std::unexpected(raised.error());
-              if (raised->has_value())
-                return std::move(**raised);
-              break;
-            }
-            if (reference->kind != classfile::ConstantKind::field_ref)
-            {
-              auto raised = cache_failure(Error::make(
-                  ErrorCode::malformed_class,
-                  "field opcode references a non-field constant"));
-              if (!raised)
-                return std::unexpected(raised.error());
-              if (raised->has_value())
-                return std::move(**raised);
-              break;
-            }
-            auto resolved = states_.resolve_field(reference->owner,
-                                                  reference->name,
-                                                  reference->descriptor,
-                                                  is_static);
-            if (!resolved)
-            {
-              auto raised = cache_failure(resolved.error());
-              if (!raised)
-                return std::unexpected(raised.error());
-              if (raised->has_value())
-                return std::move(**raised);
-              break;
-            }
-            auto resolved_field = std::make_shared<const FieldLocation>(
-                std::move(*resolved));
-            auto completed = entry.resolve_field(resolved_field);
-            if (!completed)
-              return std::unexpected(completed.error());
-            field = std::move(resolved_field);
-          }
-        }
-        else
-        {
-          const u32 binding_key =
-              (static_cast<u32>(*index) << 1U) | (is_static ? 1U : 0U);
-          auto &owner_bindings = field_bindings_[&frame.owner()];
-          if (const auto cached = owner_bindings.find(binding_key);
-              cached != owner_bindings.end())
-          {
-            field = cached->second;
-          }
-          else
-          {
-            auto reference = frame.owner().member_reference(*index);
-            if (!reference)
-              return std::unexpected(reference.error());
-            if (reference->kind != classfile::ConstantKind::field_ref)
-            {
-              return fail(ErrorCode::malformed_class,
-                          "field opcode references a non-field constant");
-            }
-            auto resolved = states_.resolve_field(reference->owner,
-                                                  reference->name,
-                                                  reference->descriptor,
-                                                  is_static);
-            if (!resolved)
-            {
-              auto raised = raise_resolution_error(stable_linkage_error(
-                  resolved.error(), OperandResolutionKind::field), opcode_pc);
-              if (!raised)
-                return std::unexpected(raised.error());
-              if (raised->has_value())
-                return std::move(**raised);
-              break;
-            }
-            field = std::make_shared<const FieldLocation>(std::move(*resolved));
-            owner_bindings.emplace(binding_key, field);
-          }
+          field = std::make_shared<const FieldLocation>(std::move(*resolved));
+          owner_bindings.emplace(binding_key, field);
         }
         if (is_static)
         {

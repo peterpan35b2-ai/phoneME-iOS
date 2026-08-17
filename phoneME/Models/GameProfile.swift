@@ -348,7 +348,7 @@ struct GameProfile: Codable, Equatable {
     // native pacing, so FPS is not overridden unless the user enables it.
     var framePacingMode: FramePacingMode? = .native
     // Optional keeps older profile JSON decodable. Missing/nil uses the
-    // runtime's 64 MiB default heap limit.
+    // runtime's 256 MiB default heap limit.
     var heapSizeMegabytes: Int?
     // Optional keeps older profile JSON decodable. Missing/nil means off.
     var autoTranslateToVietnamese: Bool?
@@ -382,7 +382,7 @@ struct GameProfile: Codable, Equatable {
 
     static let defaultFrameRate = 30
     static let maximumFrameRate = 60
-    static let defaultHeapSizeMegabytes = 64
+    static let defaultHeapSizeMegabytes = 256
     static let minimumHeapSizeMegabytes = 1
     static let maximumHeapSizeMegabytes = 512
     static let `default` = GameProfile()

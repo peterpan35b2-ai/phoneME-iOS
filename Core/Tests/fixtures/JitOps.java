@@ -21,6 +21,15 @@ public final class JitOps {
         return total;
     }
 
+    public int scanWithNativeProgress(int limit) {
+        String marker = "x";
+        int total = 0;
+        for (int index = 0; index < limit; index++) {
+            total += marker.charAt(0);
+        }
+        return total;
+    }
+
     public static int cfgConstantLoop(int limit) {
         int scale = 8;
         int total = 0;

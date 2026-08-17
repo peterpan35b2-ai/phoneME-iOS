@@ -53,6 +53,24 @@ public final class FileOps {
             fallbackCount == 17 ? 1 : 0;
     }
 
+    public static int classLoaderResourceLookup() throws Exception {
+        ClassLoader loader = FileOps.class.getClassLoader();
+        if (loader == null) {
+            return 0;
+        }
+        InputStream resource = loader.getResourceAsStream("corefixture/data.bin");
+        if (resource == null) {
+            return 0;
+        }
+        int first = resource.read();
+        int count = first >= 0 ? 1 : 0;
+        while (resource.read() >= 0) {
+            count++;
+        }
+        resource.close();
+        return first == 'P' && count == 17 ? 1 : 0;
+    }
+
     public static int resourceTraversalBlocked() {
         try {
             FileOps.class.getResourceAsStream("../../escape.bin");

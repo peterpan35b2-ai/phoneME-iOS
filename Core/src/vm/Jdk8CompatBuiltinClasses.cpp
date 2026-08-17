@@ -355,6 +355,7 @@ using namespace builtin;
             method(kPublic, "store",
                    "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
             method(kPublic, "stringPropertyNames", "()Ljava/util/Set;"),
+            method(kPublic, "propertyNames", "()Ljava/util/Enumeration;"),
             method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
         });
     }
@@ -481,6 +482,33 @@ using namespace builtin;
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
         });
     }
+    if (name == "java/util/zip/DataFormatException") {
+        return make_class("java/util/zip/DataFormatException",
+                          "java/lang/Exception", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
+    if (name == "java/util/zip/Inflater") {
+        return make_class("java/util/zip/Inflater", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate, "input", "[B"),
+            field(kPrivate, "output", "[B"),
+            field(kPrivate, "offset", "I"),
+            field(kPrivate, "finished", "Z"),
+            field(kPrivate, "needsInput", "Z"),
+            field(kPrivate, "needsDictionary", "Z"),
+            field(kPrivate, "ended", "Z"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "setInput", "([B)V"),
+            method(kPublic, "inflate", "([B)I"),
+            method(kPublic, "finished", "()Z"),
+            method(kPublic, "needsInput", "()Z"),
+            method(kPublic, "needsDictionary", "()Z"),
+            method(kPublic, "end", "()V"),
+        });
+    }
     if (name == "java/util/zip/GZIPInputStream") {
         return make_class("java/util/zip/GZIPInputStream",
                           "java/io/InputStream", kOrdinary, {
@@ -549,6 +577,14 @@ using namespace builtin;
             method(kPublic, "<init>", "(Ljava/lang/String;)V"),
         });
     }
+    if (name == "java/lang/NoSuchMethodException") {
+        return make_class("java/lang/NoSuchMethodException",
+                          "java/lang/ReflectiveOperationException",
+                          kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
     if (name == "java/lang/reflect/Modifier") {
         return make_class("java/lang/reflect/Modifier", "java/lang/Object",
                           kOrdinary | kFinal, {}, {
@@ -569,6 +605,32 @@ using namespace builtin;
             method(kPublic, "get", "(Ljava/lang/Object;)Ljava/lang/Object;"),
             method(kPublic, "getModifiers", "()I"),
             method(kPublic, "getType", "()Ljava/lang/Class;"),
+        });
+    }
+    if (name == "java/lang/reflect/Method") {
+        return make_class("java/lang/reflect/Method", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "declaringClass", "Ljava/lang/Class;"),
+            field(kPrivate | kFinal, "name", "Ljava/lang/String;"),
+            field(kPrivate | kFinal, "descriptor", "Ljava/lang/String;"),
+            field(kPrivate | kFinal, "modifiers", "I"),
+        }, {
+            method(kPrivate, "<init>",
+                   "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"),
+            method(kPublic, "invoke",
+                   "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "getModifiers", "()I"),
+        });
+    }
+
+    if (name == "java/text/SimpleDateFormat") {
+        return make_class("java/text/SimpleDateFormat", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate | kFinal, "pattern", "Ljava/lang/String;"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "format",
+                   "(Ljava/util/Date;)Ljava/lang/String;"),
         });
     }
 

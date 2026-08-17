@@ -20,6 +20,55 @@ using namespace builtin;
                    "(Ljava/lang/String;Ljava/lang/String;Z)V"),
         });
     }
+    if (name == "java/security/Key") {
+        return make_class("java/security/Key", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "getAlgorithm", "()Ljava/lang/String;"),
+            method(kPublic | kAbstract, "getFormat", "()Ljava/lang/String;"),
+            method(kPublic | kAbstract, "getEncoded", "()[B"),
+        });
+    }
+    if (name == "javax/crypto/SecretKey") {
+        return make_class("javax/crypto/SecretKey", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {},
+                          {"java/security/Key"});
+    }
+    if (name == "javax/crypto/spec/SecretKeySpec") {
+        return make_class("javax/crypto/spec/SecretKeySpec", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "key", "[B"),
+            field(kPrivate | kFinal, "algorithm", "Ljava/lang/String;"),
+        }, {
+            method(kPublic, "<init>", "([BLjava/lang/String;)V"),
+            method(kPublic, "getAlgorithm", "()Ljava/lang/String;"),
+            method(kPublic, "getFormat", "()Ljava/lang/String;"),
+            method(kPublic, "getEncoded", "()[B"),
+        }, {"javax/crypto/SecretKey", "java/security/Key"});
+    }
+    if (name == "javax/crypto/Cipher") {
+        return make_class("javax/crypto/Cipher", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "transformation", "Ljava/lang/String;"),
+            field(kPrivate, "mode", "I"),
+            field(kPrivate, "key", "[B"),
+        }, {
+            method(kPrivate, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic | kStatic, "getInstance",
+                   "(Ljava/lang/String;)Ljavax/crypto/Cipher;"),
+            method(kPublic, "init", "(ILjava/security/Key;)V"),
+            method(kPublic, "doFinal", "([B)[B"),
+        });
+    }
+    if (name == "javax/crypto/NoSuchPaddingException" ||
+        name == "javax/crypto/BadPaddingException" ||
+        name == "javax/crypto/IllegalBlockSizeException" ||
+        name == "java/security/InvalidKeyException") {
+        return make_class(std::string(name), "java/lang/Exception",
+                          kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
     if (name == "java/security/MessageDigest") {
         return make_class("java/security/MessageDigest", "java/lang/Object",
                           kOrdinary | kFinal, {

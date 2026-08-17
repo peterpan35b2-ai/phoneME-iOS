@@ -293,6 +293,213 @@ void add(NativeMethodRegistry& registry,
     return *object;
 }
 
+[[nodiscard]] constexpr u8 aes_gf_multiply(u8 left, u8 right) noexcept {
+    u8 result = 0U;
+    for (unsigned bit = 0U; bit < 8U; ++bit) {
+        if ((right & 1U) != 0U) result = static_cast<u8>(result ^ left);
+        const bool high = (left & 0x80U) != 0U;
+        left = static_cast<u8>(left << 1U);
+        if (high) left = static_cast<u8>(left ^ 0x1BU);
+        right = static_cast<u8>(right >> 1U);
+    }
+    return result;
+}
+
+[[nodiscard]] constexpr u8 aes_rotate_left(u8 value,
+                                           unsigned amount) noexcept {
+    return static_cast<u8>((static_cast<unsigned>(value) << amount) |
+                           (static_cast<unsigned>(value) >> (8U - amount)));
+}
+
+[[nodiscard]] constexpr u8 aes_inverse(u8 value) noexcept {
+    if (value == 0U) return 0U;
+    u8 result = 1U;
+    u8 base = value;
+    unsigned exponent = 254U;
+    while (exponent != 0U) {
+        if ((exponent & 1U) != 0U) {
+            result = aes_gf_multiply(result, base);
+        }
+        base = aes_gf_multiply(base, base);
+        exponent >>= 1U;
+    }
+    return result;
+}
+
+[[nodiscard]] constexpr u8 aes_sbox_value(u8 value) noexcept {
+    const u8 inverse = aes_inverse(value);
+    return static_cast<u8>(inverse ^ aes_rotate_left(inverse, 1U) ^
+                           aes_rotate_left(inverse, 2U) ^
+                           aes_rotate_left(inverse, 3U) ^
+                           aes_rotate_left(inverse, 4U) ^ 0x63U);
+}
+
+[[nodiscard]] constexpr std::array<u8, 256U> make_aes_sbox() noexcept {
+    std::array<u8, 256U> table {};
+    for (usize index = 0U; index < table.size(); ++index) {
+        table[index] = aes_sbox_value(static_cast<u8>(index));
+    }
+    return table;
+}
+
+[[nodiscard]] constexpr std::array<u8, 256U> make_aes_inverse_sbox() noexcept {
+    std::array<u8, 256U> table {};
+    const auto sbox = make_aes_sbox();
+    for (usize index = 0U; index < sbox.size(); ++index) {
+        table[sbox[index]] = static_cast<u8>(index);
+    }
+    return table;
+}
+
+[[nodiscard]] constexpr std::array<u8, 256U> make_aes_multiply_table(
+    u8 multiplier) noexcept {
+    std::array<u8, 256U> table {};
+    for (usize index = 0U; index < table.size(); ++index) {
+        table[index] = aes_gf_multiply(static_cast<u8>(index), multiplier);
+    }
+    return table;
+}
+
+constexpr auto kAesSbox = make_aes_sbox();
+constexpr auto kAesInverseSbox = make_aes_inverse_sbox();
+constexpr auto kAesMul2 = make_aes_multiply_table(2U);
+constexpr auto kAesMul3 = make_aes_multiply_table(3U);
+constexpr auto kAesMul9 = make_aes_multiply_table(9U);
+constexpr auto kAesMul11 = make_aes_multiply_table(11U);
+constexpr auto kAesMul13 = make_aes_multiply_table(13U);
+constexpr auto kAesMul14 = make_aes_multiply_table(14U);
+
+[[nodiscard]] std::array<u8, 176U> aes128_expand_key(
+    std::span<const u8, 16U> key) {
+    std::array<u8, 176U> round_keys {};
+    std::copy(key.begin(), key.end(), round_keys.begin());
+    usize generated = 16U;
+    u8 rcon = 1U;
+    std::array<u8, 4U> temp {};
+    while (generated < round_keys.size()) {
+        std::copy_n(round_keys.begin() +
+                        static_cast<std::ptrdiff_t>(generated - 4U),
+                    4U, temp.begin());
+        if ((generated % 16U) == 0U) {
+            const u8 first = temp[0];
+            temp[0] = kAesSbox[temp[1]];
+            temp[1] = kAesSbox[temp[2]];
+            temp[2] = kAesSbox[temp[3]];
+            temp[3] = kAesSbox[first];
+            temp[0] = static_cast<u8>(temp[0] ^ rcon);
+            rcon = aes_gf_multiply(rcon, 2U);
+        }
+        for (usize index = 0U; index < 4U; ++index) {
+            round_keys[generated] = static_cast<u8>(
+                round_keys[generated - 16U] ^ temp[index]);
+            ++generated;
+        }
+    }
+    return round_keys;
+}
+
+void aes_add_round_key(std::array<u8, 16U>& state,
+                       const std::array<u8, 176U>& round_keys,
+                       usize round) noexcept {
+    const usize offset = round * 16U;
+    for (usize index = 0U; index < state.size(); ++index) {
+        state[index] = static_cast<u8>(state[index] ^
+                                       round_keys[offset + index]);
+    }
+}
+
+void aes_shift_rows(std::array<u8, 16U>& state, bool inverse) noexcept {
+    const auto original = state;
+    for (usize row = 1U; row < 4U; ++row) {
+        for (usize column = 0U; column < 4U; ++column) {
+            const usize source_column = inverse
+                ? (column + 4U - row) % 4U
+                : (column + row) % 4U;
+            state[row + 4U * column] =
+                original[row + 4U * source_column];
+        }
+    }
+}
+
+void aes_mix_columns(std::array<u8, 16U>& state, bool inverse) noexcept {
+    for (usize column = 0U; column < 4U; ++column) {
+        const usize offset = column * 4U;
+        const u8 a = state[offset];
+        const u8 b = state[offset + 1U];
+        const u8 c = state[offset + 2U];
+        const u8 d = state[offset + 3U];
+        if (inverse) {
+            state[offset] = static_cast<u8>(
+                kAesMul14[a] ^ kAesMul11[b] ^ kAesMul13[c] ^ kAesMul9[d]);
+            state[offset + 1U] = static_cast<u8>(
+                kAesMul9[a] ^ kAesMul14[b] ^ kAesMul11[c] ^ kAesMul13[d]);
+            state[offset + 2U] = static_cast<u8>(
+                kAesMul13[a] ^ kAesMul9[b] ^ kAesMul14[c] ^ kAesMul11[d]);
+            state[offset + 3U] = static_cast<u8>(
+                kAesMul11[a] ^ kAesMul13[b] ^ kAesMul9[c] ^ kAesMul14[d]);
+        } else {
+            state[offset] = static_cast<u8>(
+                kAesMul2[a] ^ kAesMul3[b] ^ c ^ d);
+            state[offset + 1U] = static_cast<u8>(
+                a ^ kAesMul2[b] ^ kAesMul3[c] ^ d);
+            state[offset + 2U] = static_cast<u8>(
+                a ^ b ^ kAesMul2[c] ^ kAesMul3[d]);
+            state[offset + 3U] = static_cast<u8>(
+                kAesMul3[a] ^ b ^ c ^ kAesMul2[d]);
+        }
+    }
+}
+
+void aes128_encrypt_block(std::span<const u8, 16U> input,
+                          std::span<u8, 16U> output,
+                          const std::array<u8, 176U>& round_keys) noexcept {
+    std::array<u8, 16U> state {};
+    std::copy(input.begin(), input.end(), state.begin());
+    aes_add_round_key(state, round_keys, 0U);
+    for (usize round = 1U; round < 10U; ++round) {
+        for (u8& value : state) value = kAesSbox[value];
+        aes_shift_rows(state, false);
+        aes_mix_columns(state, false);
+        aes_add_round_key(state, round_keys, round);
+    }
+    for (u8& value : state) value = kAesSbox[value];
+    aes_shift_rows(state, false);
+    aes_add_round_key(state, round_keys, 10U);
+    std::copy(state.begin(), state.end(), output.begin());
+}
+
+void aes128_decrypt_block(std::span<const u8, 16U> input,
+                          std::span<u8, 16U> output,
+                          const std::array<u8, 176U>& round_keys) noexcept {
+    std::array<u8, 16U> state {};
+    std::copy(input.begin(), input.end(), state.begin());
+    aes_add_round_key(state, round_keys, 10U);
+    for (usize round = 9U; round > 0U; --round) {
+        aes_shift_rows(state, true);
+        for (u8& value : state) value = kAesInverseSbox[value];
+        aes_add_round_key(state, round_keys, round);
+        aes_mix_columns(state, true);
+    }
+    aes_shift_rows(state, true);
+    for (u8& value : state) value = kAesInverseSbox[value];
+    aes_add_round_key(state, round_keys, 0U);
+    std::copy(state.begin(), state.end(), output.begin());
+}
+
+[[nodiscard]] Result<ObjectRef> copy_byte_array(Machine& machine,
+                                                ObjectRef source) {
+    auto length = machine.heap().array_length(source);
+    if (!length) return std::unexpected(length.error());
+    auto bytes = machine.heap().read_byte_array(source, 0U, *length);
+    if (!bytes) return std::unexpected(bytes.error());
+    auto copy = machine.heap().allocate_array(
+        "[B", bytes->size(), Value::from_int(0));
+    if (!copy) return std::unexpected(copy.error());
+    auto written = machine.heap().write_byte_array(*copy, 0U, *bytes);
+    if (!written) return std::unexpected(written.error());
+    return *copy;
+}
+
 [[nodiscard]] Result<ObjectRef> allocate_collection_instance(
     Machine& machine,
     std::string_view class_name) {
@@ -1521,6 +1728,251 @@ void register_permission_natives(NativeMethodRegistry& registry) {
         });
 }
 
+void register_crypto_natives(NativeMethodRegistry& registry) {
+    constexpr std::string_view kSecretKeySpecClass =
+        "javax/crypto/spec/SecretKeySpec";
+    constexpr std::string_view kCipherClass = "javax/crypto/Cipher";
+
+    add(registry, std::string(kSecretKeySpecClass), "<init>",
+        "([BLjava/lang/String;)V",
+        [kSecretKeySpecClass](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            auto key = reference_argument(arguments, 1U, false);
+            auto algorithm = reference_argument(arguments, 2U, false);
+            if (!receiver) return std::unexpected(receiver.error());
+            if (!key) return std::unexpected(key.error());
+            if (!algorithm) return std::unexpected(algorithm.error());
+            auto key_copy = copy_byte_array(machine, *key);
+            if (!key_copy) return std::unexpected(key_copy.error());
+            auto key_root = machine.pin_native_root(*key_copy);
+            if (!key_root) return std::unexpected(key_root.error());
+            auto key_stored = set_instance_field(
+                machine, *receiver, kSecretKeySpecClass, "key", "[B",
+                Value::from_reference(*key_copy));
+            auto algorithm_stored = set_instance_field(
+                machine, *receiver, kSecretKeySpecClass, "algorithm",
+                "Ljava/lang/String;", Value::from_reference(*algorithm));
+            if (!key_stored) return std::unexpected(key_stored.error());
+            if (!algorithm_stored) {
+                return std::unexpected(algorithm_stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kSecretKeySpecClass), "getAlgorithm",
+        "()Ljava/lang/String;",
+        [kSecretKeySpecClass](Machine& machine,
+                              std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto value = instance_field(
+                machine, *receiver, kSecretKeySpecClass, "algorithm",
+                "Ljava/lang/String;");
+            if (!value) return std::unexpected(value.error());
+            return std::optional<Value>(*value);
+        });
+
+    add(registry, std::string(kSecretKeySpecClass), "getFormat",
+        "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto text = make_string(machine, "RAW");
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
+        });
+
+    add(registry, std::string(kSecretKeySpecClass), "getEncoded", "()[B",
+        [kSecretKeySpecClass](Machine& machine,
+                              std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto receiver = require_receiver(arguments);
+            if (!receiver) return std::unexpected(receiver.error());
+            auto value = instance_field(
+                machine, *receiver, kSecretKeySpecClass, "key", "[B");
+            if (!value) return std::unexpected(value.error());
+            auto key = value->as_reference();
+            if (!key) return std::unexpected(key.error());
+            if (key->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "SecretKeySpec key is not initialized");
+            }
+            auto copy = copy_byte_array(machine, *key);
+            if (!copy) return std::unexpected(copy.error());
+            return std::optional<Value>(Value::from_reference(*copy));
+        });
+
+    add(registry, std::string(kCipherClass), "getInstance",
+        "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
+        [kCipherClass](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto transformation = reference_argument(arguments, 0U, false);
+            if (!transformation) return std::unexpected(transformation.error());
+            auto text = utf8_string(machine, *transformation, false);
+            if (!text) return std::unexpected(text.error());
+            std::string normalized = *text;
+            std::transform(normalized.begin(), normalized.end(),
+                           normalized.begin(), [](char character) {
+                               return static_cast<char>(std::toupper(
+                                   static_cast<unsigned char>(character)));
+                           });
+            if (normalized != "AES/ECB/PKCS5PADDING" &&
+                normalized != "AES/ECB/PKCS7PADDING") {
+                return fail_java("java/security/NoSuchAlgorithmException",
+                                 "unsupported Cipher transformation: " + *text);
+            }
+            auto cipher = machine.class_states().allocate_instance(
+                machine.heap(), kCipherClass);
+            if (!cipher) return std::unexpected(cipher.error());
+            auto stored = set_instance_field(
+                machine, *cipher, kCipherClass, "transformation",
+                "Ljava/lang/String;", Value::from_reference(*transformation));
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_reference(*cipher));
+        });
+
+    add(registry, std::string(kCipherClass), "init",
+        "(ILjava/security/Key;)V",
+        [kCipherClass](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto cipher = require_receiver(arguments);
+            if (!cipher) return std::unexpected(cipher.error());
+            if (arguments.size() < 3U) {
+                return fail(ErrorCode::invalid_argument,
+                            "Cipher.init arguments are missing");
+            }
+            auto mode = arguments[1].as_int();
+            auto key = arguments[2].as_reference();
+            if (!mode) return std::unexpected(mode.error());
+            if (!key || key->is_null()) {
+                return fail_java("java/security/InvalidKeyException",
+                                 "Cipher key is null");
+            }
+            if (*mode != 1 && *mode != 2) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "Cipher mode must be ENCRYPT_MODE or DECRYPT_MODE");
+            }
+            auto encoded = machine.invoke_instance(
+                *key, "java/security/Key", "getEncoded", "()[B");
+            if (!encoded) return std::unexpected(encoded.error());
+            if (encoded->throwable.has_value() ||
+                !encoded->return_value.has_value()) {
+                return fail_java("java/security/InvalidKeyException",
+                                 "Cipher key cannot be encoded");
+            }
+            auto encoded_ref = encoded->return_value->as_reference();
+            if (!encoded_ref || encoded_ref->is_null()) {
+                return fail_java("java/security/InvalidKeyException",
+                                 "Cipher key encoding is null");
+            }
+            auto key_length = machine.heap().array_length(*encoded_ref);
+            if (!key_length) return std::unexpected(key_length.error());
+            if (*key_length != 16U) {
+                return fail_java("java/security/InvalidKeyException",
+                                 "AES-128 requires a 16-byte key");
+            }
+            auto key_copy = copy_byte_array(machine, *encoded_ref);
+            if (!key_copy) return std::unexpected(key_copy.error());
+            auto key_root = machine.pin_native_root(*key_copy);
+            if (!key_root) return std::unexpected(key_root.error());
+            auto mode_stored = set_instance_field(
+                machine, *cipher, kCipherClass, "mode", "I",
+                Value::from_int(*mode));
+            auto key_stored = set_instance_field(
+                machine, *cipher, kCipherClass, "key", "[B",
+                Value::from_reference(*key_copy));
+            if (!mode_stored) return std::unexpected(mode_stored.error());
+            if (!key_stored) return std::unexpected(key_stored.error());
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kCipherClass), "doFinal", "([B)[B",
+        [kCipherClass](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto cipher = require_receiver(arguments);
+            auto input = reference_argument(arguments, 1U, false);
+            if (!cipher) return std::unexpected(cipher.error());
+            if (!input) return std::unexpected(input.error());
+            auto mode_value = instance_field(
+                machine, *cipher, kCipherClass, "mode", "I");
+            auto key_value = instance_field(
+                machine, *cipher, kCipherClass, "key", "[B");
+            if (!mode_value) return std::unexpected(mode_value.error());
+            if (!key_value) return std::unexpected(key_value.error());
+            auto mode = mode_value->as_int();
+            auto key_ref = key_value->as_reference();
+            if (!mode) return std::unexpected(mode.error());
+            if (!key_ref || key_ref->is_null()) {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Cipher is not initialized");
+            }
+            auto key_bytes = machine.heap().read_byte_array(*key_ref, 0U, 16U);
+            if (!key_bytes) return std::unexpected(key_bytes.error());
+            std::array<u8, 16U> key {};
+            std::copy_n(key_bytes->begin(), 16U, key.begin());
+            const auto round_keys = aes128_expand_key(key);
+
+            auto input_length = machine.heap().array_length(*input);
+            if (!input_length) return std::unexpected(input_length.error());
+            auto source = machine.heap().read_byte_array(*input, 0U, *input_length);
+            if (!source) return std::unexpected(source.error());
+            std::vector<u8> output;
+            if (*mode == 2) {
+                if (source->empty() || (source->size() % 16U) != 0U) {
+                    return fail_java("javax/crypto/IllegalBlockSizeException",
+                                     "AES/ECB ciphertext length is invalid");
+                }
+                output.resize(source->size());
+                for (usize offset = 0U; offset < source->size(); offset += 16U) {
+                    std::span<const u8, 16U> block(
+                        source->data() + offset, 16U);
+                    std::span<u8, 16U> result(output.data() + offset, 16U);
+                    aes128_decrypt_block(block, result, round_keys);
+                }
+                const u8 padding = output.back();
+                if (padding == 0U || padding > 16U ||
+                    static_cast<usize>(padding) > output.size()) {
+                    return fail_java("javax/crypto/BadPaddingException",
+                                     "AES padding is invalid");
+                }
+                for (usize index = output.size() - padding;
+                     index < output.size(); ++index) {
+                    if (output[index] != padding) {
+                        return fail_java("javax/crypto/BadPaddingException",
+                                         "AES padding is invalid");
+                    }
+                }
+                output.resize(output.size() - padding);
+            } else if (*mode == 1) {
+                const usize padding = 16U - (source->size() % 16U);
+                output = *source;
+                output.insert(output.end(), padding,
+                              static_cast<u8>(padding));
+                for (usize offset = 0U; offset < output.size(); offset += 16U) {
+                    std::array<u8, 16U> plain {};
+                    std::copy_n(output.begin() +
+                                    static_cast<std::ptrdiff_t>(offset),
+                                16U, plain.begin());
+                    std::span<u8, 16U> result(output.data() + offset, 16U);
+                    aes128_encrypt_block(plain, result, round_keys);
+                }
+            } else {
+                return fail_java("java/lang/IllegalStateException",
+                                 "Cipher is not initialized");
+            }
+
+            auto result = machine.heap().allocate_array(
+                "[B", output.size(), Value::from_int(0));
+            if (!result) return std::unexpected(result.error());
+            auto written = machine.heap().write_byte_array(*result, 0U, output);
+            if (!written) return std::unexpected(written.error());
+            return std::optional<Value>(Value::from_reference(*result));
+        });
+}
+
 } // namespace
 
 void register_security_natives(NativeMethodRegistry& registry) {
@@ -1618,6 +2070,7 @@ void register_security_natives(NativeMethodRegistry& registry) {
 
     register_message_digest_natives(registry);
     register_permission_natives(registry);
+    register_crypto_natives(registry);
 }
 
 } // namespace phoneme::vm

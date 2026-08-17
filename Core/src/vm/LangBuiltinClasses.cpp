@@ -38,6 +38,7 @@ using namespace builtin;
             method(kPublic, "isAssignableFrom", "(Ljava/lang/Class;)Z"),
             method(kPublic, "getSuperclass", "()Ljava/lang/Class;"),
             method(kPublic, "getComponentType", "()Ljava/lang/Class;"),
+            method(kPublic, "getClassLoader", "()Ljava/lang/ClassLoader;"),
             method(kPublic, "desiredAssertionStatus", "()Z"),
             method(kPublic, "toString", "()Ljava/lang/String;"),
             method(kPublic, "getResourceAsStream",
@@ -46,8 +47,18 @@ using namespace builtin;
                    "(Ljava/lang/String;)Ljava/net/URL;"),
             method(kPublic, "getDeclaredField",
                    "(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
+            method(kPublic, "getMethod",
+                   "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"),
             method(kPublic | kStatic, "forName",
                    "(Ljava/lang/String;)Ljava/lang/Class;"),
+        });
+    }
+    if (name == "java/lang/ClassLoader") {
+        return make_class("java/lang/ClassLoader", "java/lang/Object",
+                          kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "getResourceAsStream",
+                   "(Ljava/lang/String;)Ljava/io/InputStream;"),
         });
     }
     if (name == "java/lang/CharSequence") {
@@ -190,6 +201,7 @@ using namespace builtin;
             method(kPublic | kStatic, "getRuntime", "()Ljava/lang/Runtime;"),
             method(kPublic, "totalMemory", "()J"),
             method(kPublic, "freeMemory", "()J"),
+            method(kPublic, "maxMemory", "()J"),
             method(kPublic, "gc", "()V"),
             method(kPublic, "exit", "(I)V"),
         });
@@ -365,6 +377,7 @@ using namespace builtin;
             method(kPublic | kStatic, "toBinaryString", "(I)Ljava/lang/String;"),
             method(kPublic | kStatic, "compare", "(II)I"),
             method(kPublic | kStatic, "sum", "(II)I"),
+            method(kPublic | kStatic, "bitCount", "(I)I"),
         });
     }
     if (name == "java/lang/Long") {

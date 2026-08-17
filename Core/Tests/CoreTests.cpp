@@ -312,6 +312,15 @@ void test_class_layout(const std::string& fixture_jar) {
                     phoneme::vm::ValueKind::int32,
             "field metadata caches its storage value kind");
 
+    auto inherited_interface_field = states.resolve_field(
+        "corefixture/FieldResolutionOps", "INHERITED_NUMBER", "I", true);
+    require(inherited_interface_field.has_value() &&
+                inherited_interface_field->declaring_class ==
+                    "corefixture/FieldResolutionConstants" &&
+                inherited_interface_field->value_kind ==
+                    phoneme::vm::ValueKind::int32,
+            "field resolution searches implementing interfaces before the superclass");
+
     phoneme::vm::Heap heap(64);
     auto instance = states.allocate_instance(heap, "corefixture/Arithmetic");
     require(instance.has_value(), "allocate fixture instance");
@@ -2188,6 +2197,46 @@ void test_baseline_jit(const std::string& fixture_jar) {
                     watchdog_jit_before.executed_methods,
             "progress watchdog keeps nested Java JIT execution enabled");
 
+    // Lifecycle callbacks use this mode as well. A finite resource scan may
+    // execute far more bytecodes than one watchdog window while repeatedly
+    // completing native helpers such as String.charAt. Total-budget mode must
+    // still reject the same workload, while progress-watchdog mode lets it
+    // finish without weakening the no-progress guard.
+    phoneme::vm::Machine lifecycle_watchdog_machine(classes);
+    lifecycle_watchdog_machine.configure_jit(false);
+    auto lifecycle_watchdog_instance =
+        lifecycle_watchdog_machine.class_states().allocate_instance(
+            lifecycle_watchdog_machine.heap(), "corefixture/JitOps");
+    require(lifecycle_watchdog_instance.has_value(),
+            "allocate isolated lifecycle watchdog fixture");
+    const phoneme::vm::Value scan_limit = phoneme::vm::Value::from_int(400);
+    auto total_budget_scan = lifecycle_watchdog_machine.invoke_instance(
+        *lifecycle_watchdog_instance,
+        "corefixture/JitOps",
+        "scanWithNativeProgress",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&scan_limit, 1U),
+        300U);
+    require(!total_budget_scan.has_value() &&
+                total_budget_scan.error().code ==
+                    phoneme::ErrorCode::invalid_state,
+            "total instruction budget rejects a long finite resource scan");
+
+    auto progress_budget_scan = lifecycle_watchdog_machine.invoke_instance(
+        *lifecycle_watchdog_instance,
+        "corefixture/JitOps",
+        "scanWithNativeProgress",
+        "(I)I",
+        std::span<const phoneme::vm::Value>(&scan_limit, 1U),
+        300U,
+        phoneme::vm::InstructionBudgetMode::progress_watchdog);
+    require(progress_budget_scan.has_value() &&
+                progress_budget_scan->completed_normally() &&
+                progress_budget_scan->return_value.has_value() &&
+                progress_budget_scan->return_value->as_int().value_or(0) ==
+                    400 * static_cast<int>('x'),
+            "progress watchdog permits finite scans that repeatedly make native progress");
+
     const auto dynamic_statistics_before = machine.jit_statistics();
     for (int pass = 0; pass < 2; ++pass) {
         const phoneme::vm::Value addend = phoneme::vm::Value::from_int(7);
@@ -3931,6 +3980,21 @@ void test_machine_rms(const std::string& fixture_jar) {
     require(!cleanup_error, "remove RMS persistence fixture directory");
 }
 
+void test_compatibility_api_surface(const std::string& fixture_jar) {
+    phoneme::vm::ClassRepository classes;
+    require(classes.add_archive(fixture_jar).has_value(),
+            "add compatibility API fixture archive");
+    phoneme::vm::Machine machine(classes);
+    auto result = machine.invoke_static(
+        "corefixture/CompatibilityApiOps", "run", "()I", {}, 50'000'000U);
+    require(result.has_value() && result->completed_normally() &&
+                result->return_value.has_value(),
+            "execute compatibility API regression fixture");
+    auto value = result->return_value->as_int();
+    require(value.has_value() && *value == 127,
+            "runtime/reflection/date/properties/inflater/AES compatibility APIs work");
+}
+
 void test_machine_filesystem(const std::string& fixture_jar) {
     const std::filesystem::path root =
         std::filesystem::path(fixture_jar).parent_path() /
@@ -4037,6 +4101,8 @@ void test_machine_filesystem(const std::string& fixture_jar) {
     };
     invoke("resourceLookup", 1,
            "Class.getResourceAsStream resolves relative and absolute resources");
+    invoke("classLoaderResourceLookup", 1,
+           "Class.getClassLoader and ClassLoader.getResourceAsStream resolve archive resources");
     invoke("resourceTraversalBlocked", 1,
            "Class.getResourceAsStream rejects archive-root traversal");
     invoke("fileRoundTrip", 1,
@@ -4840,11 +4906,33 @@ void test_machine_gc_roots(const std::string& fixture_jar) {
     auto constructor_race = constructor_race_machine.invoke_static(
         "corefixture/ThreadOps", "constructorRootRace", "()I",
         {}, 250'000'000U);
-    require(constructor_race.has_value() &&
-                constructor_race->completed_normally() &&
-                constructor_race->return_value.has_value() &&
-                constructor_race->return_value->as_int().has_value() &&
-                *constructor_race->return_value->as_int() == 0,
+    const bool constructor_race_ok =
+        constructor_race.has_value() &&
+        constructor_race->completed_normally() &&
+        constructor_race->return_value.has_value() &&
+        constructor_race->return_value->as_int().has_value() &&
+        *constructor_race->return_value->as_int() == 0;
+    if (!constructor_race_ok) {
+        std::cerr << "constructorRootRace diagnostic: ";
+        if (!constructor_race.has_value()) {
+            std::cerr << "VM error=" << constructor_race.error().message;
+        } else if (constructor_race->throwable.has_value()) {
+            auto throwable_class = constructor_race_machine.heap().class_name(
+                *constructor_race->throwable);
+            std::cerr << "throwable="
+                      << (throwable_class.has_value() ? *throwable_class
+                                                      : std::string("<invalid>"));
+        } else if (!constructor_race->return_value.has_value()) {
+            std::cerr << "no return value";
+        } else if (auto value = constructor_race->return_value->as_int();
+                   value.has_value()) {
+            std::cerr << "return=" << *value;
+        } else {
+            std::cerr << "non-int return value";
+        }
+        std::cerr << '\n';
+    }
+    require(constructor_race_ok,
             "cross-thread GC preserves a pending constructor receiver");
     require(constructor_race_machine.heap().stats().collections > 0U,
             "constructor root race performs a collection");
@@ -4853,11 +4941,33 @@ void test_machine_gc_roots(const std::string& fixture_jar) {
     auto class_init_race = class_init_race_machine.invoke_static(
         "corefixture/ThreadOps", "constructorClassInitRootRace", "()I",
         {}, 250'000'000U);
-    require(class_init_race.has_value() &&
-                class_init_race->completed_normally() &&
-                class_init_race->return_value.has_value() &&
-                class_init_race->return_value->as_int().has_value() &&
-                *class_init_race->return_value->as_int() == 0,
+    const bool class_init_race_ok =
+        class_init_race.has_value() &&
+        class_init_race->completed_normally() &&
+        class_init_race->return_value.has_value() &&
+        class_init_race->return_value->as_int().has_value() &&
+        *class_init_race->return_value->as_int() == 0;
+    if (!class_init_race_ok) {
+        std::cerr << "constructorClassInitRootRace diagnostic: ";
+        if (!class_init_race.has_value()) {
+            std::cerr << "VM error=" << class_init_race.error().message;
+        } else if (class_init_race->throwable.has_value()) {
+            auto throwable_class = class_init_race_machine.heap().class_name(
+                *class_init_race->throwable);
+            std::cerr << "throwable="
+                      << (throwable_class.has_value() ? *throwable_class
+                                                      : std::string("<invalid>"));
+        } else if (!class_init_race->return_value.has_value()) {
+            std::cerr << "no return value";
+        } else if (auto value = class_init_race->return_value->as_int();
+                   value.has_value()) {
+            std::cerr << "return=" << *value;
+        } else {
+            std::cerr << "non-int return value";
+        }
+        std::cerr << '\n';
+    }
+    require(class_init_race_ok,
             "cross-thread GC preserves an outer constructor receiver while "
             "a nested argument class initializer is blocked");
     require(class_init_race_machine.heap().stats().collections > 0U,
@@ -8978,6 +9088,18 @@ int main(int argc, char** argv) {
         std::cout << "Standalone VM extended opcode tests passed\n";
         return 0;
     }
+    if (filter != nullptr && std::string_view(filter) == "filesystem") {
+        test_archive_and_classfile(fixture_jar);
+        test_builtin_boot_classes();
+        test_machine_filesystem(fixture_jar);
+        std::cout << "Standalone Filesystem Core tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr && std::string_view(filter) == "compat-api") {
+        test_compatibility_api_surface(fixture_jar);
+        std::cout << "Standalone compatibility API tests passed\n";
+        return 0;
+    }
     if (filter != nullptr && std::string_view(filter) == "security") {
         test_archive_and_classfile(fixture_jar);
         test_suite_permissions(fixture_jar);
@@ -9053,6 +9175,11 @@ int main(int argc, char** argv) {
         std::string_view(filter) == "runtime-lcdui") {
         test_runtime_lcdui(fixture_jar);
         std::cout << "Standalone runtime LCDUI tests passed\n";
+        return 0;
+    }
+    if (filter != nullptr && std::string_view(filter) == "gc-roots") {
+        test_machine_gc_roots(fixture_jar);
+        std::cout << "Standalone GC root tests passed\n";
         return 0;
     }
     test_archive_and_classfile(fixture_jar);

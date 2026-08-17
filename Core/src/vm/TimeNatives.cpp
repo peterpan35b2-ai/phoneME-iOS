@@ -33,6 +33,7 @@ constexpr usize kJavaTimeZoneIdField = 0U;
 constexpr usize kJavaTimeZoneRawOffsetField = 1U;
 constexpr usize kFormatterPatternField = 0U;
 constexpr usize kFormatterZoneField = 1U;
+constexpr usize kSimpleDateFormatPatternField = 0U;
 
 constexpr i64 kMillisPerSecond = 1'000LL;
 constexpr i64 kMillisPerMinute = 60LL * kMillisPerSecond;
@@ -970,6 +971,61 @@ void register_time_natives(NativeMethodRegistry& registry) {
             auto string = create_string(machine, ascii_text(text));
             if (!string) return std::unexpected(string.error());
             return std::optional<Value>(Value::from_reference(*string));
+        });
+
+    add(registry, "java/text/SimpleDateFormat", "<init>",
+        "(Ljava/lang/String;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto formatter = receiver(arguments);
+            if (!formatter) return std::unexpected(formatter.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "SimpleDateFormat pattern is missing");
+            }
+            auto pattern = arguments[1].as_reference();
+            if (!pattern || pattern->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "SimpleDateFormat pattern is null");
+            }
+            auto stored = set_reference_field(
+                machine, *formatter, kSimpleDateFormatPatternField, *pattern);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/text/SimpleDateFormat", "format",
+        "(Ljava/util/Date;)Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto formatter = receiver(arguments);
+            if (!formatter) return std::unexpected(formatter.error());
+            if (arguments.size() < 2U) {
+                return fail(ErrorCode::invalid_argument,
+                            "SimpleDateFormat date is missing");
+            }
+            auto date = arguments[1].as_reference();
+            if (!date || date->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "SimpleDateFormat date is null");
+            }
+            auto pattern_ref = reference_field(
+                machine, *formatter, kSimpleDateFormatPatternField);
+            if (!pattern_ref || pattern_ref->is_null()) {
+                return fail(ErrorCode::invalid_state,
+                            "SimpleDateFormat has no pattern");
+            }
+            auto pattern = ascii_string(machine, *pattern_ref);
+            auto millis = long_field(machine, *date, kDateTimeField);
+            auto timezone = local_timezone();
+            if (!pattern) return std::unexpected(pattern.error());
+            if (!millis) return std::unexpected(millis.error());
+            if (!timezone) return std::unexpected(timezone.error());
+            auto fields = fields_from_epoch(*millis, timezone->second);
+            if (!fields) return std::unexpected(fields.error());
+            auto text = create_string(
+                machine, ascii_text(format_datetime_pattern(*pattern, *fields)));
+            if (!text) return std::unexpected(text.error());
+            return std::optional<Value>(Value::from_reference(*text));
         });
 
     add(registry, "java/util/Date", "<init>", "()V",

@@ -14,6 +14,9 @@ using namespace jdk8compat;
 constexpr usize kMapKeysField = 0U;
 constexpr usize kMapValuesField = 1U;
 constexpr usize kMapSizeField = 2U;
+constexpr usize kEnumerationArrayField = 0U;
+constexpr usize kEnumerationIndexField = 1U;
+constexpr usize kEnumerationSizeField = 2U;
 
 [[nodiscard]] int hex_digit(char16_t value) {
     if (value >= u'0' && value <= u'9') return value - u'0';
@@ -432,6 +435,44 @@ void register_properties_methods(NativeMethodRegistry& registry) {
                 if (!added) return std::unexpected(added.error());
             }
             return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, "java/util/Properties", "propertyNames",
+        "()Ljava/util/Enumeration;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto properties = receiver(arguments);
+            if (!properties) return std::unexpected(properties.error());
+            auto size = int_field(machine, *properties, kMapSizeField);
+            auto keys = reference_field(machine, *properties, kMapKeysField);
+            if (!size || !keys || keys->is_null() || *size < 0) {
+                return fail(ErrorCode::invalid_state,
+                            "Properties key storage is invalid");
+            }
+            auto values = allocate_object_array(
+                machine, static_cast<usize>(*size));
+            if (!values) return std::unexpected(values.error());
+            auto values_root = machine.pin_native_root(*values);
+            if (!values_root) return std::unexpected(values_root.error());
+            for (i32 index = 0; index < *size; ++index) {
+                auto key = machine.heap().element(
+                    *keys, static_cast<usize>(index));
+                if (!key) return std::unexpected(key.error());
+                auto stored = machine.heap().set_element(
+                    *values, static_cast<usize>(index), *key);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            auto enumeration = new_instance(machine, "java/util/ArrayEnumeration");
+            if (!enumeration) return std::unexpected(enumeration.error());
+            auto array_stored = set_reference_field(
+                machine, *enumeration, kEnumerationArrayField, *values);
+            auto index_stored = set_int_field(
+                machine, *enumeration, kEnumerationIndexField, 0);
+            auto size_stored = set_int_field(
+                machine, *enumeration, kEnumerationSizeField, *size);
+            if (!array_stored) return std::unexpected(array_stored.error());
+            if (!index_stored) return std::unexpected(index_stored.error());
+            if (!size_stored) return std::unexpected(size_stored.error());
+            return std::optional<Value>(Value::from_reference(*enumeration));
         });
     add(registry, "java/util/Properties", "equals",
         "(Ljava/lang/Object;)Z",

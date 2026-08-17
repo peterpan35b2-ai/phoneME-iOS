@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <unordered_set>
 #include <utility>
 
 #include "phoneme/vm/PerformanceCounters.hpp"
@@ -161,27 +162,36 @@ namespace phoneme::vm
       return iterator->second;
     };
 
-    usize hierarchy_depth = 0;
-    while (!current.empty())
+    // JVMS 5.4.3.2 field resolution checks the declaring class first, then
+    // its direct superinterfaces recursively, and only then its superclass.
+    // Many MIDP codebases expose constants through interfaces while emitting a
+    // Fieldref whose symbolic owner is the implementing class.
+    std::unordered_set<std::string> visited;
+    visited.reserve(16U);
+    const auto resolve_in_hierarchy =
+        [&](auto&& self,
+            const std::string& candidate,
+            usize depth) -> Result<std::optional<FieldLocation>>
     {
-      if (++hierarchy_depth > 256)
+      if (candidate.empty())
+        return std::optional<FieldLocation>{};
+      if (depth > 256U)
       {
         return fail(ErrorCode::malformed_class,
                     "field hierarchy exceeds the supported depth");
       }
+      if (!visited.insert(candidate).second)
+        return std::optional<FieldLocation>{};
 
-      auto loaded = classes_.load(current);
+      auto loaded = classes_.load(candidate);
       if (!loaded)
-      {
         return std::unexpected(loaded.error());
-      }
 
       for (const classfile::Field &field : (*loaded)->fields())
       {
         if (field.name != name || field.descriptor != descriptor)
-        {
           continue;
-        }
+
         const bool is_static = (field.access_flags & kAccStatic) != 0;
         if (is_static != require_static)
         {
@@ -191,10 +201,8 @@ namespace phoneme::vm
 
         auto value_kind = field_value_kind(descriptor);
         if (!value_kind)
-        {
           return std::unexpected(value_kind.error());
-        }
-        const auto runtime_class = classes_.metadata().find_class(current);
+        const auto runtime_class = classes_.metadata().find_class(candidate);
         if (runtime_class == nullptr)
         {
           return fail(ErrorCode::internal_error,
@@ -203,34 +211,35 @@ namespace phoneme::vm
 
         if (is_static)
         {
-          return cache_location(FieldLocation{
+          auto location = cache_location(FieldLocation{
               .declaring_class_id = runtime_class->id,
-              .declaring_class = current,
+              .declaring_class = candidate,
               .name = std::string(name),
               .descriptor = std::string(descriptor),
               .index = 0,
               .value_kind = *value_kind,
               .is_static = true,
               .constant_value_index = field.constant_value_index,
-              .storage_key = field_key(current, name, descriptor),
+              .storage_key = field_key(candidate, name, descriptor),
           });
+          if (!location)
+            return std::unexpected(location.error());
+          return std::optional<FieldLocation>(std::move(*location));
         }
 
-        auto declaring_layout = layout(current);
+        auto declaring_layout = layout(candidate);
         if (!declaring_layout)
-        {
           return std::unexpected(declaring_layout.error());
-        }
-        const std::string key = field_key(current, name, descriptor);
+        const std::string key = field_key(candidate, name, descriptor);
         const auto offset = (*declaring_layout)->instance_fields.find(key);
         if (offset == (*declaring_layout)->instance_fields.end())
         {
           return fail(ErrorCode::internal_error,
                       "instance field is absent from its class layout");
         }
-        return cache_location(FieldLocation{
+        auto location = cache_location(FieldLocation{
             .declaring_class_id = runtime_class->id,
-            .declaring_class = current,
+            .declaring_class = candidate,
             .name = std::string(name),
             .descriptor = std::string(descriptor),
             .index = offset->second,
@@ -239,9 +248,29 @@ namespace phoneme::vm
             .constant_value_index = std::nullopt,
             .storage_key = key,
         });
+        if (!location)
+          return std::unexpected(location.error());
+        return std::optional<FieldLocation>(std::move(*location));
       }
-      current = (*loaded)->super_name();
-    }
+
+      for (const std::string& interface_name : (*loaded)->interfaces())
+      {
+        auto resolved = self(self, interface_name, depth + 1U);
+        if (!resolved)
+          return std::unexpected(resolved.error());
+        if (resolved->has_value())
+          return resolved;
+      }
+
+      return self(self, (*loaded)->super_name(), depth + 1U);
+    };
+
+    auto resolved = resolve_in_hierarchy(
+        resolve_in_hierarchy, current, 0U);
+    if (!resolved)
+      return std::unexpected(resolved.error());
+    if (resolved->has_value())
+      return std::move(**resolved);
 
     return fail(ErrorCode::class_not_found,
                 "field was not found in the class hierarchy: " +

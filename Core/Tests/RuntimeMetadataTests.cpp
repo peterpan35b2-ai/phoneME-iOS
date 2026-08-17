@@ -122,56 +122,39 @@ int main() {
                 (*linked_metadata)->operand_resolutions->size() == 2U,
             "runtime method owns a decoded operand side table");
 
-    auto field_entry = (*linked_metadata)->operand_resolutions->entry(0U, 0U);
-    require(field_entry.has_value(), "field operand side-table entry uses original BCI");
+    auto operand_entry = (*linked_metadata)->operand_resolutions->entry(0U, 0U);
+    require(operand_entry.has_value(),
+            "decoded operand side-table entry uses original BCI");
     require(!(*linked_metadata)->operand_resolutions->entry(0U, 3U).has_value(),
             "operand side table rejects a mismatched BCI");
-    require((*field_entry)->begin(phoneme::vm::OperandResolutionKind::field)
-                .has_value(),
-            "field operand enters resolving state");
-    auto field = std::make_shared<const phoneme::vm::FieldLocation>(
-        phoneme::vm::FieldLocation {
-            .id = phoneme::vm::FieldId {1U},
-            .declaring_class_id = (*runtime_class)->id,
-            .declaring_class = "test/Metadata",
-            .name = "value",
-            .descriptor = "I",
-            .index = 0U,
-            .value_kind = phoneme::vm::ValueKind::int32,
-            .is_static = true,
-        });
-    require((*field_entry)->resolve_field(field).has_value() &&
-                (*field_entry)->state ==
-                    phoneme::vm::OperandResolutionState::resolved &&
-                (*field_entry)->field == field,
-            "field operand publishes its resolved payload");
-    (*field_entry)->reset();
-    require((*field_entry)->begin(
+    // FieldLocation contains Machine-local FieldId state and is deliberately
+    // excluded from shared RuntimeMetadata. Field linkage is cached by Machine.
+    require((*operand_entry)->begin(
                 phoneme::vm::OperandResolutionKind::class_reference).has_value(),
             "class operand enters resolving state");
-    require((*field_entry)->resolve_class_reference(
+    require((*operand_entry)->resolve_class_reference(
                 "test/Metadata",
                 (*runtime_class)->id,
                 class_file,
                 "[Ltest/Metadata;").has_value() &&
-                (*field_entry)->target_class == (*runtime_class)->id &&
-                (*field_entry)->target_class_file == class_file &&
-                (*field_entry)->target_class_name == "test/Metadata" &&
-                (*field_entry)->target_array_name == "[Ltest/Metadata;",
+                (*operand_entry)->target_class == (*runtime_class)->id &&
+                (*operand_entry)->target_class_file == class_file &&
+                (*operand_entry)->target_class_name == "test/Metadata" &&
+                (*operand_entry)->target_array_name == "[Ltest/Metadata;",
             "class operand publishes stable class and array metadata");
-    (*field_entry)->reset();
-    require((*field_entry)->begin_virtual_call((*runtime_class)->id)
+    (*operand_entry)->reset();
+    require((*operand_entry)->begin_virtual_call((*runtime_class)->id)
                 .has_value(),
             "virtual-call operand binds its receiver class");
-    require((*field_entry)->resolve_virtual_call(
+    require((*operand_entry)->resolve_virtual_call(
                 (*sum_metadata)->id,
                 phoneme::vm::NativeMethodId {9U},
                 13U).has_value() &&
-                (*field_entry)->kind ==
+                (*operand_entry)->kind ==
                     phoneme::vm::OperandResolutionKind::virtual_call &&
-                (*field_entry)->receiver_class == (*runtime_class)->id &&
-                (*field_entry)->target_method == (*sum_metadata)->id &&
-                (*field_entry)->target_native_method ==
+                (*operand_entry)->receiver_class == (*runtime_class)->id &&
+                (*operand_entry)->target_method == (*sum_metadata)->id &&
+                (*operand_entry)->target_native_method ==
                     phoneme::vm::NativeMethodId {9U},
             "virtual-call operand publishes a monomorphic method/native target");
 

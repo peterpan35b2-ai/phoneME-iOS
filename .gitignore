@@ -211,3 +211,4 @@ web/fly.websockify.toml
 __pycache__/
 *.class
 .wrangler/
+.omc/

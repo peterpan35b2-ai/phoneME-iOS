@@ -16,8 +16,6 @@
 
 namespace phoneme::vm {
 
-struct FieldLocation;
-
 enum class OperandResolutionState : u8 {
     unresolved,
     resolving,
@@ -37,7 +35,6 @@ struct OperandResolutionEntry final {
     u32 bytecode_pc {kInvalidDecodedIndex};
     OperandResolutionState state {OperandResolutionState::unresolved};
     OperandResolutionKind kind {OperandResolutionKind::none};
-    std::shared_ptr<const FieldLocation> field;
     MethodId target_method;
     ClassId receiver_class;
     NativeMethodId target_native_method;
@@ -50,8 +47,6 @@ struct OperandResolutionEntry final {
     std::optional<Error> failure;
 
     [[nodiscard]] Status begin(OperandResolutionKind expected_kind);
-    [[nodiscard]] Status resolve_field(
-        std::shared_ptr<const FieldLocation> resolved_field);
     [[nodiscard]] Status resolve_direct_call(
         MethodId resolved_method,
         NativeMethodId resolved_native_method,

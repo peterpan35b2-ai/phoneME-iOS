@@ -82,7 +82,7 @@ struct AppFramePacingConfig final {
 };
 
 struct AppHeapConfig final {
-    usize maximum_bytes {64U * 1024U * 1024U};
+    usize maximum_bytes {256U * 1024U * 1024U};
 };
 
 struct FrameReadView final {
