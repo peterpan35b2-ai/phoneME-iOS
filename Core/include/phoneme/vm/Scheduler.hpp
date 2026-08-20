@@ -134,7 +134,7 @@ private:
     std::deque<JavaThreadId> sleeping_queue_;
     JavaThreadId next_thread_id_ {2};
     bool deterministic_ {false};
-    bool host_foreground_ {true};
+    std::atomic_bool host_foreground_ {true};
     std::chrono::steady_clock::time_point background_resume_deadline_ {};
     std::atomic_bool shutting_down_ {false};
     std::atomic<i64> frame_interval_nanoseconds_ {33'333'333};

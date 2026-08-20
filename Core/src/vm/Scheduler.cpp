@@ -522,8 +522,7 @@ bool Scheduler::consume_current_background_transition() noexcept {
         host_foreground_generation_.load(std::memory_order_acquire);
     if (tls_host_foreground_generation_ == generation) return false;
     tls_host_foreground_generation_ = generation;
-    std::scoped_lock lock(mutex_);
-    return !host_foreground_;
+    return !host_foreground_.load(std::memory_order_acquire);
 }
 
 void Scheduler::begin_unpaced_execution() noexcept {
@@ -547,8 +546,10 @@ void Scheduler::end_unpaced_execution() noexcept {
 void Scheduler::set_host_foreground(bool foreground) noexcept {
     {
         std::scoped_lock lock(mutex_);
-        if (host_foreground_ == foreground) return;
-        host_foreground_ = foreground;
+        if (host_foreground_.load(std::memory_order_acquire) == foreground) {
+            return;
+        }
+        host_foreground_.store(foreground, std::memory_order_release);
         background_resume_deadline_ = {};
         host_foreground_generation_.fetch_add(1U, std::memory_order_acq_rel);
         frame_pacing_generation_.fetch_add(1U, std::memory_order_acq_rel);
@@ -596,11 +597,8 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
 
     const auto mode = static_cast<FramePacingMode>(
         frame_pacing_mode_.load(std::memory_order_acquire));
-    bool host_foreground = false;
-    {
-        std::scoped_lock lock(mutex_);
-        host_foreground = host_foreground_;
-    }
+    const bool host_foreground =
+        host_foreground_.load(std::memory_order_acquire);
     if (mode != FramePacingMode::cap || !host_foreground) {
         tls_frame_cap_deadline_valid_ = false;
         return;
@@ -626,7 +624,7 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
             tls_frame_cap_deadline_,
             [this, pacing_generation] {
                 return shutting_down_.load(std::memory_order_acquire) ||
-                       !host_foreground_ ||
+                       !host_foreground_.load(std::memory_order_acquire) ||
                        frame_pacing_generation_.load(
                            std::memory_order_acquire) != pacing_generation;
             });
@@ -643,11 +641,8 @@ void Scheduler::note_current_frame_boundary() noexcept {
 
     const auto mode = static_cast<FramePacingMode>(
         frame_pacing_mode_.load(std::memory_order_acquire));
-    bool host_foreground = false;
-    {
-        std::scoped_lock lock(mutex_);
-        host_foreground = host_foreground_;
-    }
+    const bool host_foreground =
+        host_foreground_.load(std::memory_order_acquire);
     if (!host_foreground || mode == FramePacingMode::native) {
         reset_current_frame_pacing_state();
         return;
@@ -685,11 +680,8 @@ void Scheduler::note_current_frame_request() noexcept {
 
     const auto mode = static_cast<FramePacingMode>(
         frame_pacing_mode_.load(std::memory_order_acquire));
-    bool host_foreground = false;
-    {
-        std::scoped_lock lock(mutex_);
-        host_foreground = host_foreground_;
-    }
+    const bool host_foreground =
+        host_foreground_.load(std::memory_order_acquire);
     if (!host_foreground || mode != FramePacingMode::override_game_loop) {
         return;
     }
@@ -734,8 +726,11 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         std::scoped_lock lock(mutex_);
         deterministic_mode = deterministic_;
         foreground_peer_runnable =
-            !deterministic_mode && host_foreground_ && !runnable_queue_.empty();
-        if (!deterministic_mode && !host_foreground_) {
+            !deterministic_mode &&
+            host_foreground_.load(std::memory_order_acquire) &&
+            !runnable_queue_.empty();
+        if (!deterministic_mode &&
+            !host_foreground_.load(std::memory_order_acquire)) {
             const auto reservation_time = std::chrono::steady_clock::now();
             if (background_resume_deadline_ < reservation_time) {
                 background_resume_deadline_ = reservation_time;
@@ -756,7 +751,8 @@ void Scheduler::cooperative_quantum(Machine& machine) {
     if (background_deadline.has_value()) {
         std::unique_lock lock(mutex_);
         background_condition_.wait_until(lock, *background_deadline, [this] {
-            return host_foreground_ || shutting_down_;
+            return host_foreground_.load(std::memory_order_acquire) ||
+                   shutting_down_.load(std::memory_order_acquire);
         });
     } else if (unpaced_execution) {
         // MIDlet construction and class initialization are finite bootstrap
@@ -804,7 +800,8 @@ void Scheduler::cooperative_yield(Machine& machine) {
     std::optional<std::chrono::steady_clock::time_point> background_deadline;
     {
         std::scoped_lock lock(mutex_);
-        if (!deterministic_ && !host_foreground_) {
+        if (!deterministic_ &&
+            !host_foreground_.load(std::memory_order_acquire)) {
             const auto reservation_time = std::chrono::steady_clock::now();
             if (background_resume_deadline_ < reservation_time) {
                 background_resume_deadline_ = reservation_time;
@@ -818,7 +815,8 @@ void Scheduler::cooperative_yield(Machine& machine) {
     if (background_deadline.has_value()) {
         std::unique_lock lock(mutex_);
         background_condition_.wait_until(lock, *background_deadline, [this] {
-            return host_foreground_ || shutting_down_;
+            return host_foreground_.load(std::memory_order_acquire) ||
+                   shutting_down_.load(std::memory_order_acquire);
         });
     } else {
         std::this_thread::sleep_for(kExplicitYieldBackoff);
@@ -846,11 +844,8 @@ Result<SchedulerWaitResult> Scheduler::sleep_current(
         frame_interval_nanoseconds_.load(std::memory_order_acquire);
     const auto pacing_mode = static_cast<FramePacingMode>(
         frame_pacing_mode_.load(std::memory_order_acquire));
-    bool host_foreground = false;
-    {
-        std::scoped_lock lock(mutex_);
-        host_foreground = host_foreground_;
-    }
+    const bool host_foreground =
+        host_foreground_.load(std::memory_order_acquire);
 
     if (tls_frame_boundary_pending_) {
         tls_frame_boundary_pending_ = false;
