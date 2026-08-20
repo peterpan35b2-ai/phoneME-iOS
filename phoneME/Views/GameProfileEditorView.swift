@@ -59,7 +59,7 @@ struct GameProfileEditorView: View {
                 }
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
                         profile = .default
@@ -78,7 +78,9 @@ struct GameProfileEditorView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel("More options")
+            }
 
+            ToolbarItem(placement: .confirmationAction) {
                 Button {
                     persistProfile()
                     startAction?()

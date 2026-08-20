@@ -352,22 +352,26 @@ struct ProfilesView: View {
                 .accessibilityLabel("Add profile")
             }
         }
-        .alert("New Profile", isPresented: $showAddDialog) {
-            TextField("Profile Name", text: $enteredName)
-            Button("Cancel", role: .cancel) {}
-            Button("Add") {
-                if let template = templates.add(name: enteredName) {
-                    editingTemplate = template
-                }
+        .phoneMETextInputAlert(
+            isPresented: $showAddDialog,
+            title: "New Profile",
+            placeholder: "Profile Name",
+            text: $enteredName,
+            confirmTitle: "Add"
+        ) {
+            if let template = templates.add(name: enteredName) {
+                editingTemplate = template
             }
         }
-        .alert("Rename Profile", isPresented: renameDialogBinding) {
-            TextField("Profile Name", text: $enteredName)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                if let renamingTemplate {
-                    templates.rename(renamingTemplate, to: enteredName)
-                }
+        .phoneMETextInputAlert(
+            isPresented: renameDialogBinding,
+            title: "Rename Profile",
+            placeholder: "Profile Name",
+            text: $enteredName,
+            confirmTitle: "Save"
+        ) {
+            if let renamingTemplate {
+                templates.rename(renamingTemplate, to: enteredName)
             }
         }
         .sheet(item: $editingTemplate) { template in

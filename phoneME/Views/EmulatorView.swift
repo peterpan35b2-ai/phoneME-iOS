@@ -1026,20 +1026,32 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                     }
                 }
 
-                ToolbarItemGroup(placement: .primaryAction) {
+                ToolbarItem(placement: .primaryAction) {
                     Group {
                         if keyboardAdjustmentMode == .none {
                             Button(action: toggleKeyboardAction) {
-                        Image(systemName: "keyboard")
+                                Image(systemName: "keyboard")
+                            }
+                            .accessibilityLabel("Keyboard (IME)")
+                            .disabled(keyboardDisabled)
+                        }
                     }
-                    .accessibilityLabel("Keyboard (IME)")
-                    .disabled(keyboardDisabled)
+                }
 
-                    Button(action: screenshotAction) {
-                        Image(systemName: "camera")
+                ToolbarItem(placement: .primaryAction) {
+                    Group {
+                        if keyboardAdjustmentMode == .none {
+                            Button(action: screenshotAction) {
+                                Image(systemName: "camera")
+                            }
+                            .accessibilityLabel("Take screenshot")
+                        }
                     }
-                    .accessibilityLabel("Take screenshot")
+                }
 
+                ToolbarItem(placement: .primaryAction) {
+                    Group {
+                        if keyboardAdjustmentMode == .none {
                     Menu {
                         Menu {
                             Button(action: beginKeyboardPositionAction) {
@@ -1087,8 +1099,8 @@ private struct EmulatorToolbarAnchor: View, Equatable {
                                     ? L10n.string("Unlock screen rotation")
                                     : L10n.string("Lock screen rotation"),
                                 systemImage: isRotationLocked
-                                    ? "lock.rotation.open"
-                                    : "lock.rotation"
+                                    ? "lock.open"
+                                    : "lock"
                             )
                         }
                         Menu {

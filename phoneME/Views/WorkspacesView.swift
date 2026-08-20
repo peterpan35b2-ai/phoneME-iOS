@@ -81,16 +81,18 @@ struct WorkspacesView: View {
                 }
             }
         }
-        .alert("Rename Workspace", isPresented: renameAlertBinding) {
-            TextField("Workspace name", text: $renameText)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                guard let renameWorkspace else { return }
-                workspaceStore.renameWorkspace(
-                    id: renameWorkspace.id,
-                    to: renameText
-                )
-            }
+        .phoneMETextInputAlert(
+            isPresented: renameAlertBinding,
+            title: "Rename Workspace",
+            placeholder: "Workspace name",
+            text: $renameText,
+            confirmTitle: "Save"
+        ) {
+            guard let renameWorkspace else { return }
+            workspaceStore.renameWorkspace(
+                id: renameWorkspace.id,
+                to: renameText
+            )
         }
         .confirmationDialog(
             "Delete this workspace?",
@@ -275,7 +277,7 @@ struct WorkspaceDetailView: View {
                 }
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     if hasRunningPanels {
                         stopAllScreens()
@@ -292,8 +294,11 @@ struct WorkspaceDetailView: View {
                             : "play.fill"
                     )
                 }
+                .labelStyle(.iconOnly)
                 .disabled(!hasRunningPanels && !canLaunchAnyPanel)
+            }
 
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showsKeyboard.toggle()
                 } label: {
@@ -302,8 +307,11 @@ struct WorkspaceDetailView: View {
                         systemImage: "keyboard"
                     )
                 }
+                .labelStyle(.iconOnly)
                 .disabled(focusedPanel == nil)
+            }
 
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     focusedPanelID = nil
                     isEditingLayout.toggle()
@@ -313,16 +321,22 @@ struct WorkspaceDetailView: View {
                         systemImage: isEditingLayout ? "checkmark" : "arrow.up.left.and.arrow.down.right"
                     )
                 }
+                .labelStyle(.iconOnly)
+            }
 
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showGamePicker = true
                 } label: {
                     Label("Add Screen", systemImage: "plus")
                 }
+                .labelStyle(.iconOnly)
                 .disabled(
                     (workspace?.panels.count ?? 0) >= WorkspaceStore.maximumPanelCount
                 )
+            }
 
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
                         showResetLayoutConfirmation = true

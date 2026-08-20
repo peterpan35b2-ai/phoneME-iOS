@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -17,6 +18,10 @@
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
+#endif
+
+#if defined(PHONEME_WEB)
+#include <emscripten.h>
 #endif
 
 namespace phoneme::graphics {
@@ -323,6 +328,69 @@ struct PhoneMEFontBin final {
             }
         }
         pen_x += glyph_advance(font, glyph_index, logical_font);
+    }
+    return {};
+}
+
+// Composites an 8-bit coverage mask into the target image. Mask row zero is
+// the top row; (destination_left, destination_top) is the mask's top-left
+// corner in target coordinates. Pixels outside the clip and the target are
+// skipped. Shared by the CoreText and browser-canvas fallback rasterizers.
+[[nodiscard]] Status composite_text_mask(Image& target,
+                                         std::span<const u8> mask,
+                                         i32 mask_width,
+                                         i64 destination_left,
+                                         i64 destination_top,
+                                         Pixel color,
+                                         const Rect& clip) {
+    if (mask_width <= 0 ||
+        mask.size() % static_cast<usize>(mask_width) != 0U) {
+        return fail(ErrorCode::internal_error,
+                    "text fallback mask dimensions are invalid");
+    }
+    const Rect target_clip = intersect(clip, target_bounds(target));
+    const i64 mask_height = static_cast<i64>(mask.size()) /
+                            static_cast<i64>(mask_width);
+    const i64 clip_right = static_cast<i64>(target_clip.x) +
+                           target_clip.width;
+    const i64 clip_bottom = static_cast<i64>(target_clip.y) +
+                            target_clip.height;
+    const i64 visible_left = std::max<i64>(target_clip.x, destination_left);
+    const i64 visible_right =
+        std::min<i64>(clip_right,
+                      destination_left + static_cast<i64>(mask_width));
+    const i64 visible_top = std::max<i64>(target_clip.y, destination_top);
+    const i64 visible_bottom =
+        std::min<i64>(clip_bottom, destination_top + mask_height);
+    if (visible_right <= visible_left || visible_bottom <= visible_top) {
+        return {};
+    }
+
+    const u32 base_alpha = alpha(color);
+    for (i64 row = visible_top; row < visible_bottom; ++row) {
+        const u8* mask_row = mask.data() +
+            static_cast<usize>(row - destination_top) *
+                static_cast<usize>(mask_width);
+        for (i64 column = visible_left; column < visible_right; ++column) {
+            const u8 coverage =
+                mask_row[static_cast<usize>(column - destination_left)];
+            if (coverage == 0U) {
+                continue;
+            }
+            const u8 source_alpha = static_cast<u8>(
+                (base_alpha * coverage + 127U) / 255U);
+            const Pixel source = argb(source_alpha,
+                                      red(color),
+                                      green(color),
+                                      blue(color));
+            auto stored = target.set_pixel(static_cast<i32>(column),
+                                           static_cast<i32>(row),
+                                           source,
+                                           true);
+            if (!stored) {
+                return stored;
+            }
+        }
     }
     return {};
 }
@@ -689,38 +757,234 @@ struct CachedFont final {
     CGContextRelease(context);
     CFRelease(line);
 
-    const u32 base_alpha = alpha(color);
-    for (i32 source_y = 0; source_y < kPhoneMEFontHeight; ++source_y) {
-        // This is the same row mapping used by the phoneME C iOS port. The
-        // fallback mask and Canvas framebuffer both expose row zero at top.
-        const i64 destination_y = static_cast<i64>(top) + source_y;
-        if (destination_y < visible_top || destination_y >= visible_bottom) {
-            continue;
+    return composite_text_mask(target,
+                               mask,
+                               mask_width,
+                               visible_left,
+                               top,
+                               color,
+                               clip);
+}
+
+#endif
+
+#if defined(PHONEME_WEB)
+
+// Browser fallback rasterizer. The bundled phoneME bitmap font only covers
+// Latin (at most kMaximumFontGlyphs glyphs), so every other script — CJK,
+// Vietnamese, Cyrillic, ... — is measured and rasterized with the worker's
+// canvas 2D font stack, mirroring the iOS CoreText fallback. If OffscreenCanvas
+// is unavailable the bridge reports failure and callers keep the bitmap-only
+// behavior.
+constexpr i32 kWebFontPixelSize = 13;
+constexpr i32 kWebFontBaseline = kPhoneMEFontAscent;
+
+[[nodiscard]] std::string utf8_text(std::span<const char32_t> text) {
+    std::string output;
+    output.reserve(text.size());
+    for (const char32_t character : text) {
+        u32 value = static_cast<u32>(character);
+        if (value > 0x10FFFFU ||
+            (value >= 0xD800U && value <= 0xDFFFU)) {
+            value = 0xFFFDU;
         }
-        for (i32 source_x = 0; source_x < mask_width; ++source_x) {
-            const u8 coverage = mask[
-                static_cast<usize>(source_y) * width_value +
-                static_cast<usize>(source_x)];
-            if (coverage == 0U) {
-                continue;
-            }
-            const i32 destination_x = static_cast<i32>(visible_left + source_x);
-            const u8 source_alpha = static_cast<u8>(
-                (base_alpha * coverage + 127U) / 255U);
-            const Pixel source = argb(source_alpha,
-                                      red(color),
-                                      green(color),
-                                      blue(color));
-            auto stored = target.set_pixel(destination_x,
-                                           static_cast<i32>(destination_y),
-                                           source,
-                                           true);
-            if (!stored) {
-                return stored;
-            }
+        if (value < 0x80U) {
+            output.push_back(static_cast<char>(value));
+        } else if (value < 0x800U) {
+            output.push_back(static_cast<char>(0xC0U | (value >> 6U)));
+            output.push_back(static_cast<char>(0x80U | (value & 0x3FU)));
+        } else if (value < 0x10000U) {
+            output.push_back(static_cast<char>(0xE0U | (value >> 12U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((value >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (value & 0x3FU)));
+        } else {
+            output.push_back(static_cast<char>(0xF0U | (value >> 18U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((value >> 12U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | ((value >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (value & 0x3FU)));
         }
     }
-    return {};
+    return output;
+}
+
+[[nodiscard]] std::string web_css_font(const Font& font) {
+    std::string css;
+    if (font.is_bold()) {
+        css += "bold ";
+    }
+    if (font.is_italic()) {
+        css += "italic ";
+    }
+    css += std::to_string(kWebFontPixelSize);
+    css += "px ";
+    css += font.face() == static_cast<i32>(FontFace::monospace)
+        ? "monospace"
+        : "system-ui";
+    return css;
+}
+
+[[nodiscard]] i32 web_measure_text(std::string_view text,
+                                   std::string_view css_font) noexcept {
+    const std::string text_bytes(text);
+    const std::string font_bytes(css_font);
+    return EM_ASM_INT({
+        if (typeof OffscreenCanvas === 'undefined') return -1;
+        const global = globalThis;
+        let bridge = global.__phoneMETextBridge;
+        if (!bridge) {
+            bridge = global.__phoneMETextBridge = {
+                context: new OffscreenCanvas(1, 1)
+                    .getContext('2d', { willReadFrequently: true })
+            };
+        }
+        bridge.context.font = UTF8ToString($1);
+        const width = bridge.context.measureText(UTF8ToString($0)).width;
+        return Number.isFinite(width) && width >= 0 ? Math.ceil(width) : -1;
+    }, text_bytes.c_str(), font_bytes.c_str());
+}
+
+[[nodiscard]] bool web_rasterize_text(std::string_view text,
+                                      std::string_view css_font,
+                                      u8* mask,
+                                      i32 mask_width,
+                                      i32 mask_height,
+                                      double origin_x) noexcept {
+    const std::string text_bytes(text);
+    const std::string font_bytes(css_font);
+    return EM_ASM_INT({
+        const bridge = globalThis.__phoneMETextBridge;
+        if (!bridge || $3 <= 0 || $4 <= 0) return 0;
+        const context = bridge.context;
+        const canvas = context.canvas;
+        if ($3 > canvas.width) canvas.width = $3;
+        if ($4 > canvas.height) canvas.height = $4;
+        context.clearRect(0, 0, $3, $4);
+        context.font = UTF8ToString($1);
+        context.fillStyle = '#fff';
+        context.textBaseline = 'alphabetic';
+        context.fillText(UTF8ToString($0), $5, $6);
+        const pixels = context.getImageData(0, 0, $3, $4).data;
+        const total = $3 * $4;
+        for (let index = 0; index < total; ++index) {
+            HEAPU8[$2 + index] = pixels[index * 4 + 3];
+        }
+        return 1;
+    }, text_bytes.c_str(), font_bytes.c_str(),
+       reinterpret_cast<intptr_t>(mask), mask_width, mask_height, origin_x,
+       static_cast<double>(kWebFontBaseline)) != 0;
+}
+
+[[nodiscard]] std::optional<i32> web_text_width(
+    const Font& font,
+    std::span<const char32_t> text) noexcept {
+    if (text.empty()) {
+        return 0;
+    }
+    const i32 width = web_measure_text(utf8_text(text), web_css_font(font));
+    if (width < 0) {
+        return std::nullopt;
+    }
+    return width;
+}
+
+[[nodiscard]] Status draw_web_text(Image& target,
+                                   const Font& font,
+                                   std::span<const char32_t> text,
+                                   i32 x,
+                                   i32 top,
+                                   Pixel color,
+                                   const Rect& clip) {
+    const std::string utf8 = utf8_text(text);
+    const std::string css_font = web_css_font(font);
+    const i32 advance = web_measure_text(utf8, css_font);
+    if (advance < 0) {
+        return fail(ErrorCode::unsupported_feature,
+                    "browser text bridge is unavailable");
+    }
+
+    constexpr i32 kWebTextPadding = 1;
+    const i64 full_left = static_cast<i64>(x) - kWebTextPadding;
+    const i64 full_right =
+        static_cast<i64>(x) + advance + kWebTextPadding;
+    const i64 full_bottom =
+        static_cast<i64>(top) + kPhoneMEFontHeight;
+
+    const Rect target_clip = intersect(clip, target_bounds(target));
+    const i64 clip_right =
+        static_cast<i64>(target_clip.x) + target_clip.width;
+    const i64 clip_bottom =
+        static_cast<i64>(target_clip.y) + target_clip.height;
+    const i64 visible_left =
+        std::max<i64>(target_clip.x, full_left);
+    const i64 visible_right = std::min<i64>(clip_right, full_right);
+    const i64 visible_top = std::max<i64>(target_clip.y, top);
+    const i64 visible_bottom =
+        std::min<i64>(clip_bottom, full_bottom);
+    if (visible_right <= visible_left || visible_bottom <= visible_top) {
+        return {};
+    }
+
+    const i32 mask_width =
+        static_cast<i32>(visible_right - visible_left);
+    const usize width_value = static_cast<usize>(mask_width);
+    constexpr usize height_value = static_cast<usize>(kPhoneMEFontHeight);
+    if (width_value >
+        std::numeric_limits<usize>::max() / height_value) {
+        return fail(ErrorCode::overflow,
+                    "browser text mask size overflows");
+    }
+    std::vector<u8> mask(width_value * height_value, 0U);
+
+    // Mask column zero is visible_left; the run's pen starts at x.
+    const double origin_x = static_cast<double>(x - visible_left);
+    if (!web_rasterize_text(utf8,
+                            css_font,
+                            mask.data(),
+                            mask_width,
+                            kPhoneMEFontHeight,
+                            origin_x)) {
+        return fail(ErrorCode::unsupported_feature,
+                    "browser text rasterization failed");
+    }
+
+    return composite_text_mask(target,
+                               mask,
+                               mask_width,
+                               visible_left,
+                               top,
+                               color,
+                               clip);
+}
+
+#endif
+
+#if defined(__APPLE__) || defined(PHONEME_WEB)
+
+[[nodiscard]] std::optional<i32> fallback_text_width(
+    const Font& font,
+    std::span<const char32_t> text) noexcept {
+#if defined(__APPLE__)
+    return core_text_width(font, text);
+#else
+    return web_text_width(font, text);
+#endif
+}
+
+[[nodiscard]] Status draw_text_fallback(Image& target,
+                                        const Font& font,
+                                        std::span<const char32_t> text,
+                                        i32 x,
+                                        i32 top,
+                                        Pixel color,
+                                        const Rect& clip) {
+#if defined(__APPLE__)
+    return draw_core_text_fallback(target, font, text, x, top, color, clip);
+#else
+    return draw_web_text(target, font, text, x, top, color, clip);
+#endif
 }
 
 [[nodiscard]] std::optional<i32> mixed_text_width(
@@ -742,7 +1006,7 @@ struct CachedFont final {
         const auto run = text.subspan(run_start, run_end - run_start);
         const std::optional<i32> run_width = use_bitmap
             ? bitmap_text_width(font, run)
-            : core_text_width(font, run);
+            : fallback_text_width(font, run);
         if (!run_width || *run_width < 0 ||
             total_width > std::numeric_limits<i32>::max() - *run_width) {
             return std::nullopt;
@@ -776,7 +1040,7 @@ struct CachedFont final {
         const auto run = text.subspan(run_start, run_end - run_start);
         const std::optional<i32> run_width = use_bitmap
             ? bitmap_text_width(font, run)
-            : core_text_width(font, run);
+            : fallback_text_width(font, run);
         if (!run_width) {
             return fail(ErrorCode::unsupported_feature,
                         "text run could not be measured");
@@ -793,13 +1057,13 @@ struct CachedFont final {
                                top,
                                color,
                                clip)
-            : draw_core_text_fallback(target,
-                                      font,
-                                      run,
-                                      static_cast<i32>(pen_x),
-                                      top,
-                                      color,
-                                      clip);
+            : draw_text_fallback(target,
+                                 font,
+                                 run,
+                                 static_cast<i32>(pen_x),
+                                 top,
+                                 color,
+                                 clip);
         if (!status) {
             return status;
         }
@@ -834,11 +1098,13 @@ std::optional<i32> platform_text_width(
     if (text.size() > kMaximumTextCodePoints) {
         return std::nullopt;
     }
+#if defined(__APPLE__) || defined(PHONEME_WEB)
 #if defined(__APPLE__)
     auto normalized = normalize_nfc_if_needed(text);
     if (normalized) {
         text = *normalized;
     }
+#endif
     return mixed_text_width(font, text);
 #else
     return bitmap_text_width(font, text);
@@ -863,11 +1129,13 @@ Status draw_platform_text(Image& target,
         return fail(ErrorCode::overflow,
                     "text input exceeds the bounded glyph budget");
     }
+#if defined(__APPLE__) || defined(PHONEME_WEB)
 #if defined(__APPLE__)
     auto normalized = normalize_nfc_if_needed(text);
     if (normalized) {
         text = *normalized;
     }
+#endif
     return draw_mixed_text(target, font, text, x, top, color, clip);
 #else
     if (bitmap_text_width(font, text).has_value()) {

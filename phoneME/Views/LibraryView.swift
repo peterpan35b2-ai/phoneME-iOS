@@ -187,15 +187,15 @@ struct LibraryView: View {
                     }
             }
         }
-        .alert("Rename", isPresented: renameAlertBinding) {
-            TextField("App name", text: $renameText)
-                .foregroundStyle(.primary)
-                .tint(.accentColor)
-            Button("Cancel", role: .cancel) {}
-            Button("OK") {
-                if let renameGame {
-                    library.rename(renameGame, to: renameText)
-                }
+        .phoneMETextInputAlert(
+            isPresented: renameAlertBinding,
+            title: "Rename",
+            placeholder: "App name",
+            text: $renameText,
+            confirmTitle: "OK"
+        ) {
+            if let renameGame {
+                library.rename(renameGame, to: renameText)
             }
         }
         .confirmationDialog(
@@ -430,8 +430,11 @@ struct LibraryView: View {
             importToolbarButton
         }
 
-        ToolbarItemGroup(placement: .primaryAction) {
+        ToolbarItem(placement: .primaryAction) {
             runningFilterButton
+        }
+
+        ToolbarItem(placement: .primaryAction) {
             moreToolbarMenu
         }
     }

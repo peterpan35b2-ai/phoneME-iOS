@@ -5,6 +5,80 @@ import UIKit
 import AppKit
 #endif
 
+extension View {
+    @ViewBuilder
+    func phoneMETextInputAlert(
+        isPresented: Binding<Bool>,
+        title: String,
+        placeholder: String,
+        text: Binding<String>,
+        confirmTitle: String,
+        onConfirm: @escaping () -> Void
+    ) -> some View {
+#if os(iOS)
+        if #available(iOS 16.0, *) {
+            self.alert(title, isPresented: isPresented) {
+                TextField(placeholder, text: text)
+                Button("Cancel", role: .cancel) {}
+                Button(confirmTitle, action: onConfirm)
+            }
+        } else {
+            sheet(isPresented: isPresented) {
+                PhoneMETextInputSheet(
+                    title: title,
+                    placeholder: placeholder,
+                    text: text,
+                    confirmTitle: confirmTitle,
+                    onConfirm: onConfirm
+                )
+            }
+        }
+#else
+        self.alert(title, isPresented: isPresented) {
+            TextField(placeholder, text: text)
+            Button("Cancel", role: .cancel) {}
+            Button(confirmTitle, action: onConfirm)
+        }
+#endif
+    }
+}
+
+#if os(iOS)
+private struct PhoneMETextInputSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    let confirmTitle: String
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text(title)
+                .font(.headline)
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button("Cancel", role: .cancel) { dismiss() }
+                Spacer()
+                Button(confirmTitle) {
+                    onConfirm()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: 360)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+    }
+}
+#endif
+
 extension Color {
     static var phoneMEAppBackground: Color {
 #if os(iOS)

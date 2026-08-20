@@ -1,51 +1,102 @@
 # phoneME iOS
 
-Native SwiftUI front end for the phoneME J2ME runtime.
+A J2ME (Java ME / MIDP 2.0) emulator for iOS and the web, built on a
+from-scratch C++23 runtime. Play classic mobile-phone Java games and apps
+natively on modern devices.
 
-## Current milestone
+![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Web-blue)
+![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
-- One multiplatform Xcode target for iOS 16+ and macOS 13+.
-- Native game library with `.jar` import and persistent metadata.
-- Native emulator shell with scalable framebuffer surface and J2ME keypad.
-- A small C ABI contract loaded through `dlsym`, allowing the phoneME VM to be linked into the app without VNC, a child window, or SDL UI.
-- Native settings UI.
+## Features
 
-The app deliberately does not bundle the whole sibling `phoneME` checkout. The next core milestone is to compile only the CLDC/MIDP runtime, networking, RMS, media and the framebuffer/input ports into a static library exporting the symbols documented in `phoneME/Runtime/PhoneMECAPI.swift`.
+- **Complete J2ME runtime** — CLDC 1.1 and MIDP 2.x implemented in C++23, with
+  no external class archives required at boot.
+- **High-performance VM** — bytecode interpreter plus a baseline JIT with
+  inline resolvers and OSR (on-stack replacement), tuned for real games.
+- **Wide API coverage** — LCDUI (Canvas, Form, List, TextBox, Game API:
+  Sprite, TiledLayer, LayerManager), RMS record stores, HTTP/HTTPS/sockets/
+  datagrams/file connections (GCF), JSR-135 Mobile Media, and more. See
+  [docs/J2ME_API_COVERAGE.md](docs/J2ME_API_COVERAGE.md) for the full audit.
+- **Native iOS app** (SwiftUI, iOS 15+) — game library with `.jar` import,
+  per-game profiles and workspaces, J2ME keypad, scalable framebuffer.
+- **Web app** — the same core compiled to WebAssembly with a Material UI
+  frontend, running entirely in the browser.
 
-## Build
+## Repository layout
+
+```text
+Core/       J2ME runtime written in C++23 (VM, JIT, graphics, network,
+            media, RMS, JAR/classfile, security) exposed through a C ABI
+phoneME/    Native iOS app (SwiftUI) embedding the core as a static library
+web/        Vite + TypeScript frontend and WebAssembly build of the core
+docs/       J2ME API coverage audit
+Scripts/    Helper scripts
+```
+
+## Building
+
+### iOS app
+
+Requirements: macOS with Xcode, CMake, and an arm64 Apple device or simulator.
 
 ```bash
-xcodebuild -project phoneME.xcodeproj -target phoneME -sdk macosx build
+open phoneME.xcodeproj   # then select the phoneME target and run
+```
+
+The Xcode build compiles `Core/` into a static library automatically via
+`Core/Tools/build-iphoneos.sh` (arm64, iOS 15.0+, C++23).
+
+Command line:
+
+```bash
 xcodebuild -project phoneME.xcodeproj -target phoneME -sdk iphonesimulator build
 ```
 
-Open `phoneME.xcodeproj` in Xcode to run the native app.
+### Web app
+
+Requirements: Node.js, CMake, Emscripten (`emcc`, `emcmake`).
+
+```bash
+cd web
+npm install
+npm run dev       # development server (adds COOP/COEP headers for threads)
+npm run build     # Wasm build + type-check + production bundle
+```
+
+## Testing
+
+```bash
+bash Core/Tools/test-host.sh                       # host test suite
+PHONEME_SANITIZE=1 bash Core/Tools/test-host.sh    # ASan/UBSan
+bash Core/Tools/test-full-regression.sh            # everything: host suites,
+                                                   # sanitizers, arm64 archive,
+                                                   # iOS app Debug+Release
+```
 
 ## Runtime ABI
 
-The embedded runtime must export:
+The core exposes a versioned C ABI (`Core/include/PhoneMECore.h`,
+`PHONEME_C_API_VERSION`), consumed by both the iOS app
+(`phoneME/Runtime/PhoneMECAPI.swift`) and the Wasm web build:
 
 ```c
-void *phoneme_create(void);
-void phoneme_destroy(void *runtime);
-int32_t phoneme_start_jar(void *runtime, const char *jar_path);
-void phoneme_stop(void *runtime);
-void phoneme_send_key(void *runtime, int32_t key_code, int32_t pressed);
-int32_t phoneme_copy_frame_rgba(
-    void *runtime,
-    uint8_t *destination,
-    int32_t capacity,
-    int32_t *width,
-    int32_t *height
-);
+uint32_t phoneme_c_api_version(void);
+void    *phoneme_create(void);
+void     phoneme_destroy(void *runtime);
+int32_t  phoneme_start_jar(void *runtime, const char *jar_path);
+void     phoneme_stop(void *runtime);
+void     phoneme_send_key(void *runtime, int32_t key_code, int32_t pressed);
+int32_t  phoneme_copy_frame_rgba(void *runtime, uint8_t *destination,
+         int32_t capacity, int32_t *width, int32_t *height);
 ```
 
-`phoneme_copy_frame_rgba` returns the required byte count. It may be called once with a null destination to query the current frame size. Pixels are tightly packed RGBA8888.
+`phoneme_copy_frame_rgba` returns the required byte count; call it with a null
+destination to query the current frame size (tightly packed RGBA8888). The ABI
+is additive: new surface bumps the minor version, breaking changes require a
+major bump, and hosts reject incompatible majors at load time.
 
 ## License
 
-Copyright 2026 Duy Pham. Licensed under the **Apache License, Version 2.0** with the **Commons Clause License Condition v1.0**.
+Copyright © 2026 Duy Pham.
 
-This software is **not for commercial sale**. You may use, copy, modify, merge, publish, and distribute it under the Apache 2.0 terms, **but you may not Sell the Software** — i.e. you may not provide to third parties, for a fee or other consideration, a product or service whose value derives entirely or substantially from the function of this software (including paid hosting or paid consulting/support for it). All other rights and conditions of the Apache License remain in effect.
-
-See [`LICENSE`](LICENSE) for the full terms.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
