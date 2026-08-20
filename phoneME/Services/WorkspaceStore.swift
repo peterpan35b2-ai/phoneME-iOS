@@ -781,6 +781,12 @@ final class WorkspaceRuntimeStore: ObservableObject {
         }
     }
 
+    func flushAllRecordStores() {
+        for session in sessions.values {
+            session.flushRecordStores()
+        }
+    }
+
     func launch(
         panel: EmulatorWorkspacePanel,
         workspaceID: UUID,

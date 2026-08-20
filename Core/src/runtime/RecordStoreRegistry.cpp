@@ -949,6 +949,7 @@ Status RecordStoreRegistry::commit_mutation_unlocked(Store& store) const {
         if (!store.pending_persist) {
             store.pending_persist = true;
             store.pending_since = std::chrono::steady_clock::now();
+            any_pending_persist_.store(true, std::memory_order_relaxed);
         }
         return {};
     }
@@ -961,22 +962,30 @@ void RecordStoreRegistry::set_write_through(bool enabled) noexcept {
 }
 
 void RecordStoreRegistry::flush_pending() {
+    if (!any_pending_persist_.load(std::memory_order_relaxed)) return;
     std::scoped_lock lock(mutex_);
     // ponytail: fixed 250ms pending window flushed on the VM thread; an
     // async flusher thread would shave the remaining hitch but costs a
     // thread on every platform including wasm.
     constexpr auto kPendingFlushDelay = std::chrono::milliseconds(250);
     const auto now = std::chrono::steady_clock::now();
+    bool still_pending = false;
     for (auto& [name, store] : stores_) {
         (void)name;
-        if (!store.pending_persist || store.open_count == 0U) continue;
-        if (now - store.pending_since < kPendingFlushDelay) continue;
-        if (persist_unlocked(store).has_value())
+        if (!store.pending_persist) continue;
+        if (store.open_count != 0U &&
+            now - store.pending_since >= kPendingFlushDelay &&
+            persist_unlocked(store).has_value()) {
             store.pending_persist = false;
+            continue;
+        }
+        still_pending = true;
     }
+    any_pending_persist_.store(still_pending, std::memory_order_relaxed);
 }
 
 Status RecordStoreRegistry::flush_all() {
+    if (!any_pending_persist_.load(std::memory_order_relaxed)) return {};
     std::scoped_lock lock(mutex_);
     for (auto& [name, store] : stores_) {
         (void)name;
@@ -985,6 +994,7 @@ Status RecordStoreRegistry::flush_all() {
         if (!persisted) return persisted;
         store.pending_persist = false;
     }
+    any_pending_persist_.store(false, std::memory_order_relaxed);
     return {};
 }
 

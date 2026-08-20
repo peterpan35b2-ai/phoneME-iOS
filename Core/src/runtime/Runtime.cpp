@@ -2701,6 +2701,33 @@ void Runtime::suspend() noexcept {
             }
         }
     }
+
+    // iOS can terminate the process at any point while suspended, so deferred
+    // RMS writes must reach disk now or the player's last save dies with the
+    // process. Java execution keeps running; later writes still see the normal
+    // pending-flush window.
+    flush_record_stores();
+}
+
+void Runtime::flush_record_stores() noexcept {
+    std::vector<std::shared_ptr<ApplicationVM>> app_vms;
+    {
+        std::scoped_lock lock(mutex_);
+        app_vms.reserve(apps_.size());
+        for (auto& [app_id, app] : apps_) {
+            (void)app_id;
+            if (app.vm != nullptr) app_vms.push_back(app.vm);
+        }
+    }
+    for (const auto& app_vm : app_vms) {
+        auto flushed = app_vm->machine.record_stores().flush_all();
+        if (!flushed) {
+            std::fprintf(stderr,
+                         "[phoneME] RMS flush failed: %s\n",
+                         flushed.error().message.c_str());
+            std::fflush(stderr);
+        }
+    }
 }
 
 void Runtime::resume() noexcept {

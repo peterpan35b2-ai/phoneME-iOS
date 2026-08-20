@@ -188,6 +188,9 @@ public:
     void stop() noexcept;
     void suspend() noexcept;
     void resume() noexcept;
+    // Persists deferred RMS writes for every live application VM. Call before
+    // the host may kill the process (backgrounding, memory pressure).
+    void flush_record_stores() noexcept;
 
     [[nodiscard]] bool is_running() const noexcept;
     [[nodiscard]] bool is_suspended() const noexcept;

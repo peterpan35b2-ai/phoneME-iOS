@@ -619,6 +619,10 @@ final class PhoneMECAPI: @unchecked Sendable {
         phoneme_resume(runtime?.rawValue)
     }
 
+    func flushRMS(_ runtime: RuntimeHandle?) {
+        phoneme_flush_rms(runtime?.rawValue)
+    }
+
     func isRunning(_ runtime: RuntimeHandle?) -> Bool {
         phoneme_is_running(runtime?.rawValue) != 0
     }

@@ -343,6 +343,9 @@ int32_t phoneme_start_jar(PhoneMERuntimeRef runtime,
 void phoneme_stop(PhoneMERuntimeRef runtime);
 void phoneme_suspend(PhoneMERuntimeRef runtime);
 void phoneme_resume(PhoneMERuntimeRef runtime);
+/* Persists deferred RMS (record store) writes for every live application.
+ * Call before the host may kill the process (backgrounding, memory warning). */
+void phoneme_flush_rms(PhoneMERuntimeRef runtime);
 int32_t phoneme_is_running(PhoneMERuntimeRef runtime);
 int32_t phoneme_is_suspended(PhoneMERuntimeRef runtime);
 int32_t phoneme_last_exit_code(PhoneMERuntimeRef runtime);

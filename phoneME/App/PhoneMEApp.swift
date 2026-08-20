@@ -93,6 +93,18 @@ struct PhoneMEApp: App {
                 .onChange(of: scenePhase) { newPhase in
                     updateLifecycle(for: newPhase)
                 }
+#if os(iOS)
+                // iOS may jetsam the process shortly after a memory warning;
+                // persist deferred RMS (game saves) before that can happen.
+                .onReceive(
+                    NotificationCenter.default.publisher(
+                        for: UIApplication.didReceiveMemoryWarningNotification
+                    )
+                ) { _ in
+                    session.flushRecordStores()
+                    workspaceRuntime.flushAllRecordStores()
+                }
+#endif
         }
 
 #if os(macOS)

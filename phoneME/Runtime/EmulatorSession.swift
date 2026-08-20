@@ -588,6 +588,10 @@ final class EmulatorSession: ObservableObject {
         engine.enterForeground()
     }
 
+    func flushRecordStores() {
+        engine.flushRecordStores()
+    }
+
     private func capturePresentationSnapshot(for gameID: UUID) {
         presentationSnapshots[gameID] = EmulatorPresentationSnapshot(
             frame: frameStore.frame,

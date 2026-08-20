@@ -1915,6 +1915,23 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
     }
 
+    /// Persists deferred RMS (record store) writes before iOS can kill the
+    /// process (memory warning). Runtime::suspend() already flushes on
+    /// backgrounding; this covers the killed-while-active path.
+    func flushRecordStores() {
+        guard
+            let api,
+            let runtime
+        else {
+            return
+        }
+        // Serialized with destroyRuntime on runtimeQueue, so the handle stays
+        // valid for the duration of the call.
+        runtimeQueue.async {
+            api.flushRMS(runtime)
+        }
+    }
+
     private func pauseHostPollingForBackground() {
         if let pollTimer, !pollTimerIsSuspended {
             pollTimer.suspend()

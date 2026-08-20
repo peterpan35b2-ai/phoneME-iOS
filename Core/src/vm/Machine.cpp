@@ -2630,7 +2630,12 @@ namespace phoneme::vm
     // the class-initialization condition.
     class_initialization_condition_.notify_all();
     scheduler_.shutdown(&monitors_);
-    static_cast<void>(record_stores_.flush_all());
+    if (auto flushed = record_stores_.flush_all(); !flushed) {
+      std::fprintf(stderr,
+                   "[phoneME] RMS flush during shutdown failed: %s\n",
+                   flushed.error().message.c_str());
+      std::fflush(stderr);
+    }
     dump_performance_summary_if_requested();
   }
 

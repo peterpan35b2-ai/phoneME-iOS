@@ -133,6 +133,11 @@ private:
     std::unordered_map<std::string, Store> stores_;
     RecordStoreFaultInjector fault_injector_;
     mutable std::atomic<u64> mutation_generation_ {0};
+    // Relaxed hint: set while marking a store pending, recomputed by the
+    // flush paths under mutex_. False only guarantees "nothing pending" while
+    // mutex_ serializes writers, letting the periodic VM flush poll skip the
+    // lock+scan entirely in the common no-RMS case.
+    mutable std::atomic_bool any_pending_persist_ {false};
 };
 
 } // namespace phoneme::runtime

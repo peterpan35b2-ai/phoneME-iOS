@@ -751,6 +751,12 @@ void phoneme_suspend(PhoneMERuntimeRef runtime) {
     }
 }
 
+void phoneme_flush_rms(PhoneMERuntimeRef runtime) {
+    if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
+        instance->flush_record_stores();
+    }
+}
+
 void phoneme_resume(PhoneMERuntimeRef runtime) {
     if (Runtime* instance = cast_runtime(runtime); instance != nullptr) {
         instance->resume();
