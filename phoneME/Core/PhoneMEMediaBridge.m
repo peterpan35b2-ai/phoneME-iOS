@@ -70,8 +70,14 @@ static UIImage *gPMMediaApplicationArtwork;
 static int32_t gPMNowPlayingHandle = 0;
 #endif
 
+#if TARGET_OS_IOS || TARGET_OS_TV
+static void PMRegisterMediaLifecycleObservers(void);
+void phoneme_ios_media_reset(void);
+#endif
+
 static void PMConfigureAudioSession(void) {
 #if TARGET_OS_IOS || TARGET_OS_TV
+    PMRegisterMediaLifecycleObservers();
     AVAudioSession *session = AVAudioSession.sharedInstance;
     NSError *categoryError = nil;
     [session setCategory:AVAudioSessionCategoryPlayback
@@ -1292,7 +1298,7 @@ static uint64_t gPMLightGeneration = 0;
 static BOOL gPMKeepScreenAwake = NO;
 #endif
 
-void phoneme_ios_media_suspend(void) {
+static void PMStopAllMediaForSuspension(void) {
     dispatch_sync(PMMediaQueue(), ^{
         for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
             entry.resumeAfterSystemSuspend = [entry isPlaying] ||
@@ -1307,6 +1313,10 @@ void phoneme_ios_media_suspend(void) {
         [PMTonePlayers() removeAllObjects];
         PMReevaluateNowPlaying(nil);
     });
+}
+
+void phoneme_ios_media_suspend(void) {
+    PMStopAllMediaForSuspension();
 
 #if TARGET_OS_IOS || TARGET_OS_TV
     NSError *deactivationError = nil;
@@ -1333,6 +1343,56 @@ void phoneme_ios_media_resume(void) {
         PMReevaluateNowPlaying(nil);
     });
 }
+
+#if TARGET_OS_IOS || TARGET_OS_TV
+// Reuses the app-suspend machinery for system audio interruptions (phone
+// call, Siri, alarm): stop players, then restart them when the OS ends the
+// interruption with the resume hint. Without this, the session stayed
+// deactivated after an interruption and in-game audio died until the next
+// playback start.
+static void PMRegisterMediaLifecycleObservers(void) {
+    static dispatch_once_t onceToken;
+    static id interruptionObserver = nil;
+    static id mediaResetObserver = nil;
+    dispatch_once(&onceToken, ^{
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        interruptionObserver = [center
+            addObserverForName:AVAudioSessionInterruptionNotification
+                         object:AVAudioSession.sharedInstance
+                          queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+                NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey]
+                    unsignedIntegerValue];
+                if (type == AVAudioSessionInterruptionTypeBegan) {
+                    // The system already deactivated the session; skip
+                    // setActive:NO — NotifyOthersOnDeactivation would wrongly
+                    // unpause other apps' audio mid-interruption.
+                    PMStopAllMediaForSuspension();
+                } else if (type == AVAudioSessionInterruptionTypeEnded) {
+                    NSUInteger options =
+                        [note.userInfo[AVAudioSessionInterruptionOptionKey]
+                            unsignedIntegerValue];
+                    if ((options & AVAudioSessionInterruptionOptionShouldResume)
+                            != 0) {
+                        phoneme_ios_media_resume();
+                    }
+                }
+            }];
+        // Media server death invalidates every player object. Reset the
+        // registry so MIDlets recreate players on their next play.
+        // ponytail: existing handles go stale until the game rebuilds its
+        // Player objects; full revival would need source retention on
+        // PMMediaEntry.
+        mediaResetObserver = [center
+            addObserverForName:AVAudioSessionMediaServicesWereResetNotification
+                         object:AVAudioSession.sharedInstance
+                          queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *_) {
+                phoneme_ios_media_reset();
+            }];
+    });
+}
+#endif
 
 void phoneme_ios_media_reset(void) {
     dispatch_sync(PMMediaQueue(), ^{
