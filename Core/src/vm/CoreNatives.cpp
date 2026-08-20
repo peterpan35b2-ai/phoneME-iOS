@@ -326,14 +326,16 @@ void add(NativeMethodRegistry& registry,
          std::string owner,
          std::string name,
          std::string descriptor,
-         NativeMethod method) {
+         NativeMethod method,
+         NativeJitPolicy jit_policy = NativeJitPolicy::conservative) {
     const std::string diagnostic_owner = owner;
     const std::string diagnostic_name = name;
     const std::string diagnostic_descriptor = descriptor;
     const auto registered = registry.register_method(std::move(owner),
                                                      std::move(name),
                                                      std::move(descriptor),
-                                                     std::move(method));
+                                                     std::move(method),
+                                                     jit_policy);
     if (!registered) {
         std::fprintf(stderr,
                      "failed to register native %s.%s%s: %s\n",
@@ -1650,10 +1652,17 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                 if (!character) {
                     return std::unexpected(character.error());
                 }
-                auto text = machine.heap().string_value(*receiver);
-                if (!text) {
-                    return std::unexpected(text.error());
+                // The forward, no-offset form is a hot bitmap-font primitive
+                // in many MIDP games. Avoid copying the complete UTF-16 payload
+                // for each glyph lookup.
+                if (!reverse && !with_offset) {
+                    auto position = machine.heap().string_index_of(
+                        *receiver, static_cast<u16>(*character));
+                    if (!position) return std::unexpected(position.error());
+                    return std::optional<Value>(Value::from_int(*position));
                 }
+                auto text = machine.heap().string_value(*receiver);
+                if (!text) return std::unexpected(text.error());
                 i32 from = reverse
                     ? static_cast<i32>(std::min<usize>(
                           text->size(),
@@ -1687,7 +1696,10 @@ void register_string_extensions(NativeMethodRegistry& registry) {
                     position == std::u16string::npos
                         ? -1
                         : static_cast<i32>(position)));
-            });
+            },
+            !reverse && !with_offset
+                ? NativeJitPolicy::synchronous_bounded
+                : NativeJitPolicy::conservative);
     };
     register_char_search(false, false);
     register_char_search(false, true);
@@ -2665,17 +2677,16 @@ void register_core_natives(NativeMethodRegistry& registry) {
             if (!receiver) {
                 return std::unexpected(receiver.error());
             }
-            auto text = machine.heap().string_value(*receiver);
-            if (!text) {
-                return std::unexpected(text.error());
-            }
-            if (text->size() > static_cast<usize>(std::numeric_limits<i32>::max())) {
+            auto length = machine.heap().string_length(*receiver);
+            if (!length) return std::unexpected(length.error());
+            if (*length > static_cast<usize>(std::numeric_limits<i32>::max())) {
                 return fail(ErrorCode::overflow,
                             "Java String length exceeds int range");
             }
             return std::optional<Value>(
-                Value::from_int(static_cast<i32>(text->size())));
-        });
+                Value::from_int(static_cast<i32>(*length)));
+        },
+        NativeJitPolicy::synchronous_bounded);
 
     add(registry,
         "java/lang/String",
@@ -2745,17 +2756,23 @@ void register_core_natives(NativeMethodRegistry& registry) {
             if (!index) {
                 return std::unexpected(index.error());
             }
-            auto text = machine.heap().string_value(*receiver);
-            if (!text) {
-                return std::unexpected(text.error());
-            }
-            if (*index < 0 || static_cast<usize>(*index) >= text->size()) {
+            if (*index < 0) {
                 return fail_java("java/lang/StringIndexOutOfBoundsException",
                                  "String.charAt index is out of range");
             }
+            auto character = machine.heap().string_character(
+                *receiver, static_cast<usize>(*index));
+            if (!character) {
+                if (character.error().code == ErrorCode::out_of_range) {
+                    return fail_java("java/lang/StringIndexOutOfBoundsException",
+                                     "String.charAt index is out of range");
+                }
+                return std::unexpected(character.error());
+            }
             return std::optional<Value>(Value::from_int(static_cast<i32>(
-                static_cast<u16>((*text)[static_cast<usize>(*index)]))));
-        });
+                *character)));
+        },
+        NativeJitPolicy::synchronous_bounded);
 
     add(registry,
         "java/lang/String",

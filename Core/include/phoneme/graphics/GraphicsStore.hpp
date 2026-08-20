@@ -17,6 +17,12 @@ struct DirtyImageUpdate final {
     std::vector<Pixel> pixels;
 };
 
+struct GraphicsStoreDiagnostics final {
+    usize images {0U};
+    usize contexts {0U};
+    usize estimated_bytes {0U};
+};
+
 class GraphicsStore final {
 public:
     [[nodiscard]] Status attach_image(u64 object_key, Image image);
@@ -36,6 +42,13 @@ public:
     void erase_context(u64 object_key) noexcept;
     [[nodiscard]] bool automatic_collection_due() const noexcept;
     [[nodiscard]] usize estimated_bytes() const noexcept;
+    [[nodiscard]] GraphicsStoreDiagnostics diagnostics() const noexcept {
+        return GraphicsStoreDiagnostics {
+            .images = images_.size(),
+            .contexts = contexts_.size(),
+            .estimated_bytes = estimated_bytes(),
+        };
+    }
     void prune(const std::function<bool(u64)>& is_live);
     void clear() noexcept;
 

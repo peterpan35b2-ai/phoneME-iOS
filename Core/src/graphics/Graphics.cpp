@@ -1,6 +1,7 @@
 #include "phoneme/graphics/Graphics.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cctype>
@@ -9,11 +10,14 @@
 #include <vector>
 
 #include "phoneme/graphics/TextRasterizer.hpp"
+#include "phoneme/runtime/ParallelExecutor.hpp"
 
 namespace phoneme::graphics {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr usize kParallelBlitPixels = 64U * 1024U;
+constexpr usize kParallelDrawRgbPixels = 128U * 1024U;
 
 [[nodiscard]] i32 saturated_add(i32 left, i32 right) noexcept {
     const i64 value = static_cast<i64>(left) + static_cast<i64>(right);
@@ -111,6 +115,111 @@ struct TransformSteps final {
     if (composited == destination) return false;
     destination = composited;
     return true;
+}
+
+template <ImageAlphaKind AlphaKind>
+[[nodiscard]] inline bool composite_classified_device_pixel(
+    Pixel source,
+    Pixel& destination) noexcept {
+    if constexpr (AlphaKind == ImageAlphaKind::opaque) {
+        const Pixel composited = rgb565_roundtrip(source);
+        if (composited == destination) return false;
+        destination = composited;
+        return true;
+    } else if constexpr (AlphaKind == ImageAlphaKind::binary) {
+        if ((source & 0xFF000000U) == 0U) return false;
+        const Pixel composited = rgb565_roundtrip(source);
+        if (composited == destination) return false;
+        destination = composited;
+        return true;
+    } else {
+        return composite_device_pixel(source, destination);
+    }
+}
+
+template <ImageAlphaKind AlphaKind>
+[[nodiscard]] bool blit_linear_pixels(
+    std::span<Pixel> target_pixels,
+    usize target_stride,
+    std::span<const Pixel> source_pixels,
+    usize source_stride,
+    usize destination_x,
+    usize destination_y,
+    usize source_x,
+    usize source_y,
+    usize width,
+    usize height) noexcept {
+    std::atomic<bool> changed {false};
+    const auto blit_rows = [&](usize row_begin, usize row_end) {
+        bool local_changed = false;
+        for (usize row = row_begin; row < row_end; ++row) {
+            const usize destination_offset =
+                (destination_y + row) * target_stride + destination_x;
+            const usize source_offset =
+                (source_y + row) * source_stride + source_x;
+            for (usize column = 0; column < width; ++column) {
+                local_changed = composite_classified_device_pixel<AlphaKind>(
+                    source_pixels[source_offset + column],
+                    target_pixels[destination_offset + column]) ||
+                    local_changed;
+            }
+        }
+        if (local_changed) changed.store(true, std::memory_order_relaxed);
+    };
+    if (width * height >= kParallelBlitPixels && height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 4U * 1024U / std::max<usize>(width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            runtime::WorkClass::frame_critical,
+            width * height,
+            height, 4U, rows_per_chunk, blit_rows);
+    } else {
+        blit_rows(0U, height);
+    }
+    return changed.load(std::memory_order_relaxed);
+}
+
+template <ImageAlphaKind AlphaKind>
+[[nodiscard]] bool blit_strided_pixels(
+    std::span<Pixel> target_pixels,
+    usize target_stride,
+    const Pixel* source_base,
+    i64 first_source_index,
+    i64 column_step,
+    i64 row_step,
+    usize destination_x,
+    usize destination_y,
+    usize width,
+    usize height) noexcept {
+    std::atomic<bool> changed {false};
+    const auto blit_rows = [&](usize row_begin, usize row_end) {
+        bool local_changed = false;
+        for (usize row = row_begin; row < row_end; ++row) {
+            const usize destination_offset =
+                (destination_y + row) * target_stride + destination_x;
+            i64 source_index = first_source_index +
+                static_cast<i64>(row) * row_step;
+            for (usize column = 0; column < width; ++column) {
+                local_changed = composite_classified_device_pixel<AlphaKind>(
+                    source_base[static_cast<usize>(source_index)],
+                    target_pixels[destination_offset + column]) ||
+                    local_changed;
+                source_index += column_step;
+            }
+        }
+        if (local_changed) changed.store(true, std::memory_order_relaxed);
+    };
+    if (width * height >= kParallelBlitPixels && height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 4U * 1024U / std::max<usize>(width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            runtime::WorkClass::frame_critical,
+            width * height,
+            height, 4U, rows_per_chunk, blit_rows);
+    } else {
+        blit_rows(0U, height);
+    }
+    return changed.load(std::memory_order_relaxed);
 }
 
 [[nodiscard]] Status require_mutable(const Image& image) {
@@ -577,28 +686,56 @@ Status fill_rect(Image& target,
     if (alpha(context.color) == 255U) {
         const Pixel device_color = rgb565_roundtrip(context.color);
         auto pixels = target.mutable_pixels();
-        for (i32 row = 0; row < fill.height; ++row) {
-            const usize offset =
-                static_cast<usize>(fill.y + row) *
-                    static_cast<usize>(target.width()) +
-                static_cast<usize>(fill.x);
-            std::fill_n(pixels.begin() + static_cast<std::ptrdiff_t>(offset),
-                        fill.width,
-                        device_color);
+        const usize stride = static_cast<usize>(target.width());
+        if (fill.x == 0 && fill.width == target.width()) {
+            const usize offset = static_cast<usize>(fill.y) * stride;
+            const usize count = static_cast<usize>(fill.height) * stride;
+            std::fill_n(
+                pixels.begin() + static_cast<std::ptrdiff_t>(offset),
+                count,
+                device_color);
+        } else {
+            for (i32 row = 0; row < fill.height; ++row) {
+                const usize offset =
+                    static_cast<usize>(fill.y + row) * stride +
+                    static_cast<usize>(fill.x);
+                std::fill_n(
+                    pixels.begin() + static_cast<std::ptrdiff_t>(offset),
+                    fill.width,
+                    device_color);
+            }
         }
         target.mark_dirty_region(fill.x, fill.y, fill.width, fill.height);
         return {};
     }
-    for (i32 row = 0; row < fill.height; ++row) {
-        for (i32 column = 0; column < fill.width; ++column) {
-            auto stored = target.set_pixel(fill.x + column,
-                                           fill.y + row,
-                                           context.color,
-                                           true);
-            if (!stored) {
-                return stored;
+    auto pixels = target.mutable_pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    const usize fill_width = static_cast<usize>(fill.width);
+    const usize fill_height = static_cast<usize>(fill.height);
+    std::atomic<bool> changed {false};
+    const auto fill_rows = [&](usize row_begin, usize row_end) {
+        bool local_changed = false;
+        for (usize row = row_begin; row < row_end; ++row) {
+            const usize offset =
+                (static_cast<usize>(fill.y) + row) * target_stride +
+                static_cast<usize>(fill.x);
+            for (usize column = 0; column < fill_width; ++column) {
+                local_changed = composite_device_pixel(
+                    context.color, pixels[offset + column]) || local_changed;
             }
         }
+        if (local_changed) changed.store(true, std::memory_order_relaxed);
+    };
+    if (fill_width * fill_height >= kParallelBlitPixels && fill_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 4U * 1024U / std::max<usize>(fill_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            fill_height, 4U, rows_per_chunk, fill_rows);
+    } else {
+        fill_rows(0U, fill_height);
+    }
+    if (changed.load(std::memory_order_relaxed)) {
+        target.mark_dirty_region(fill.x, fill.y, fill.width, fill.height);
     }
     return {};
 }
@@ -626,14 +763,23 @@ Status clear_rect(Image& target,
         return {};
     }
     auto pixels = target.mutable_pixels();
-    for (i32 row = 0; row < clear.height; ++row) {
-        const usize offset =
-            static_cast<usize>(clear.y + row) *
-                static_cast<usize>(target.width()) +
-            static_cast<usize>(clear.x);
+    const usize stride = static_cast<usize>(target.width());
+    if (clear.x == 0 && clear.width == target.width()) {
+        const usize offset = static_cast<usize>(clear.y) * stride;
+        const usize count = static_cast<usize>(clear.height) * stride;
         std::fill_n(pixels.begin() + static_cast<std::ptrdiff_t>(offset),
-                    clear.width,
+                    count,
                     0U);
+    } else {
+        for (i32 row = 0; row < clear.height; ++row) {
+            const usize offset =
+                static_cast<usize>(clear.y + row) * stride +
+                static_cast<usize>(clear.x);
+            std::fill_n(
+                pixels.begin() + static_cast<std::ptrdiff_t>(offset),
+                clear.width,
+                0U);
+        }
     }
     target.mark_dirty_region(clear.x, clear.y, clear.width, clear.height);
     return {};
@@ -937,24 +1083,50 @@ Status draw_image(Image& target,
     const usize target_stride = static_cast<usize>(target.width());
     const usize source_stride = static_cast<usize>(source.width());
     const usize visible_width = static_cast<usize>(visible.width);
-    bool changed = false;
-    for (i32 row = 0; row < visible.height; ++row) {
-        const usize row_index = static_cast<usize>(row);
-        const usize destination_offset =
-            static_cast<usize>(visible.y + row) * target_stride +
-            static_cast<usize>(visible.x);
-        const usize source_offset = needs_snapshot
-            ? row_index * visible_width
-            : static_cast<usize>(first_source_y + row) * source_stride +
-                static_cast<usize>(first_source_x);
-        for (usize column = 0; column < visible_width; ++column) {
-            const Pixel pixel_value = needs_snapshot
-                ? snapshot[source_offset + column]
-                : source_pixels[source_offset + column];
-            Pixel& destination = target_pixels[destination_offset + column];
-            changed = composite_device_pixel(pixel_value, destination) || changed;
+    const std::span<const Pixel> blit_source = needs_snapshot
+        ? std::span<const Pixel>(snapshot)
+        : source_pixels;
+    const usize blit_source_stride = needs_snapshot
+        ? visible_width
+        : source_stride;
+    const usize blit_source_x = needs_snapshot
+        ? 0U
+        : static_cast<usize>(first_source_x);
+    const usize blit_source_y = needs_snapshot
+        ? 0U
+        : static_cast<usize>(first_source_y);
+    const ImageAlphaKind alpha_kind = needs_snapshot
+        ? ImageAlphaKind::translucent
+        : source.alpha_kind();
+    const bool changed = [&]() noexcept {
+        switch (alpha_kind) {
+        case ImageAlphaKind::opaque:
+            return blit_linear_pixels<ImageAlphaKind::opaque>(
+                target_pixels, target_stride,
+                blit_source, blit_source_stride,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                blit_source_x, blit_source_y,
+                visible_width, static_cast<usize>(visible.height));
+        case ImageAlphaKind::binary:
+            return blit_linear_pixels<ImageAlphaKind::binary>(
+                target_pixels, target_stride,
+                blit_source, blit_source_stride,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                blit_source_x, blit_source_y,
+                visible_width, static_cast<usize>(visible.height));
+        case ImageAlphaKind::translucent:
+            return blit_linear_pixels<ImageAlphaKind::translucent>(
+                target_pixels, target_stride,
+                blit_source, blit_source_stride,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                blit_source_x, blit_source_y,
+                visible_width, static_cast<usize>(visible.height));
         }
-    }
+        return false;
+    }();
     if (changed) {
         target.mark_dirty_region(
             visible.x, visible.y, visible.width, visible.height);
@@ -1069,23 +1241,40 @@ Status draw_region(Image& target,
         static_cast<i64>(steps.column_y) * source_stride + steps.column_x;
     const i64 row_step =
         static_cast<i64>(steps.row_y) * source_stride + steps.row_x;
-    i64 row_source_index = first_source_y * source_stride + first_source_x;
-
-    bool changed = false;
-    for (i32 row = 0; row < visible.height; ++row) {
-        const usize destination_offset =
-            static_cast<usize>(visible.y + row) * target_stride +
-            static_cast<usize>(visible.x);
-        i64 source_index = row_source_index;
-        for (i32 column = 0; column < visible.width; ++column) {
-            const Pixel pixel_value = source_base[static_cast<usize>(source_index)];
-            Pixel& destination = target_pixels[
-                destination_offset + static_cast<usize>(column)];
-            changed = composite_device_pixel(pixel_value, destination) || changed;
-            source_index += column_step;
+    const i64 first_source_index =
+        first_source_y * source_stride + first_source_x;
+    const ImageAlphaKind alpha_kind = needs_snapshot
+        ? ImageAlphaKind::translucent
+        : source.alpha_kind();
+    const bool changed = [&]() noexcept {
+        switch (alpha_kind) {
+        case ImageAlphaKind::opaque:
+            return blit_strided_pixels<ImageAlphaKind::opaque>(
+                target_pixels, target_stride, source_base,
+                first_source_index, column_step, row_step,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                static_cast<usize>(visible.width),
+                static_cast<usize>(visible.height));
+        case ImageAlphaKind::binary:
+            return blit_strided_pixels<ImageAlphaKind::binary>(
+                target_pixels, target_stride, source_base,
+                first_source_index, column_step, row_step,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                static_cast<usize>(visible.width),
+                static_cast<usize>(visible.height));
+        case ImageAlphaKind::translucent:
+            return blit_strided_pixels<ImageAlphaKind::translucent>(
+                target_pixels, target_stride, source_base,
+                first_source_index, column_step, row_step,
+                static_cast<usize>(visible.x),
+                static_cast<usize>(visible.y),
+                static_cast<usize>(visible.width),
+                static_cast<usize>(visible.height));
         }
-        row_source_index += row_step;
-    }
+        return false;
+    }();
     if (changed) {
         target.mark_dirty_region(
             visible.x, visible.y, visible.width, visible.height);
@@ -1168,30 +1357,50 @@ Status draw_rgb(Image& target,
     const usize target_stride = static_cast<usize>(target.width());
     const i64 first_source_column = static_cast<i64>(visible.x) - absolute_x;
     const i64 first_source_row = static_cast<i64>(visible.y) - absolute_y;
-    bool changed = false;
-    for (i32 row = 0; row < visible.height; ++row) {
-        const i64 source_index = static_cast<i64>(offset) +
-            (first_source_row + row) * scan_length + first_source_column;
-        const usize destination_offset =
-            static_cast<usize>(visible.y + row) * target_stride +
-            static_cast<usize>(visible.x);
-        for (i32 column = 0; column < visible.width; ++column) {
-            const Pixel pixel_value = pixels[static_cast<usize>(
-                source_index + column)];
-            Pixel& destination = target_pixels[
-                destination_offset + static_cast<usize>(column)];
-            if (process_alpha) {
-                changed = composite_device_pixel(pixel_value, destination) || changed;
-            } else {
-                const Pixel device_pixel = rgb565_roundtrip(opaque(pixel_value));
-                if (device_pixel != destination) {
-                    destination = device_pixel;
-                    changed = true;
+    std::atomic<bool> changed {false};
+    const usize visible_width = static_cast<usize>(visible.width);
+    const usize visible_height = static_cast<usize>(visible.height);
+    const auto draw_rows = [&](usize row_begin, usize row_end) {
+        bool local_changed = false;
+        for (usize row = row_begin; row < row_end; ++row) {
+            const i64 source_index = static_cast<i64>(offset) +
+                (first_source_row + static_cast<i64>(row)) * scan_length +
+                first_source_column;
+            const usize destination_offset =
+                (static_cast<usize>(visible.y) + row) * target_stride +
+                static_cast<usize>(visible.x);
+            for (usize column = 0U; column < visible_width; ++column) {
+                const Pixel pixel_value = pixels[static_cast<usize>(
+                    source_index + static_cast<i64>(column))];
+                Pixel& destination = target_pixels[destination_offset + column];
+                if (process_alpha) {
+                    local_changed =
+                        composite_device_pixel(pixel_value, destination) ||
+                        local_changed;
+                } else {
+                    const Pixel device_pixel =
+                        rgb565_roundtrip(opaque(pixel_value));
+                    if (device_pixel != destination) {
+                        destination = device_pixel;
+                        local_changed = true;
+                    }
                 }
             }
         }
+        if (local_changed) changed.store(true, std::memory_order_relaxed);
+    };
+    if (visible_width * visible_height >= kParallelDrawRgbPixels &&
+        visible_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 4U * 1024U / std::max<usize>(visible_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            runtime::WorkClass::frame_critical,
+            visible_width * visible_height,
+            visible_height, 4U, rows_per_chunk, draw_rows);
+    } else {
+        draw_rows(0U, visible_height);
     }
-    if (changed) {
+    if (changed.load(std::memory_order_relaxed)) {
         target.mark_dirty_region(
             visible.x, visible.y, visible.width, visible.height);
     }

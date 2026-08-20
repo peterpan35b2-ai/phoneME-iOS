@@ -187,6 +187,10 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 @property(nonatomic) NSUInteger playbackGeneration;
 @property(nonatomic) BOOL transientTone;
 @property(nonatomic) BOOL hasStartedPlayback;
+@property(nonatomic) BOOL logicallyPlaying;
+@property(nonatomic) BOOL mediaServicesInvalidated;
+@property(nonatomic) int64_t lastKnownMediaTimeMicroseconds;
+@property(nonatomic) int64_t lastKnownDurationMicroseconds;
 @property(nonatomic) uint64_t startedSequence;
 @property(nonatomic, copy) NSString *mediaTitle;
 @end
@@ -232,6 +236,12 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 }
 
 - (BOOL)start {
+    if (self.mediaServicesInvalidated) {
+        // Let MediaService observe the failed start and recreate this handle
+        // from the source it already owns. Do not touch AVFoundation objects
+        // invalidated by a media-server reset.
+        return NO;
+    }
     if (!PMActivateAudioSession()) {
         return NO;
     }
@@ -248,6 +258,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         [self applyVolume];
         BOOL started = [self.audioPlayer play];
         if (started) {
+            self.logicallyPlaying = YES;
             self.hasStartedPlayback = YES;
             self.startedSequence = ++gPMPlaybackSequence;
         }
@@ -261,6 +272,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         }
         self.midiLoopsRemaining = self.loopCount;
         [self applyVolume];
+        self.logicallyPlaying = YES;
         self.hasStartedPlayback = YES;
         self.startedSequence = ++gPMPlaybackSequence;
         [self playMIDIGeneration:generation];
@@ -281,6 +293,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         [self applyVolume];
         if (self.hasPendingSeek) {
             self.resumeAfterPendingSeek = YES;
+            self.logicallyPlaying = YES;
             self.hasStartedPlayback = YES;
             self.startedSequence = ++gPMPlaybackSequence;
             [self applyPendingSeekIfPossible];
@@ -291,6 +304,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
             self.streamFailed = YES;
             return NO;
         }
+        self.logicallyPlaying = YES;
         self.hasStartedPlayback = YES;
         self.startedSequence = ++gPMPlaybackSequence;
         return YES;
@@ -321,6 +335,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
                 [strongSelf playMIDIGeneration:generation];
             } else {
                 strongSelf.ended = YES;
+                strongSelf.logicallyPlaying = NO;
                 PMReevaluateNowPlaying(nil);
             }
         });
@@ -329,6 +344,8 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 
 - (BOOL)stop {
     self.playbackGeneration += 1;
+    self.logicallyPlaying = NO;
+    if (self.mediaServicesInvalidated) return YES;
     if (self.audioPlayer != nil) {
         [self.audioPlayer pause];
         return YES;
@@ -346,6 +363,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 }
 
 - (BOOL)isPlaying {
+    if (self.mediaServicesInvalidated) return NO;
     if (self.audioPlayer != nil) return self.audioPlayer.isPlaying;
     if (self.midiPlayer != nil) return self.midiPlayer.isPlaying;
     if (self.streamPlayer != nil) {
@@ -358,6 +376,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 }
 
 - (BOOL)hasError {
+    if (self.mediaServicesInvalidated) return YES;
     AVPlayerItem *item = self.streamPlayer.currentItem;
     if (item.status == AVPlayerItemStatusFailed || self.streamPlayer.error != nil) {
         self.streamFailed = YES;
@@ -366,6 +385,9 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
 }
 
 - (int64_t)mediaTimeMicroseconds {
+    if (self.mediaServicesInvalidated) {
+        return self.lastKnownMediaTimeMicroseconds;
+    }
     NSTimeInterval seconds = 0;
     if (self.audioPlayer != nil) {
         seconds = self.audioPlayer.currentTime;
@@ -381,10 +403,17 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         }
     }
     if (!isfinite(seconds) || seconds < 0) seconds = 0;
-    return (int64_t)llround(seconds * 1000000.0);
+    self.lastKnownMediaTimeMicroseconds =
+        (int64_t)llround(seconds * 1000000.0);
+    return self.lastKnownMediaTimeMicroseconds;
 }
 
 - (int64_t)durationMicroseconds {
+    if (self.mediaServicesInvalidated) {
+        return self.lastKnownDurationMicroseconds > 0
+            ? self.lastKnownDurationMicroseconds
+            : -1;
+    }
     NSTimeInterval seconds = 0;
     if (self.audioPlayer != nil) {
         seconds = self.audioPlayer.duration;
@@ -397,10 +426,20 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         }
     }
     if (!isfinite(seconds) || seconds <= 0) return -1;
-    return (int64_t)llround(seconds * 1000000.0);
+    self.lastKnownDurationMicroseconds =
+        (int64_t)llround(seconds * 1000000.0);
+    return self.lastKnownDurationMicroseconds;
 }
 
 - (int64_t)setMediaTimeMicroseconds:(int64_t)microseconds {
+    if (self.mediaServicesInvalidated) {
+        int64_t target = MAX((int64_t)0, microseconds);
+        if (self.lastKnownDurationMicroseconds > 0) {
+            target = MIN(target, self.lastKnownDurationMicroseconds);
+        }
+        self.lastKnownMediaTimeMicroseconds = target;
+        return target;
+    }
     NSTimeInterval seconds = MAX(0, (double)microseconds / 1000000.0);
     if (self.audioPlayer != nil) {
         BOOL resume = self.audioPlayer.isPlaying;
@@ -443,6 +482,7 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         }
         self.pendingSeekMicroseconds =
                 (int64_t)llround(seconds * 1000000.0);
+        self.lastKnownMediaTimeMicroseconds = self.pendingSeekMicroseconds;
         self.hasPendingSeek = YES;
         self.resumeAfterPendingSeek = resume;
         self.ended = NO;
@@ -454,6 +494,46 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
         return self.pendingSeekMicroseconds;
     }
     return 0;
+}
+
+- (void)invalidateAfterMediaServicesReset {
+    // Audio-server reset invalidates every AVFoundation object. Detach KVO /
+    // notification observers before dropping those objects, then keep only a
+    // lightweight handle marker. C++ MediaService already retains the source
+    // bytes/locator, so duplicating them here would unnecessarily double media
+    // payload memory just for an exceptional recovery path.
+    self.playbackGeneration += 1;
+    self.seekGeneration += 1;
+    self.logicallyPlaying = NO;
+    self.resumeAfterSystemSuspend = NO;
+    self.resumeAfterPendingSeek = NO;
+    self.hasPendingSeek = NO;
+    self.seekInProgress = NO;
+    self.pendingSeekRetryCount = 0;
+
+    if (self.observingStreamStatus && self.streamPlayer.currentItem != nil) {
+        [self.streamPlayer.currentItem removeObserver:self
+                                           forKeyPath:@"status"
+                                              context:PMStreamStatusContext];
+        [self.streamPlayer.currentItem removeObserver:self
+                                           forKeyPath:@"duration"
+                                              context:PMStreamDurationContext];
+    }
+    self.observingStreamStatus = NO;
+    if (self.streamEndObserver != nil) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.streamEndObserver];
+        self.streamEndObserver = nil;
+    }
+    if (self.streamFailedObserver != nil) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.streamFailedObserver];
+        self.streamFailedObserver = nil;
+    }
+    self.audioPlayer.delegate = nil;
+    self.audioPlayer = nil;
+    self.midiPlayer = nil;
+    self.streamPlayer = nil;
+    self.streamFailed = YES;
+    self.mediaServicesInvalidated = YES;
 }
 
 - (void)applyPendingSeekIfPossible {
@@ -599,9 +679,11 @@ static NSString *PMMediaTitleFromURL(NSURL *url) {
                        successfully:(BOOL)flag {
     dispatch_async(PMMediaQueue(), ^{
         if (self.transientTone) {
+            self.logicallyPlaying = NO;
             [PMTonePlayers() removeObject:self];
         } else if (player == self.audioPlayer) {
             self.ended = YES;
+            self.logicallyPlaying = NO;
             PMReevaluateNowPlaying(nil);
         }
     });
@@ -1035,6 +1117,7 @@ static PMMediaEntry *PMEntryWithURL(NSURL *url, NSString *contentType) {
                 }];
             } else {
                 strongEntry.ended = YES;
+                strongEntry.logicallyPlaying = NO;
                 PMReevaluateNowPlaying(nil);
             }
         });
@@ -1378,11 +1461,9 @@ static void PMRegisterMediaLifecycleObservers(void) {
                     }
                 }
             }];
-        // Media server death invalidates every player object. Reset the
-        // registry so MIDlets recreate players on their next play.
-        // ponytail: existing handles go stale until the game rebuilds its
-        // Player objects; full revival would need source retention on
-        // PMMediaEntry.
+        // Media server death invalidates every AVFoundation player object.
+        // Keep lightweight handle markers so C++ MMAPI can observe the reset
+        // and rebuild from its retained source on the next explicit start.
         mediaResetObserver = [center
             addObserverForName:AVAudioSessionMediaServicesWereResetNotification
                          object:AVAudioSession.sharedInstance
@@ -1390,6 +1471,10 @@ static void PMRegisterMediaLifecycleObservers(void) {
                     usingBlock:^(NSNotification *_) {
                 phoneme_ios_media_reset();
             }];
+        // Static strong references intentionally retain block-based observers
+        // for the process lifetime.
+        (void)interruptionObserver;
+        (void)mediaResetObserver;
     });
 }
 #endif
@@ -1397,9 +1482,8 @@ static void PMRegisterMediaLifecycleObservers(void) {
 void phoneme_ios_media_reset(void) {
     dispatch_sync(PMMediaQueue(), ^{
         for (PMMediaEntry *entry in PMMediaRegistry().allValues) {
-            [entry stop];
+            [entry invalidateAfterMediaServicesReset];
         }
-        [PMMediaRegistry() removeAllObjects];
         for (PMMediaEntry *entry in PMTonePlayers()) {
             [entry stop];
         }

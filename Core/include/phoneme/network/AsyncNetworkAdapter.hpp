@@ -13,6 +13,14 @@
 
 namespace phoneme::network {
 
+struct NetworkAdapterDiagnostics final {
+    usize workers {0U};
+    usize active_workers {0U};
+    usize active_blocking_workers {0U};
+    usize queued_tasks {0U};
+    usize operations {0U};
+};
+
 enum class ConnectionMode : i32 {
     read = 1,
     write = 2,
@@ -151,10 +159,14 @@ public:
     [[nodiscard]] virtual Status close(NativeHandle handle) = 0;
     [[nodiscard]] virtual Status cancel(OperationId operation) = 0;
 
+    [[nodiscard]] virtual NetworkAdapterDiagnostics diagnostics() const noexcept {
+        return {};
+    }
+
     // Test-only diagnostics have a neutral default so fake adapters and
     // production callers remain decoupled from POSIX pool internals.
     [[nodiscard]] virtual usize worker_count_for_tests() const noexcept {
-        return 0U;
+        return diagnostics().workers;
     }
 };
 

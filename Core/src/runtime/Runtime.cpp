@@ -1,4 +1,5 @@
 #include "phoneme/runtime/Runtime.hpp"
+#include "phoneme/runtime/ParallelExecutor.hpp"
 
 #include <sys/stat.h>
 
@@ -22,6 +23,7 @@
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/LcduiBridge.hpp"
 #include "phoneme/vm/Machine.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 
 #if defined(__APPLE__)
 #include <os/log.h>
@@ -590,6 +592,51 @@ private:
     return std::move(*graphics_root);
 }
 
+constexpr usize kParallelFrameConversionPixels = 32U * 1024U;
+
+void convert_image_region_to_rgba(
+    std::span<const graphics::Pixel> source_pixels,
+    i32 source_width,
+    const graphics::ImageRegion& region,
+    std::span<u8> destination) {
+    const usize region_width = static_cast<usize>(region.width);
+    const usize region_height = static_cast<usize>(region.height);
+    const usize pixel_count = region_width * region_height;
+    const usize source_stride = static_cast<usize>(source_width);
+
+    const auto convert_rows = [&](usize row_begin, usize row_end) {
+        for (usize row = row_begin; row < row_end; ++row) {
+            usize source =
+                (static_cast<usize>(region.y) + row) * source_stride +
+                static_cast<usize>(region.x);
+            usize output = row * region_width * 4U;
+            for (usize column = 0U; column < region_width; ++column) {
+                const graphics::Pixel display_pixel =
+                    graphics::rgb565_roundtrip(source_pixels[source++]);
+                destination[output++] = graphics::red(display_pixel);
+                destination[output++] = graphics::green(display_pixel);
+                destination[output++] = graphics::blue(display_pixel);
+                destination[output++] = graphics::alpha(display_pixel);
+            }
+        }
+    };
+
+    if (pixel_count < kParallelFrameConversionPixels || region_height < 4U) {
+        convert_rows(0U, region_height);
+        return;
+    }
+
+    const usize rows_per_chunk = std::max<usize>(
+        1U, 4U * 1024U / std::max<usize>(region_width, 1U));
+    shared_compute_executor().parallel_for(
+        WorkClass::frame_critical,
+        pixel_count,
+        region_height,
+        4U,
+        rows_per_chunk,
+        convert_rows);
+}
+
 [[nodiscard]] Status publish_canvas_graphics(
     vm::Machine& machine,
     Framebuffer& framebuffer,
@@ -604,22 +651,120 @@ private:
     auto image = machine.graphics().image(image_object->bits);
     if (!image) return std::unexpected(image.error());
 
+    // Drawing primitives already accumulate a dirty bounding box. Avoid
+    // reconverting the entire display on every paint/flush when only a small
+    // sprite, text run or HUD region changed. A no-change flush still reaches
+    // the scheduler's frame-boundary hook in the caller, but does not force a
+    // redundant host framebuffer generation/copy.
+    if (!(*image)->has_dirty_region()) {
+        vm::PerformanceCounters::record_canvas_unchanged_publication();
+        return {};
+    }
+    const auto publication_started = std::chrono::steady_clock::now();
+    const graphics::ImageRegion dirty = (*image)->dirty_region();
+    if (dirty.x < 0 || dirty.y < 0 || dirty.width <= 0 || dirty.height <= 0 ||
+        static_cast<i64>(dirty.x) + dirty.width > (*image)->width() ||
+        static_cast<i64>(dirty.y) + dirty.height > (*image)->height()) {
+        return fail(ErrorCode::internal_error,
+                    "Canvas dirty region is outside its image storage");
+    }
+
     std::vector<u8> local_rgba;
     std::vector<u8>& rgba = reusable_rgba != nullptr
         ? *reusable_rgba
         : local_rgba;
-    rgba.resize((*image)->pixels().size() * 4U);
-    usize offset = 0;
-    for (graphics::Pixel pixel : (*image)->pixels()) {
-        const graphics::Pixel display_pixel =
-            graphics::rgb565_roundtrip(pixel);
-        rgba[offset++] = graphics::red(display_pixel);
-        rgba[offset++] = graphics::green(display_pixel);
-        rgba[offset++] = graphics::blue(display_pixel);
-        rgba[offset++] = graphics::alpha(display_pixel);
+    const Dimensions dimensions {(*image)->width(), (*image)->height()};
+    const auto current_frame = framebuffer.metadata();
+    const bool can_update_region =
+        current_frame.dimensions.width == dimensions.width &&
+        current_frame.dimensions.height == dimensions.height &&
+        current_frame.byte_count == (*image)->pixels().size() * 4U;
+
+    if (can_update_region) {
+        const auto dirty_regions = (*image)->dirty_regions();
+        usize dirty_pixels = 0U;
+        for (const graphics::ImageRegion& region : dirty_regions) {
+            if (region.x < 0 || region.y < 0 || region.width <= 0 ||
+                region.height <= 0 ||
+                static_cast<i64>(region.x) + region.width > (*image)->width() ||
+                static_cast<i64>(region.y) + region.height > (*image)->height()) {
+                return fail(ErrorCode::internal_error,
+                            "Canvas dirty island is outside its image storage");
+            }
+            dirty_pixels += static_cast<usize>(region.width) *
+                            static_cast<usize>(region.height);
+        }
+        // Older/custom Image producers may expose only the aggregate region.
+        const bool use_islands = !dirty_regions.empty();
+        if (!use_islands) {
+            dirty_pixels = static_cast<usize>(dirty.width) *
+                           static_cast<usize>(dirty.height);
+        }
+        rgba.resize(dirty_pixels * 4U);
+        usize destination = 0U;
+        std::vector<FrameRegionUpdate> updates;
+        updates.reserve(use_islands ? dirty_regions.size() : 1U);
+        const auto append_region = [&](const graphics::ImageRegion& region) {
+            const usize byte_start = destination;
+            const usize region_pixels = static_cast<usize>(region.width) *
+                                        static_cast<usize>(region.height);
+            const usize region_bytes = region_pixels * 4U;
+            convert_image_region_to_rgba(
+                (*image)->pixels(),
+                (*image)->width(),
+                region,
+                std::span<u8>(rgba).subspan(byte_start, region_bytes));
+            destination += region_bytes;
+            updates.push_back(FrameRegionUpdate {
+                .x = region.x,
+                .y = region.y,
+                .width = region.width,
+                .height = region.height,
+                .rgba = std::span<const u8>(
+                    rgba.data() + static_cast<std::ptrdiff_t>(byte_start),
+                    destination - byte_start),
+            });
+        };
+        if (use_islands) {
+            for (const graphics::ImageRegion& region : dirty_regions) {
+                append_region(region);
+            }
+        } else {
+            append_region(dirty);
+        }
+        auto updated = framebuffer.update_regions(dimensions, updates);
+        if (!updated) return updated;
+        (*image)->clear_dirty_region();
+        const usize full_frame_pixels = (*image)->pixels().size();
+        vm::PerformanceCounters::record_canvas_publication(
+            dirty_pixels,
+            full_frame_pixels,
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - publication_started).count()));
+        return {};
     }
-    return framebuffer.replace_exchange(
-        Dimensions {(*image)->width(), (*image)->height()}, rgba);
+
+    rgba.resize((*image)->pixels().size() * 4U);
+    convert_image_region_to_rgba(
+        (*image)->pixels(),
+        (*image)->width(),
+        graphics::ImageRegion {
+            .x = 0,
+            .y = 0,
+            .width = (*image)->width(),
+            .height = (*image)->height(),
+        },
+        rgba);
+    auto replaced = framebuffer.replace_exchange(dimensions, rgba);
+    if (replaced) {
+        (*image)->clear_dirty_region();
+        vm::PerformanceCounters::record_canvas_publication(
+            (*image)->pixels().size(),
+            (*image)->pixels().size(),
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - publication_started).count()));
+    }
+    return replaced;
 }
 
 [[nodiscard]] bool is_directory(const std::string& path) noexcept {
@@ -1560,7 +1705,23 @@ Status Runtime::start_midlet(SuiteId suite_id,
             std::to_string(app_id.value));
     if (!configured) return fail_start(configured.error());
 
-    auto classpath = application_vm->classes.add_archive(suite.jar_path);
+    Status classpath;
+    if (suite.managed) {
+        const u32 cache_version =
+            vm::ClassRepository::verification_cache_version();
+        const std::unordered_map<std::string, u64> empty_verified_classes;
+        const auto& verified_classes =
+            suite.verified_class_cache_version == cache_version
+                ? suite.verified_classes
+                : empty_verified_classes;
+        classpath = application_vm->classes.add_archive(
+            suite.jar_path,
+            suite.archive_sha256,
+            cache_version,
+            verified_classes);
+    } else {
+        classpath = application_vm->classes.add_archive(suite.jar_path);
+    }
     if (!classpath) return fail_start(classpath.error());
     if (!optional_class_archive.empty()) {
         classpath = application_vm->classes.add_archive(optional_class_archive);
@@ -1858,6 +2019,18 @@ Status Runtime::start_midlet(SuiteId suite_id,
                           ? "MIDlet became observable while startApp continues on the lifecycle thread"
                           : "MIDlet constructor and startApp completed in the C++ VM")),
     });
+    if (suite.managed) {
+        auto verified_classes =
+            application_vm->classes.verified_classes(suite.jar_path);
+        std::scoped_lock lock(mutex_);
+        // This cache is an optimization only. A storage error must never turn
+        // a successfully started MIDlet into a launch failure; the next start
+        // simply verifies the affected classes again.
+        static_cast<void>(suite_store_.update_verified_classes(
+            suite_id,
+            vm::ClassRepository::verification_cache_version(),
+            verified_classes));
+    }
     return {};
 }
 
@@ -2876,10 +3049,12 @@ std::optional<FrameReadView> Runtime::acquire_current_frame_rgba_since(
     if (!lease) return std::nullopt;
     const FrameMetadata metadata = lease->metadata();
     const auto pixels = lease->pixels();
+    const auto damage_regions = lease->damage_regions();
     frame_read_lease_.emplace(std::move(*lease));
     return FrameReadView {
         .pixels = pixels.data(),
         .metadata = metadata,
+        .damage_regions = damage_regions,
     };
 }
 
@@ -2973,13 +3148,20 @@ std::optional<UiEvent> Runtime::poll_ui_event() {
     // Display.callSerially runs on a scheduler worker after the current LCDUI
     // callback returns. Preserve event ordering at the native bridge boundary:
     // a temporarily empty queue must not look terminal while that worker is
-    // about to publish setCurrent()/screen events. Keep the wait short so a
-    // genuinely long Runnable cannot stall frame polling or input delivery.
+    // about to publish setCurrent()/screen events. Wait on the queue instead
+    // of waking every 100 us; a push wakes us immediately and the 1 ms slice
+    // still lets a callback that completes without publishing an event become
+    // observable well before the 5 ms outer deadline.
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
     do {
-        if (auto event = ui_queue_.pop()) return event;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) break;
+        const auto remaining = deadline - now;
+        const auto wait_slice = std::min(
+            std::chrono::duration_cast<std::chrono::microseconds>(remaining),
+            std::chrono::microseconds(1'000));
+        if (auto event = ui_queue_.wait_pop_for(wait_slice)) return event;
     } while (vm->machine.pending_serial_callbacks() != 0U &&
              std::chrono::steady_clock::now() < deadline);
 
@@ -3151,6 +3333,29 @@ void Runtime::finalize_deferred_start(
             .detail = "Deferred MIDlet startApp failed: " + diagnostic,
         });
         return;
+    }
+
+    Suite deferred_suite;
+    bool cache_verified_classes = false;
+    {
+        std::unique_lock lock(mutex_);
+        const App* app = find_app_unlocked(app_id);
+        if (app != nullptr && app->vm == vm) {
+            if (const Suite* suite = suite_store_.find(app->suite_id);
+                suite != nullptr && suite->managed) {
+                deferred_suite = *suite;
+                cache_verified_classes = true;
+            }
+        }
+    }
+    if (cache_verified_classes) {
+        auto verified_classes =
+            vm->classes.verified_classes(deferred_suite.jar_path);
+        std::scoped_lock lock(mutex_);
+        static_cast<void>(suite_store_.update_verified_classes(
+            deferred_suite.id,
+            vm::ClassRepository::verification_cache_version(),
+            verified_classes));
     }
 
     if (signal == vm::MidletSignal::none ||

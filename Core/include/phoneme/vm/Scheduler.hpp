@@ -69,6 +69,9 @@ public:
     void begin_unpaced_execution() noexcept;
     void end_unpaced_execution() noexcept;
     void set_host_foreground(bool foreground) noexcept;
+    [[nodiscard]] bool host_foreground() const noexcept {
+        return host_foreground_.load(std::memory_order_acquire);
+    }
     void configure_frame_pacing(i32 frames_per_second,
                                 FramePacingMode mode) noexcept;
     void pace_current_frame_publication(Machine& machine);
@@ -157,6 +160,10 @@ private:
     static thread_local i64 tls_frame_interval_sample_nanoseconds_;
     static thread_local bool tls_frame_loop_wake_valid_;
     static thread_local bool tls_frame_cap_deadline_valid_;
+    static thread_local bool tls_native_frame_boundary_valid_;
+    static thread_local bool tls_native_backpressure_active_;
+    static thread_local bool tls_pressure_frame_boundary_valid_;
+    static thread_local u32 tls_native_fast_frame_streak_;
     static thread_local u64 tls_frame_pacing_generation_;
     static thread_local std::chrono::steady_clock::time_point
         tls_frame_loop_wake_time_;
@@ -164,6 +171,10 @@ private:
         tls_frame_cap_deadline_;
     static thread_local std::chrono::steady_clock::time_point
         tls_frame_boundary_time_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_native_frame_boundary_time_;
+    static thread_local std::chrono::steady_clock::time_point
+        tls_pressure_frame_boundary_time_;
 };
 
 } // namespace phoneme::vm

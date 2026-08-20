@@ -12,6 +12,13 @@ namespace phoneme::vm {
 
 class Machine;
 
+struct MediaEventServiceDiagnostics final {
+    usize registered_players {0U};
+    usize pending_events {0U};
+    bool worker_started {false};
+    bool polling {false};
+};
+
 class MediaEventService final {
 public:
     explicit MediaEventService(Machine& machine) noexcept;
@@ -27,6 +34,7 @@ public:
                                  media::MediaEvent event);
     void wake() noexcept;
     void shutdown() noexcept;
+    [[nodiscard]] MediaEventServiceDiagnostics diagnostics() const noexcept;
 
 private:
     struct Registration final {
@@ -43,16 +51,17 @@ private:
         std::stop_token stop_token);
     [[nodiscard]] Status queue_event(ObjectRef player,
                                      media::MediaEvent event);
-    void poll_players();
+    [[nodiscard]] bool poll_players();
     void dispatch_pending();
 
     Machine& machine_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable_any condition_;
     std::unordered_map<i32, Registration> players_;
     std::deque<PendingEvent> pending_;
     ObjectRef worker_thread_ {};
     bool worker_started_ {false};
+    bool poll_requested_ {false};
     bool shutting_down_ {false};
 };
 

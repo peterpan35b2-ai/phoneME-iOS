@@ -365,6 +365,21 @@ i32 ConnectionRegistry::owner() const noexcept {
     return owner_;
 }
 
+ConnectionRegistryDiagnostics ConnectionRegistry::diagnostics() const noexcept {
+    std::scoped_lock lock(mutex_);
+    ConnectionRegistryDiagnostics result {
+        .connections = entries_.size(),
+        .adapter = adapter_ != nullptr
+            ? adapter_->diagnostics()
+            : NetworkAdapterDiagnostics {},
+    };
+    for (const auto& [id, entry] : entries_) {
+        (void)id;
+        result.pending_operations += entry.pending_cancellations.size();
+    }
+    return result;
+}
+
 ConnectionToken ConnectionRegistry::allocate_token_unlocked() {
     if (next_id_ <= 0 || next_id_ == std::numeric_limits<i32>::max()) {
         next_id_ = 1;

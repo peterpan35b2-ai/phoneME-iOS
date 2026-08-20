@@ -40,9 +40,39 @@ namespace phoneme::vm
       key.append(target);
       return key;
     }
+
+    [[nodiscard]] u64 verified_class_stamp(
+        const archive::ZipEntry &entry) noexcept
+    {
+      return (static_cast<u64>(entry.crc32) << 32U) |
+             static_cast<u64>(entry.uncompressed_size);
+    }
   } // namespace
 
   Status ClassRepository::add_archive(std::string archive_path)
+  {
+    return add_archive_impl(
+        std::move(archive_path), nullptr, 0U, nullptr);
+  }
+
+  Status ClassRepository::add_archive(
+      std::string archive_path,
+      const std::array<u8, 32>& archive_sha256,
+      u32 verification_cache_version,
+      const std::unordered_map<std::string, u64>& verified_classes)
+  {
+    return add_archive_impl(
+        std::move(archive_path),
+        &archive_sha256,
+        verification_cache_version,
+        &verified_classes);
+  }
+
+  Status ClassRepository::add_archive_impl(
+      std::string archive_path,
+      const std::array<u8, 32>* archive_sha256,
+      u32 verification_cache_version,
+      const std::unordered_map<std::string, u64>* verified_classes)
   {
     if (archive_path.empty())
     {
@@ -64,9 +94,23 @@ namespace phoneme::vm
         });
     if (existing == archives_.end())
     {
+      const bool cache_enabled =
+          archive_sha256 != nullptr && verified_classes != nullptr &&
+          verification_cache_version ==
+              ClassRepository::verification_cache_version();
       archives_.push_back(ClasspathArchive{
           .path = std::move(archive_path),
           .archive = std::move(*archive),
+          .archive_sha256 = archive_sha256 != nullptr
+              ? *archive_sha256
+              : std::array<u8, 32> {},
+          .verification_cache_version = cache_enabled
+              ? verification_cache_version
+              : 0U,
+          .verified_classes = cache_enabled
+              ? *verified_classes
+              : std::unordered_map<std::string, u64> {},
+          .verification_cache_enabled = cache_enabled,
       });
       cache_.clear();
       method_cache_.clear();
@@ -75,6 +119,23 @@ namespace phoneme::vm
       metadata_.clear();
     }
     return {};
+  }
+
+  std::unordered_map<std::string, u64> ClassRepository::verified_classes(
+      std::string_view archive_path) const
+  {
+    std::scoped_lock lock(mutex_);
+    const auto found = std::find_if(
+        archives_.begin(), archives_.end(),
+        [archive_path](const ClasspathArchive &candidate)
+        {
+          return candidate.path == archive_path;
+        });
+    if (found == archives_.end() || !found->verification_cache_enabled)
+    {
+      return {};
+    }
+    return found->verified_classes;
   }
 
   Result<std::shared_ptr<const classfile::ClassFile>> ClassRepository::load(
@@ -463,7 +524,7 @@ namespace phoneme::vm
   }
 
   Result<std::shared_ptr<const classfile::ClassFile>>
-  ClassRepository::load_uncached(std::string_view internal_name) const
+  ClassRepository::load_uncached(std::string_view internal_name)
   {
     if (!internal_name.empty() && internal_name.front() == '[')
     {
@@ -500,7 +561,7 @@ namespace phoneme::vm
     }
 
     const std::string entry_name = std::string(internal_name) + ".class";
-    for (const ClasspathArchive &classpath_archive : archives_)
+    for (ClasspathArchive &classpath_archive : archives_)
     {
       const archive::ZipEntry *entry =
           classpath_archive.archive.find(entry_name);
@@ -523,12 +584,30 @@ namespace phoneme::vm
         return fail(ErrorCode::malformed_class,
                     "classpath entry name does not match class declaration");
       }
-      auto verified = verify_class(*parsed);
-      if (!verified)
+      const u64 verification_stamp = verified_class_stamp(*entry);
+      bool already_verified = false;
+      if (classpath_archive.verification_cache_enabled)
       {
-        return fail(verified.error().code,
-                    std::string(internal_name) + "." +
-                        verified.error().message);
+        const auto cached = classpath_archive.verified_classes.find(
+            std::string(internal_name));
+        already_verified =
+            cached != classpath_archive.verified_classes.end() &&
+            cached->second == verification_stamp;
+      }
+      if (!already_verified)
+      {
+        auto verified = verify_class(*parsed);
+        if (!verified)
+        {
+          return fail(verified.error().code,
+                      std::string(internal_name) + "." +
+                          verified.error().message);
+        }
+        if (classpath_archive.verification_cache_enabled)
+        {
+          classpath_archive.verified_classes.insert_or_assign(
+              std::string(internal_name), verification_stamp);
+        }
       }
       return std::make_shared<const classfile::ClassFile>(std::move(*parsed));
     }

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "phoneme/base/Checked.hpp"
+#include "phoneme/runtime/ParallelExecutor.hpp"
 #include "phoneme/vm/BuiltinClasses.hpp"
 #include "phoneme/vm/Descriptor.hpp"
 #include "phoneme/vm/ModifiedUtf8.hpp"
@@ -41,9 +42,12 @@ namespace phoneme::vm
     constexpr usize kMaximumCallDepth = 1'024;
     constexpr u64 kSchedulerQuantum = 50'000U;
     constexpr u64 kGarbageCollectionPollInterval = 10'000U;
-    constexpr u64 kMaintenancePollInterval = 256U;
-    static_assert((kMaintenancePollInterval &
-                   (kMaintenancePollInterval - 1U)) == 0U);
+    constexpr u64 kForegroundMaintenancePollInterval = 1'024U;
+    constexpr u64 kBackgroundMaintenancePollInterval = 256U;
+    static_assert((kForegroundMaintenancePollInterval &
+                   (kForegroundMaintenancePollInterval - 1U)) == 0U);
+    static_assert((kBackgroundMaintenancePollInterval &
+                   (kBackgroundMaintenancePollInterval - 1U)) == 0U);
 
     [[nodiscard]] constexpr std::string_view jit_exception_class(
         JitExceptionKind kind) noexcept
@@ -2694,11 +2698,51 @@ namespace phoneme::vm
                      counters.field_resolution_hits),
                  static_cast<unsigned long long>(
                      counters.field_resolution_misses));
+    std::fprintf(stderr,
+                 "[phoneME-perf] canvas frames=%llu unchanged=%llu "
+                 "dirty_pixels=%llu avoided_pixels=%llu publish_ms=%.1f "
+                 "backpressure_waits=%llu wait_ms=%.1f\n",
+                 static_cast<unsigned long long>(counters.canvas_publications),
+                 static_cast<unsigned long long>(
+                     counters.canvas_unchanged_publications),
+                 static_cast<unsigned long long>(counters.canvas_dirty_pixels),
+                 static_cast<unsigned long long>(
+                     counters.canvas_full_frame_pixels_avoided),
+                 static_cast<double>(counters.canvas_publication_nanoseconds) /
+                     1.0e6,
+                 static_cast<unsigned long long>(
+                     counters.frame_backpressure_waits),
+                 static_cast<double>(counters.frame_backpressure_nanoseconds) /
+                     1.0e6);
+    std::fprintf(stderr,
+                 "[phoneME-perf] maintenance checks=%llu background=%llu "
+                 "resource_cache hit=%llu miss=%llu evict=%llu peak_kb=%.1f "
+                 "text_cache hit=%llu miss=%llu evict=%llu peak_kb=%.1f\n",
+                 static_cast<unsigned long long>(counters.maintenance_checks),
+                 static_cast<unsigned long long>(
+                     counters.maintenance_background_checks),
+                 static_cast<unsigned long long>(
+                     counters.resource_array_cache_hits),
+                 static_cast<unsigned long long>(
+                     counters.resource_array_cache_misses),
+                 static_cast<unsigned long long>(
+                     counters.resource_array_cache_evictions),
+                 static_cast<double>(counters.resource_array_cache_peak_bytes) /
+                     1024.0,
+                 static_cast<unsigned long long>(counters.core_text_cache_hits),
+                 static_cast<unsigned long long>(counters.core_text_cache_misses),
+                 static_cast<unsigned long long>(
+                     counters.core_text_cache_evictions),
+                 static_cast<double>(counters.core_text_cache_peak_bytes) /
+                     1024.0);
     const JitStatistics jit = jit_statistics();
     std::fprintf(stderr,
                  "[phoneME-perf] jit attempts=%llu compiled=%llu "
                  "executed_methods=%llu rejected=%llu deopt=%llu "
-                 "compile_ms=%.1f exec_ms=%.1f osr=%llu\n",
+                 "compile_ms=%.1f exec_ms=%.1f osr=%llu bg_workers=%llu "
+                 "bg_queue_peak=%llu "
+                 "bg_compile_ms=%.1f render_cooldown_waits=%llu "
+                 "render_cooldown_ms=%.1f code_cache_kb=%.1f/%0.1f\n",
                  static_cast<unsigned long long>(jit.compile_attempts),
                  static_cast<unsigned long long>(jit.compiled_methods),
                  static_cast<unsigned long long>(jit.executed_methods),
@@ -2706,7 +2750,18 @@ namespace phoneme::vm
                  static_cast<unsigned long long>(jit.deoptimized_executions),
                  static_cast<double>(jit.compile_time_nanoseconds) / 1.0e6,
                  static_cast<double>(jit.execution_time_nanoseconds) / 1.0e6,
-                 static_cast<unsigned long long>(jit.osr_executions));
+                 static_cast<unsigned long long>(jit.osr_executions),
+                 static_cast<unsigned long long>(
+                     jit.background_compile_worker_count),
+                 static_cast<unsigned long long>(jit.background_compile_queue_peak),
+                 static_cast<double>(jit.background_compile_time_nanoseconds) /
+                     1.0e6,
+                 static_cast<unsigned long long>(
+                     jit.background_compile_render_cooldown_waits),
+                 static_cast<double>(
+                     jit.background_compile_render_cooldown_nanoseconds) / 1.0e6,
+                 static_cast<double>(jit.code_cache_bytes) / 1024.0,
+                 static_cast<double>(jit.code_cache_limit_bytes) / 1024.0);
     for (usize reason = 0U; reason < kJitRejectReasonCount; ++reason)
       if (jit.reject_reasons[reason] != 0U)
         std::fprintf(stderr, "[phoneME-perf] jit reject %s=%llu\n",
@@ -2715,6 +2770,39 @@ namespace phoneme::vm
                      static_cast<unsigned long long>(
                          jit.reject_reasons[reason]));
 #endif  // PHONEME_ENABLE_VM_PROFILING
+
+    const auto scheduler = scheduler_.snapshot();
+    const auto timers = timers_.diagnostics();
+    const auto media_events = media_events_.diagnostics();
+    const auto network = connections_.diagnostics();
+    const auto graphics = graphics_.diagnostics();
+    const auto metadata = classes_.metadata().diagnostics();
+    std::fprintf(stderr,
+                 "[phoneME-perf] workers java=%zu runnable=%zu blocked=%zu "
+                 "sleeping=%zu timers=%zu timer_tasks=%zu media_worker=%d "
+                 "media_players=%zu media_pending=%zu network_workers=%zu "
+                 "network_active=%zu network_blocked=%zu network_queued=%zu "
+                 "connections=%zu pending_io=%zu native_compute=%u\n",
+                 scheduler.threads.size(), scheduler.runnable.size(),
+                 scheduler.blocked.size(), scheduler.sleeping.size(),
+                 timers.timers, timers.scheduled_tasks,
+                 media_events.worker_started ? 1 : 0,
+                 media_events.registered_players, media_events.pending_events,
+                 network.adapter.workers, network.adapter.active_workers,
+                 network.adapter.active_blocking_workers,
+                 network.adapter.queued_tasks, network.connections,
+                 network.pending_operations,
+                 runtime::shared_compute_executor().active_worker_count());
+    std::fprintf(stderr,
+                 "[phoneME-perf] caches resource_current_kb=%.1f "
+                 "graphics_images=%zu graphics_contexts=%zu graphics_kb=%.1f "
+                 "metadata_classes=%zu metadata_methods=%zu descriptors=%zu "
+                 "decoded_instructions=%zu decoded_operands=%zu\n",
+                 static_cast<double>(resource_array_cache_payload_bytes_) / 1024.0,
+                 graphics.images, graphics.contexts,
+                 static_cast<double>(graphics.estimated_bytes) / 1024.0,
+                 metadata.classes, metadata.methods, metadata.descriptors,
+                 metadata.decoded_instructions, metadata.decoded_operands);
   }
 
   void Machine::begin_character_translation_frame() noexcept
@@ -3475,6 +3563,7 @@ namespace phoneme::vm
   void Machine::note_frame_pacing_boundary() noexcept
   {
     scheduler_.note_current_frame_boundary();
+    jit_.note_frame_published();
   }
 
   void Machine::note_frame_pacing_request() noexcept
@@ -3716,8 +3805,10 @@ namespace phoneme::vm
         iterator != resource_array_cache_.end() &&
         !iterator->second.is_null())
     {
+      PerformanceCounters::record_resource_array_cache(true);
       return iterator->second;
     }
+    PerformanceCounters::record_resource_array_cache(false);
     auto bytes = classes_.read_resource(resource_name);
     if (!bytes) return std::unexpected(bytes.error());
     auto array = heap_.allocate_array(
@@ -3743,10 +3834,13 @@ namespace phoneme::vm
           resource_array_cache_payload_bytes_ -=
               static_cast<u64>(*size);
         resource_array_cache_.erase(evicted);
+        PerformanceCounters::record_resource_array_cache_eviction();
       }
       resource_array_cache_order_.pop_front();
     }
     resource_array_cache_payload_bytes_ += bytes->size();
+    PerformanceCounters::observe_resource_array_cache_bytes(
+        static_cast<usize>(resource_array_cache_payload_bytes_));
     resource_array_cache_order_.emplace_back(resource_name);
     resource_array_cache_[std::string(resource_name)] = *array;
     return *array;
@@ -7387,6 +7481,81 @@ namespace phoneme::vm
       }
 
       const u64 nested_budget = first;
+
+      // Bitmap-font renderers in classic MIDP games frequently execute
+      // String.length()/charAt()/indexOf(int) for every glyph. Resolve these
+      // immutable String accessors directly against the VM heap so compiled
+      // render loops neither deopt at each character nor copy the complete
+      // UTF-16 payload through the public native API.
+      if (operation == JitRuntimeOperation::invoke_virtual &&
+          operands->receiver.has_value() &&
+          reference->owner == "java/lang/String")
+      {
+        const ObjectRef string = *operands->receiver;
+        if (reference->name == "length" &&
+            reference->descriptor == "()I")
+        {
+          auto length = heap_.vm_string_length(string);
+          if (!length ||
+              *length > static_cast<usize>(std::numeric_limits<i32>::max()))
+          {
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          }
+          *result_bits = static_cast<u64>(static_cast<u32>(
+              static_cast<i32>(*length)));
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+        if (reference->name == "charAt" &&
+            reference->descriptor == "(I)C" &&
+            operands->arguments.size() == 1U)
+        {
+          auto index = operands->arguments[0U].as_int();
+          if (!index)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          if (*index < 0)
+          {
+            auto throwable = create_throwable(
+                "java/lang/StringIndexOutOfBoundsException",
+                "String.charAt index is out of range");
+            if (!throwable)
+              return static_cast<u32>(JitRuntimeStatus::deoptimize);
+            *result_bits = throwable->bits;
+            return static_cast<u32>(JitRuntimeStatus::java_throwable);
+          }
+          auto character = heap_.vm_string_character(
+              string, static_cast<usize>(*index));
+          if (!character)
+          {
+            if (character.error().code == ErrorCode::out_of_range)
+            {
+              auto throwable = create_throwable(
+                  "java/lang/StringIndexOutOfBoundsException",
+                  "String.charAt index is out of range");
+              if (!throwable)
+                return static_cast<u32>(JitRuntimeStatus::deoptimize);
+              *result_bits = throwable->bits;
+              return static_cast<u32>(JitRuntimeStatus::java_throwable);
+            }
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          }
+          *result_bits = static_cast<u64>(static_cast<u32>(*character));
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+        if (reference->name == "indexOf" &&
+            reference->descriptor == "(I)I" &&
+            operands->arguments.size() == 1U)
+        {
+          auto character = operands->arguments[0U].as_int();
+          if (!character)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          auto position = heap_.vm_string_index_of(
+              string, static_cast<u16>(*character));
+          if (!position)
+            return static_cast<u32>(JitRuntimeStatus::deoptimize);
+          *result_bits = static_cast<u64>(static_cast<u32>(*position));
+          return static_cast<u32>(JitRuntimeStatus::success);
+        }
+      }
 
       // Vector accessors sit in some of the hottest MIDP collision/render
       // loops. Going through full virtual resolution + NativeMethodRegistry for
@@ -11431,8 +11600,14 @@ namespace phoneme::vm
 
     while (!frames.empty())
     {
+      const bool host_foreground = scheduler_.host_foreground();
+      const u64 maintenance_interval = host_foreground
+          ? kForegroundMaintenancePollInterval
+          : kBackgroundMaintenancePollInterval;
       const bool maintenance_boundary =
-          (executed & (kMaintenancePollInterval - 1U)) == 0U;
+          (executed & (maintenance_interval - 1U)) == 0U;
+      if (maintenance_boundary)
+        PerformanceCounters::record_maintenance_check(!host_foreground);
       if (maintenance_boundary && scheduler_.current_stop_requested())
       {
         return fail(ErrorCode::invalid_state,

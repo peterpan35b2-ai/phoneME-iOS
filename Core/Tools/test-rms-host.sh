@@ -112,6 +112,8 @@ fi
 while IFS= read -r source; do
   SOURCES+=("$source")
 done < <(find "$CORE_ROOT/src/graphics" -type f -name '*.cpp' -print | LC_ALL=C sort)
+SOURCES+=("$CORE_ROOT/src/runtime/ParallelExecutor.cpp")
+SOURCES+=("$CORE_ROOT/src/runtime/WorkCoordinator.cpp")
 while IFS= read -r source; do
   SOURCES+=("$source")
 done < <(find "$CORE_ROOT/src/vm" -type f -name '*.cpp' -print | LC_ALL=C sort)

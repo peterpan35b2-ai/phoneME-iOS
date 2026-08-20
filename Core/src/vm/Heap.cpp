@@ -1,11 +1,15 @@
 #include "phoneme/vm/Heap.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <limits>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include "phoneme/base/Checked.hpp"
+#include "phoneme/runtime/ParallelExecutor.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/VmTrace.hpp"
 
@@ -13,6 +17,8 @@ namespace phoneme::vm {
 namespace {
 
 thread_local HeapAccessContext g_heap_access_context {};
+constexpr usize kParallelGcSlotThreshold = 4U * 1024U;
+constexpr usize kParallelGcSlotChunk = 512U;
 
 [[nodiscard]] bool supports_text_payload(std::string_view class_name) noexcept {
     return class_name == "java/lang/String" ||
@@ -723,6 +729,125 @@ Result<std::u16string> Heap::string_value(ObjectRef reference) const {
     return object.string_payload;
 }
 
+Result<usize> Heap::string_length(ObjectRef reference) const {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.string_length", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    return object.string_payload.size();
+}
+
+Result<u16> Heap::string_character(ObjectRef reference, usize index) const {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.string_character", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    if (index >= object.string_payload.size()) {
+        return fail(ErrorCode::out_of_range,
+                    "Java text character index is out of range");
+    }
+    return static_cast<u16>(object.string_payload[index]);
+}
+
+Result<i32> Heap::string_index_of(ObjectRef reference,
+                                  u16 character,
+                                  usize start) const {
+    PerformanceCounters::record_locked_heap_operation();
+    std::scoped_lock lock(mutex_);
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.string_index_of", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    if (start > object.string_payload.size()) return -1;
+    const usize position = object.string_payload.find(
+        static_cast<char16_t>(character), start);
+    if (position == std::u16string::npos) return -1;
+    if (position > static_cast<usize>(std::numeric_limits<i32>::max())) {
+        return fail(ErrorCode::overflow,
+                    "Java text character position exceeds int range");
+    }
+    return static_cast<i32>(position);
+}
+
+Result<usize> Heap::vm_string_length(ObjectRef reference) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(), "Heap.vm_string_length", reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    return object.string_payload.size();
+}
+
+Result<u16> Heap::vm_string_character(ObjectRef reference, usize index) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(),
+                                 "Heap.vm_string_character",
+                                 reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    if (index >= object.string_payload.size()) {
+        return fail(ErrorCode::out_of_range,
+                    "Java text character index is out of range");
+    }
+    return static_cast<u16>(object.string_payload[index]);
+}
+
+Result<i32> Heap::vm_string_index_of(ObjectRef reference,
+                                     u16 character,
+                                     usize start) const {
+    PerformanceCounters::record_vm_fast_heap_operation();
+    auto slot = resolve_slot_unlocked(reference);
+    if (!slot) {
+        return heap_access_error(slot.error(),
+                                 "Heap.vm_string_index_of",
+                                 reference);
+    }
+    const Object& object = slots_[*slot].object;
+    if (!object.is_string || !supports_text_payload(object.class_name)) {
+        return fail(ErrorCode::invalid_state,
+                    "object does not contain a Java text payload");
+    }
+    if (start > object.string_payload.size()) return -1;
+    const usize position = object.string_payload.find(
+        static_cast<char16_t>(character), start);
+    if (position == std::u16string::npos) return -1;
+    if (position > static_cast<usize>(std::numeric_limits<i32>::max())) {
+        return fail(ErrorCode::overflow,
+                    "Java text character position exceeds int range");
+    }
+    return static_cast<i32>(position);
+}
+
 Status Heap::set_weak_referent(ObjectRef reference, ObjectRef referent) {
     PerformanceCounters::record_locked_heap_operation();
     std::scoped_lock lock(mutex_);
@@ -776,22 +901,39 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
     const auto collection_started = std::chrono::steady_clock::now();
     std::scoped_lock lock(mutex_);
     const usize bytes_before = live_bytes_;
-    usize objects_scanned = 0U;
-    usize primitive_bytes_scanned = 0U;
-    for (Slot& slot : slots_) {
-        if (slot.occupied) {
-            ++objects_scanned;
-            if (slot.object.is_array && slot.object.class_name.size() >= 2U &&
-                slot.object.class_name.front() == '[' &&
-                slot.object.class_name[1U] != 'L' &&
-                slot.object.class_name[1U] != '[') {
-                primitive_bytes_scanned = saturated_add(
-                    primitive_bytes_scanned,
-                    slot.object.elements.size() * sizeof(Value));
+    std::atomic<usize> scanned_objects {0U};
+    std::atomic<usize> scanned_primitive_bytes {0U};
+    const auto reset_marks = [&](usize begin, usize end) {
+        usize local_objects = 0U;
+        usize local_primitive_bytes = 0U;
+        for (usize index = begin; index < end; ++index) {
+            Slot& slot = slots_[index];
+            if (slot.occupied) {
+                ++local_objects;
+                if (slot.object.is_array && slot.object.class_name.size() >= 2U &&
+                    slot.object.class_name.front() == '[' &&
+                    slot.object.class_name[1U] != 'L' &&
+                    slot.object.class_name[1U] != '[') {
+                    local_primitive_bytes = saturated_add(
+                        local_primitive_bytes,
+                        slot.object.elements.size() * sizeof(Value));
+                }
+                slot.object.marked = false;
             }
-            slot.object.marked = false;
         }
-    }
+        scanned_objects.fetch_add(local_objects, std::memory_order_relaxed);
+        scanned_primitive_bytes.fetch_add(
+            local_primitive_bytes, std::memory_order_relaxed);
+    };
+    runtime::shared_compute_executor().parallel_for(
+        slots_.size(),
+        kParallelGcSlotThreshold,
+        kParallelGcSlotChunk,
+        reset_marks);
+    const usize objects_scanned =
+        scanned_objects.load(std::memory_order_relaxed);
+    const usize primitive_bytes_scanned =
+        scanned_primitive_bytes.load(std::memory_order_relaxed);
     vm_trace("gc",
              "begin roots=%zu live=%zu bytes=%zu capacity=%zu",
              roots.size(),
@@ -834,23 +976,53 @@ Status Heap::collect(std::span<const ObjectRef> roots) {
         }
     }
 
-    usize objects_reclaimed = 0U;
-    for (usize index = 0; index < slots_.size(); ++index) {
-        Slot& slot = slots_[index];
-        if (!slot.occupied || slot.object.marked) {
-            continue;
+    std::atomic<usize> reclaimed_objects {0U};
+    std::atomic<usize> reclaimed_bytes {0U};
+    std::mutex reclaimed_indices_mutex;
+    std::vector<usize> reclaimed_indices;
+    const auto sweep_slots = [&](usize begin, usize end) {
+        usize local_objects = 0U;
+        usize local_bytes = 0U;
+        std::vector<usize> local_indices;
+        for (usize index = begin; index < end; ++index) {
+            Slot& slot = slots_[index];
+            if (!slot.occupied || slot.object.marked) {
+                continue;
+            }
+            ++local_objects;
+            local_bytes = saturated_add(local_bytes, slot.accounted_bytes);
+            slot.object = {};
+            slot.accounted_bytes = 0U;
+            slot.occupied = false;
+            ++slot.generation;
+            if (slot.generation == 0U) {
+                slot.generation = 1U;
+            }
+            local_indices.push_back(index);
         }
-        ++objects_reclaimed;
-        live_bytes_ -= slot.accounted_bytes;
-        slot.object = {};
-        slot.accounted_bytes = 0U;
-        slot.occupied = false;
-        ++slot.generation;
-        if (slot.generation == 0U) {
-            slot.generation = 1U;
+        reclaimed_objects.fetch_add(local_objects, std::memory_order_relaxed);
+        reclaimed_bytes.fetch_add(local_bytes, std::memory_order_relaxed);
+        if (!local_indices.empty()) {
+            std::scoped_lock indices_lock(reclaimed_indices_mutex);
+            reclaimed_indices.insert(
+                reclaimed_indices.end(),
+                local_indices.begin(),
+                local_indices.end());
         }
-        free_slots_.push_back(index);
-    }
+    };
+    runtime::shared_compute_executor().parallel_for(
+        slots_.size(),
+        kParallelGcSlotThreshold,
+        kParallelGcSlotChunk,
+        sweep_slots);
+    std::sort(reclaimed_indices.begin(), reclaimed_indices.end());
+    free_slots_.insert(
+        free_slots_.end(), reclaimed_indices.begin(), reclaimed_indices.end());
+    const usize objects_reclaimed =
+        reclaimed_objects.load(std::memory_order_relaxed);
+    const usize bytes_reclaimed =
+        reclaimed_bytes.load(std::memory_order_relaxed);
+    live_bytes_ -= std::min(live_bytes_, bytes_reclaimed);
     ++collections_;
     update_automatic_collection_threshold_unlocked();
     const auto collection_finished = std::chrono::steady_clock::now();

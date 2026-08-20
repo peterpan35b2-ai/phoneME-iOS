@@ -292,7 +292,8 @@ struct PhoneMEApp: App {
                     .map { String(describing: $0.state) } ?? "missing"
 #if os(iOS)
                 if let frame = session.frame,
-                   let data = UIImage(cgImage: frame).pngData() {
+                   let image = frame.makeCGImage(),
+                   let data = UIImage(cgImage: image).pngData() {
                     let frameURL = FileManager.default.temporaryDirectory
                         .appendingPathComponent("phoneme-debug-frame.png")
                     try? data.write(to: frameURL, options: .atomic)

@@ -88,7 +88,10 @@ constexpr usize kInitialNetworkWorkerCount = 2U;
 constexpr usize kMaximumNetworkWorkerCount = 32U;
 constexpr usize kMaximumReservedNetworkWorkers = 4U;
 #else
-constexpr usize kInitialNetworkWorkerCount = 8U;
+// Start lean on native hosts as well. The pool already grows on demand when
+// queued work exceeds runnable capacity, so eight permanent pthread stacks at
+// startup only increase memory/thread footprint for the common one-socket game.
+constexpr usize kInitialNetworkWorkerCount = 2U;
 constexpr usize kMaximumNetworkWorkerCount = 32U;
 constexpr usize kMaximumReservedNetworkWorkers = 4U;
 #endif
@@ -112,7 +115,18 @@ std::atomic<u64> g_next_apple_http_session_id {1U};
 }
 #endif
 
-using CancellationCheck = std::function<bool()>;
+struct CancellationCheck final {
+    std::function<bool()> requested;
+    int wake_descriptor {-1};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(requested);
+    }
+
+    [[nodiscard]] bool operator()() const {
+        return requested && requested();
+    }
+};
 
 struct ScopedDescriptor final {
     int value {-1};
@@ -202,6 +216,22 @@ public:
             remaining.count(), kCancellationPollMilliseconds));
     }
 
+    [[nodiscard]] Result<i32> next_fd_poll_timeout() const {
+        if (!deadline_.has_value()) return -1;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= *deadline_) {
+            return fail(ErrorCode::io_error,
+                        "network operation timed out");
+        }
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            *deadline_ - now);
+        if (remaining.count() <= 0) {
+            remaining = std::chrono::milliseconds(1);
+        }
+        return static_cast<i32>(std::min<i64>(
+            remaining.count(), static_cast<i64>(INT32_MAX)));
+    }
+
 private:
     std::optional<std::chrono::steady_clock::time_point> deadline_;
 };
@@ -273,19 +303,31 @@ private:
     const CancellationCheck& cancelled = {}) {
     while (true) {
         if (cancellation_requested(cancelled)) return cancelled_operation();
-        auto poll_timeout = deadline.next_poll_timeout();
+        auto poll_timeout = cancelled.wake_descriptor >= 0
+            ? deadline.next_fd_poll_timeout()
+            : deadline.next_poll_timeout();
         if (!poll_timeout) return std::unexpected(poll_timeout.error());
 
-        pollfd poll_descriptor {
-            .fd = descriptor,
-            .events = events,
-            .revents = 0,
-        };
-        const int result = ::poll(&poll_descriptor, 1, *poll_timeout);
+        std::array<pollfd, 2> poll_descriptors {{
+            pollfd {.fd = descriptor, .events = events, .revents = 0},
+            pollfd {
+                .fd = cancelled.wake_descriptor,
+                .events = POLLIN,
+                .revents = 0,
+            },
+        }};
+        const nfds_t count = cancelled.wake_descriptor >= 0 ? 2U : 1U;
+        const int result = ::poll(poll_descriptors.data(), count, *poll_timeout);
         if (result > 0) {
-            if ((poll_descriptor.revents &
+            if (count == 2U &&
+                (poll_descriptors[1].revents &
+                 static_cast<short>(POLLIN | POLLERR | POLLHUP | POLLNVAL)) !=
+                    0) {
+                return cancelled_operation();
+            }
+            if ((poll_descriptors[0].revents &
                  static_cast<short>(POLLERR | POLLHUP | POLLNVAL)) != 0 &&
-                (poll_descriptor.revents & events) == 0) {
+                (poll_descriptors[0].revents & events) == 0) {
                 return fail(ErrorCode::io_error,
                             "network descriptor reported an error");
             }
@@ -1884,8 +1926,19 @@ public:
     }
 
     [[nodiscard]] usize worker_count_for_tests() const noexcept override {
+        return diagnostics().workers;
+    }
+
+    [[nodiscard]] NetworkAdapterDiagnostics diagnostics() const noexcept override {
         std::scoped_lock lock(operation_mutex_);
-        return workers_.size();
+        return NetworkAdapterDiagnostics {
+            .workers = workers_.size(),
+            .active_workers = active_workers_,
+            .active_blocking_workers = active_blocking_workers_,
+            .queued_tasks = latency_sensitive_queue_.size() +
+                            blocking_input_queue_.size(),
+            .operations = operations_.size(),
+        };
     }
 
     Result<OperationId> open_stream(
@@ -2559,8 +2612,7 @@ public:
             std::scoped_lock lock(operation_mutex_);
             const auto found = operations_.find(operation.value);
             if (found != operations_.end()) {
-                found->second->cancelled.store(true,
-                                               std::memory_order_release);
+                found->second->signal_cancel();
             }
         }
         operation_condition_.notify_all();
@@ -2586,11 +2638,83 @@ public:
     }
 
 private:
-    struct OperationState final {
-        std::atomic_bool cancelled {false};
+    struct WorkerWake final {
+        int read_descriptor {-1};
+        int write_descriptor {-1};
+
+        WorkerWake() noexcept {
+#if !defined(PHONEME_WEB)
+            int descriptors[2] {-1, -1};
+            if (::pipe(descriptors) == 0) {
+                read_descriptor = descriptors[0];
+                write_descriptor = descriptors[1];
+                const int read_flags = ::fcntl(read_descriptor, F_GETFL, 0);
+                const int write_flags = ::fcntl(write_descriptor, F_GETFL, 0);
+                if (read_flags >= 0) {
+                    (void)::fcntl(read_descriptor, F_SETFL,
+                                  read_flags | O_NONBLOCK);
+                }
+                if (write_flags >= 0) {
+                    (void)::fcntl(write_descriptor, F_SETFL,
+                                  write_flags | O_NONBLOCK);
+                }
+            }
+#endif
+        }
+
+        ~WorkerWake() {
+            if (read_descriptor >= 0) ::close(read_descriptor);
+            if (write_descriptor >= 0) ::close(write_descriptor);
+        }
+
+        WorkerWake(const WorkerWake&) = delete;
+        WorkerWake& operator=(const WorkerWake&) = delete;
+
+        void drain() noexcept {
+            if (read_descriptor < 0) return;
+            std::array<u8, 64> bytes {};
+            while (::read(read_descriptor, bytes.data(), bytes.size()) > 0) {
+            }
+        }
+
+        void signal() noexcept {
+            if (write_descriptor < 0) return;
+            const u8 byte = 1U;
+            const ssize_t ignored = ::write(write_descriptor, &byte, 1U);
+            (void)ignored;
+        }
     };
 
-    using AsyncTask = std::function<void()>;
+    struct OperationState final {
+        std::atomic_bool cancelled {false};
+        std::mutex worker_wake_mutex;
+        std::weak_ptr<WorkerWake> worker_wake;
+
+        void attach_worker(const std::shared_ptr<WorkerWake>& wake) noexcept {
+            std::scoped_lock lock(worker_wake_mutex);
+            worker_wake = wake;
+        }
+
+        void detach_worker() noexcept {
+            std::scoped_lock lock(worker_wake_mutex);
+            worker_wake.reset();
+        }
+
+        void signal_cancel() noexcept {
+            const bool was_cancelled =
+                cancelled.exchange(true, std::memory_order_acq_rel);
+            if (was_cancelled) return;
+            std::shared_ptr<WorkerWake> wake;
+            {
+                std::scoped_lock lock(worker_wake_mutex);
+                wake = worker_wake.lock();
+            }
+            if (wake) wake->signal();
+        }
+    };
+
+    using AsyncTask =
+        std::function<void(const std::shared_ptr<WorkerWake>&)>;
 
     template <typename T, typename Work, typename Cleanup>
     [[nodiscard]] Result<OperationId> start_async_with_cleanup(
@@ -2610,11 +2734,20 @@ private:
                           task_class,
                           completion = std::move(completion),
                           work = std::move(work),
-                          cleanup = std::move(cleanup)]() mutable {
-            const CancellationCheck cancelled = [state] {
-                return state->cancelled.load(std::memory_order_acquire);
+                          cleanup = std::move(cleanup)](
+                             const std::shared_ptr<WorkerWake>& worker_wake) mutable {
+            if (worker_wake) worker_wake->drain();
+            state->attach_worker(worker_wake);
+            const CancellationCheck cancelled {
+                .requested = [state] {
+                    return state->cancelled.load(std::memory_order_acquire);
+                },
+                .wake_descriptor = worker_wake
+                    ? worker_wake->read_descriptor
+                    : -1,
             };
             Result<T> result = work(cancelled);
+            state->detach_worker();
             bool deliver = false;
             {
                 std::scoped_lock lock(operation_mutex_);
@@ -2670,9 +2803,10 @@ private:
     }
 
     void spawn_worker_unlocked() {
+        auto wake = std::make_shared<WorkerWake>();
         workers_.emplace_back(
-            [this](std::stop_token stop_token) {
-                worker_loop(stop_token);
+            [this, wake = std::move(wake)](std::stop_token stop_token) {
+                worker_loop(stop_token, wake);
             });
     }
 
@@ -2730,7 +2864,9 @@ private:
         }
     }
 
-    void worker_loop(std::stop_token stop_token) noexcept {
+    void worker_loop(
+        std::stop_token stop_token,
+        const std::shared_ptr<WorkerWake>& worker_wake) noexcept {
         while (true) {
             AsyncTask task;
             bool blocking_input = false;
@@ -2759,7 +2895,7 @@ private:
                 }
                 ++active_workers_;
             }
-            if (task) task();
+            if (task) task(worker_wake);
             {
                 std::scoped_lock lock(operation_mutex_);
                 if (active_workers_ != 0U) --active_workers_;
@@ -2782,7 +2918,7 @@ private:
             stopping_ = true;
             for (auto& [unused, state] : operations_) {
                 (void)unused;
-                state->cancelled.store(true, std::memory_order_release);
+                state->signal_cancel();
             }
             latency_sensitive_queue_.clear();
             blocking_input_queue_.clear();

@@ -172,6 +172,9 @@ public final class VmDifferentialOracle {
         emitInt("thread-synchronized", new IntCall() {
             public int run() { return VmDifferentialOps.synchronizedThreadCounters(); }
         });
+        emitString("openjdk-remaining-surface", new StringCall() {
+            public String run() { return VmDifferentialOps.openJdkRemainingSurfaceTrace(); }
+        });
         emitString("exception-constructors", new StringCall() {
             public String run() { return VmDifferentialOps.exceptionConstructorSurfaceTrace(); }
         });

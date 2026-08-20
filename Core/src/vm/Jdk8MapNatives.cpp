@@ -1,7 +1,10 @@
 #include "Jdk8CompatNativesParts.hpp"
 
+#include <algorithm>
 #include <array>
+#include <limits>
 #include <string_view>
+#include <vector>
 
 #include "Jdk8CompatNativeSupport.hpp"
 
@@ -15,6 +18,60 @@ constexpr usize kMapSizeField = 2U;
 constexpr usize kEnumMapTypeField = 4U;
 constexpr usize kEntryOwnerField = 0U;
 constexpr usize kEntryKeyField = 1U;
+
+[[nodiscard]] Result<std::optional<Value>> invoke_hash_map_native(
+    Machine& machine,
+    ObjectRef map,
+    std::string_view name,
+    std::string_view descriptor,
+    std::span<const Value> arguments = {}) {
+    std::vector<Value> forwarded;
+    forwarded.reserve(arguments.size() + 1U);
+    forwarded.push_back(Value::from_reference(map));
+    forwarded.insert(forwarded.end(), arguments.begin(), arguments.end());
+    return invoke_native(machine, "java/util/HashMap", name, descriptor,
+                         forwarded);
+}
+
+[[nodiscard]] Result<ObjectRef> create_concurrent_key_set(
+    Machine& machine,
+    std::optional<ObjectRef> map,
+    i32 requested_capacity = 0) {
+    i32 capacity = requested_capacity;
+    if (map.has_value()) {
+        auto size = int_field(machine, *map, kMapSizeField);
+        if (!size) return std::unexpected(size.error());
+        capacity = std::max(capacity, *size * 2);
+    }
+    auto set = new_instance(
+        machine, "java/util/concurrent/ConcurrentHashMap$KeySetView");
+    if (!set) return std::unexpected(set.error());
+    auto root = machine.pin_native_root(*set);
+    if (!root) return std::unexpected(root.error());
+    const std::array<Value, 2> init_arguments {
+        Value::from_reference(*set), Value::from_int(capacity),
+    };
+    auto initialized = invoke_native(machine, "java/util/HashSet", "<init>",
+                                     "(I)V", init_arguments);
+    if (!initialized) return std::unexpected(initialized.error());
+    if (!map.has_value()) return *set;
+
+    auto size = int_field(machine, *map, kMapSizeField);
+    auto keys = reference_field(machine, *map, kMapKeysField);
+    if (!size) return std::unexpected(size.error());
+    if (!keys) return std::unexpected(keys.error());
+    for (i32 index = 0; index < *size; ++index) {
+        auto key = machine.heap().element(*keys, static_cast<usize>(index));
+        if (!key) return std::unexpected(key.error());
+        const std::array<Value, 2> add_arguments {
+            Value::from_reference(*set), *key,
+        };
+        auto added = invoke_native(machine, "java/util/HashSet", "add",
+                                   "(Ljava/lang/Object;)Z", add_arguments);
+        if (!added) return std::unexpected(added.error());
+    }
+    return *set;
+}
 
 void register_map_defaults(NativeMethodRegistry& registry) {
     add(registry, "java/util/Map", "getOrDefault",
@@ -204,6 +261,714 @@ void alias_hash_map(NativeMethodRegistry& registry,
     }
 }
 
+void register_concurrent_hash_map(NativeMethodRegistry& registry) {
+    constexpr std::string_view kOwner =
+        "java/util/concurrent/ConcurrentHashMap";
+
+    const auto initialize = [&registry, kOwner](const char* descriptor,
+                                        bool has_capacity) {
+        add(registry, std::string(kOwner), "<init>", descriptor,
+            [has_capacity](Machine& machine,
+                           std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto map = receiver(arguments);
+                if (!map) return std::unexpected(map.error());
+                i32 capacity = 16;
+                if (has_capacity) {
+                    auto requested = int_argument(arguments, 1U);
+                    if (!requested) return std::unexpected(requested.error());
+                    if (*requested < 0) {
+                        return fail_java("java/lang/IllegalArgumentException",
+                                         "negative ConcurrentHashMap capacity");
+                    }
+                    capacity = *requested;
+                }
+                const Value capacity_value = Value::from_int(capacity);
+                auto initialized = invoke_hash_map_native(
+                    machine, *map, "<init>", "(I)V",
+                    std::span<const Value>(&capacity_value, 1U));
+                if (!initialized) return std::unexpected(initialized.error());
+                return std::optional<Value> {};
+            });
+    };
+    initialize("()V", false);
+    initialize("(I)V", true);
+
+    add(registry, std::string(kOwner), "<init>", "(IF)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto capacity = int_argument(arguments, 1U);
+            auto load_factor = float_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!capacity) return std::unexpected(capacity.error());
+            if (!load_factor) return std::unexpected(load_factor.error());
+            if (*capacity < 0 || !(*load_factor > 0.0F)) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "invalid ConcurrentHashMap sizing arguments");
+            }
+            const Value capacity_value = Value::from_int(*capacity);
+            auto initialized = invoke_hash_map_native(
+                machine, *map, "<init>", "(I)V",
+                std::span<const Value>(&capacity_value, 1U));
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+    add(registry, std::string(kOwner), "<init>", "(IFI)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto capacity = int_argument(arguments, 1U);
+            auto load_factor = float_argument(arguments, 2U);
+            auto concurrency = int_argument(arguments, 3U);
+            if (!map) return std::unexpected(map.error());
+            if (!capacity) return std::unexpected(capacity.error());
+            if (!load_factor) return std::unexpected(load_factor.error());
+            if (!concurrency) return std::unexpected(concurrency.error());
+            if (*capacity < 0 || !(*load_factor > 0.0F) || *concurrency <= 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "invalid ConcurrentHashMap sizing arguments");
+            }
+            const i32 requested = std::max(*capacity, *concurrency);
+            const Value capacity_value = Value::from_int(requested);
+            auto initialized = invoke_hash_map_native(
+                machine, *map, "<init>", "(I)V",
+                std::span<const Value>(&capacity_value, 1U));
+            if (!initialized) return std::unexpected(initialized.error());
+            return std::optional<Value> {};
+        });
+
+    const auto invoke_one_reference = [&registry, kOwner](const char* name,
+                                                  const char* descriptor,
+                                                  bool nullable,
+                                                  const char* source_name = nullptr) {
+        add(registry, std::string(kOwner), name, descriptor,
+            [name = std::string(name), descriptor = std::string(descriptor),
+             source = std::string(source_name == nullptr ? name : source_name),
+             nullable](Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto map = receiver(arguments);
+                auto value = reference_argument(arguments, 1U, nullable);
+                if (!map) return std::unexpected(map.error());
+                if (!value) return std::unexpected(value.error());
+                const Value forwarded = Value::from_reference(*value);
+                return invoke_hash_map_native(
+                    machine, *map, source, descriptor,
+                    std::span<const Value>(&forwarded, 1U));
+            });
+    };
+    invoke_one_reference("get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+    invoke_one_reference("containsKey", "(Ljava/lang/Object;)Z", false);
+    invoke_one_reference("containsValue", "(Ljava/lang/Object;)Z", false);
+    invoke_one_reference("remove", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+    invoke_one_reference("contains", "(Ljava/lang/Object;)Z", false,
+                         "containsValue");
+
+    const auto invoke_two_references = [&registry, kOwner](const char* name,
+                                                   const char* descriptor,
+                                                   bool second_nullable,
+                                                   const char* source_name = nullptr) {
+        add(registry, std::string(kOwner), name, descriptor,
+            [name = std::string(name), descriptor = std::string(descriptor),
+             source = std::string(source_name == nullptr ? name : source_name),
+             second_nullable](Machine& machine,
+                              std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto map = receiver(arguments);
+                auto first = reference_argument(arguments, 1U);
+                auto second = reference_argument(arguments, 2U,
+                                                 second_nullable);
+                if (!map) return std::unexpected(map.error());
+                if (!first) return std::unexpected(first.error());
+                if (!second) return std::unexpected(second.error());
+                const std::array<Value, 2> forwarded {
+                    Value::from_reference(*first),
+                    Value::from_reference(*second),
+                };
+                return invoke_hash_map_native(machine, *map, source,
+                                              descriptor, forwarded);
+            });
+    };
+    invoke_two_references("put",
+                          "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                          false);
+    invoke_two_references("putIfAbsent",
+                          "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                          false);
+    invoke_two_references("getOrDefault",
+                          "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                          true);
+
+    const std::array<std::pair<std::string_view, std::string_view>, 6>
+        simple_aliases {{
+            {"size", "()I"}, {"isEmpty", "()Z"}, {"clear", "()V"},
+            {"keySet", "()Ljava/util/Set;"},
+            {"values", "()Ljava/util/Collection;"},
+            {"toString", "()Ljava/lang/String;"},
+        }};
+    for (const auto& [name, descriptor] : simple_aliases) {
+        alias(registry, "java/util/HashMap", name, descriptor,
+              std::string(kOwner));
+    }
+
+    add(registry, std::string(kOwner), "remove",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto expected = reference_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!expected) return std::unexpected(expected.error());
+            const Value key_argument = Value::from_reference(*key);
+            auto current = invoke_hash_map_native(
+                machine, *map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!current) return std::unexpected(current.error());
+            if (!current->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "ConcurrentHashMap get returned no value");
+            }
+            auto current_ref = current->value().as_reference();
+            if (!current_ref) return std::unexpected(current_ref.error());
+            if (current_ref->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto equal = object_equals(machine, *current_ref, *expected);
+            if (!equal) return std::unexpected(equal.error());
+            if (!*equal) return std::optional<Value>(Value::from_int(0));
+            auto removed = invoke_hash_map_native(
+                machine, *map, "remove", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!removed) return std::unexpected(removed.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+
+    add(registry, std::string(kOwner), "replace",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto value = reference_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!value) return std::unexpected(value.error());
+            const Value key_argument = Value::from_reference(*key);
+            auto current = invoke_hash_map_native(
+                machine, *map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!current) return std::unexpected(current.error());
+            if (!current->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "ConcurrentHashMap get returned no value");
+            }
+            auto current_ref = current->value().as_reference();
+            if (!current_ref) return std::unexpected(current_ref.error());
+            if (current_ref->is_null()) return current->value();
+            const std::array<Value, 2> put_arguments {
+                Value::from_reference(*key), Value::from_reference(*value),
+            };
+            return invoke_hash_map_native(
+                machine, *map, "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                put_arguments);
+        });
+
+    add(registry, std::string(kOwner), "replace",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto expected = reference_argument(arguments, 2U);
+            auto desired = reference_argument(arguments, 3U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!expected) return std::unexpected(expected.error());
+            if (!desired) return std::unexpected(desired.error());
+            const Value key_argument = Value::from_reference(*key);
+            auto current = invoke_hash_map_native(
+                machine, *map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!current) return std::unexpected(current.error());
+            if (!current->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "ConcurrentHashMap get returned no value");
+            }
+            auto current_ref = current->value().as_reference();
+            if (!current_ref) return std::unexpected(current_ref.error());
+            if (current_ref->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto equal = object_equals(machine, *current_ref, *expected);
+            if (!equal) return std::unexpected(equal.error());
+            if (!*equal) return std::optional<Value>(Value::from_int(0));
+            const std::array<Value, 2> put_arguments {
+                Value::from_reference(*key), Value::from_reference(*desired),
+            };
+            auto stored = invoke_hash_map_native(
+                machine, *map, "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                put_arguments);
+            if (!stored) return std::unexpected(stored.error());
+            return std::optional<Value>(Value::from_int(1));
+        });
+
+    add(registry, std::string(kOwner), "computeIfAbsent",
+        "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto function = reference_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!function) return std::unexpected(function.error());
+            const std::array<Value, 2> forwarded {
+                Value::from_reference(*key), Value::from_reference(*function),
+            };
+            return invoke_hash_map_native(
+                machine, *map, "computeIfAbsent",
+                "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+                forwarded);
+        });
+    add(registry, std::string(kOwner), "merge",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto value = reference_argument(arguments, 2U);
+            auto function = reference_argument(arguments, 3U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!value) return std::unexpected(value.error());
+            if (!function) return std::unexpected(function.error());
+            const std::array<Value, 3> forwarded {
+                Value::from_reference(*key), Value::from_reference(*value),
+                Value::from_reference(*function),
+            };
+            return invoke_hash_map_native(
+                machine, *map, "merge",
+                "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+                forwarded);
+        });
+
+    add(registry, std::string(kOwner), "computeIfPresent",
+        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto function = reference_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!function) return std::unexpected(function.error());
+            const Value key_argument = Value::from_reference(*key);
+            auto current = invoke_hash_map_native(
+                machine, *map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!current) return std::unexpected(current.error());
+            if (!current->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "ConcurrentHashMap get returned no value");
+            }
+            auto current_ref = current->value().as_reference();
+            if (!current_ref) return std::unexpected(current_ref.error());
+            if (current_ref->is_null()) return current->value();
+            const std::array<Value, 2> callback_arguments {
+                Value::from_reference(*key),
+                Value::from_reference(*current_ref),
+            };
+            auto computed = invoke_checked(
+                machine, *function, "java/util/function/BiFunction", "apply",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                callback_arguments);
+            if (!computed) return std::unexpected(computed.error());
+            if (!computed->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "BiFunction.apply returned no value");
+            }
+            auto computed_ref = computed->value().as_reference();
+            if (!computed_ref) return std::unexpected(computed_ref.error());
+            if (computed_ref->is_null()) {
+                auto removed = invoke_hash_map_native(
+                    machine, *map, "remove",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    std::span<const Value>(&key_argument, 1U));
+                if (!removed) return std::unexpected(removed.error());
+            } else {
+                const std::array<Value, 2> put_arguments {
+                    Value::from_reference(*key),
+                    Value::from_reference(*computed_ref),
+                };
+                auto stored = invoke_hash_map_native(
+                    machine, *map, "put",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    put_arguments);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*computed_ref));
+        });
+
+    add(registry, std::string(kOwner), "compute",
+        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto key = reference_argument(arguments, 1U);
+            auto function = reference_argument(arguments, 2U);
+            if (!map) return std::unexpected(map.error());
+            if (!key) return std::unexpected(key.error());
+            if (!function) return std::unexpected(function.error());
+            const Value key_argument = Value::from_reference(*key);
+            auto current = invoke_hash_map_native(
+                machine, *map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&key_argument, 1U));
+            if (!current) return std::unexpected(current.error());
+            if (!current->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "ConcurrentHashMap get returned no value");
+            }
+            auto current_ref = current->value().as_reference();
+            if (!current_ref) return std::unexpected(current_ref.error());
+            const std::array<Value, 2> callback_arguments {
+                Value::from_reference(*key),
+                Value::from_reference(*current_ref),
+            };
+            auto computed = invoke_checked(
+                machine, *function, "java/util/function/BiFunction", "apply",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                callback_arguments);
+            if (!computed) return std::unexpected(computed.error());
+            if (!computed->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "BiFunction.apply returned no value");
+            }
+            auto computed_ref = computed->value().as_reference();
+            if (!computed_ref) return std::unexpected(computed_ref.error());
+            if (computed_ref->is_null()) {
+                auto removed = invoke_hash_map_native(
+                    machine, *map, "remove",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    std::span<const Value>(&key_argument, 1U));
+                if (!removed) return std::unexpected(removed.error());
+            } else {
+                const std::array<Value, 2> put_arguments {
+                    Value::from_reference(*key),
+                    Value::from_reference(*computed_ref),
+                };
+                auto stored = invoke_hash_map_native(
+                    machine, *map, "put",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    put_arguments);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value>(Value::from_reference(*computed_ref));
+        });
+
+    add(registry, std::string(kOwner), "forEach",
+        "(Ljava/util/function/BiConsumer;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto consumer = reference_argument(arguments, 1U);
+            if (!map) return std::unexpected(map.error());
+            if (!consumer) return std::unexpected(consumer.error());
+            auto size = int_field(machine, *map, kMapSizeField);
+            auto keys = reference_field(machine, *map, kMapKeysField);
+            auto values = reference_field(machine, *map, 1U);
+            if (!size || !keys || !values) {
+                return fail(ErrorCode::invalid_state,
+                            "ConcurrentHashMap storage is invalid");
+            }
+            for (i32 index = 0; index < *size; ++index) {
+                auto key = machine.heap().element(*keys,
+                                                  static_cast<usize>(index));
+                auto value = machine.heap().element(*values,
+                                                    static_cast<usize>(index));
+                if (!key) return std::unexpected(key.error());
+                if (!value) return std::unexpected(value.error());
+                const std::array<Value, 2> callback {*key, *value};
+                auto accepted = invoke_checked(
+                    machine, *consumer, "java/util/function/BiConsumer",
+                    "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V",
+                    callback);
+                if (!accepted) return std::unexpected(accepted.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kOwner), "replaceAll",
+        "(Ljava/util/function/BiFunction;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto function = reference_argument(arguments, 1U);
+            if (!map) return std::unexpected(map.error());
+            if (!function) return std::unexpected(function.error());
+            auto size = int_field(machine, *map, kMapSizeField);
+            auto keys = reference_field(machine, *map, kMapKeysField);
+            auto values = reference_field(machine, *map, 1U);
+            if (!size || !keys || !values) {
+                return fail(ErrorCode::invalid_state,
+                            "ConcurrentHashMap storage is invalid");
+            }
+            for (i32 index = 0; index < *size; ++index) {
+                auto key = machine.heap().element(*keys,
+                                                  static_cast<usize>(index));
+                auto value = machine.heap().element(*values,
+                                                    static_cast<usize>(index));
+                if (!key) return std::unexpected(key.error());
+                if (!value) return std::unexpected(value.error());
+                const std::array<Value, 2> callback {*key, *value};
+                auto replaced = invoke_checked(
+                    machine, *function, "java/util/function/BiFunction",
+                    "apply",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    callback);
+                if (!replaced) return std::unexpected(replaced.error());
+                if (!replaced->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "BiFunction.apply returned no value");
+                }
+                auto replacement = replaced->value().as_reference();
+                if (!replacement) return std::unexpected(replacement.error());
+                if (replacement->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "ConcurrentHashMap replacement is null");
+                }
+                auto stored = machine.heap().set_element(
+                    *values, static_cast<usize>(index),
+                    Value::from_reference(*replacement));
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kOwner), "mappingCount", "()J",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            if (!map) return std::unexpected(map.error());
+            auto size = int_field(machine, *map, kMapSizeField);
+            if (!size) return std::unexpected(size.error());
+            return std::optional<Value>(Value::from_long(*size));
+        });
+
+    add(registry, std::string(kOwner), "keySet",
+        "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            if (!map) return std::unexpected(map.error());
+            auto set = create_concurrent_key_set(machine, *map);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, std::string(kOwner), "keySet",
+        "(Ljava/lang/Object;)Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto mapped_value = reference_argument(arguments, 1U);
+            if (!map) return std::unexpected(map.error());
+            if (!mapped_value) return std::unexpected(mapped_value.error());
+            auto set = create_concurrent_key_set(machine, *map);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, std::string(kOwner), "newKeySet",
+        "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        [](Machine& machine, std::span<const Value>)
+            -> Result<std::optional<Value>> {
+            auto set = create_concurrent_key_set(machine, std::nullopt, 16);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, std::string(kOwner), "newKeySet",
+        "(I)Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto capacity = int_argument(arguments, 0U);
+            if (!capacity) return std::unexpected(capacity.error());
+            if (*capacity < 0) {
+                return fail_java("java/lang/IllegalArgumentException",
+                                 "negative key set capacity");
+            }
+            auto set = create_concurrent_key_set(machine, std::nullopt,
+                                                 *capacity);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference(*set));
+        });
+    add(registry, "java/util/concurrent/ConcurrentHashMap$KeySetView",
+        "getMappedValue", "()Ljava/lang/Object;",
+        [](Machine&, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto set = receiver(arguments);
+            if (!set) return std::unexpected(set.error());
+            return std::optional<Value>(Value::from_reference({}));
+        });
+
+    add(registry, std::string(kOwner), "putAll", "(Ljava/util/Map;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto source = reference_argument(arguments, 1U);
+            if (!map) return std::unexpected(map.error());
+            if (!source) return std::unexpected(source.error());
+            auto entries = invoke_checked(machine, *source, "java/util/Map",
+                                          "entrySet", "()Ljava/util/Set;");
+            if (!entries) return std::unexpected(entries.error());
+            if (!entries->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Map.entrySet returned no value");
+            }
+            auto set = entries->value().as_reference();
+            if (!set) return std::unexpected(set.error());
+            auto iterator = invoke_checked(machine, *set, "java/util/Set",
+                                           "iterator",
+                                           "()Ljava/util/Iterator;");
+            if (!iterator) return std::unexpected(iterator.error());
+            if (!iterator->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Set.iterator returned no value");
+            }
+            auto cursor = iterator->value().as_reference();
+            if (!cursor) return std::unexpected(cursor.error());
+            while (true) {
+                auto has_next = invoke_checked(machine, *cursor,
+                                               "java/util/Iterator", "hasNext",
+                                               "()Z");
+                if (!has_next) return std::unexpected(has_next.error());
+                if (!has_next->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Iterator.hasNext returned no value");
+                }
+                auto present = has_next->value().as_int();
+                if (!present) return std::unexpected(present.error());
+                if (*present == 0) break;
+                auto next = invoke_checked(machine, *cursor,
+                                           "java/util/Iterator", "next",
+                                           "()Ljava/lang/Object;");
+                if (!next) return std::unexpected(next.error());
+                if (!next->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Iterator.next returned no value");
+                }
+                auto entry = next->value().as_reference();
+                if (!entry) return std::unexpected(entry.error());
+                auto key = invoke_checked(machine, *entry,
+                                          "java/util/Map$Entry", "getKey",
+                                          "()Ljava/lang/Object;");
+                auto value = invoke_checked(machine, *entry,
+                                            "java/util/Map$Entry", "getValue",
+                                            "()Ljava/lang/Object;");
+                if (!key) return std::unexpected(key.error());
+                if (!value) return std::unexpected(value.error());
+                if (!key->has_value() || !value->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Map.Entry accessor returned no value");
+                }
+                auto key_ref = key->value().as_reference();
+                auto value_ref = value->value().as_reference();
+                if (!key_ref) return std::unexpected(key_ref.error());
+                if (!value_ref) return std::unexpected(value_ref.error());
+                if (key_ref->is_null() || value_ref->is_null()) {
+                    return fail_java("java/lang/NullPointerException",
+                                     "ConcurrentHashMap does not allow nulls");
+                }
+                const std::array<Value, 2> put_arguments {
+                    Value::from_reference(*key_ref),
+                    Value::from_reference(*value_ref),
+                };
+                auto stored = invoke_hash_map_native(
+                    machine, *map, "put",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    put_arguments);
+                if (!stored) return std::unexpected(stored.error());
+            }
+            return std::optional<Value> {};
+        });
+
+    add(registry, std::string(kOwner), "<init>", "(Ljava/util/Map;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto map = receiver(arguments);
+            auto source = reference_argument(arguments, 1U);
+            if (!map) return std::unexpected(map.error());
+            if (!source) return std::unexpected(source.error());
+            const Value capacity = Value::from_int(16);
+            auto initialized = invoke_hash_map_native(
+                machine, *map, "<init>", "(I)V",
+                std::span<const Value>(&capacity, 1U));
+            if (!initialized) return std::unexpected(initialized.error());
+            const Value source_argument = Value::from_reference(*source);
+            auto copied = invoke_checked(
+                machine, *map, "java/util/concurrent/ConcurrentHashMap",
+                "putAll", "(Ljava/util/Map;)V",
+                std::span<const Value>(&source_argument, 1U));
+            if (!copied) return std::unexpected(copied.error());
+            return std::optional<Value> {};
+        });
+
+    const auto enumeration = [&registry, kOwner](const char* name,
+                                         const char* collection_method,
+                                         const char* collection_owner) {
+        add(registry, std::string(kOwner), name, "()Ljava/util/Enumeration;",
+            [collection_method = std::string(collection_method),
+             collection_owner = std::string(collection_owner)](
+                 Machine& machine, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto map = receiver(arguments);
+                if (!map) return std::unexpected(map.error());
+                auto collection = invoke_hash_map_native(
+                    machine, *map, collection_method,
+                    collection_method == "keySet"
+                        ? "()Ljava/util/Set;"
+                        : "()Ljava/util/Collection;");
+                if (!collection) return std::unexpected(collection.error());
+                if (!collection->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "map collection accessor returned no value");
+                }
+                auto collection_ref = collection->value().as_reference();
+                if (!collection_ref) return std::unexpected(collection_ref.error());
+                auto array = invoke_checked(machine, *collection_ref,
+                                            collection_owner, "toArray",
+                                            "()[Ljava/lang/Object;");
+                if (!array) return std::unexpected(array.error());
+                if (!array->has_value()) {
+                    return fail(ErrorCode::internal_error,
+                                "Collection.toArray returned no value");
+                }
+                auto values = array->value().as_reference();
+                if (!values) return std::unexpected(values.error());
+                auto size = machine.heap().array_length(*values);
+                if (!size) return std::unexpected(size.error());
+                if (*size > static_cast<usize>(std::numeric_limits<i32>::max())) {
+                    return fail(ErrorCode::overflow,
+                                "ConcurrentHashMap enumeration is too large");
+                }
+                auto result = new_instance(machine, "java/util/ArrayEnumeration");
+                if (!result) return std::unexpected(result.error());
+                auto stored_values = set_reference_field(machine, *result, 0U,
+                                                         *values);
+                auto stored_index = set_int_field(machine, *result, 1U, 0);
+                auto stored_size = set_int_field(
+                    machine, *result, 2U, static_cast<i32>(*size));
+                if (!stored_values) return std::unexpected(stored_values.error());
+                if (!stored_index) return std::unexpected(stored_index.error());
+                if (!stored_size) return std::unexpected(stored_size.error());
+                return std::optional<Value>(Value::from_reference(*result));
+            });
+    };
+    enumeration("keys", "keySet", "java/util/Set");
+    enumeration("elements", "values", "java/util/Collection");
+}
+
 [[nodiscard]] Result<ObjectRef> make_entry(Machine& machine,
                                             ObjectRef owner,
                                             ObjectRef key) {
@@ -219,10 +984,10 @@ void alias_hash_map(NativeMethodRegistry& registry,
 }
 
 void register_entry_set(NativeMethodRegistry& registry) {
-    const std::array<std::string_view, 5> owners {
+    const std::array<std::string_view, 6> owners {
         "java/util/HashMap", "java/util/LinkedHashMap",
         "java/util/IdentityHashMap", "java/util/WeakHashMap",
-        "java/util/EnumMap",
+        "java/util/EnumMap", "java/util/concurrent/ConcurrentHashMap",
     };
     for (const auto owner : owners) {
         add(registry, std::string(owner), "entrySet", "()Ljava/util/Set;",
@@ -904,6 +1669,7 @@ void register_enum_map(NativeMethodRegistry& registry) {
 void register_jdk8_map_natives(NativeMethodRegistry& registry) {
     register_map_defaults(registry);
     alias_hash_map(registry, "java/util/LinkedHashMap");
+    register_concurrent_hash_map(registry);
     register_identity_map(registry);
     alias_hash_map(registry, "java/util/WeakHashMap");
     register_enum_map(registry);

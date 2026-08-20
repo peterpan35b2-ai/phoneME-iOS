@@ -14,5 +14,7 @@ void register_jdk8_binary_natives(NativeMethodRegistry& registry);
 void register_jdk8_stream_natives(NativeMethodRegistry& registry);
 void register_jdk8_zip_natives(NativeMethodRegistry& registry);
 void register_jdk8_regex_natives(NativeMethodRegistry& registry);
+void register_jdk8_concurrent_natives(NativeMethodRegistry& registry);
+void register_jdk8_optional_natives(NativeMethodRegistry& registry);
 
 } // namespace phoneme::vm

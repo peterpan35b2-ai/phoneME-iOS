@@ -36,6 +36,8 @@ struct Suite final {
     u32 archive_crc32 {0};
     u64 archive_size {0};
     u64 declared_jar_size {0};
+    u32 verified_class_cache_version {0};
+    std::unordered_map<std::string, u64> verified_classes;
     bool managed {false};
 };
 
@@ -91,6 +93,10 @@ public:
     [[nodiscard]] Status uninstall(
         SuiteId id,
         const SuiteUninstallPolicy& policy = {});
+    [[nodiscard]] Status update_verified_classes(
+        SuiteId id,
+        u32 cache_version,
+        const std::unordered_map<std::string, u64>& verified_classes);
 
     [[nodiscard]] const Suite* find(SuiteId id) const noexcept;
     [[nodiscard]] std::vector<SuiteId> list() const;
@@ -117,7 +123,8 @@ private:
         std::string jad_path,
         bool managed) const;
     [[nodiscard]] Result<Suite> suite_from_record(
-        const SuiteDatabaseRecord& record) const;
+        const SuiteDatabaseRecord& record,
+        const SuiteDescriptor* validated_descriptor = nullptr) const;
     [[nodiscard]] SuiteDatabaseRecord record_from_suite(
         const Suite& suite) const;
     [[nodiscard]] SuiteDatabaseSnapshot snapshot_with_generation(
@@ -126,7 +133,8 @@ private:
         const std::array<u8, 32>& identity_sha256,
         std::string_view identity_key) const noexcept;
     [[nodiscard]] Status recover_transactions(
-        SuiteDatabaseSnapshot& snapshot);
+        SuiteDatabaseSnapshot& snapshot,
+        std::unordered_map<i32, SuiteDescriptor>* validated_descriptors = nullptr);
     [[nodiscard]] Status remove_policy_data(
         SuiteId id,
         const SuiteUninstallPolicy& policy) const;

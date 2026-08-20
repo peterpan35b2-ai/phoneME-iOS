@@ -255,6 +255,19 @@ void test_clip_translate_alpha_and_dirty_region() {
                 dirty.width == 4 && dirty.height == 4,
             "dirty rectangle follows clipped draw coverage");
 
+    image->clear_dirty_region();
+    image->mark_dirty_region(0, 0, 1, 1);
+    image->mark_dirty_region(7, 7, 1, 1);
+    require(image->dirty_regions().size() == 2U,
+            "distant dirty updates remain separate islands");
+    const auto island_bounds = image->dirty_region();
+    require(island_bounds.x == 0 && island_bounds.y == 0 &&
+                island_bounds.width == 8 && island_bounds.height == 8,
+            "aggregate dirty bounds remain available for compatibility");
+    image->mark_dirty_region(0, 1, 1, 1);
+    require(image->dirty_regions().size() == 2U,
+            "touching dirty updates merge without collapsing distant islands");
+
     auto alpha_image = Image::create_mutable(2, 1);
     require(alpha_image.has_value(), "create alpha target");
     phoneme::graphics::GraphicsContext alpha_context;
@@ -451,6 +464,49 @@ void test_anchor_matrix_and_transform() {
     };
     auto source = Image::create_immutable(2, 2, pixels);
     require(source.has_value(), "create immutable source image");
+    require(source->alpha_kind() == phoneme::graphics::ImageAlphaKind::opaque,
+            "opaque immutable images select the opaque blit kernel");
+
+    constexpr std::array<Pixel, 2> binary_alpha_pixels {
+        0x00000000U, 0xFFFFFFFFU,
+    };
+    auto binary_alpha = Image::create_immutable(2, 1, binary_alpha_pixels);
+    require(binary_alpha.has_value(), "create binary-alpha source image");
+    require(binary_alpha->alpha_kind() ==
+                phoneme::graphics::ImageAlphaKind::binary,
+            "binary-alpha immutable images select the binary blit kernel");
+    auto binary_target = Image::create_mutable_argb(2, 1, 0xFF0000FFU);
+    require(binary_target.has_value(), "create binary-alpha target image");
+    phoneme::graphics::GraphicsContext binary_context;
+    binary_context.clip = phoneme::graphics::target_bounds(*binary_target);
+    require(phoneme::graphics::draw_image(
+                *binary_target,
+                binary_context,
+                *binary_alpha,
+                0,
+                0,
+                phoneme::graphics::anchor_left |
+                    phoneme::graphics::anchor_top)
+                .has_value(),
+            "draw binary-alpha source image");
+    require(binary_target->pixel(0, 0).value() == 0xFF0000FFU &&
+                binary_target->pixel(1, 0).value() == 0xFFFFFFFFU,
+            "binary-alpha kernel preserves transparent pixels exactly");
+
+    constexpr std::array<Pixel, 2> translucent_pixels {
+        0x80010203U, 0xFFFFFFFFU,
+    };
+    auto translucent = Image::create_immutable(2, 1, translucent_pixels);
+    require(translucent.has_value(), "create translucent source image");
+    require(translucent->alpha_kind() ==
+                phoneme::graphics::ImageAlphaKind::translucent,
+            "partial-alpha immutable images keep the general blit kernel");
+
+    auto mutable_alpha = Image::create_mutable_argb(2, 1, 0xFFFFFFFFU);
+    require(mutable_alpha.has_value(), "create mutable alpha source image");
+    require(mutable_alpha->alpha_kind() ==
+                phoneme::graphics::ImageAlphaKind::translucent,
+            "mutable images keep the general blit kernel");
     auto rotated = Image::transformed_region(
         *source, 0, 0, 2, 2, phoneme::graphics::Transform::rotate_90);
     require(rotated.has_value(), "rotate image region");

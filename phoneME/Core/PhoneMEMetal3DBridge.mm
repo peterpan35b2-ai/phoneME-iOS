@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 #include "PhoneMEMetal3D.h"
@@ -361,6 +362,47 @@ bool multiplyFits(size_t left, size_t right, size_t limit) noexcept {
     return left == 0U || right <= limit / left;
 }
 
+struct MetalScratchBuffers final {
+    std::mutex mutex;
+    __strong id<MTLBuffer> pixels = nil;
+    __strong id<MTLBuffer> depth = nil;
+    __strong id<MTLBuffer> triangles = nil;
+    __strong id<MTLBuffer> texture_pixels = nil;
+    __strong id<MTLBuffer> texture_descriptors = nil;
+    size_t pixel_capacity {0U};
+    size_t depth_capacity {0U};
+    size_t triangle_capacity {0U};
+    size_t texture_pixel_capacity {0U};
+    size_t texture_descriptor_capacity {0U};
+};
+
+MetalScratchBuffers& scratch_buffers() {
+    static MetalScratchBuffers buffers;
+    return buffers;
+}
+
+bool ensure_shared_buffer(id<MTLDevice> device,
+                          __strong id<MTLBuffer>& buffer,
+                          size_t& capacity,
+                          size_t required_bytes) {
+    if (required_bytes == 0U) required_bytes = 1U;
+    if (buffer != nil && capacity >= required_bytes) return true;
+    constexpr size_t kAllocationQuantum = 4U * 1024U;
+    if (required_bytes > std::numeric_limits<size_t>::max() -
+                             (kAllocationQuantum - 1U)) {
+        return false;
+    }
+    const size_t rounded =
+        ((required_bytes + kAllocationQuantum - 1U) / kAllocationQuantum) *
+        kAllocationQuantum;
+    id<MTLBuffer> replacement = [device newBufferWithLength:rounded
+                                                    options:MTLResourceStorageModeShared];
+    if (replacement == nil) return false;
+    buffer = replacement;
+    capacity = rounded;
+    return true;
+}
+
 } // namespace
 
 extern "C" bool phoneme_metal3d_rasterize(
@@ -395,9 +437,9 @@ extern "C" bool phoneme_metal3d_rasterize(
             [PhoneMEMetal3DContext sharedContext];
         if (context == nil) return false;
 
-        std::vector<uint32_t> packedTexturePixels;
         std::vector<MetalTextureDescriptor> packedTextures;
         packedTextures.reserve(texture_count);
+        size_t packedTexturePixelCount = 0U;
         for (size_t index = 0U; index < texture_count; ++index) {
             const PhoneMEMetal3DTextureSource &source = textures[index];
             if (source.pixels == nullptr || source.width <= 0 ||
@@ -409,63 +451,144 @@ extern "C" bool phoneme_metal3d_rasterize(
             }
             const size_t count = static_cast<size_t>(source.width) *
                                  static_cast<size_t>(source.height);
-            if (packedTexturePixels.size() >
+            if (packedTexturePixelCount >
                     static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
                 count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) -
-                        packedTexturePixels.size()) {
+                        packedTexturePixelCount) {
                 return false;
             }
             packedTextures.push_back(MetalTextureDescriptor {
-                .offset = static_cast<uint32_t>(packedTexturePixels.size()),
+                .offset = static_cast<uint32_t>(packedTexturePixelCount),
                 .width = source.width,
                 .height = source.height,
             });
-            packedTexturePixels.insert(packedTexturePixels.end(),
-                                       source.pixels, source.pixels + count);
+            packedTexturePixelCount += count;
         }
-        if (packedTexturePixels.empty()) packedTexturePixels.push_back(0U);
         if (packedTextures.empty()) {
             packedTextures.push_back(MetalTextureDescriptor {0U, 0, 0});
+        }
+        if (packedTexturePixelCount == 0U) packedTexturePixelCount = 1U;
+
+        int32_t minimumX = width;
+        int32_t minimumY = height;
+        int32_t maximumX = -1;
+        int32_t maximumY = -1;
+        size_t coveredWorkload = 0U;
+        for (size_t index = 0U; index < triangle_count; ++index) {
+            const PhoneMEMetal3DTriangle &triangle = triangles[index];
+            if (triangle.maximum_x < triangle.minimum_x ||
+                triangle.maximum_y < triangle.minimum_y) {
+                continue;
+            }
+            minimumX = std::min(minimumX, std::max<int32_t>(0, triangle.minimum_x));
+            minimumY = std::min(minimumY, std::max<int32_t>(0, triangle.minimum_y));
+            maximumX = std::max(maximumX,
+                                std::min<int32_t>(width - 1, triangle.maximum_x));
+            maximumY = std::max(maximumY,
+                                std::min<int32_t>(height - 1, triangle.maximum_y));
+            const int32_t clippedMinX = std::max<int32_t>(0, triangle.minimum_x);
+            const int32_t clippedMinY = std::max<int32_t>(0, triangle.minimum_y);
+            const int32_t clippedMaxX =
+                std::min<int32_t>(width - 1, triangle.maximum_x);
+            const int32_t clippedMaxY =
+                std::min<int32_t>(height - 1, triangle.maximum_y);
+            if (clippedMaxX >= clippedMinX && clippedMaxY >= clippedMinY) {
+                const size_t triangleWidth = static_cast<size_t>(
+                    clippedMaxX - clippedMinX + 1);
+                const size_t triangleHeight = static_cast<size_t>(
+                    clippedMaxY - clippedMinY + 1);
+                if (triangleWidth <= std::numeric_limits<size_t>::max() /
+                                         triangleHeight &&
+                    coveredWorkload <= std::numeric_limits<size_t>::max() -
+                                           triangleWidth * triangleHeight) {
+                    coveredWorkload += triangleWidth * triangleHeight;
+                } else {
+                    coveredWorkload = std::numeric_limits<size_t>::max();
+                }
+            }
+        }
+        if (maximumX < minimumX || maximumY < minimumY) return true;
+        if (triangle_count > static_cast<size_t>(
+                std::numeric_limits<uint32_t>::max())) {
+            return false;
         }
 
         const size_t pixelBytes = pixelCount * sizeof(uint32_t);
         const size_t depthBytes = pixelCount * sizeof(float);
-        id<MTLBuffer> pixelBuffer = [context.device newBufferWithBytes:pixels
-                                                               length:pixelBytes
-                                                              options:MTLResourceStorageModeShared];
-        id<MTLBuffer> depthBuffer = [context.device newBufferWithBytes:depth
-                                                               length:depthBytes
-                                                              options:MTLResourceStorageModeShared];
-        id<MTLBuffer> triangleBuffer = [context.device newBufferWithBytes:triangles
-                                                                  length:triangle_count * sizeof(PhoneMEMetal3DTriangle)
-                                                                 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> texturePixelBuffer = [context.device newBufferWithBytes:packedTexturePixels.data()
-                                                                      length:packedTexturePixels.size() * sizeof(uint32_t)
-                                                                     options:MTLResourceStorageModeShared];
-        id<MTLBuffer> textureDescriptorBuffer = [context.device newBufferWithBytes:packedTextures.data()
-                                                                           length:packedTextures.size() * sizeof(MetalTextureDescriptor)
-                                                                          options:MTLResourceStorageModeShared];
-        if (pixelBuffer == nil || depthBuffer == nil || triangleBuffer == nil ||
-            texturePixelBuffer == nil || textureDescriptorBuffer == nil) {
+        const size_t triangleBytes =
+            triangle_count * sizeof(PhoneMEMetal3DTriangle);
+        const size_t texturePixelBytes =
+            packedTexturePixelCount * sizeof(uint32_t);
+        const size_t textureDescriptorBytes =
+            packedTextures.size() * sizeof(MetalTextureDescriptor);
+
+        MetalScratchBuffers& scratch = scratch_buffers();
+        std::lock_guard<std::mutex> scratchLock(scratch.mutex);
+        if (!ensure_shared_buffer(context.device, scratch.pixels,
+                                  scratch.pixel_capacity, pixelBytes) ||
+            !ensure_shared_buffer(context.device, scratch.depth,
+                                  scratch.depth_capacity, depthBytes) ||
+            !ensure_shared_buffer(context.device, scratch.triangles,
+                                  scratch.triangle_capacity, triangleBytes) ||
+            !ensure_shared_buffer(context.device, scratch.texture_pixels,
+                                  scratch.texture_pixel_capacity,
+                                  texturePixelBytes) ||
+            !ensure_shared_buffer(context.device, scratch.texture_descriptors,
+                                  scratch.texture_descriptor_capacity,
+                                  textureDescriptorBytes)) {
             return false;
         }
+
+        const size_t rowWidth = static_cast<size_t>(maximumX - minimumX + 1);
+        const size_t firstColumn = static_cast<size_t>(minimumX);
+        auto *gpuPixels = static_cast<uint32_t*>(scratch.pixels.contents);
+        auto *gpuDepth = static_cast<float*>(scratch.depth.contents);
+        for (int32_t y = minimumY; y <= maximumY; ++y) {
+            const size_t rowOffset =
+                static_cast<size_t>(y) * static_cast<size_t>(width) + firstColumn;
+            std::memcpy(gpuPixels + rowOffset,
+                        pixels + rowOffset,
+                        rowWidth * sizeof(uint32_t));
+            std::memcpy(gpuDepth + rowOffset,
+                        depth + rowOffset,
+                        rowWidth * sizeof(float));
+        }
+        std::memcpy(scratch.triangles.contents, triangles, triangleBytes);
+        auto *gpuTexturePixels =
+            static_cast<uint32_t*>(scratch.texture_pixels.contents);
+        if (texture_count == 0U) {
+            gpuTexturePixels[0] = 0U;
+        } else {
+            for (size_t index = 0U; index < texture_count; ++index) {
+                const PhoneMEMetal3DTextureSource &source = textures[index];
+                const size_t count = static_cast<size_t>(source.width) *
+                                     static_cast<size_t>(source.height);
+                std::memcpy(
+                    gpuTexturePixels + packedTextures[index].offset,
+                    source.pixels,
+                    count * sizeof(uint32_t));
+            }
+        }
+        std::memcpy(scratch.texture_descriptors.contents,
+                    packedTextures.data(), textureDescriptorBytes);
 
         id<MTLCommandBuffer> commandBuffer = [context.commandQueue commandBuffer];
         id<MTLComputeCommandEncoder> encoder =
             [commandBuffer computeCommandEncoder];
         if (commandBuffer == nil || encoder == nil) return false;
         [encoder setComputePipelineState:context.pipeline];
-        [encoder setBuffer:pixelBuffer offset:0 atIndex:0];
-        [encoder setBuffer:depthBuffer offset:0 atIndex:1];
-        [encoder setBuffer:texturePixelBuffer offset:0 atIndex:3];
-        [encoder setBuffer:textureDescriptorBuffer offset:0 atIndex:4];
+        [encoder setBuffer:scratch.pixels offset:0 atIndex:0];
+        [encoder setBuffer:scratch.depth offset:0 atIndex:1];
+        [encoder setBuffer:scratch.triangles offset:0 atIndex:2];
+        [encoder setBuffer:scratch.texture_pixels offset:0 atIndex:3];
+        [encoder setBuffer:scratch.texture_descriptors offset:0 atIndex:4];
         MetalRasterParameters parameters {
             .width = width,
             .height = height,
             .texture_count = static_cast<uint32_t>(texture_count),
-            .triangle_count = 1U,
-            .origin_x = 0,
-            .origin_y = 0,
+            .triangle_count = static_cast<uint32_t>(triangle_count),
+            .origin_x = minimumX,
+            .origin_y = minimumY,
             .reserved_0 = 0U,
             .reserved_1 = 0U,
         };
@@ -477,26 +600,61 @@ extern "C" bool phoneme_metal3d_rasterize(
                 context.pipeline.maxTotalThreadsPerThreadgroup / executionWidth));
         const MTLSize threadsPerGroup = MTLSizeMake(
             executionWidth, executionHeight, 1U);
-        for (size_t index = 0U; index < triangle_count; ++index) {
-            const PhoneMEMetal3DTriangle &triangle = triangles[index];
-            if (triangle.maximum_x < triangle.minimum_x ||
-                triangle.maximum_y < triangle.minimum_y) {
-                continue;
-            }
-            const NSUInteger regionWidth = static_cast<NSUInteger>(
-                triangle.maximum_x - triangle.minimum_x + 1);
-            const NSUInteger regionHeight = static_cast<NSUInteger>(
-                triangle.maximum_y - triangle.minimum_y + 1);
-            parameters.origin_x = triangle.minimum_x;
-            parameters.origin_y = triangle.minimum_y;
-            [encoder setBuffer:triangleBuffer
-                        offset:index * sizeof(PhoneMEMetal3DTriangle)
-                       atIndex:2];
+        const size_t unionWidth = static_cast<size_t>(maximumX - minimumX + 1);
+        const size_t unionHeight = static_cast<size_t>(maximumY - minimumY + 1);
+        const size_t unionArea = unionWidth * unionHeight;
+        const bool batchTraversalFits =
+            unionArea == 0U ||
+            triangle_count <= std::numeric_limits<size_t>::max() / unionArea;
+        const size_t batchTraversal = batchTraversalFits
+            ? unionArea * triangle_count
+            : std::numeric_limits<size_t>::max();
+        const bool coveredTimesFourFits =
+            coveredWorkload <= std::numeric_limits<size_t>::max() / 4U;
+        const size_t batchingBudget = coveredTimesFourFits
+            ? std::max<size_t>(coveredWorkload * 4U, 8U * 1024U)
+            : std::numeric_limits<size_t>::max();
+        const bool useBatchedDispatch =
+            triangle_count <= 64U && batchTraversal <= batchingBudget;
+
+        if (useBatchedDispatch) {
             [encoder setBytes:&parameters length:sizeof(parameters) atIndex:5];
-            [encoder dispatchThreads:MTLSizeMake(regionWidth, regionHeight, 1U)
+            [encoder dispatchThreads:MTLSizeMake(
+                static_cast<NSUInteger>(unionWidth),
+                static_cast<NSUInteger>(unionHeight),
+                1U)
                threadsPerThreadgroup:threadsPerGroup];
-            if (index + 1U < triangle_count) {
-                [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        } else {
+            parameters.triangle_count = 1U;
+            for (size_t index = 0U; index < triangle_count; ++index) {
+                const PhoneMEMetal3DTriangle &triangle = triangles[index];
+                const int32_t dispatchMinX =
+                    std::max<int32_t>(0, triangle.minimum_x);
+                const int32_t dispatchMinY =
+                    std::max<int32_t>(0, triangle.minimum_y);
+                const int32_t dispatchMaxX =
+                    std::min<int32_t>(width - 1, triangle.maximum_x);
+                const int32_t dispatchMaxY =
+                    std::min<int32_t>(height - 1, triangle.maximum_y);
+                if (dispatchMaxX < dispatchMinX || dispatchMaxY < dispatchMinY) {
+                    continue;
+                }
+                parameters.origin_x = dispatchMinX;
+                parameters.origin_y = dispatchMinY;
+                [encoder setBuffer:scratch.triangles
+                            offset:index * sizeof(PhoneMEMetal3DTriangle)
+                           atIndex:2];
+                [encoder setBytes:&parameters
+                           length:sizeof(parameters)
+                          atIndex:5];
+                [encoder dispatchThreads:MTLSizeMake(
+                    static_cast<NSUInteger>(dispatchMaxX - dispatchMinX + 1),
+                    static_cast<NSUInteger>(dispatchMaxY - dispatchMinY + 1),
+                    1U)
+                   threadsPerThreadgroup:threadsPerGroup];
+                if (index + 1U < triangle_count) {
+                    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                }
             }
         }
         [encoder endEncoding];
@@ -506,8 +664,16 @@ extern "C" bool phoneme_metal3d_rasterize(
             commandBuffer.error != nil) {
             return false;
         }
-        std::memcpy(pixels, pixelBuffer.contents, pixelBytes);
-        std::memcpy(depth, depthBuffer.contents, depthBytes);
+        for (int32_t y = minimumY; y <= maximumY; ++y) {
+            const size_t rowOffset =
+                static_cast<size_t>(y) * static_cast<size_t>(width) + firstColumn;
+            std::memcpy(pixels + rowOffset,
+                        gpuPixels + rowOffset,
+                        rowWidth * sizeof(uint32_t));
+            std::memcpy(depth + rowOffset,
+                        gpuDepth + rowOffset,
+                        rowWidth * sizeof(float));
+        }
         return true;
     }
 }

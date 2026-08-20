@@ -44,10 +44,37 @@ using namespace builtin;
                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
         });
     }
+    if (name == "java/util/function/UnaryOperator") {
+        return make_class("java/util/function/UnaryOperator", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "apply",
+                   "(Ljava/lang/Object;)Ljava/lang/Object;"),
+        }, {"java/util/function/Function"});
+    }
+    if (name == "java/util/function/BinaryOperator") {
+        return make_class("java/util/function/BinaryOperator", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "apply",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+        }, {"java/util/function/BiFunction"});
+    }
     if (name == "java/util/function/Consumer") {
         return make_class("java/util/function/Consumer", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {}, {
             method(kPublic | kAbstract, "accept", "(Ljava/lang/Object;)V"),
+        });
+    }
+    if (name == "java/util/function/BiConsumer") {
+        return make_class("java/util/function/BiConsumer", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "accept",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)V"),
+        });
+    }
+    if (name == "java/util/function/Supplier") {
+        return make_class("java/util/function/Supplier", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "get", "()Ljava/lang/Object;"),
         });
     }
     if (name == "java/util/function/Predicate") {
@@ -68,6 +95,36 @@ using namespace builtin;
             method(kPublic | kAbstract, "getAsInt", "()I"),
         });
     }
+    if (name == "java/util/function/LongSupplier") {
+        return make_class("java/util/function/LongSupplier", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "getAsLong", "()J"),
+        });
+    }
+    if (name == "java/util/function/DoubleSupplier") {
+        return make_class("java/util/function/DoubleSupplier", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "getAsDouble", "()D"),
+        });
+    }
+    if (name == "java/util/function/IntConsumer") {
+        return make_class("java/util/function/IntConsumer", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "accept", "(I)V"),
+        });
+    }
+    if (name == "java/util/function/LongConsumer") {
+        return make_class("java/util/function/LongConsumer", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "accept", "(J)V"),
+        });
+    }
+    if (name == "java/util/function/DoubleConsumer") {
+        return make_class("java/util/function/DoubleConsumer", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "accept", "(D)V"),
+        });
+    }
     if (name == "java/util/function/IntUnaryOperator") {
         return make_class("java/util/function/IntUnaryOperator",
                           "java/lang/Object",
@@ -75,6 +132,27 @@ using namespace builtin;
             method(kPublic | kAbstract, "applyAsInt", "(I)I"),
             method(kPublic | kStatic, "identity",
                    "()Ljava/util/function/IntUnaryOperator;"),
+        });
+    }
+    if (name == "java/util/function/IntBinaryOperator") {
+        return make_class("java/util/function/IntBinaryOperator",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "applyAsInt", "(II)I"),
+        });
+    }
+    if (name == "java/util/function/LongUnaryOperator") {
+        return make_class("java/util/function/LongUnaryOperator",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "applyAsLong", "(J)J"),
+        });
+    }
+    if (name == "java/util/function/LongBinaryOperator") {
+        return make_class("java/util/function/LongBinaryOperator",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "applyAsLong", "(JJ)J"),
         });
     }
     if (name == "java/util/function/ToIntFunction") {
@@ -360,12 +438,133 @@ using namespace builtin;
         });
     }
 
-    if (name == "java/nio/ByteBuffer") {
-        return make_class("java/nio/ByteBuffer", "java/lang/Object",
+    if (name == "java/util/OptionalInt") {
+        return make_class("java/util/OptionalInt", "java/lang/Object",
                           kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "I"),
+            field(kPrivate | kFinal, "present", "Z"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPrivate, "<init>", "(I)V"),
+            method(kPublic | kStatic, "empty", "()Ljava/util/OptionalInt;"),
+            method(kPublic | kStatic, "of", "(I)Ljava/util/OptionalInt;"),
+            method(kPublic, "getAsInt", "()I"),
+            method(kPublic, "isPresent", "()Z"),
+            method(kPublic, "ifPresent", "(Ljava/util/function/IntConsumer;)V"),
+            method(kPublic, "orElse", "(I)I"),
+            method(kPublic, "orElseGet", "(Ljava/util/function/IntSupplier;)I"),
+            method(kPublic, "orElseThrow", "(Ljava/util/function/Supplier;)I"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/util/OptionalLong") {
+        return make_class("java/util/OptionalLong", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "J"),
+            field(kPrivate | kFinal, "present", "Z"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPrivate, "<init>", "(J)V"),
+            method(kPublic | kStatic, "empty", "()Ljava/util/OptionalLong;"),
+            method(kPublic | kStatic, "of", "(J)Ljava/util/OptionalLong;"),
+            method(kPublic, "getAsLong", "()J"),
+            method(kPublic, "isPresent", "()Z"),
+            method(kPublic, "ifPresent", "(Ljava/util/function/LongConsumer;)V"),
+            method(kPublic, "orElse", "(J)J"),
+            method(kPublic, "orElseGet", "(Ljava/util/function/LongSupplier;)J"),
+            method(kPublic, "orElseThrow", "(Ljava/util/function/Supplier;)J"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/util/OptionalDouble") {
+        return make_class("java/util/OptionalDouble", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "value", "D"),
+            field(kPrivate | kFinal, "present", "Z"),
+        }, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPrivate, "<init>", "(D)V"),
+            method(kPublic | kStatic, "empty", "()Ljava/util/OptionalDouble;"),
+            method(kPublic | kStatic, "of", "(D)Ljava/util/OptionalDouble;"),
+            method(kPublic, "getAsDouble", "()D"),
+            method(kPublic, "isPresent", "()Z"),
+            method(kPublic, "ifPresent", "(Ljava/util/function/DoubleConsumer;)V"),
+            method(kPublic, "orElse", "(D)D"),
+            method(kPublic, "orElseGet", "(Ljava/util/function/DoubleSupplier;)D"),
+            method(kPublic, "orElseThrow", "(Ljava/util/function/Supplier;)D"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+
+    if (name == "java/nio/ByteOrder") {
+        return make_class("java/nio/ByteOrder", "java/lang/Object",
+                          kOrdinary | kFinal, {
+            field(kPrivate | kFinal, "name", "Ljava/lang/String;"),
+            field(kPrivate | kFinal, "kind", "I"),
+            field(kPublic | kStatic | kFinal, "BIG_ENDIAN",
+                  "Ljava/nio/ByteOrder;"),
+            field(kPublic | kStatic | kFinal, "LITTLE_ENDIAN",
+                  "Ljava/nio/ByteOrder;"),
+        }, {
+            method(kPrivate, "<init>", "(Ljava/lang/String;I)V"),
+            method(kPrivate | kStatic, "<clinit>", "()V"),
+            method(kPublic | kStatic, "nativeOrder", "()Ljava/nio/ByteOrder;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+
+    if (name == "java/nio/InvalidMarkException") {
+        return make_class("java/nio/InvalidMarkException",
+                          "java/lang/IllegalStateException", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+        });
+    }
+
+    if (name == "java/nio/Buffer") {
+        return make_class("java/nio/Buffer", "java/lang/Object",
+                          kPublic | kAbstract, {}, {
+            method(kPublic | kFinal, "capacity", "()I"),
+            method(kPublic | kFinal, "position", "()I"),
+            method(kPublic | kFinal, "position", "(I)Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "limit", "()I"),
+            method(kPublic | kFinal, "limit", "(I)Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "mark", "()Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "reset", "()Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "clear", "()Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "flip", "()Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "rewind", "()Ljava/nio/Buffer;"),
+            method(kPublic | kFinal, "remaining", "()I"),
+            method(kPublic | kFinal, "hasRemaining", "()Z"),
+            method(kPublic | kAbstract, "isReadOnly", "()Z"),
+            method(kPublic | kAbstract, "hasArray", "()Z"),
+            method(kPublic | kAbstract, "array", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "arrayOffset", "()I"),
+            method(kPublic | kAbstract, "isDirect", "()Z"),
+        });
+    }
+
+    if (name == "java/nio/BufferUnderflowException" ||
+        name == "java/nio/BufferOverflowException") {
+        return make_class(std::string(name), "java/lang/RuntimeException",
+                          kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+        });
+    }
+
+    if (name == "java/nio/ByteBuffer") {
+        return make_class("java/nio/ByteBuffer", "java/nio/Buffer",
+                          kPublic | kAbstract, {
             field(kPrivate | kFinal, "data", "[B"),
-            field(kPrivate | kFinal, "limit", "I"),
+            field(kPrivate, "limit", "I"),
             field(kPrivate, "position", "I"),
+            field(kPrivate, "mark", "I"),
+            field(kPrivate, "order", "I"),
         }, {
             method(kPrivate, "<init>", "([BII)V"),
             method(kPublic | kStatic, "allocate", "(I)Ljava/nio/ByteBuffer;"),
@@ -373,14 +572,429 @@ using namespace builtin;
             method(kPublic | kStatic, "wrap", "([BII)Ljava/nio/ByteBuffer;"),
             method(kPublic, "put", "(B)Ljava/nio/ByteBuffer;"),
             method(kPublic, "put", "([B)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "put", "([BII)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "put", "(IB)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putShort", "(S)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putShort", "(IS)Ljava/nio/ByteBuffer;"),
             method(kPublic, "putInt", "(I)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putInt", "(II)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putLong", "(J)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putLong", "(IJ)Ljava/nio/ByteBuffer;"),
             method(kPublic, "get", "()B"),
+            method(kPublic, "get", "(I)B"),
             method(kPublic, "get", "([B)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "get", "([BII)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "getShort", "()S"),
+            method(kPublic, "getShort", "(I)S"),
             method(kPublic, "getInt", "()I"),
-            method(kPublic, "array", "()[B"),
-            method(kPublic, "position", "()I"),
+            method(kPublic, "getInt", "(I)I"),
+            method(kPublic, "getLong", "()J"),
+            method(kPublic, "getLong", "(I)J"),
+            method(kPublic, "putChar", "(C)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putChar", "(IC)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "getChar", "()C"),
+            method(kPublic, "getChar", "(I)C"),
+            method(kPublic, "putFloat", "(F)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putFloat", "(IF)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "getFloat", "()F"),
+            method(kPublic, "getFloat", "(I)F"),
+            method(kPublic, "putDouble", "(D)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "putDouble", "(ID)Ljava/nio/ByteBuffer;"),
+            method(kPublic, "getDouble", "()D"),
+            method(kPublic, "getDouble", "(I)D"),
+            method(kPublic | kFinal, "order", "()Ljava/nio/ByteOrder;"),
+            method(kPublic | kFinal, "order",
+                   "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;"),
+            method(kPublic | kFinal, "hasArray", "()Z"),
+            method(kPublic | kFinal, "array", "()[B"),
+            method(kPublic, "array", "()Ljava/lang/Object;"),
+            method(kPublic | kFinal, "arrayOffset", "()I"),
+            method(kPublic, "isDirect", "()Z"),
+            method(kPublic, "isReadOnly", "()Z"),
+            // Covariant aliases keep post-JDK8 bytecode usable while the
+            // canonical JDK8 Buffer-returning descriptors live on Buffer.
+            method(kPublic, "limit", "(I)Ljava/nio/ByteBuffer;"),
             method(kPublic, "position", "(I)Ljava/nio/ByteBuffer;"),
-            method(kPublic, "remaining", "()I"),
+            method(kPublic, "clear", "()Ljava/nio/ByteBuffer;"),
+            method(kPublic, "flip", "()Ljava/nio/ByteBuffer;"),
+            method(kPublic, "rewind", "()Ljava/nio/ByteBuffer;"),
+        }, {"java/lang/Comparable"});
+    }
+    if (name == "java/nio/HeapByteBuffer") {
+        return make_class("java/nio/HeapByteBuffer", "java/nio/ByteBuffer",
+                          kSuper | kFinal, {}, {});
+    }
+
+    if (name == "java/util/concurrent/atomic/AtomicInteger") {
+        return make_class("java/util/concurrent/atomic/AtomicInteger",
+                          "java/lang/Number", kOrdinary, {
+            field(kPrivate, "value", "I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic | kFinal, "get", "()I"),
+            method(kPublic | kFinal, "set", "(I)V"),
+            method(kPublic | kFinal, "lazySet", "(I)V"),
+            method(kPublic | kFinal, "getAndSet", "(I)I"),
+            method(kPublic | kFinal, "compareAndSet", "(II)Z"),
+            method(kPublic | kFinal, "weakCompareAndSet", "(II)Z"),
+            method(kPublic | kFinal, "getAndIncrement", "()I"),
+            method(kPublic | kFinal, "getAndDecrement", "()I"),
+            method(kPublic | kFinal, "getAndAdd", "(I)I"),
+            method(kPublic | kFinal, "incrementAndGet", "()I"),
+            method(kPublic | kFinal, "decrementAndGet", "()I"),
+            method(kPublic | kFinal, "addAndGet", "(I)I"),
+            method(kPublic | kFinal, "getAndUpdate",
+                   "(Ljava/util/function/IntUnaryOperator;)I"),
+            method(kPublic | kFinal, "updateAndGet",
+                   "(Ljava/util/function/IntUnaryOperator;)I"),
+            method(kPublic | kFinal, "getAndAccumulate",
+                   "(ILjava/util/function/IntBinaryOperator;)I"),
+            method(kPublic | kFinal, "accumulateAndGet",
+                   "(ILjava/util/function/IntBinaryOperator;)I"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/io/Serializable"});
+    }
+
+    if (name == "java/util/concurrent/atomic/AtomicLong") {
+        return make_class("java/util/concurrent/atomic/AtomicLong",
+                          "java/lang/Number", kOrdinary, {
+            field(kPrivate, "value", "J"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(J)V"),
+            method(kPublic | kFinal, "get", "()J"),
+            method(kPublic | kFinal, "set", "(J)V"),
+            method(kPublic | kFinal, "lazySet", "(J)V"),
+            method(kPublic | kFinal, "getAndSet", "(J)J"),
+            method(kPublic | kFinal, "compareAndSet", "(JJ)Z"),
+            method(kPublic | kFinal, "weakCompareAndSet", "(JJ)Z"),
+            method(kPublic | kFinal, "getAndIncrement", "()J"),
+            method(kPublic | kFinal, "getAndDecrement", "()J"),
+            method(kPublic | kFinal, "getAndAdd", "(J)J"),
+            method(kPublic | kFinal, "incrementAndGet", "()J"),
+            method(kPublic | kFinal, "decrementAndGet", "()J"),
+            method(kPublic | kFinal, "addAndGet", "(J)J"),
+            method(kPublic | kFinal, "getAndUpdate",
+                   "(Ljava/util/function/LongUnaryOperator;)J"),
+            method(kPublic | kFinal, "updateAndGet",
+                   "(Ljava/util/function/LongUnaryOperator;)J"),
+            method(kPublic | kFinal, "getAndAccumulate",
+                   "(JLjava/util/function/LongBinaryOperator;)J"),
+            method(kPublic | kFinal, "accumulateAndGet",
+                   "(JLjava/util/function/LongBinaryOperator;)J"),
+            method(kPublic, "intValue", "()I"),
+            method(kPublic, "longValue", "()J"),
+            method(kPublic, "floatValue", "()F"),
+            method(kPublic, "doubleValue", "()D"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/io/Serializable"});
+    }
+
+    if (name == "java/util/concurrent/atomic/AtomicBoolean") {
+        return make_class("java/util/concurrent/atomic/AtomicBoolean",
+                          "java/lang/Object", kOrdinary, {
+            field(kPrivate, "value", "Z"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Z)V"),
+            method(kPublic | kFinal, "get", "()Z"),
+            method(kPublic | kFinal, "compareAndSet", "(ZZ)Z"),
+            method(kPublic, "weakCompareAndSet", "(ZZ)Z"),
+            method(kPublic | kFinal, "set", "(Z)V"),
+            method(kPublic | kFinal, "lazySet", "(Z)V"),
+            method(kPublic | kFinal, "getAndSet", "(Z)Z"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/io/Serializable"});
+    }
+
+    if (name == "java/util/concurrent/atomic/AtomicReference") {
+        return make_class("java/util/concurrent/atomic/AtomicReference",
+                          "java/lang/Object", kOrdinary, {
+            field(kPrivate, "value", "Ljava/lang/Object;"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/Object;)V"),
+            method(kPublic | kFinal, "get", "()Ljava/lang/Object;"),
+            method(kPublic | kFinal, "set", "(Ljava/lang/Object;)V"),
+            method(kPublic | kFinal, "lazySet", "(Ljava/lang/Object;)V"),
+            method(kPublic | kFinal, "getAndSet",
+                   "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic | kFinal, "compareAndSet",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic | kFinal, "weakCompareAndSet",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic | kFinal, "getAndUpdate",
+                   "(Ljava/util/function/UnaryOperator;)Ljava/lang/Object;"),
+            method(kPublic | kFinal, "updateAndGet",
+                   "(Ljava/util/function/UnaryOperator;)Ljava/lang/Object;"),
+            method(kPublic | kFinal, "getAndAccumulate",
+                   "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;"),
+            method(kPublic | kFinal, "accumulateAndGet",
+                   "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/io/Serializable"});
+    }
+
+    if (name == "java/util/concurrent/ConcurrentMap") {
+        return make_class("java/util/concurrent/ConcurrentMap", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic, "getOrDefault",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "forEach", "(Ljava/util/function/BiConsumer;)V"),
+            method(kPublic | kAbstract, "putIfAbsent",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "remove",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "replace",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic | kAbstract, "replace",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "replaceAll", "(Ljava/util/function/BiFunction;)V"),
+            method(kPublic, "computeIfAbsent",
+                   "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;"),
+            method(kPublic, "computeIfPresent",
+                   "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+            method(kPublic, "compute",
+                   "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+            method(kPublic, "merge",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+        }, {"java/util/Map"});
+    }
+    if (name == "java/util/concurrent/ConcurrentHashMap") {
+        return make_class("java/util/concurrent/ConcurrentHashMap",
+                          "java/util/AbstractMap", kOrdinary, {
+            field(kPrivate, "keys", "[Ljava/lang/Object;"),
+            field(kPrivate, "values", "[Ljava/lang/Object;"),
+            field(kPrivate, "size", "I"),
+            field(kPrivate, "hashes", "[I"),
+        }, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic, "<init>", "(Ljava/util/Map;)V"),
+            method(kPublic, "<init>", "(IF)V"),
+            method(kPublic, "<init>", "(IFI)V"),
+            method(kPublic, "size", "()I"),
+            method(kPublic, "isEmpty", "()Z"),
+            method(kPublic, "get", "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "containsKey", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "containsValue", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "put",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "putAll", "(Ljava/util/Map;)V"),
+            method(kPublic, "remove",
+                   "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "clear", "()V"),
+            method(kPublic, "keySet", "()Ljava/util/Set;"),
+            method(kPublic, "keySet",
+                   "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;"),
+            method(kPublic, "keySet",
+                   "(Ljava/lang/Object;)Ljava/util/concurrent/ConcurrentHashMap$KeySetView;"),
+            method(kPublic | kStatic, "newKeySet",
+                   "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;"),
+            method(kPublic | kStatic, "newKeySet",
+                   "(I)Ljava/util/concurrent/ConcurrentHashMap$KeySetView;"),
+            method(kPublic, "values", "()Ljava/util/Collection;"),
+            method(kPublic, "entrySet", "()Ljava/util/Set;"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+            method(kPublic, "putIfAbsent",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "remove",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic, "replace",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z"),
+            method(kPublic, "replace",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "getOrDefault",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "forEach", "(Ljava/util/function/BiConsumer;)V"),
+            method(kPublic, "replaceAll", "(Ljava/util/function/BiFunction;)V"),
+            method(kPublic, "computeIfAbsent",
+                   "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;"),
+            method(kPublic, "computeIfPresent",
+                   "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+            method(kPublic, "compute",
+                   "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+            method(kPublic, "merge",
+                   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;"),
+            method(kPublic, "contains", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "keys", "()Ljava/util/Enumeration;"),
+            method(kPublic, "elements", "()Ljava/util/Enumeration;"),
+            method(kPublic, "mappingCount", "()J"),
+        }, {"java/util/concurrent/ConcurrentMap", "java/io/Serializable"});
+    }
+    if (name == "java/util/concurrent/ConcurrentHashMap$KeySetView") {
+        return make_class("java/util/concurrent/ConcurrentHashMap$KeySetView",
+                          "java/util/HashSet", kOrdinary, {}, {
+            method(kPublic, "getMappedValue", "()Ljava/lang/Object;"),
+        }, {"java/io/Serializable"});
+    }
+    if (name == "java/util/concurrent/Callable") {
+        return make_class("java/util/concurrent/Callable", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "call", "()Ljava/lang/Object;"),
+        });
+    }
+    if (name == "java/util/concurrent/Future") {
+        return make_class("java/util/concurrent/Future", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "cancel", "(Z)Z"),
+            method(kPublic | kAbstract, "isCancelled", "()Z"),
+            method(kPublic | kAbstract, "isDone", "()Z"),
+            method(kPublic | kAbstract, "get", "()Ljava/lang/Object;"),
+            method(kPublic | kAbstract, "get",
+                   "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"),
+        });
+    }
+    if (name == "java/util/concurrent/RunnableFuture") {
+        return make_class("java/util/concurrent/RunnableFuture",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {},
+                          {"java/lang/Runnable", "java/util/concurrent/Future"});
+    }
+    if (name == "java/util/concurrent/Executor") {
+        return make_class("java/util/concurrent/Executor", "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "execute", "(Ljava/lang/Runnable;)V"),
+        });
+    }
+    if (name == "java/util/concurrent/ExecutorService") {
+        return make_class("java/util/concurrent/ExecutorService",
+                          "java/lang/Object",
+                          kPublic | kInterface | kAbstract, {}, {
+            method(kPublic | kAbstract, "shutdown", "()V"),
+            method(kPublic | kAbstract, "shutdownNow", "()Ljava/util/List;"),
+            method(kPublic | kAbstract, "isShutdown", "()Z"),
+            method(kPublic | kAbstract, "isTerminated", "()Z"),
+            method(kPublic | kAbstract, "awaitTermination",
+                   "(JLjava/util/concurrent/TimeUnit;)Z"),
+            method(kPublic | kAbstract, "submit",
+                   "(Ljava/util/concurrent/Callable;)Ljava/util/concurrent/Future;"),
+            method(kPublic | kAbstract, "submit",
+                   "(Ljava/lang/Runnable;Ljava/lang/Object;)Ljava/util/concurrent/Future;"),
+            method(kPublic | kAbstract, "submit",
+                   "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;"),
+        }, {"java/util/concurrent/Executor"});
+    }
+    if (name == "java/util/concurrent/CountDownLatch") {
+        return make_class("java/util/concurrent/CountDownLatch",
+                          "java/lang/Object", kOrdinary, {
+            field(kPrivate, "count", "J"),
+        }, {
+            method(kPublic, "<init>", "(I)V"),
+            method(kPublic, "await", "()V"),
+            method(kPublic, "await",
+                   "(JLjava/util/concurrent/TimeUnit;)Z"),
+            method(kPublic, "countDown", "()V"),
+            method(kPublic, "getCount", "()J"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        });
+    }
+    if (name == "java/util/concurrent/FutureTask") {
+        return make_class("java/util/concurrent/FutureTask", "java/lang/Object",
+                          kOrdinary, {
+            field(kPrivate, "callable", "Ljava/util/concurrent/Callable;"),
+            field(kPrivate, "runnable", "Ljava/lang/Runnable;"),
+            field(kPrivate, "result", "Ljava/lang/Object;"),
+            field(kPrivate, "throwable", "Ljava/lang/Throwable;"),
+            field(kPrivate, "state", "I"),
+            field(kPrivate, "runner", "Ljava/lang/Thread;"),
+        }, {
+            method(kPublic, "<init>", "(Ljava/util/concurrent/Callable;)V"),
+            method(kPublic, "<init>",
+                   "(Ljava/lang/Runnable;Ljava/lang/Object;)V"),
+            method(kPublic, "isCancelled", "()Z"),
+            method(kPublic, "isDone", "()Z"),
+            method(kPublic, "cancel", "(Z)Z"),
+            method(kPublic, "get", "()Ljava/lang/Object;"),
+            method(kPublic, "get",
+                   "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"),
+            method(kProtected, "done", "()V"),
+            method(kProtected, "set", "(Ljava/lang/Object;)V"),
+            method(kProtected, "setException", "(Ljava/lang/Throwable;)V"),
+            method(kPublic, "run", "()V"),
+            method(kProtected, "runAndReset", "()Z"),
+        }, {"java/util/concurrent/RunnableFuture"});
+    }
+    if (name == "java/util/concurrent/NativeExecutorService") {
+        return make_class("java/util/concurrent/NativeExecutorService",
+                          "java/lang/Object", kOrdinary | kFinal, {
+            field(kPrivate, "shutdown", "Z"),
+            field(kPrivate, "workers", "I"),
+        }, {
+            method(kPrivate, "<init>", "(I)V"),
+            method(kPublic, "execute", "(Ljava/lang/Runnable;)V"),
+            method(kPublic, "shutdown", "()V"),
+            method(kPublic, "shutdownNow", "()Ljava/util/List;"),
+            method(kPublic, "isShutdown", "()Z"),
+            method(kPublic, "isTerminated", "()Z"),
+            method(kPublic, "awaitTermination",
+                   "(JLjava/util/concurrent/TimeUnit;)Z"),
+            method(kPublic, "submit",
+                   "(Ljava/util/concurrent/Callable;)Ljava/util/concurrent/Future;"),
+            method(kPublic, "submit",
+                   "(Ljava/lang/Runnable;Ljava/lang/Object;)Ljava/util/concurrent/Future;"),
+            method(kPublic, "submit",
+                   "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;"),
+        }, {"java/util/concurrent/ExecutorService"});
+    }
+    if (name == "java/util/concurrent/NativeRunnableCallable") {
+        return make_class("java/util/concurrent/NativeRunnableCallable",
+                          "java/lang/Object", kOrdinary | kFinal, {
+            field(kPrivate, "runnable", "Ljava/lang/Runnable;"),
+            field(kPrivate, "result", "Ljava/lang/Object;"),
+        }, {
+            method(kPrivate, "<init>",
+                   "(Ljava/lang/Runnable;Ljava/lang/Object;)V"),
+            method(kPublic, "call", "()Ljava/lang/Object;"),
+        }, {"java/util/concurrent/Callable"});
+    }
+    if (name == "java/util/concurrent/Executors") {
+        return make_class("java/util/concurrent/Executors", "java/lang/Object",
+                          kOrdinary, {}, {
+            method(kPrivate, "<init>", "()V"),
+            method(kPublic | kStatic, "newFixedThreadPool",
+                   "(I)Ljava/util/concurrent/ExecutorService;"),
+            method(kPublic | kStatic, "newSingleThreadExecutor",
+                   "()Ljava/util/concurrent/ExecutorService;"),
+            method(kPublic | kStatic, "newCachedThreadPool",
+                   "()Ljava/util/concurrent/ExecutorService;"),
+            method(kPublic | kStatic, "callable",
+                   "(Ljava/lang/Runnable;Ljava/lang/Object;)Ljava/util/concurrent/Callable;"),
+            method(kPublic | kStatic, "callable",
+                   "(Ljava/lang/Runnable;)Ljava/util/concurrent/Callable;"),
+        });
+    }
+    if (name == "java/util/concurrent/ExecutionException") {
+        return make_class("java/util/concurrent/ExecutionException",
+                          "java/lang/Exception", kOrdinary, {}, {
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+            method(kPublic, "<init>", "(Ljava/lang/Throwable;)V"),
+        });
+    }
+    if (name == "java/util/concurrent/TimeoutException") {
+        return make_class("java/util/concurrent/TimeoutException",
+                          "java/lang/Exception", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
+    if (name == "java/util/concurrent/CancellationException") {
+        return make_class("java/util/concurrent/CancellationException",
+                          "java/lang/IllegalStateException", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
+        });
+    }
+    if (name == "java/util/concurrent/RejectedExecutionException") {
+        return make_class("java/util/concurrent/RejectedExecutionException",
+                          "java/lang/RuntimeException", kOrdinary, {}, {
+            method(kPublic, "<init>", "()V"),
+            method(kPublic, "<init>", "(Ljava/lang/String;)V"),
         });
     }
 

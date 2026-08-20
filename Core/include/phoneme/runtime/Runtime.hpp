@@ -88,6 +88,7 @@ struct AppHeapConfig final {
 struct FrameReadView final {
     const u8* pixels {nullptr};
     FrameMetadata metadata;
+    std::span<const FrameDamageRegion> damage_regions;
 };
 
 class Runtime final {

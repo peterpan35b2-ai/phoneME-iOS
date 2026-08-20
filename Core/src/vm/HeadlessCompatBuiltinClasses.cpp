@@ -121,6 +121,29 @@ using namespace builtin;
             method(kPublic | kAbstract, "entrySet", "()Ljava/util/Set;"),
         });
     }
+    if (name == "java/util/AbstractMap") {
+        return make_class("java/util/AbstractMap", "java/lang/Object",
+                          kPublic | kAbstract, {}, {
+            method(kProtected, "<init>", "()V"),
+            method(kPublic, "size", "()I"),
+            method(kPublic, "isEmpty", "()Z"),
+            method(kPublic, "containsKey", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "containsValue", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "get", "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "put",
+                   "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "remove",
+                   "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "putAll", "(Ljava/util/Map;)V"),
+            method(kPublic, "clear", "()V"),
+            method(kPublic, "keySet", "()Ljava/util/Set;"),
+            method(kPublic, "values", "()Ljava/util/Collection;"),
+            method(kPublic | kAbstract, "entrySet", "()Ljava/util/Set;"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
+        }, {"java/util/Map"});
+    }
     if (name == "java/util/Set") {
         return make_class("java/util/Set", "java/lang/Object",
                           kPublic | kInterface | kAbstract, {}, {
@@ -158,7 +181,7 @@ using namespace builtin;
         }, {"java/util/Iterator"});
     }
     if (name == "java/util/HashMap") {
-        return make_class("java/util/HashMap", "java/lang/Object", kOrdinary, {
+        return make_class("java/util/HashMap", "java/util/AbstractMap", kOrdinary, {
             field(kPrivate, "keys", "[Ljava/lang/Object;"),
             field(kPrivate, "values", "[Ljava/lang/Object;"),
             field(kPrivate, "size", "I"),
@@ -284,7 +307,16 @@ using namespace builtin;
             method(kPublic | kStatic, "ofNullable", "(Ljava/lang/Object;)Ljava/util/Optional;"),
             method(kPublic, "isPresent", "()Z"),
             method(kPublic, "get", "()Ljava/lang/Object;"),
+            method(kPublic, "ifPresent", "(Ljava/util/function/Consumer;)V"),
+            method(kPublic, "filter", "(Ljava/util/function/Predicate;)Ljava/util/Optional;"),
+            method(kPublic, "map", "(Ljava/util/function/Function;)Ljava/util/Optional;"),
+            method(kPublic, "flatMap", "(Ljava/util/function/Function;)Ljava/util/Optional;"),
             method(kPublic, "orElse", "(Ljava/lang/Object;)Ljava/lang/Object;"),
+            method(kPublic, "orElseGet", "(Ljava/util/function/Supplier;)Ljava/lang/Object;"),
+            method(kPublic, "orElseThrow", "(Ljava/util/function/Supplier;)Ljava/lang/Object;"),
+            method(kPublic, "equals", "(Ljava/lang/Object;)Z"),
+            method(kPublic, "hashCode", "()I"),
+            method(kPublic, "toString", "()Ljava/lang/String;"),
         });
     }
     if (name == "java/util/Base64") {

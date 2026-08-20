@@ -74,6 +74,7 @@ public:
                                             i64 microseconds);
     [[nodiscard]] Result<PlayerSnapshot> snapshot(i32 player_id);
     [[nodiscard]] Result<std::optional<MediaEvent>> synchronize(i32 player_id);
+    [[nodiscard]] Result<bool> event_poll_needed(i32 player_id);
     [[nodiscard]] Status set_tone_sequence(i32 player_id,
                                            std::vector<u8> sequence);
     [[nodiscard]] Result<bool> play_tone(i32 note,
@@ -99,6 +100,8 @@ private:
         std::vector<u8> data;
         std::string content_type;
         std::vector<u8> tone_sequence;
+        i64 media_time {0};
+        i64 duration {-1};
         i32 loop_count {1};
         i32 volume {100};
         bool muted {false};
@@ -107,6 +110,8 @@ private:
 
     [[nodiscard]] Result<Player*> player_unlocked(i32 player_id);
     [[nodiscard]] Status realize_unlocked(Player& player);
+    [[nodiscard]] Status ensure_platform_handle_unlocked(Player& player);
+    [[nodiscard]] Status start_platform_unlocked(Player& player);
     [[nodiscard]] Status ensure_tone_handle_unlocked(Player& player);
     [[nodiscard]] Result<std::optional<MediaEvent>>
     synchronize_unlocked(Player& player);

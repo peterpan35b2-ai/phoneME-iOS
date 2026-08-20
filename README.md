@@ -15,8 +15,7 @@ natively on modern devices.
   inline resolvers and OSR (on-stack replacement), tuned for real games.
 - **Wide API coverage** — LCDUI (Canvas, Form, List, TextBox, Game API:
   Sprite, TiledLayer, LayerManager), RMS record stores, HTTP/HTTPS/sockets/
-  datagrams/file connections (GCF), JSR-135 Mobile Media, and more. See
-  [docs/J2ME_API_COVERAGE.md](docs/J2ME_API_COVERAGE.md) for the full audit.
+  datagrams/file connections (GCF), JSR-135 Mobile Media, and more.
 - **Native iOS app** (SwiftUI, iOS 15+) — game library with `.jar` import,
   per-game profiles and workspaces, J2ME keypad, scalable framebuffer.
 - **Web app** — the same core compiled to WebAssembly with a Material UI

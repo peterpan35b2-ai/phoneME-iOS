@@ -1,5 +1,6 @@
 #include "phoneme/vm/BaselineJit.hpp"
 #include "phoneme/vm/Verifier.hpp"
+#include "phoneme/runtime/WorkCoordinator.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -61,6 +62,7 @@ constexpr u64 kMinimumCodeCacheBytes = 1U * 1024U * 1024U;
 constexpr u64 kMaximumCodeCacheBytes = 256U * 1024U * 1024U;
 constexpr u32 kUnavailableProbeInterval = 256U;
 constexpr usize kMaximumBackgroundCompileQueue = 32U;
+constexpr u32 kMaximumBackgroundCompileWorkers = 1U;
 constexpr usize kMaximumSwitchCases = 512U;
 constexpr usize kMaximumNativeInstructions = 256U * 1024U;
 
@@ -128,6 +130,26 @@ constexpr usize kMaximumNativeInstructions = 256U * 1024U;
            std::string_view(value) != "off";
 }
 
+[[nodiscard]] u32 configured_background_compile_worker_count() noexcept {
+    const char* value = std::getenv("PHONEME_JIT_BACKGROUND_WORKERS");
+    if (value != nullptr && *value != '\0') {
+        char* end = nullptr;
+        errno = 0;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (errno == 0 && end != value && *end == '\0' && parsed != 0UL) {
+            return static_cast<u32>(std::min<unsigned long>(
+                parsed,
+                static_cast<unsigned long>(kMaximumBackgroundCompileWorkers)));
+        }
+    }
+
+    // Compilation is independent of Java execution, but allowing several JIT
+    // workers to race rendering raises package power much more than it improves
+    // steady-state game performance. A single sleeping worker is enough to
+    // warm hot methods without oversubscribing the device.
+    return 1U;
+}
+
 [[nodiscard]] constexpr bool background_compile_platform_supported() noexcept {
 #if defined(__APPLE__) && defined(MAP_JIT) && defined(__aarch64__)
     return true;
@@ -163,6 +185,23 @@ constexpr usize kMaximumNativeInstructions = 256U * 1024U;
     }
     const u64 bytes = static_cast<u64>(parsed) * 1024U * 1024U;
     return std::clamp(bytes, kMinimumCodeCacheBytes, kMaximumCodeCacheBytes);
+}
+
+[[nodiscard]] u64 configured_render_compile_cooldown_nanoseconds() noexcept {
+    constexpr u64 kDefaultCooldownMicroseconds = 1'500U;
+    constexpr u64 kMaximumCooldownMicroseconds = 8'000U;
+    const char* value = std::getenv("PHONEME_JIT_RENDER_COOLDOWN_US");
+    if (value == nullptr || *value == '\0') {
+        return kDefaultCooldownMicroseconds * 1'000U;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        return kDefaultCooldownMicroseconds * 1'000U;
+    }
+    return std::min<u64>(static_cast<u64>(parsed),
+                         kMaximumCooldownMicroseconds) * 1'000U;
 }
 
 [[nodiscard]] bool integer_like(JavaTypeKind kind) noexcept {
@@ -1359,7 +1398,7 @@ void ExecutableBlock::reset() noexcept {
     return ExecutableBlock(memory, mapped_size, function_at(memory));
 }
 
-[[nodiscard]] std::optional<ExecutableBlock> finalize_code(
+[[nodiscard, maybe_unused]] std::optional<ExecutableBlock> finalize_code(
     const std::vector<u32>& code) noexcept {
     if (code.empty() || code.size() > kMaximumNativeInstructions) {
         return std::nullopt;
@@ -8776,6 +8815,8 @@ public:
           background_compile_enabled_(
               configured_background_compile_enabled() &&
               background_compile_platform_supported()),
+          background_compile_worker_limit_(
+              configured_background_compile_worker_count()),
           code_cache_limit_bytes_(configured_code_cache_bytes()) {
         stats_.code_cache_limit_bytes = code_cache_limit_bytes_;
     }
@@ -8942,7 +8983,31 @@ public:
     [[nodiscard]] JitAvailability availability() const noexcept {
         return availability_;
     }
-    [[nodiscard]] JitStatistics statistics() const noexcept { return stats_; }
+    [[nodiscard]] JitStatistics statistics() const noexcept {
+        JitStatistics result = stats_;
+        result.background_compile_queue_peak =
+            background_compile_queue_peak_.load(std::memory_order_acquire);
+        result.background_compile_worker_count = static_cast<u64>(
+            background_workers_.size());
+        result.background_compile_render_cooldown_waits =
+            background_compile_render_cooldown_waits_.load(
+                std::memory_order_acquire);
+        result.background_compile_render_cooldown_nanoseconds =
+            background_compile_render_cooldown_nanoseconds_.load(
+                std::memory_order_acquire);
+        return result;
+    }
+
+    void note_frame_published() noexcept {
+#if defined(__aarch64__)
+        const u64 nanoseconds = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        last_frame_publication_nanoseconds_.store(
+            nanoseconds, std::memory_order_release);
+        background_condition_.notify_all();
+#endif
+    }
 
     [[nodiscard]] Result<std::optional<JitExecutionResult>> try_execute(
         MethodId method_id,
@@ -10153,17 +10218,20 @@ private:
     }
 
     [[nodiscard]] bool start_background_compiler() {
-        if (!background_compile_enabled_ || background_worker_.joinable()) {
-            return background_worker_.joinable();
+        if (!background_compile_enabled_ || !background_workers_.empty()) {
+            return !background_workers_.empty();
         }
         {
             std::scoped_lock lock(background_mutex_);
             background_stop_ = false;
         }
-        background_worker_ = std::thread([this] {
-            background_compile_loop();
-        });
-        return background_worker_.joinable();
+        background_workers_.reserve(background_compile_worker_limit_);
+        for (u32 index = 0U; index < background_compile_worker_limit_; ++index) {
+            background_workers_.emplace_back([this, index] {
+                background_compile_loop(index);
+            });
+        }
+        return !background_workers_.empty();
     }
 
     void stop_background_compiler() noexcept {
@@ -10173,16 +10241,20 @@ private:
             background_tasks_.clear();
         }
         background_condition_.notify_all();
-        if (background_worker_.joinable()) {
-            background_worker_.join();
+        for (std::thread& worker : background_workers_) {
+            if (worker.joinable()) worker.join();
         }
+        background_workers_.clear();
         std::scoped_lock lock(background_mutex_);
         background_tasks_.clear();
         background_results_.clear();
         background_stop_ = false;
     }
 
-    void background_compile_loop() noexcept {
+    void background_compile_loop(u32 worker_index) noexcept {
+        (void)worker_index;
+        runtime::WorkCoordinator& work_coordinator =
+            runtime::shared_work_coordinator();
         for (;;) {
             BackgroundCompileTask task;
             {
@@ -10191,6 +10263,51 @@ private:
                     return background_stop_ || !background_tasks_.empty();
                 });
                 if (background_stop_ && background_tasks_.empty()) return;
+                while (!background_stop_ && !background_tasks_.empty()) {
+                    const u64 last_frame =
+                        last_frame_publication_nanoseconds_.load(
+                            std::memory_order_acquire);
+                    if (last_frame == 0U ||
+                        render_compile_cooldown_nanoseconds_ == 0U) {
+                        break;
+                    }
+                    const u64 now = static_cast<u64>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
+                    if (now >= last_frame + render_compile_cooldown_nanoseconds_) {
+                        break;
+                    }
+                    const u64 remaining =
+                        last_frame + render_compile_cooldown_nanoseconds_ - now;
+                    background_compile_render_cooldown_waits_.fetch_add(
+                        1U, std::memory_order_relaxed);
+                    background_compile_render_cooldown_nanoseconds_.fetch_add(
+                        remaining, std::memory_order_relaxed);
+                    background_condition_.wait_for(
+                        lock, std::chrono::nanoseconds(remaining));
+                }
+                if (background_stop_ && background_tasks_.empty()) return;
+                if (background_tasks_.empty()) continue;
+
+                // Rendering/gameplay has priority over speculative JIT work.
+                // The coordinator also serializes native background compute so
+                // a compiler burst cannot overlap another CPU-heavy subsystem.
+                while (!background_stop_ && !background_tasks_.empty() &&
+                       !work_coordinator.try_begin_background_work()) {
+                    background_condition_.wait_for(
+                        lock,
+                        std::chrono::milliseconds(32),
+                        [this, &work_coordinator] {
+                            return background_stop_ ||
+                                   background_tasks_.empty() ||
+                                   (work_coordinator.background_work_allowed() &&
+                                    work_coordinator.active_background_jobs() ==
+                                        0U);
+                        });
+                }
+                if (background_stop_ && background_tasks_.empty()) return;
+                if (background_tasks_.empty()) continue;
                 task = std::move(background_tasks_.front());
                 background_tasks_.pop_front();
             }
@@ -10214,6 +10331,7 @@ private:
             const u64 elapsed = static_cast<u64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - started).count());
+            work_coordinator.end_background_work();
             {
                 std::scoped_lock lock(background_mutex_);
                 if (background_stop_) continue;
@@ -10260,6 +10378,16 @@ private:
                 .has_receiver = has_receiver,
                 .startup = startup,
             });
+            const u64 depth = static_cast<u64>(background_tasks_.size());
+            u64 previous = background_compile_queue_peak_.load(
+                std::memory_order_relaxed);
+            while (depth > previous &&
+                   !background_compile_queue_peak_.compare_exchange_weak(
+                       previous,
+                       depth,
+                       std::memory_order_relaxed,
+                       std::memory_order_relaxed)) {
+            }
         }
         background_condition_.notify_one();
         ++stats_.background_compile_queued;
@@ -10420,7 +10548,7 @@ private:
     std::condition_variable background_condition_;
     std::deque<BackgroundCompileTask> background_tasks_;
     std::deque<BackgroundCompileResult> background_results_;
-    std::thread background_worker_;
+    std::vector<std::thread> background_workers_;
     bool background_stop_ {false};
     std::unordered_map<MethodId, Entry, MetadataIdHash<MethodId>> entries_;
     std::string profile_path_;
@@ -10428,6 +10556,12 @@ private:
 #endif
     bool enabled_ {true};
     std::atomic<bool> startup_mode_ {false};
+    std::atomic<u64> last_frame_publication_nanoseconds_ {0U};
+    const u64 render_compile_cooldown_nanoseconds_ {
+        configured_render_compile_cooldown_nanoseconds()};
+    std::atomic<u64> background_compile_queue_peak_ {0U};
+    std::atomic<u64> background_compile_render_cooldown_waits_ {0U};
+    std::atomic<u64> background_compile_render_cooldown_nanoseconds_ {0U};
     JitAvailability availability_ {JitAvailability::unavailable};
     JitInlineResolverHooks inline_resolver_ {};
     u32 hot_threshold_ {kDefaultHotThreshold};
@@ -10438,6 +10572,7 @@ private:
     u64 startup_compile_budget_nanoseconds_ {
         kDefaultStartupCompileBudgetNanoseconds};
     bool background_compile_enabled_ {false};
+    const u32 background_compile_worker_limit_ {1U};
     std::atomic<u32> startup_compile_attempts_ {0U};
     std::atomic<u64> startup_compile_time_nanoseconds_ {0U};
     u32 unavailable_probe_countdown_ {0U};
@@ -10460,6 +10595,10 @@ void BaselineJit::set_enabled(bool enabled) noexcept {
 
 void BaselineJit::set_startup_mode(bool enabled) noexcept {
     impl_->set_startup_mode(enabled);
+}
+
+void BaselineJit::note_frame_published() noexcept {
+    impl_->note_frame_published();
 }
 
 void BaselineJit::set_inline_resolver(JitInlineResolverHooks hooks) noexcept {

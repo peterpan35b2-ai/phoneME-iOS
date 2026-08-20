@@ -21,7 +21,8 @@ namespace phoneme::runtime {
 namespace {
 
 constexpr std::array<u8, 8> kMagic {'P', 'M', 'E', 'S', 'D', 'B', '2', 0};
-constexpr u32 kFormatVersion = 2U;
+constexpr u32 kFormatVersion = 4U;
+constexpr u32 kOldestSupportedFormatVersion = 2U;
 constexpr usize kMaximumDatabaseBytes = 16U * 1024U * 1024U;
 constexpr u32 kMaximumRecords = 4096U;
 constexpr u32 kMaximumVectorItems = 16'384U;
@@ -43,6 +44,18 @@ void append_u64(std::vector<u8>& output, u64 value) {
     for (u32 shift = 0; shift < 64U; shift += 8U) {
         output.push_back(static_cast<u8>(value >> shift));
     }
+}
+
+void append_validation_stamp(std::vector<u8>& output,
+                             const SuiteFileValidationStamp& stamp) {
+    append_u8(output, stamp.valid ? 1U : 0U);
+    append_u64(output, stamp.size);
+    append_u64(output, stamp.device);
+    append_u64(output, stamp.inode);
+    append_u64(output, stamp.modified_seconds);
+    append_u64(output, stamp.modified_nanoseconds);
+    append_u64(output, stamp.changed_seconds);
+    append_u64(output, stamp.changed_nanoseconds);
 }
 
 [[nodiscard]] Status append_string(std::vector<u8>& output,
@@ -156,6 +169,40 @@ private:
     return values;
 }
 
+[[nodiscard]] Result<SuiteFileValidationStamp> read_validation_stamp(
+    Reader& reader) {
+    auto valid = reader.read_u8();
+    if (!valid) return std::unexpected(valid.error());
+    if (*valid > 1U) {
+        return fail(ErrorCode::malformed_archive,
+                    "suite database contains an invalid validation stamp flag");
+    }
+    SuiteFileValidationStamp stamp;
+    stamp.valid = *valid != 0U;
+    auto size = reader.read_u64();
+    auto device = reader.read_u64();
+    auto inode = reader.read_u64();
+    auto modified_seconds = reader.read_u64();
+    auto modified_nanoseconds = reader.read_u64();
+    auto changed_seconds = reader.read_u64();
+    auto changed_nanoseconds = reader.read_u64();
+    if (!size) return std::unexpected(size.error());
+    if (!device) return std::unexpected(device.error());
+    if (!inode) return std::unexpected(inode.error());
+    if (!modified_seconds) return std::unexpected(modified_seconds.error());
+    if (!modified_nanoseconds) return std::unexpected(modified_nanoseconds.error());
+    if (!changed_seconds) return std::unexpected(changed_seconds.error());
+    if (!changed_nanoseconds) return std::unexpected(changed_nanoseconds.error());
+    stamp.size = *size;
+    stamp.device = *device;
+    stamp.inode = *inode;
+    stamp.modified_seconds = *modified_seconds;
+    stamp.modified_nanoseconds = *modified_nanoseconds;
+    stamp.changed_seconds = *changed_seconds;
+    stamp.changed_nanoseconds = *changed_nanoseconds;
+    return stamp;
+}
+
 [[nodiscard]] Result<std::vector<u8>> serialize(
     const SuiteDatabaseSnapshot& snapshot) {
     if (snapshot.records.size() > kMaximumRecords) {
@@ -194,6 +241,30 @@ private:
         append_u64(output, record.archive_size);
         append_u64(output, record.declared_jar_size);
         append_u8(output, record.has_permission_declarations ? 1U : 0U);
+        append_u8(output, record.has_signature_metadata ? 1U : 0U);
+        append_validation_stamp(output, record.jar_validation_stamp);
+        append_validation_stamp(output, record.jad_validation_stamp);
+        append_u32(output, record.verified_class_cache_version);
+
+        if (record.verified_classes.size() > kMaximumVectorItems) {
+            return fail(ErrorCode::out_of_range,
+                        "suite database contains too many verified classes");
+        }
+        std::vector<std::pair<std::string_view, u64>> verified_classes;
+        verified_classes.reserve(record.verified_classes.size());
+        for (const auto& [name, stamp] : record.verified_classes) {
+            verified_classes.emplace_back(name, stamp);
+        }
+        std::sort(verified_classes.begin(), verified_classes.end(),
+                  [](const auto& left, const auto& right) {
+                      return left.first < right.first;
+                  });
+        append_u32(output, static_cast<u32>(verified_classes.size()));
+        for (const auto& [name, stamp] : verified_classes) {
+            auto name_status = append_string(output, name);
+            if (!name_status) return std::unexpected(name_status.error());
+            append_u64(output, stamp);
+        }
 
         auto midlets = append_strings(output, record.midlet_classes);
         if (!midlets) return std::unexpected(midlets.error());
@@ -408,7 +479,7 @@ Result<SuiteDatabaseSnapshot> SuiteDatabase::load_path(
     }
     auto version = reader.read_u32();
     if (!version) return std::unexpected(version.error());
-    if (*version != kFormatVersion) {
+    if (*version < kOldestSupportedFormatVersion || *version > kFormatVersion) {
         return fail(ErrorCode::unsupported_feature,
                     "suite database format version is not supported");
     }
@@ -480,6 +551,48 @@ Result<SuiteDatabaseSnapshot> SuiteDatabase::load_path(
         record.archive_size = *archive_size;
         record.declared_jar_size = *declared_size;
         record.has_permission_declarations = *flags != 0U;
+
+        if (*version >= 3U) {
+            auto signature_metadata = reader.read_u8();
+            if (!signature_metadata) {
+                return std::unexpected(signature_metadata.error());
+            }
+            if (*signature_metadata > 1U) {
+                return fail(ErrorCode::malformed_archive,
+                            "suite database contains invalid signature metadata flags");
+            }
+            record.has_signature_metadata = *signature_metadata != 0U;
+            auto jar_stamp = read_validation_stamp(reader);
+            auto jad_stamp = read_validation_stamp(reader);
+            if (!jar_stamp) return std::unexpected(jar_stamp.error());
+            if (!jad_stamp) return std::unexpected(jad_stamp.error());
+            record.jar_validation_stamp = *jar_stamp;
+            record.jad_validation_stamp = *jad_stamp;
+        }
+
+        if (*version >= 4U) {
+            auto cache_version = reader.read_u32();
+            auto verified_count = reader.read_u32();
+            if (!cache_version) return std::unexpected(cache_version.error());
+            if (!verified_count) return std::unexpected(verified_count.error());
+            if (*verified_count > kMaximumVectorItems) {
+                return fail(ErrorCode::out_of_range,
+                            "suite database verified-class cache is too large");
+            }
+            record.verified_class_cache_version = *cache_version;
+            record.verified_classes.reserve(*verified_count);
+            for (u32 index = 0; index < *verified_count; ++index) {
+                auto verified_name = reader.read_string();
+                auto stamp = reader.read_u64();
+                if (!verified_name) return std::unexpected(verified_name.error());
+                if (!stamp) return std::unexpected(stamp.error());
+                if (!record.verified_classes.emplace(
+                        std::move(*verified_name), *stamp).second) {
+                    return fail(ErrorCode::malformed_archive,
+                                "suite database contains a duplicate verified class");
+                }
+            }
+        }
 
         auto midlets = read_strings(reader);
         auto permissions = read_strings(reader);

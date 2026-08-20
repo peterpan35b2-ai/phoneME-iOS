@@ -116,6 +116,14 @@ struct RuntimeMethod final {
     std::shared_ptr<OperandResolutionTable> operand_resolutions;
 };
 
+struct RuntimeMetadataDiagnostics final {
+    usize classes {0U};
+    usize methods {0U};
+    usize descriptors {0U};
+    usize decoded_instructions {0U};
+    usize decoded_operands {0U};
+};
+
 class RuntimeMetadata final {
 public:
     RuntimeMetadata() = default;
@@ -142,6 +150,7 @@ public:
         MethodId id) const noexcept;
 
     [[nodiscard]] u64 generation() const noexcept;
+    [[nodiscard]] RuntimeMetadataDiagnostics diagnostics() const noexcept;
     void clear() noexcept;
 
 private:

@@ -737,8 +737,13 @@ struct EmulatorView: View {
 #if os(iOS)
     private func captureCurrentScreen() -> UIImage? {
         if !session.isPresentingNativeLCDUI {
-            guard let frame = session.frame else { return nil }
-            return UIImage(cgImage: frame, scale: 1, orientation: .up)
+            guard
+                let frame = session.frame,
+                let image = frame.makeCGImage()
+            else {
+                return nil
+            }
+            return UIImage(cgImage: image, scale: 1, orientation: .up)
         }
 
         guard let scene = UIApplication.shared.connectedScenes
@@ -1304,21 +1309,23 @@ struct FrameSurface: View {
     }
 
     @ViewBuilder
-    private func renderedFrame(_ frame: CGImage) -> some View {
+    private func renderedFrame(_ frame: PhoneMEFrame) -> some View {
 #if canImport(UIKit)
         PhoneMEFrameLayerView(
-            image: frame,
+            frame: frame,
             filtering: forcesNearestNeighborFit ? false : profile.filtering
         )
 #else
-        Image(decorative: frame, scale: 1, orientation: .up)
-            .resizable()
-            .interpolation(profile.filtering ? .high : .none)
+        if let image = frame.image ?? frame.makeCGImage() {
+            Image(decorative: image, scale: 1, orientation: .up)
+                .resizable()
+                .interpolation(profile.filtering ? .high : .none)
+        }
 #endif
     }
 
     private func pointerGesture(
-        frame: CGImage,
+        frame: PhoneMEFrame,
         availableSize: CGSize
     ) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
@@ -1356,7 +1363,7 @@ struct FrameSurface: View {
 
     private func pointerPoint(
         _ location: CGPoint,
-        frame: CGImage,
+        frame: PhoneMEFrame,
         availableSize: CGSize,
         clampOutside: Bool
     ) -> (x: Int32, y: Int32)? {
@@ -1383,7 +1390,7 @@ struct FrameSurface: View {
 
 private enum FrameLayout {
     static func renderedFrameRect(
-        frame: CGImage?,
+        frame: PhoneMEFrame?,
         availableSize: CGSize,
         profile: GameProfile,
         strictFit: Bool = false,
@@ -1405,7 +1412,7 @@ private enum FrameLayout {
     }
 
     static func renderedFrameRect(
-        frame: CGImage,
+        frame: PhoneMEFrame,
         availableSize: CGSize,
         profile: GameProfile,
         strictFit: Bool = false,
@@ -1536,12 +1543,12 @@ private enum FrameLayout {
 
 #if canImport(UIKit)
 private struct PhoneMEFrameLayerView: UIViewRepresentable {
-    let image: CGImage
+    let frame: PhoneMEFrame
     let filtering: Bool
 
     func makeUIView(context: Context) -> PhoneMEFrameLayerHostView {
         let view = PhoneMEFrameLayerHostView()
-        view.update(image: image, filtering: filtering)
+        view.update(frame: frame, filtering: filtering)
         return view
     }
 
@@ -1549,7 +1556,7 @@ private struct PhoneMEFrameLayerView: UIViewRepresentable {
         _ uiView: PhoneMEFrameLayerHostView,
         context: Context
     ) {
-        uiView.update(image: image, filtering: filtering)
+        uiView.update(frame: frame, filtering: filtering)
     }
 
     static func dismantleUIView(
@@ -1774,6 +1781,7 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
     private var nearestSampler: MTLSamplerState?
     private var linearSampler: MTLSamplerState?
     private var frameTexture: MTLTexture?
+    private var currentFrame: PhoneMEFrame?
     private var usesLinearFiltering = false
 
     override init(frame: CGRect, device: MTLDevice?) {
@@ -1794,9 +1802,28 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         fallbackLayer.frame = bounds
     }
 
-    func update(image: CGImage, filtering: Bool) {
+    func update(frame: PhoneMEFrame, filtering: Bool) {
         usesLinearFiltering = filtering
         installRendererResourcesIfAvailable()
+#if canImport(Metal)
+        if let texture = frame.metalTexture,
+           texture.device.registryID == device?.registryID,
+           pipelineState != nil,
+           commandQueue != nil,
+           nearestSampler != nil,
+           linearSampler != nil {
+            currentFrame = frame
+            frameTexture = texture
+            fallbackLayer.isHidden = true
+            setNeedsDisplay()
+            return
+        }
+#endif
+        currentFrame = frame
+        guard let image = frame.image ?? frame.makeCGImage() else {
+            clearFrame()
+            return
+        }
         guard upload(image: image) else {
             showFallback(image: image, filtering: filtering)
             return
@@ -1806,6 +1833,7 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
     }
 
     func clearFrame() {
+        currentFrame = nil
         frameTexture = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1840,6 +1868,9 @@ private final class PhoneMEFrameLayerHostView: MTKView, MTKViewDelegate {
         )
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
+#if canImport(Metal)
+        currentFrame?.retainMetalResources(until: commandBuffer)
+#endif
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }

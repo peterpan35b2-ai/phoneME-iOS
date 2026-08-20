@@ -40,7 +40,7 @@ done
 if [[ "$#" -gt 0 ]]; then
   MODULES=("$@")
 else
-  MODULES=(host builtin-registry graphics graphics-vm push canvas-graphics game-api filesystem network-adapter security c-api rms scheduler suite-installer lcdui-extended vendor-compat coverage-inventory)
+  MODULES=(host builtin-registry graphics graphics-vm parallel-executor push canvas-graphics game-api filesystem network-adapter security c-api rms scheduler suite-installer lcdui-extended vendor-compat coverage-inventory)
 fi
 
 if [[ -n "${PHONEME_TEST_REPORT_ROOT:-}" ]]; then

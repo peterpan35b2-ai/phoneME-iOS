@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 #include <vector>
 
@@ -19,6 +20,15 @@ enum class Transform : i32 {
     mirror_rotate_90 = 7,
 };
 
+// Immutable decoded images are classified once so hot sprite blits can pick a
+// compositing kernel before entering the pixel loop. Mutable images use the
+// general path because their alpha distribution can change after creation.
+enum class ImageAlphaKind : u8 {
+    opaque,
+    binary,
+    translucent,
+};
+
 struct Size final {
     i32 width {0};
     i32 height {0};
@@ -33,6 +43,7 @@ struct ImageRegion final {
 
 class Image final {
 public:
+    static constexpr usize kMaximumDirtyRegions = 8U;
     [[nodiscard]] static Result<Image> create_mutable(i32 width,
                                                        i32 height);
     [[nodiscard]] static Result<Image> create_mutable_argb(i32 width,
@@ -57,6 +68,9 @@ public:
     [[nodiscard]] i32 width() const noexcept { return width_; }
     [[nodiscard]] i32 height() const noexcept { return height_; }
     [[nodiscard]] bool is_mutable() const noexcept { return mutable_; }
+    [[nodiscard]] ImageAlphaKind alpha_kind() const noexcept {
+        return alpha_kind_;
+    }
     [[nodiscard]] std::span<const Pixel> pixels() const noexcept {
         return pixels_;
     }
@@ -66,6 +80,10 @@ public:
     [[nodiscard]] bool has_dirty_region() const noexcept { return dirty_; }
     [[nodiscard]] ImageRegion dirty_region() const noexcept {
         return dirty_region_;
+    }
+    [[nodiscard]] std::span<const ImageRegion> dirty_regions() const noexcept {
+        return std::span<const ImageRegion>(dirty_regions_.data(),
+                                            dirty_region_count_);
     }
     void clear_dirty_region() noexcept;
     void mark_dirty_region(i32 x, i32 y, i32 width, i32 height) noexcept;
@@ -86,8 +104,11 @@ private:
     i32 height_ {0};
     bool mutable_ {false};
     std::vector<Pixel> pixels_;
+    ImageAlphaKind alpha_kind_ {ImageAlphaKind::translucent};
     bool dirty_ {false};
     ImageRegion dirty_region_ {};
+    std::array<ImageRegion, kMaximumDirtyRegions> dirty_regions_ {};
+    usize dirty_region_count_ {0U};
 };
 
 [[nodiscard]] Result<Transform> transform_from_int(i32 value);

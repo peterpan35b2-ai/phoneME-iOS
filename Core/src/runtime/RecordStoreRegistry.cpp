@@ -254,6 +254,7 @@ Status RecordStoreRegistry::configure(std::string root_directory) {
     }
     stores_.clear();
     mutation_generation_.store(0, std::memory_order_relaxed);
+    any_pending_persist_.store(false, std::memory_order_release);
     return {};
 }
 
@@ -949,7 +950,7 @@ Status RecordStoreRegistry::commit_mutation_unlocked(Store& store) const {
         if (!store.pending_persist) {
             store.pending_persist = true;
             store.pending_since = std::chrono::steady_clock::now();
-            any_pending_persist_.store(true, std::memory_order_relaxed);
+            any_pending_persist_.store(true, std::memory_order_release);
         }
         return {};
     }
@@ -962,11 +963,11 @@ void RecordStoreRegistry::set_write_through(bool enabled) noexcept {
 }
 
 void RecordStoreRegistry::flush_pending() {
-    if (!any_pending_persist_.load(std::memory_order_relaxed)) return;
+    if (!any_pending_persist_.load(std::memory_order_acquire)) return;
     std::scoped_lock lock(mutex_);
-    // ponytail: fixed 250ms pending window flushed on the VM thread; an
-    // async flusher thread would shave the remaining hitch but costs a
-    // thread on every platform including wasm.
+    // Use a short coalescing window on the VM thread. An async flusher would
+    // remove the remaining persistence hitch, but would also add another host
+    // thread on every native runtime and needs a separate wasm strategy.
     constexpr auto kPendingFlushDelay = std::chrono::milliseconds(250);
     const auto now = std::chrono::steady_clock::now();
     bool still_pending = false;
@@ -981,12 +982,15 @@ void RecordStoreRegistry::flush_pending() {
         }
         still_pending = true;
     }
-    any_pending_persist_.store(still_pending, std::memory_order_relaxed);
+    any_pending_persist_.store(still_pending, std::memory_order_release);
 }
 
 Status RecordStoreRegistry::flush_all() {
-    if (!any_pending_persist_.load(std::memory_order_relaxed)) return {};
+    // Suspend/memory-warning durability is a rare path, so do not trust an
+    // unlocked fast-path observation here. Taking the mutex first guarantees
+    // a concurrent commit cannot be hidden by a stale false observation.
     std::scoped_lock lock(mutex_);
+    if (!any_pending_persist_.load(std::memory_order_acquire)) return {};
     for (auto& [name, store] : stores_) {
         (void)name;
         if (!store.pending_persist) continue;
@@ -994,7 +998,7 @@ Status RecordStoreRegistry::flush_all() {
         if (!persisted) return persisted;
         store.pending_persist = false;
     }
-    any_pending_persist_.store(false, std::memory_order_relaxed);
+    any_pending_persist_.store(false, std::memory_order_release);
     return {};
 }
 

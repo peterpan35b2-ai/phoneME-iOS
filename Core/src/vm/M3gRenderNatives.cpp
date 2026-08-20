@@ -18,6 +18,7 @@
 
 #include "M3gLoader.hpp"
 #include "M3gNativeSupport.hpp"
+#include "phoneme/runtime/ParallelExecutor.hpp"
 
 namespace phoneme::vm {
 namespace {
@@ -33,6 +34,7 @@ constexpr const char* kMaterial = "javax/microedition/m3g/Material";
 constexpr const char* kFog = "javax/microedition/m3g/Fog";
 constexpr const char* kLight = "javax/microedition/m3g/Light";
 constexpr usize kTextureUnitCount = 8U;
+constexpr usize kParallelM3gRasterPixels = 8U * 1024U;
 
 struct BoundRenderTarget final {
     graphics::Image* image {nullptr};
@@ -2044,7 +2046,11 @@ struct DeformedGeometry final {
             std::max({first.y, second.y, third.y}))));
     if (minimum_x > maximum_x || minimum_y > maximum_y) return {};
     auto pixels = image.mutable_pixels();
-    for (i32 y = minimum_y; y <= maximum_y; ++y) {
+    const usize raster_width = static_cast<usize>(maximum_x - minimum_x + 1);
+    const usize raster_height = static_cast<usize>(maximum_y - minimum_y + 1);
+    const auto raster_rows = [&](usize row_begin, usize row_end) {
+      for (usize row = row_begin; row < row_end; ++row) {
+        const i32 y = minimum_y + static_cast<i32>(row);
         for (i32 x = minimum_x; x <= maximum_x; ++x) {
             const float sample_x = static_cast<float>(x) + 0.5F;
             const float sample_y = static_cast<float>(y) + 0.5F;
@@ -2142,6 +2148,16 @@ struct DeformedGeometry final {
                 source, pixels[pixel_index], state);
             if (state.depth_write) depth.values[pixel_index] = pixel_depth;
         }
+      }
+    };
+    if (raster_width * raster_height >= kParallelM3gRasterPixels &&
+        raster_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 2U * 1024U / std::max<usize>(raster_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            raster_height, 4U, rows_per_chunk, raster_rows);
+    } else {
+        raster_rows(0U, raster_height);
     }
     return {};
 }
@@ -2435,7 +2451,11 @@ struct DeformedGeometry final {
     if (!texture) return std::unexpected(texture.error());
     if (texture->pixels.empty()) return {};
     auto pixels = target.image->mutable_pixels();
-    for (i32 y = area.clip.y; y < area.clip.y + area.clip.height; ++y) {
+    const usize background_width = static_cast<usize>(area.clip.width);
+    const usize background_height = static_cast<usize>(area.clip.height);
+    const auto draw_rows = [&](usize row_begin, usize row_end) {
+      for (usize row = row_begin; row < row_end; ++row) {
+        const i32 y = area.clip.y + static_cast<i32>(row);
         const double normalized_y =
             (static_cast<double>(y - area.viewport.y) + 0.5) /
             static_cast<double>(area.viewport.height);
@@ -2468,6 +2488,16 @@ struct DeformedGeometry final {
                 ? source
                 : graphics::source_over(source, pixels[destination_index]);
         }
+      }
+    };
+    if (background_width * background_height >= kParallelM3gRasterPixels &&
+        background_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 2U * 1024U / std::max<usize>(background_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            background_height, 4U, rows_per_chunk, draw_rows);
+    } else {
+        draw_rows(0U, background_height);
     }
     target.image->mark_dirty_region(area.clip.x, area.clip.y,
                                     area.clip.width, area.clip.height);
@@ -2730,7 +2760,11 @@ struct DeformedGeometry final {
     const float top = draw_center_y - draw_height * 0.5F;
     const float node_alpha = std::clamp(
         *alpha_factor * inherited_alpha, 0.0F, 1.0F);
-    for (i32 y = minimum_y; y <= maximum_y; ++y) {
+    const usize sprite_width = static_cast<usize>(maximum_x - minimum_x + 1);
+    const usize sprite_height = static_cast<usize>(maximum_y - minimum_y + 1);
+    const auto draw_rows = [&](usize row_begin, usize row_end) {
+      for (usize row = row_begin; row < row_end; ++row) {
+        const i32 y = minimum_y + static_cast<i32>(row);
         const float normalized_y = std::clamp(
             (static_cast<float>(y) + 0.5F - top) / draw_height,
             0.0F, std::nextafter(1.0F, 0.0F));
@@ -2779,6 +2813,16 @@ struct DeformedGeometry final {
                 depth.values[destination_index] = sprite_depth;
             }
         }
+      }
+    };
+    if (sprite_width * sprite_height >= kParallelM3gRasterPixels &&
+        sprite_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 2U * 1024U / std::max<usize>(sprite_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            sprite_height, 4U, rows_per_chunk, draw_rows);
+    } else {
+        draw_rows(0U, sprite_height);
     }
     target->image->mark_dirty_region(minimum_x, minimum_y,
                                      maximum_x - minimum_x + 1,

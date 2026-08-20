@@ -34,6 +34,7 @@ Status MediaEventService::register_player(i32 player_id,
                     "media event service is shutting down");
     }
     players_.insert_or_assign(player_id, Registration {.player = player});
+    poll_requested_ = true;
     auto started = start_worker_locked();
     if (!started) {
         players_.erase(player_id);
@@ -46,11 +47,27 @@ Status MediaEventService::register_player(i32 player_id,
 void MediaEventService::unregister_player(i32 player_id) noexcept {
     std::scoped_lock lock(mutex_);
     players_.erase(player_id);
+    poll_requested_ = true;
     condition_.notify_all();
 }
 
 void MediaEventService::wake() noexcept {
+    {
+        std::scoped_lock lock(mutex_);
+        if (shutting_down_) return;
+        poll_requested_ = true;
+    }
     condition_.notify_all();
+}
+
+MediaEventServiceDiagnostics MediaEventService::diagnostics() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return MediaEventServiceDiagnostics {
+        .registered_players = players_.size(),
+        .pending_events = pending_.size(),
+        .worker_started = worker_started_,
+        .polling = poll_requested_,
+    };
 }
 
 void MediaEventService::shutdown() noexcept {
@@ -60,6 +77,7 @@ void MediaEventService::shutdown() noexcept {
         shutting_down_ = true;
         players_.clear();
         pending_.clear();
+        poll_requested_ = true;
     }
     condition_.notify_all();
 }
@@ -91,20 +109,38 @@ Status MediaEventService::start_worker_locked() {
 
 Result<std::optional<ObjectRef>> MediaEventService::run_worker(
     std::stop_token stop_token) {
+    bool continuous_poll = false;
     for (;;) {
         {
             std::unique_lock lock(mutex_);
-            condition_.wait_for(lock, kPollInterval, [this, &stop_token] {
+            const auto wake_predicate = [this, &stop_token] {
                 return shutting_down_ || stop_token.stop_requested() ||
-                       !pending_.empty();
-            });
+                       poll_requested_ || !pending_.empty();
+            };
+            if (continuous_poll) {
+                condition_.wait_for(lock, kPollInterval, wake_predicate);
+            } else {
+                condition_.wait(lock, wake_predicate);
+            }
             if (shutting_down_ || stop_token.stop_requested()) break;
+            poll_requested_ = false;
         }
 
-        poll_players();
+        // A registered Player only needs periodic synchronization while the
+        // platform backend is actually playing. Realized/prefetched/stopped
+        // players used to keep this worker waking every 25 ms for the rest of
+        // the VM lifetime, which was a persistent mobile CPU/thermal tax after
+        // the first sound effect. Lifecycle operations call wake(), so an idle
+        // worker resumes immediately when playback starts again.
+        continuous_poll = poll_players();
         dispatch_pending();
     }
     return std::optional<ObjectRef> {};
+}
+
+Status MediaEventService::enqueue(ObjectRef player,
+                                  media::MediaEvent event) {
+    return queue_event(player, std::move(event));
 }
 
 Status MediaEventService::queue_event(ObjectRef player,
@@ -122,7 +158,7 @@ Status MediaEventService::queue_event(ObjectRef player,
     return {};
 }
 
-void MediaEventService::poll_players() {
+bool MediaEventService::poll_players() {
     std::vector<std::pair<i32, ObjectRef>> players;
     {
         std::scoped_lock lock(mutex_);
@@ -132,6 +168,7 @@ void MediaEventService::poll_players() {
         }
     }
 
+    bool needs_continuous_poll = false;
     for (const auto& [player_id, player] : players) {
         if (!machine_.heap().class_name(player)) {
             (void)machine_.media().close(player_id);
@@ -140,12 +177,22 @@ void MediaEventService::poll_players() {
         }
 
         auto event = machine_.media().synchronize(player_id);
-        if (!event || !event->has_value()) continue;
-        const bool closed =
-            (**event).kind == media::MediaEventKind::closed;
-        (void)queue_event(player, std::move(**event));
-        if (closed) unregister_player(player_id);
+        if (event && event->has_value()) {
+            const bool closed =
+                (**event).kind == media::MediaEventKind::closed;
+            (void)queue_event(player, std::move(**event));
+            if (closed) {
+                unregister_player(player_id);
+                continue;
+            }
+        }
+
+        auto poll_needed = machine_.media().event_poll_needed(player_id);
+        if (poll_needed && *poll_needed) {
+            needs_continuous_poll = true;
+        }
     }
+    return needs_continuous_poll;
 }
 
 void MediaEventService::dispatch_pending() {

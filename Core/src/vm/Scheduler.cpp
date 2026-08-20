@@ -13,6 +13,7 @@
 #include "phoneme/vm/MonitorTable.hpp"
 #include "phoneme/vm/PerformanceCounters.hpp"
 #include "phoneme/vm/VmTrace.hpp"
+#include "phoneme/runtime/WorkCoordinator.hpp"
 
 namespace phoneme::vm {
 
@@ -29,6 +30,10 @@ thread_local u32 Scheduler::tls_frame_pacing_streak_ = 0U;
 thread_local i64 Scheduler::tls_frame_interval_sample_nanoseconds_ = 0;
 thread_local bool Scheduler::tls_frame_loop_wake_valid_ = false;
 thread_local bool Scheduler::tls_frame_cap_deadline_valid_ = false;
+thread_local bool Scheduler::tls_native_frame_boundary_valid_ = false;
+thread_local bool Scheduler::tls_native_backpressure_active_ = false;
+thread_local bool Scheduler::tls_pressure_frame_boundary_valid_ = false;
+thread_local u32 Scheduler::tls_native_fast_frame_streak_ = 0U;
 thread_local u64 Scheduler::tls_frame_pacing_generation_ = 0U;
 thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_frame_loop_wake_time_ {};
@@ -36,6 +41,10 @@ thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_frame_cap_deadline_ {};
 thread_local std::chrono::steady_clock::time_point
     Scheduler::tls_frame_boundary_time_ {};
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_native_frame_boundary_time_ {};
+thread_local std::chrono::steady_clock::time_point
+    Scheduler::tls_pressure_frame_boundary_time_ {};
 
 namespace {
 
@@ -56,7 +65,7 @@ constexpr auto kBusyMaximumBackoff = std::chrono::milliseconds(4);
 // when a game has several Java threads that would otherwise take turns while
 // each individual thread is sleeping. A blocked socket/timer callback still
 // runs immediately until it reaches the next bounded bytecode scheduler quantum.
-constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(200);
+constexpr auto kBackgroundMinimumInterval = std::chrono::milliseconds(250);
 constexpr auto kBackgroundMaximumInterval = std::chrono::seconds(2);
 // Only a short, stable sleep immediately following an actual framebuffer
 // publication may be treated as game-loop pacing. Override mode deliberately
@@ -70,6 +79,9 @@ constexpr auto kMinimumFramePacingRequest =
 constexpr auto kMinimumSleepStabilityTolerance =
     std::chrono::milliseconds(2);
 constexpr u32 kOverrideActivationStreak = 6U;
+constexpr u32 kNativeBackpressureActivationStreak = 4U;
+constexpr i64 kNativeBackpressureFastFrameNumerator = 4;
+constexpr i64 kNativeBackpressureFastFrameDenominator = 5;
 
 [[nodiscard]] const char* thread_state_name(JavaThreadState state) noexcept {
     switch (state) {
@@ -97,10 +109,10 @@ constexpr u32 kOverrideActivationStreak = 6U;
 
 [[nodiscard]] std::chrono::steady_clock::duration background_interval(
     std::chrono::microseconds active_cpu_time) noexcept {
-    // Reserve roughly one execution slot for every twenty units of interpreter
-    // time. This targets <=5% aggregate VM duty while adapting across Debug,
-    // Release and different device generations.
-    const auto target = active_cpu_time * 20;
+    // Reserve roughly one execution slot for every twenty-five units of interpreter
+    // time. This targets <5% aggregate VM duty with margin for scheduler/JIT
+    // overhead while adapting across Debug, Release and device generations.
+    const auto target = active_cpu_time * 25;
     return std::clamp(
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(target),
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -581,6 +593,10 @@ void Scheduler::reset_current_frame_pacing_state() noexcept {
     tls_frame_interval_sample_nanoseconds_ = 0;
     tls_frame_loop_wake_valid_ = false;
     tls_frame_cap_deadline_valid_ = false;
+    tls_native_frame_boundary_valid_ = false;
+    tls_native_backpressure_active_ = false;
+    tls_pressure_frame_boundary_valid_ = false;
+    tls_native_fast_frame_streak_ = 0U;
 }
 
 void Scheduler::synchronize_current_frame_pacing_state() noexcept {
@@ -599,14 +615,75 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
         frame_pacing_mode_.load(std::memory_order_acquire));
     const bool host_foreground =
         host_foreground_.load(std::memory_order_acquire);
-    if (mode != FramePacingMode::cap || !host_foreground) {
+    if (!host_foreground) {
+        tls_frame_cap_deadline_valid_ = false;
+        tls_native_frame_boundary_valid_ = false;
+        tls_native_backpressure_active_ = false;
+        tls_native_fast_frame_streak_ = 0U;
+        return;
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    if (mode == FramePacingMode::cap) {
+        if (!tls_frame_cap_deadline_valid_) return;
+        deadline = tls_frame_cap_deadline_;
+    } else if (mode == FramePacingMode::native) {
+        // Native mode preserves a MIDlet's own pacing. Activate only after a
+        // sustained run of frames produced faster than the configured display
+        // interval. Once active, keep backpressure engaged while the game
+        // reaches the next publication gate early. A game that begins pacing
+        // itself (sleep/work >= the fast threshold) disables host backpressure
+        // immediately, so we never stack a host delay on top of a real game
+        // delay.
+        if (!tls_native_frame_boundary_valid_) return;
+        const i64 target = frame_interval_nanoseconds_.load(
+            std::memory_order_acquire);
+        const i64 fast_threshold =
+            (target * kNativeBackpressureFastFrameNumerator) /
+            kNativeBackpressureFastFrameDenominator;
+        const auto native_now = std::chrono::steady_clock::now();
+        const i64 since_boundary =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                native_now - tls_native_frame_boundary_time_).count();
+        if (tls_native_backpressure_active_) {
+            if (since_boundary >= fast_threshold) {
+                tls_native_backpressure_active_ = false;
+                tls_native_fast_frame_streak_ = 0U;
+                return;
+            }
+        } else if (tls_native_fast_frame_streak_ >=
+                   kNativeBackpressureActivationStreak) {
+            tls_native_backpressure_active_ = true;
+        } else {
+            return;
+        }
+        deadline = tls_native_frame_boundary_time_ +
+            std::chrono::nanoseconds(target);
+    } else {
         tls_frame_cap_deadline_valid_ = false;
         return;
     }
-    if (!tls_frame_cap_deadline_valid_) return;
 
     const auto now = std::chrono::steady_clock::now();
-    if (now >= tls_frame_cap_deadline_) return;
+
+    // Feed actual publication cadence into the shared CPU budget. This is
+    // independent of frame-pacing mode: background JIT should yield whenever
+    // the game is consuming most of its frame budget, even in native mode.
+    if (tls_pressure_frame_boundary_valid_ &&
+        now >= tls_pressure_frame_boundary_time_) {
+        const i64 elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now - tls_pressure_frame_boundary_time_).count();
+        const i64 target = frame_interval_nanoseconds_.load(
+            std::memory_order_acquire);
+        if (elapsed > 0 && target > 0) {
+            runtime::shared_work_coordinator().note_frame_interval(
+                static_cast<u64>(elapsed), static_cast<u64>(target));
+        }
+    }
+    tls_pressure_frame_boundary_time_ = now;
+    tls_pressure_frame_boundary_valid_ = true;
+    if (!deadline.has_value() || now >= *deadline) return;
 
     // This is a presentation gate, not Java Thread.sleep. Keep the interrupt
     // flag untouched and release the VM execution gate while waiting so input,
@@ -621,7 +698,7 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
         std::unique_lock lock(mutex_);
         background_condition_.wait_until(
             lock,
-            tls_frame_cap_deadline_,
+            *deadline,
             [this, pacing_generation] {
                 return shutting_down_.load(std::memory_order_acquire) ||
                        !host_foreground_.load(std::memory_order_acquire) ||
@@ -630,7 +707,13 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
             });
     }
     machine.resume_execution_after_blocking(depth);
-    tls_quantum_resume_time_ = std::chrono::steady_clock::now();
+    const auto resumed = std::chrono::steady_clock::now();
+    if (resumed > now) {
+        PerformanceCounters::record_frame_backpressure(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                resumed - now).count()));
+    }
+    tls_quantum_resume_time_ = resumed;
     tls_quantum_timing_valid_ = true;
     set_current_state(JavaThreadState::running);
 }
@@ -643,7 +726,7 @@ void Scheduler::note_current_frame_boundary() noexcept {
         frame_pacing_mode_.load(std::memory_order_acquire));
     const bool host_foreground =
         host_foreground_.load(std::memory_order_acquire);
-    if (!host_foreground || mode == FramePacingMode::native) {
+    if (!host_foreground) {
         reset_current_frame_pacing_state();
         return;
     }
@@ -657,6 +740,41 @@ void Scheduler::note_current_frame_boundary() noexcept {
     tls_unblocked_quantum_count_ = 0U;
     tls_quantum_resume_time_ = now;
     tls_quantum_timing_valid_ = true;
+
+    if (mode == FramePacingMode::native) {
+        const i64 target = frame_interval_nanoseconds_.load(
+            std::memory_order_acquire);
+        if (!tls_native_backpressure_active_ &&
+            tls_native_frame_boundary_valid_ &&
+            now >= tls_native_frame_boundary_time_) {
+            const i64 elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now - tls_native_frame_boundary_time_).count();
+            const i64 fast_threshold =
+                (target * kNativeBackpressureFastFrameNumerator) /
+                kNativeBackpressureFastFrameDenominator;
+            if (elapsed > 0 && elapsed < fast_threshold) {
+                if (tls_native_fast_frame_streak_ !=
+                    std::numeric_limits<u32>::max()) {
+                    ++tls_native_fast_frame_streak_;
+                }
+            } else {
+                tls_native_fast_frame_streak_ = 0U;
+            }
+        }
+        tls_native_frame_boundary_time_ = now;
+        tls_native_frame_boundary_valid_ = true;
+        tls_frame_boundary_pending_ = false;
+        tls_frame_pacing_streak_ = 0U;
+        tls_frame_interval_sample_nanoseconds_ = 0;
+        tls_frame_loop_wake_valid_ = false;
+        tls_frame_cap_deadline_valid_ = false;
+        return;
+    }
+
+    tls_native_frame_boundary_valid_ = false;
+    tls_native_backpressure_active_ = false;
+    tls_native_fast_frame_streak_ = 0U;
 
     if (mode == FramePacingMode::cap) {
         tls_frame_boundary_pending_ = false;
@@ -746,6 +864,28 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         : quantum_backoff(
               tls_unblocked_quantum_count_, active_cpu_time);
 
+    const bool periodic_foreground_handoff =
+        !unpaced_execution && !deterministic_mode &&
+        !background_deadline.has_value() &&
+        ((tls_unblocked_quantum_count_ & 7U) == 0U);
+    const bool needs_execution_handoff =
+        background_deadline.has_value() || unpaced_execution ||
+        deterministic_mode || foreground_peer_runnable ||
+        periodic_foreground_handoff;
+
+    if (!needs_execution_handoff) {
+        // Most healthy foreground quanta have no Java peer waiting and are not
+        // at the periodic fairness boundary. Previously we still transitioned
+        // running -> runnable and released/reacquired execution_mutex_ here,
+        // even though the branch below performed no yield or sleep. That lock
+        // churn sits directly in the interpreter hot path. Keep the periodic
+        // one-in-eight handoff for newly-runnable peers while making the other
+        // seven quanta a true no-op.
+        tls_quantum_resume_time_ = now;
+        tls_quantum_timing_valid_ = true;
+        return;
+    }
+
     set_current_state(JavaThreadState::runnable);
     const u32 depth = machine.suspend_execution_for_blocking();
     if (background_deadline.has_value()) {
@@ -764,20 +904,15 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         // pause so timing-sensitive scheduler tests do not become host-load
         // dependent.
         std::this_thread::sleep_for(backoff);
-    } else if (foreground_peer_runnable ||
-               (tls_unblocked_quantum_count_ & 7U) == 0U) {
-        // A real frame publication resets tls_unblocked_quantum_count_. A
-        // thread that keeps crossing scheduler quanta without ever reaching
-        // such a progress boundary is therefore a genuine busy loop.
-        // Give sustained loops a short host sleep so a malformed/uncapped
-        // MIDlet cannot pin a mobile CPU core at 100%. Healthy foreground game
-        // loops keep the cheaper yield path and retain input/thread fairness.
-        if (tls_unblocked_quantum_count_ >= 16U) {
-            std::this_thread::sleep_for(std::min(
-                backoff, std::chrono::microseconds(1'000)));
-        } else {
-            std::this_thread::yield();
-        }
+    } else if (foreground_peer_runnable || periodic_foreground_handoff) {
+        // Foreground scheduler fairness must not become a CPU duty-cycle cap.
+        // Sustained work here may be class loading, decompression, AI or a
+        // non-render worker; sleeping it reduced real throughput by roughly
+        // half on the host regression. Render overproduction is handled at the
+        // presentation gate where we can prove the extra frames are redundant.
+        // A host yield is enough to hand execution to a runnable peer without
+        // slowing single-threaded Java work.
+        std::this_thread::yield();
     }
     machine.resume_execution_after_blocking(depth);
     if (unpaced_execution) tls_unblocked_quantum_count_ = 0U;

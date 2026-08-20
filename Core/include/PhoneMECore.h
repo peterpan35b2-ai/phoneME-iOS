@@ -97,6 +97,13 @@ typedef enum {
 } PhoneMEAppState;
 
 typedef enum {
+    PHONEME_THERMAL_NOMINAL = 0,
+    PHONEME_THERMAL_FAIR = 1,
+    PHONEME_THERMAL_SERIOUS = 2,
+    PHONEME_THERMAL_CRITICAL = 3
+} PhoneMEThermalPressure;
+
+typedef enum {
     PHONEME_PUSH_FOREGROUND_ONLY = 0,
     PHONEME_PUSH_SYSTEM_MANAGED = 1
 } PhoneMEPushBackgroundPolicy;
@@ -214,6 +221,10 @@ int32_t phoneme_configure_app_heap(PhoneMERuntimeRef runtime,
  * budget guards. Unsupported methods or hosts without JIT permission
  * automatically use the interpreter. */
 int32_t phoneme_configure_jit(PhoneMERuntimeRef runtime, int32_t enabled);
+/* Updates host thermal pressure for the shared native CPU budget. This never
+ * slows Java execution directly; it first reduces native helper/JIT work. */
+int32_t phoneme_set_thermal_pressure(PhoneMERuntimeRef runtime,
+                                     int32_t pressure);
 /* Probes whether executable JIT memory is available to the current process. */
 int32_t phoneme_jit_status(void);
 /* Selects the translation service for subsequently created MIDlets. Existing
@@ -395,6 +406,12 @@ int32_t phoneme_copy_frame_rgba_since(PhoneMERuntimeRef runtime,
                                       int32_t* width,
                                       int32_t* height,
                                       uint64_t* generation);
+typedef struct {
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+} PhoneMEFrameDamageRegion;
 /* Zero-copy display path. The returned pointer remains valid until
  * phoneme_release_frame_rgba() and must not be retained after that call. */
 const uint8_t* phoneme_acquire_frame_rgba_since(PhoneMERuntimeRef runtime,
@@ -402,6 +419,28 @@ const uint8_t* phoneme_acquire_frame_rgba_since(PhoneMERuntimeRef runtime,
                                                 int32_t* width,
                                                 int32_t* height,
                                                 uint64_t* generation);
+/* Native host fast path for callers that already pumped the runtime during
+ * the same display tick. Unlike phoneme_acquire_frame_rgba_since(), this only
+ * acquires the latest completed framebuffer and never executes Canvas work. */
+const uint8_t* phoneme_acquire_current_frame_rgba_since(
+    PhoneMERuntimeRef runtime,
+    uint64_t previous_generation,
+    int32_t* width,
+    int32_t* height,
+    uint64_t* generation);
+/* Same no-pump native fast path, with the damage regions that produced this
+ * framebuffer generation. region_count receives the total region count even
+ * when region_capacity is smaller, allowing the host to fall back to a full
+ * upload when damage is unusually fragmented. */
+const uint8_t* phoneme_acquire_current_frame_rgba_regions_since(
+    PhoneMERuntimeRef runtime,
+    uint64_t previous_generation,
+    int32_t* width,
+    int32_t* height,
+    uint64_t* generation,
+    PhoneMEFrameDamageRegion* regions,
+    int32_t region_capacity,
+    int32_t* region_count);
 void phoneme_release_frame_rgba(PhoneMERuntimeRef runtime);
 /* Monotonic generation for persistent FileConnection/RMS mutations of the
  * foreground MIDlet. Used by web hosts to skip redundant IDBFS syncs. */

@@ -1557,7 +1557,7 @@ constexpr usize kThrowableSuppressedCountField = 4U;
 }
 
 void register_throwable_natives(NativeMethodRegistry& registry) {
-    static constexpr std::array<std::string_view, 47U> classes {{
+    static constexpr std::array<std::string_view, 49U> classes {{
         "java/lang/Throwable",
         "java/lang/Exception",
         "java/lang/RuntimeException",
@@ -1602,6 +1602,8 @@ void register_throwable_natives(NativeMethodRegistry& registry) {
         "java/io/InterruptedIOException",
         "java/io/UTFDataFormatException",
         "java/io/UnsupportedEncodingException",
+        "java/nio/BufferUnderflowException",
+        "java/nio/BufferOverflowException",
         "java/security/NoSuchAlgorithmException",
         "javax/wireless/messaging/SizeExceededException",
         "java/util/NoSuchElementException",

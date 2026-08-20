@@ -230,6 +230,57 @@ void add(NativeMethodRegistry& registry,
     return *equal != 0;
 }
 
+[[nodiscard]] Result<bool> deep_values_equal(Machine& machine,
+                                             ObjectRef left,
+                                             ObjectRef right) {
+    if (left == right) return true;
+    if (left.is_null() || right.is_null()) return false;
+    auto left_class = machine.heap().class_name(left);
+    auto right_class = machine.heap().class_name(right);
+    if (!left_class) return std::unexpected(left_class.error());
+    if (!right_class) return std::unexpected(right_class.error());
+    const bool left_array = !left_class->empty() && left_class->front() == '[';
+    const bool right_array = !right_class->empty() && right_class->front() == '[';
+    if (!left_array || !right_array) {
+        return values_equal(machine, left, right);
+    }
+
+    const bool left_reference_array = left_class->starts_with("[L") ||
+                                      left_class->starts_with("[[");
+    const bool right_reference_array = right_class->starts_with("[L") ||
+                                       right_class->starts_with("[[");
+    if (left_reference_array != right_reference_array) return false;
+    if (!left_reference_array && *left_class != *right_class) return false;
+
+    auto left_length = machine.heap().array_length(left);
+    auto right_length = machine.heap().array_length(right);
+    if (!left_length) return std::unexpected(left_length.error());
+    if (!right_length) return std::unexpected(right_length.error());
+    if (*left_length != *right_length) return false;
+
+    for (usize index = 0U; index < *left_length; ++index) {
+        auto left_value = machine.heap().element(left, index);
+        auto right_value = machine.heap().element(right, index);
+        if (!left_value) return std::unexpected(left_value.error());
+        if (!right_value) return std::unexpected(right_value.error());
+        if (left_reference_array) {
+            auto left_ref = left_value->as_reference();
+            auto right_ref = right_value->as_reference();
+            if (!left_ref) return std::unexpected(left_ref.error());
+            if (!right_ref) return std::unexpected(right_ref.error());
+            auto equal = deep_values_equal(machine, *left_ref, *right_ref);
+            if (!equal) return std::unexpected(equal.error());
+            if (!*equal) return false;
+            continue;
+        }
+        if (left_value->kind() != right_value->kind() ||
+            left_value->raw_bits_unchecked() != right_value->raw_bits_unchecked()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] Result<std::u16string> value_text(Machine& machine,
                                                 ObjectRef value,
                                                 ObjectRef container,
@@ -949,6 +1000,38 @@ void register_objects_extensions(NativeMethodRegistry& registry) {
             }
             return std::optional<Value>(Value::from_reference(*object));
         });
+    add(registry, "java/util/Objects", "requireNonNull",
+        "(Ljava/lang/Object;Ljava/util/function/Supplier;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = reference_argument(arguments, 0U, true);
+            auto supplier = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!supplier) return std::unexpected(supplier.error());
+            if (!object->is_null()) {
+                return std::optional<Value>(Value::from_reference(*object));
+            }
+            if (supplier->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "message supplier is null");
+            }
+            auto supplied = invoke_checked(
+                machine, *supplier, "java/util/function/Supplier", "get",
+                "()Ljava/lang/Object;");
+            if (!supplied) return std::unexpected(supplied.error());
+            if (!supplied->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Supplier.get returned no value");
+            }
+            auto message = supplied->value().as_reference();
+            if (!message) return std::unexpected(message.error());
+            if (message->is_null()) {
+                return fail_java("java/lang/NullPointerException", "");
+            }
+            auto text = utf8_text(machine, *message);
+            if (!text) return std::unexpected(text.error());
+            return fail_java("java/lang/NullPointerException", std::move(*text));
+        });
     add(registry, "java/util/Objects", "equals",
         "(Ljava/lang/Object;Ljava/lang/Object;)Z",
         [](Machine& machine, std::span<const Value> arguments)
@@ -961,6 +1044,58 @@ void register_objects_extensions(NativeMethodRegistry& registry) {
             if (!equal) return std::unexpected(equal.error());
             return std::optional<Value>(Value::from_int(*equal ? 1 : 0));
         });
+    add(registry, "java/util/Objects", "deepEquals",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto left = reference_argument(arguments, 0U, true);
+            auto right = reference_argument(arguments, 1U, true);
+            if (!left) return std::unexpected(left.error());
+            if (!right) return std::unexpected(right.error());
+            auto equal = deep_values_equal(machine, *left, *right);
+            if (!equal) return std::unexpected(equal.error());
+            return std::optional<Value>(Value::from_int(*equal ? 1 : 0));
+        });
+    add(registry, "java/util/Objects", "compare",
+        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/Comparator;)I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto left = reference_argument(arguments, 0U, true);
+            auto right = reference_argument(arguments, 1U, true);
+            if (!left) return std::unexpected(left.error());
+            if (!right) return std::unexpected(right.error());
+            if (*left == *right) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto comparator = reference_argument(arguments, 2U);
+            if (!comparator) return std::unexpected(comparator.error());
+            const std::array<Value, 2> callback_arguments {
+                Value::from_reference(*left), Value::from_reference(*right),
+            };
+            auto result = invoke_checked(
+                machine, *comparator, "java/util/Comparator", "compare",
+                "(Ljava/lang/Object;Ljava/lang/Object;)I", callback_arguments);
+            if (!result) return std::unexpected(result.error());
+            if (!result->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Comparator.compare returned no value");
+            }
+            return result->value();
+        });
+    const auto register_null_predicate = [&registry](const char* name,
+                                                      bool expected_null) {
+        add(registry, "java/util/Objects", name, "(Ljava/lang/Object;)Z",
+            [expected_null](Machine&, std::span<const Value> arguments)
+                -> Result<std::optional<Value>> {
+                auto object = reference_argument(arguments, 0U, true);
+                if (!object) return std::unexpected(object.error());
+                const bool is_null = object->is_null();
+                return std::optional<Value>(Value::from_int(
+                    is_null == expected_null ? 1 : 0));
+            });
+    };
+    register_null_predicate("isNull", true);
+    register_null_predicate("nonNull", false);
     add(registry, "java/util/Objects", "hashCode",
         "(Ljava/lang/Object;)I",
         [](Machine& machine, std::span<const Value> arguments)
@@ -3001,6 +3136,141 @@ void register_optional(NativeMethodRegistry& registry) {
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(Value::from_reference(*value));
         });
+    add(registry, "java/util/Optional", "ifPresent",
+        "(Ljava/util/function/Consumer;)V",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto consumer = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!consumer) return std::unexpected(consumer.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) return std::optional<Value> {};
+            if (consumer->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Optional consumer is null");
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            const Value callback_argument = Value::from_reference(*value);
+            auto invoked = invoke_checked(
+                machine, *consumer, "java/util/function/Consumer", "accept",
+                "(Ljava/lang/Object;)V",
+                std::span<const Value>(&callback_argument, 1U));
+            if (!invoked) return std::unexpected(invoked.error());
+            return std::optional<Value> {};
+        });
+    add(registry, "java/util/Optional", "filter",
+        "(Ljava/util/function/Predicate;)Ljava/util/Optional;",
+        [make_optional](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto predicate = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!predicate) return std::unexpected(predicate.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                return std::optional<Value>(Value::from_reference(*object));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            const Value callback_argument = Value::from_reference(*value);
+            auto matched = invoke_checked(
+                machine, *predicate, "java/util/function/Predicate", "test",
+                "(Ljava/lang/Object;)Z",
+                std::span<const Value>(&callback_argument, 1U));
+            if (!matched) return std::unexpected(matched.error());
+            if (!matched->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Predicate.test returned no value");
+            }
+            auto accepted = matched->value().as_int();
+            if (!accepted) return std::unexpected(accepted.error());
+            if (*accepted != 0) {
+                return std::optional<Value>(Value::from_reference(*object));
+            }
+            auto empty = make_optional(machine, {}, false);
+            if (!empty) return std::unexpected(empty.error());
+            return std::optional<Value>(Value::from_reference(*empty));
+        });
+    add(registry, "java/util/Optional", "map",
+        "(Ljava/util/function/Function;)Ljava/util/Optional;",
+        [make_optional](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto mapper = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!mapper) return std::unexpected(mapper.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                auto empty = make_optional(machine, {}, false);
+                if (!empty) return std::unexpected(empty.error());
+                return std::optional<Value>(Value::from_reference(*empty));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            const Value callback_argument = Value::from_reference(*value);
+            auto mapped = invoke_checked(
+                machine, *mapper, "java/util/function/Function", "apply",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&callback_argument, 1U));
+            if (!mapped) return std::unexpected(mapped.error());
+            if (!mapped->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Function.apply returned no value");
+            }
+            auto mapped_value = mapped->value().as_reference();
+            if (!mapped_value) return std::unexpected(mapped_value.error());
+            auto optional = make_optional(machine, *mapped_value,
+                                          !mapped_value->is_null());
+            if (!optional) return std::unexpected(optional.error());
+            return std::optional<Value>(Value::from_reference(*optional));
+        });
+    add(registry, "java/util/Optional", "flatMap",
+        "(Ljava/util/function/Function;)Ljava/util/Optional;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto mapper = reference_argument(arguments, 1U);
+            if (!object) return std::unexpected(object.error());
+            if (!mapper) return std::unexpected(mapper.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                return std::optional<Value>(Value::from_reference(*object));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            const Value callback_argument = Value::from_reference(*value);
+            auto mapped = invoke_checked(
+                machine, *mapper, "java/util/function/Function", "apply",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                std::span<const Value>(&callback_argument, 1U));
+            if (!mapped) return std::unexpected(mapped.error());
+            if (!mapped->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Function.apply returned no value");
+            }
+            auto optional = mapped->value().as_reference();
+            if (!optional) return std::unexpected(optional.error());
+            if (optional->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Optional.flatMap mapper returned null");
+            }
+            auto class_name = machine.heap().class_name(*optional);
+            if (!class_name) return std::unexpected(class_name.error());
+            auto compatible = machine.classes().is_assignable(
+                *class_name, "java/util/Optional");
+            if (!compatible) return std::unexpected(compatible.error());
+            if (!*compatible) {
+                return fail_java("java/lang/ClassCastException",
+                                 "Optional.flatMap mapper returned non-Optional");
+            }
+            return std::optional<Value>(Value::from_reference(*optional));
+        });
     add(registry, "java/util/Optional", "orElse",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
         [](Machine& machine, std::span<const Value> arguments)
@@ -3017,6 +3287,180 @@ void register_optional(NativeMethodRegistry& registry) {
             auto value = reference_field(machine, *object, kOptionalValueField);
             if (!value) return std::unexpected(value.error());
             return std::optional<Value>(Value::from_reference(*value));
+        });
+    add(registry, "java/util/Optional", "orElseGet",
+        "(Ljava/util/function/Supplier;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto supplier = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!supplier) return std::unexpected(supplier.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present != 0) {
+                auto value = reference_field(machine, *object,
+                                             kOptionalValueField);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            }
+            if (supplier->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "Optional supplier is null");
+            }
+            auto supplied = invoke_checked(
+                machine, *supplier, "java/util/function/Supplier", "get",
+                "()Ljava/lang/Object;");
+            if (!supplied) return std::unexpected(supplied.error());
+            if (!supplied->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Supplier.get returned no value");
+            }
+            return supplied->value();
+        });
+    add(registry, "java/util/Optional", "orElseThrow",
+        "(Ljava/util/function/Supplier;)Ljava/lang/Object;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto supplier = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!supplier) return std::unexpected(supplier.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present != 0) {
+                auto value = reference_field(machine, *object,
+                                             kOptionalValueField);
+                if (!value) return std::unexpected(value.error());
+                return std::optional<Value>(Value::from_reference(*value));
+            }
+            if (supplier->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "exception supplier is null");
+            }
+            auto supplied = invoke_checked(
+                machine, *supplier, "java/util/function/Supplier", "get",
+                "()Ljava/lang/Object;");
+            if (!supplied) return std::unexpected(supplied.error());
+            if (!supplied->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Supplier.get returned no value");
+            }
+            auto throwable = supplied->value().as_reference();
+            if (!throwable) return std::unexpected(throwable.error());
+            if (throwable->is_null()) {
+                return fail_java("java/lang/NullPointerException",
+                                 "exception supplier returned null");
+            }
+            auto throwable_class = machine.heap().class_name(*throwable);
+            if (!throwable_class) return std::unexpected(throwable_class.error());
+            auto compatible = machine.classes().is_assignable(
+                *throwable_class, "java/lang/Throwable");
+            if (!compatible) return std::unexpected(compatible.error());
+            if (!*compatible) {
+                return fail_java("java/lang/ClassCastException",
+                                 "exception supplier returned non-Throwable");
+            }
+            auto message_value = invoke_checked(
+                machine, *throwable, "java/lang/Throwable", "getMessage",
+                "()Ljava/lang/String;");
+            if (!message_value) return std::unexpected(message_value.error());
+            std::string message;
+            if (message_value->has_value()) {
+                auto message_ref = message_value->value().as_reference();
+                if (!message_ref) return std::unexpected(message_ref.error());
+                if (!message_ref->is_null()) {
+                    auto text = utf8_text(machine, *message_ref);
+                    if (!text) return std::unexpected(text.error());
+                    message = std::move(*text);
+                }
+            }
+            return fail_java(*throwable_class, std::move(message));
+        });
+    add(registry, "java/util/Optional", "equals",
+        "(Ljava/lang/Object;)Z",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            auto other = reference_argument(arguments, 1U, true);
+            if (!object) return std::unexpected(object.error());
+            if (!other) return std::unexpected(other.error());
+            if (*object == *other) {
+                return std::optional<Value>(Value::from_int(1));
+            }
+            if (other->is_null()) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto other_class = machine.heap().class_name(*other);
+            if (!other_class) return std::unexpected(other_class.error());
+            if (*other_class != "java/util/Optional") {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            auto other_present = int_field(machine, *other,
+                                           kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (!other_present) return std::unexpected(other_present.error());
+            if ((*present != 0) != (*other_present != 0)) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            if (*present == 0) {
+                return std::optional<Value>(Value::from_int(1));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            auto other_value = reference_field(machine, *other,
+                                               kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            if (!other_value) return std::unexpected(other_value.error());
+            auto equal = values_equal(machine, *value, *other_value);
+            if (!equal) return std::unexpected(equal.error());
+            return std::optional<Value>(Value::from_int(*equal ? 1 : 0));
+        });
+    add(registry, "java/util/Optional", "hashCode", "()I",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            if (*present == 0) {
+                return std::optional<Value>(Value::from_int(0));
+            }
+            auto value = reference_field(machine, *object, kOptionalValueField);
+            if (!value) return std::unexpected(value.error());
+            auto hash = invoke_checked(machine, *value, "java/lang/Object",
+                                       "hashCode", "()I");
+            if (!hash) return std::unexpected(hash.error());
+            if (!hash->has_value()) {
+                return fail(ErrorCode::internal_error,
+                            "Object.hashCode returned no value");
+            }
+            return hash->value();
+        });
+    add(registry, "java/util/Optional", "toString", "()Ljava/lang/String;",
+        [](Machine& machine, std::span<const Value> arguments)
+            -> Result<std::optional<Value>> {
+            auto object = receiver(arguments);
+            if (!object) return std::unexpected(object.error());
+            auto present = int_field(machine, *object, kOptionalPresentField);
+            if (!present) return std::unexpected(present.error());
+            std::u16string text;
+            if (*present == 0) {
+                text = u"Optional.empty";
+            } else {
+                auto value = reference_field(machine, *object,
+                                             kOptionalValueField);
+                if (!value) return std::unexpected(value.error());
+                auto rendered = value_text(machine, *value, *object,
+                                           u"(this Optional)");
+                if (!rendered) return std::unexpected(rendered.error());
+                text = u"Optional[";
+                text.append(*rendered);
+                text.push_back(u']');
+            }
+            auto string = create_string(machine, std::move(text));
+            if (!string) return std::unexpected(string.error());
+            return std::optional<Value>(Value::from_reference(*string));
         });
 }
 

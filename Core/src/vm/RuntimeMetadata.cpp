@@ -366,6 +366,22 @@ u64 RuntimeMetadata::generation() const noexcept {
     return generation_.load(std::memory_order_acquire);
 }
 
+RuntimeMetadataDiagnostics RuntimeMetadata::diagnostics() const noexcept {
+    std::scoped_lock lock(mutex_);
+    RuntimeMetadataDiagnostics result {
+        .classes = classes_by_name_.size(),
+        .methods = methods_.size(),
+        .descriptors = descriptors_.size(),
+    };
+    for (const auto& [key, method] : methods_) {
+        (void)key;
+        if (method == nullptr || method->decoded == nullptr) continue;
+        result.decoded_instructions += method->decoded->instructions.size();
+        result.decoded_operands += method->decoded->operands.size();
+    }
+    return result;
+}
+
 void RuntimeMetadata::clear() noexcept {
     std::scoped_lock lock(mutex_);
     classes_by_name_.clear();

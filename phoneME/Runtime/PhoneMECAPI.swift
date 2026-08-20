@@ -1,5 +1,388 @@
 import CoreGraphics
 import Foundation
+#if canImport(Metal)
+import Metal
+#endif
+
+#if canImport(Metal)
+private final class PhoneMEMetalFrameTexturePool: @unchecked Sendable {
+    private struct TextureKey: Hashable {
+        let width: Int
+        let height: Int
+    }
+
+    private struct TextureSlot {
+        let texture: MTLTexture
+        let generation: UInt64
+        let epoch: UInt64
+    }
+
+    private let device: MTLDevice
+    private let lock = NSLock()
+    private let maximumRetainedTextures: Int
+    private var available: [TextureKey: [TextureSlot]] = [:]
+    private var retainedTextureCount = 0
+    private var currentEpoch: UInt64 = 1
+
+    init?(maximumRetainedTextures: Int) {
+        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+        self.device = device
+        self.maximumRetainedTextures = max(maximumRetainedTextures, 2)
+    }
+
+    func acquire(width: Int, height: Int) -> PhoneMEMetalFrameTextureLease? {
+        guard width > 0, height > 0 else { return nil }
+        let key = TextureKey(width: width, height: height)
+
+        lock.lock()
+        if var bucket = available[key], let slot = bucket.popLast() {
+            if bucket.isEmpty {
+                available.removeValue(forKey: key)
+            } else {
+                available[key] = bucket
+            }
+            retainedTextureCount -= 1
+            let epoch = currentEpoch
+            lock.unlock()
+            return PhoneMEMetalFrameTextureLease(
+                texture: slot.texture,
+                width: width,
+                height: height,
+                contentGeneration: slot.epoch == epoch ? slot.generation : 0,
+                epoch: epoch,
+                pool: self
+            )
+        }
+        let epoch = currentEpoch
+        lock.unlock()
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = "phoneME J2ME framebuffer \(width)x\(height)"
+        return PhoneMEMetalFrameTextureLease(
+            texture: texture,
+            width: width,
+            height: height,
+            contentGeneration: 0,
+            epoch: epoch,
+            pool: self
+        )
+    }
+
+    func invalidateContents() {
+        lock.lock()
+        currentEpoch &+= 1
+        if currentEpoch == 0 { currentEpoch = 1 }
+        let keys = Array(available.keys)
+        for key in keys {
+            available[key] = available[key]?.map { slot in
+                TextureSlot(
+                    texture: slot.texture,
+                    generation: 0,
+                    epoch: currentEpoch
+                )
+            }
+        }
+        lock.unlock()
+    }
+
+    fileprivate func recycle(
+        texture: MTLTexture,
+        width: Int,
+        height: Int,
+        generation: UInt64,
+        epoch: UInt64
+    ) {
+        lock.lock()
+        guard retainedTextureCount < maximumRetainedTextures else {
+            lock.unlock()
+            return
+        }
+        let key = TextureKey(width: width, height: height)
+        available[key, default: []].append(TextureSlot(
+            texture: texture,
+            generation: epoch == currentEpoch ? generation : 0,
+            epoch: currentEpoch
+        ))
+        retainedTextureCount += 1
+        lock.unlock()
+    }
+}
+
+private final class PhoneMEMetalFrameTextureLease: @unchecked Sendable {
+    let texture: MTLTexture
+    let width: Int
+    let height: Int
+    var contentGeneration: UInt64
+    let epoch: UInt64
+    private var pool: PhoneMEMetalFrameTexturePool?
+
+    init(
+        texture: MTLTexture,
+        width: Int,
+        height: Int,
+        contentGeneration: UInt64,
+        epoch: UInt64,
+        pool: PhoneMEMetalFrameTexturePool
+    ) {
+        self.texture = texture
+        self.width = width
+        self.height = height
+        self.contentGeneration = contentGeneration
+        self.epoch = epoch
+        self.pool = pool
+    }
+
+    deinit {
+        pool?.recycle(
+            texture: texture,
+            width: width,
+            height: height,
+            generation: contentGeneration,
+            epoch: epoch
+        )
+        pool = nil
+    }
+}
+
+private struct PhoneMEFrameDamage: Sendable {
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+
+    var area: Int { width * height }
+
+    func intersectsOrTouches(_ other: PhoneMEFrameDamage) -> Bool {
+        x <= other.x + other.width
+            && other.x <= x + width
+            && y <= other.y + other.height
+            && other.y <= y + height
+    }
+
+    func union(_ other: PhoneMEFrameDamage) -> PhoneMEFrameDamage {
+        let left = min(x, other.x)
+        let top = min(y, other.y)
+        let right = max(x + width, other.x + other.width)
+        let bottom = max(y + height, other.y + other.height)
+        return PhoneMEFrameDamage(
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top
+        )
+    }
+}
+
+private enum PhoneMEMetalFrameUploadPlan {
+    case full
+    case regions([PhoneMEFrameDamage])
+}
+
+private final class PhoneMEMetalDamageHistory: @unchecked Sendable {
+    private struct Record {
+        let generation: UInt64
+        let isFull: Bool
+        let regions: [PhoneMEFrameDamage]
+    }
+
+    private let lock = NSLock()
+    private let maximumRecords = 32
+    private var records: [Record] = []
+
+    func reset() {
+        lock.lock()
+        records.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    func planAndRecord(
+        textureGeneration: UInt64,
+        previousPresentedGeneration: UInt64,
+        currentGeneration: UInt64,
+        currentRegions: [PhoneMEFrameDamage]?,
+        width: Int,
+        height: Int
+    ) -> PhoneMEMetalFrameUploadPlan {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let generationsAreContiguous = previousPresentedGeneration != 0
+            && previousPresentedGeneration != UInt64.max
+            && currentGeneration == previousPresentedGeneration + 1
+        let currentIsFull = !generationsAreContiguous || currentRegions == nil
+        let safeCurrentRegions = currentIsFull ? [] : (currentRegions ?? [])
+        records.append(Record(
+            generation: currentGeneration,
+            isFull: currentIsFull,
+            regions: safeCurrentRegions
+        ))
+        if records.count > maximumRecords {
+            records.removeFirst(records.count - maximumRecords)
+        }
+
+        guard
+            currentGeneration != UInt64.max,
+            textureGeneration > 0,
+            textureGeneration < currentGeneration,
+            width > 0,
+            height > 0,
+            textureGeneration != UInt64.max
+        else {
+            return .full
+        }
+
+        var expectedGeneration = textureGeneration + 1
+        var accumulated: [PhoneMEFrameDamage] = []
+        for record in records where record.generation > textureGeneration {
+            guard record.generation <= currentGeneration else { break }
+            guard record.generation == expectedGeneration, !record.isFull else {
+                return .full
+            }
+            accumulated.append(contentsOf: record.regions)
+            if record.generation == UInt64.max { return .full }
+            expectedGeneration = record.generation + 1
+        }
+        guard expectedGeneration == currentGeneration + 1,
+              !accumulated.isEmpty else {
+            return .full
+        }
+
+        var merged: [PhoneMEFrameDamage] = []
+        for region in accumulated {
+            guard
+                region.x >= 0,
+                region.y >= 0,
+                region.width > 0,
+                region.height > 0,
+                region.x + region.width <= width,
+                region.y + region.height <= height
+            else {
+                return .full
+            }
+
+            var candidate = region
+            var index = 0
+            while index < merged.count {
+                if candidate.intersectsOrTouches(merged[index]) {
+                    candidate = candidate.union(merged.remove(at: index))
+                    index = 0
+                } else {
+                    index += 1
+                }
+            }
+            merged.append(candidate)
+        }
+
+        let frameArea = width * height
+        let damagedArea = merged.reduce(0) { $0 + $1.area }
+        guard merged.count <= 8,
+              damagedArea * 2 < frameArea else {
+            return .full
+        }
+        return .regions(merged)
+    }
+}
+#endif
+
+final class PhoneMEFrame: @unchecked Sendable {
+    let width: Int
+    let height: Int
+    let generation: UInt64
+    let image: CGImage?
+
+#if canImport(Metal)
+    private let metalLease: PhoneMEMetalFrameTextureLease?
+    var metalTexture: MTLTexture? { metalLease?.texture }
+
+    func retainMetalResources(until commandBuffer: MTLCommandBuffer) {
+        guard let metalLease else { return }
+        commandBuffer.addCompletedHandler { [metalLease] _ in
+            _ = metalLease
+        }
+    }
+#endif
+
+    fileprivate init(
+        width: Int,
+        height: Int,
+        generation: UInt64,
+        image: CGImage?
+    ) {
+        self.width = width
+        self.height = height
+        self.generation = generation
+        self.image = image
+#if canImport(Metal)
+        self.metalLease = nil
+#endif
+    }
+
+#if canImport(Metal)
+    fileprivate init(
+        width: Int,
+        height: Int,
+        generation: UInt64,
+        image: CGImage?,
+        metalLease: PhoneMEMetalFrameTextureLease?
+    ) {
+        self.width = width
+        self.height = height
+        self.generation = generation
+        self.image = image
+        self.metalLease = metalLease
+    }
+#endif
+
+    func makeCGImage() -> CGImage? {
+        if let image { return image }
+#if canImport(Metal)
+        guard let texture = metalTexture, width > 0, height > 0 else {
+            return nil
+        }
+        let byteCount = width * height * 4
+        var bytes = Data(count: byteCount)
+        bytes.withUnsafeMutableBytes { storage in
+            guard let baseAddress = storage.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: width * 4,
+                from: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0
+            )
+        }
+        guard let provider = CGDataProvider(data: bytes as CFData) else {
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(
+                rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+            ),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+#else
+        return nil
+#endif
+    }
+}
 
 private final class PhoneMEPixelBufferPool: @unchecked Sendable {
     private struct Buffer {
@@ -120,6 +503,28 @@ final class PhoneMECAPI: @unchecked Sendable {
         case ready = 1
     }
 
+    enum ThermalPressure: Int32, Sendable {
+        case nominal = 0
+        case fair = 1
+        case serious = 2
+        case critical = 3
+    }
+
+    static var currentThermalPressure: ThermalPressure {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:
+            return .nominal
+        case .fair:
+            return .fair
+        case .serious:
+            return .serious
+        case .critical:
+            return .critical
+        @unknown default:
+            return .serious
+        }
+    }
+
     static let trollStoreBuildInfoKey = "PhoneMETrollStoreJIT"
 
     static var jitStatus: JITStatus {
@@ -186,6 +591,12 @@ final class PhoneMECAPI: @unchecked Sendable {
     private let imageBufferPool = PhoneMEPixelBufferPool(
         maximumRetainedBuffers: 12
     )
+#if canImport(Metal)
+    private let metalFrameTexturePool = PhoneMEMetalFrameTexturePool(
+        maximumRetainedTextures: 4
+    )
+    private let metalDamageHistory = PhoneMEMetalDamageHistory()
+#endif
 
     private init(layout: PhoneMERuntimeLayout) {
         self.layout = layout
@@ -200,6 +611,10 @@ final class PhoneMECAPI: @unchecked Sendable {
     }
 
     func createRuntime() -> RuntimeHandle? {
+#if canImport(Metal)
+        metalFrameTexturePool?.invalidateContents()
+        metalDamageHistory.reset()
+#endif
         guard let rawRuntime = phoneme_create() else {
             NSLog("[phoneMECore] phoneme_create failed home=%@", layout.homeURL.path)
             return nil
@@ -216,6 +631,21 @@ final class PhoneMECAPI: @unchecked Sendable {
                 "[phoneMECore] phoneme_configure failed status=%d home=%@ detail=%@",
                 result,
                 layout.homeURL.path,
+                detail
+            )
+            phoneme_destroy(rawRuntime)
+            return nil
+        }
+
+        let thermalResult = phoneme_set_thermal_pressure(
+            rawRuntime,
+            Self.currentThermalPressure.rawValue
+        )
+        guard thermalResult == 0 else {
+            let detail = lastErrorMessage(handle) ?? "unknown thermal configure error"
+            NSLog(
+                "[phoneMECore] phoneme_set_thermal_pressure failed status=%d detail=%@",
+                thermalResult,
                 detail
             )
             phoneme_destroy(rawRuntime)
@@ -297,6 +727,13 @@ final class PhoneMECAPI: @unchecked Sendable {
         enabled: Bool
     ) -> Int32 {
         phoneme_configure_jit(runtime?.rawValue, enabled ? 1 : 0)
+    }
+
+    func setThermalPressure(
+        _ runtime: RuntimeHandle?,
+        pressure: ThermalPressure
+    ) -> Int32 {
+        phoneme_set_thermal_pressure(runtime?.rawValue, pressure.rawValue)
     }
 
     func configureTranslation(
@@ -930,6 +1367,136 @@ final class PhoneMECAPI: @unchecked Sendable {
         }
 
         return (image, generation)
+    }
+
+    func presentationFrame(
+        _ runtime: RuntimeHandle?,
+        after previousGeneration: UInt64
+    ) -> PhoneMEFrame? {
+#if canImport(UIKit) && canImport(Metal)
+        guard let runtime, let metalFrameTexturePool else {
+            if let copied = copyFrame(runtime, after: previousGeneration) {
+                return PhoneMEFrame(
+                    width: copied.image.width,
+                    height: copied.image.height,
+                    generation: copied.generation,
+                    image: copied.image,
+                    metalLease: nil
+                )
+            }
+            return nil
+        }
+
+        var width: Int32 = 0
+        var height: Int32 = 0
+        var generation: UInt64 = 0
+        var damageCount: Int32 = 0
+        var damageStorage = Array(
+            repeating: PhoneMEFrameDamageRegion(
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0
+            ),
+            count: 32
+        )
+        let pixels = damageStorage.withUnsafeMutableBufferPointer { storage in
+            phoneme_acquire_current_frame_rgba_regions_since(
+                runtime.rawValue,
+                previousGeneration,
+                &width,
+                &height,
+                &generation,
+                storage.baseAddress,
+                Int32(storage.count),
+                &damageCount
+            )
+        }
+        guard let pixels else {
+            return nil
+        }
+        defer { phoneme_release_frame_rgba(runtime.rawValue) }
+
+        let frameWidth = Int(width)
+        let frameHeight = Int(height)
+        guard
+            width > 0,
+            height > 0,
+            generation != previousGeneration,
+            let lease = metalFrameTexturePool.acquire(
+                width: frameWidth,
+                height: frameHeight
+            )
+        else {
+            return nil
+        }
+
+        let currentDamageRegions: [PhoneMEFrameDamage]? = {
+            guard damageCount >= 0,
+                  damageCount <= Int32(damageStorage.count) else {
+                return nil
+            }
+            return damageStorage.prefix(Int(damageCount)).map { region in
+                PhoneMEFrameDamage(
+                    x: Int(region.x),
+                    y: Int(region.y),
+                    width: Int(region.width),
+                    height: Int(region.height)
+                )
+            }
+        }()
+        let uploadPlan = metalDamageHistory.planAndRecord(
+            textureGeneration: lease.contentGeneration,
+            previousPresentedGeneration: previousGeneration,
+            currentGeneration: generation,
+            currentRegions: currentDamageRegions,
+            width: frameWidth,
+            height: frameHeight
+        )
+        let bytesPerRow = frameWidth * 4
+        switch uploadPlan {
+        case .full:
+            lease.texture.replace(
+                region: MTLRegionMake2D(0, 0, frameWidth, frameHeight),
+                mipmapLevel: 0,
+                withBytes: pixels,
+                bytesPerRow: bytesPerRow
+            )
+        case .regions(let regions):
+            for region in regions {
+                let byteOffset = (region.y * frameWidth + region.x) * 4
+                lease.texture.replace(
+                    region: MTLRegionMake2D(
+                        region.x,
+                        region.y,
+                        region.width,
+                        region.height
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: pixels.advanced(by: byteOffset),
+                    bytesPerRow: bytesPerRow
+                )
+            }
+        }
+        lease.contentGeneration = generation
+        return PhoneMEFrame(
+            width: frameWidth,
+            height: frameHeight,
+            generation: generation,
+            image: nil,
+            metalLease: lease
+        )
+#else
+        guard let copied = copyFrame(runtime, after: previousGeneration) else {
+            return nil
+        }
+        return PhoneMEFrame(
+            width: copied.image.width,
+            height: copied.image.height,
+            generation: copied.generation,
+            image: copied.image
+        )
+#endif
     }
 
     private static func copyDiagnostic(

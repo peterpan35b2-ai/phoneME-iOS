@@ -220,8 +220,8 @@ Status MediaService::prefetch(i32 player_id) {
     }
     auto realized = realize_unlocked(**player);
     if (!realized) return realized;
-    auto tone_handle = ensure_tone_handle_unlocked(**player);
-    if (!tone_handle) return tone_handle;
+    auto handle = ensure_platform_handle_unlocked(**player);
+    if (!handle) return handle;
     if ((*player)->state < PlayerState::prefetched) {
         (*player)->state = PlayerState::prefetched;
     }
@@ -240,18 +240,14 @@ Result<std::optional<MediaEvent>> MediaService::start(i32 player_id) {
     }
     auto realized = realize_unlocked(**player);
     if (!realized) return std::unexpected(realized.error());
-    auto tone_handle = ensure_tone_handle_unlocked(**player);
-    if (!tone_handle) return std::unexpected(tone_handle.error());
+    auto handle = ensure_platform_handle_unlocked(**player);
+    if (!handle) return std::unexpected(handle.error());
     if ((*player)->state < PlayerState::prefetched) {
         (*player)->state = PlayerState::prefetched;
     }
 
-    if ((*player)->adapter_handle == 0) {
-        return fail(ErrorCode::invalid_state,
-                    "player has no platform media handle");
-    }
     if (!suspended_) {
-        auto started = adapter_->start((*player)->adapter_handle);
+        auto started = start_platform_unlocked(**player);
         if (!started) return std::unexpected(started.error());
     } else {
         (*player)->resume_after_suspend = true;
@@ -277,7 +273,10 @@ Result<std::optional<MediaEvent>> MediaService::stop(i32 player_id) {
     i64 media_time = 0;
     if ((*player)->adapter_handle != 0) {
         auto time = adapter_->media_time((*player)->adapter_handle);
-        if (time) media_time = *time;
+        if (time) {
+            media_time = *time;
+            (*player)->media_time = *time;
+        }
         auto stopped = adapter_->stop((*player)->adapter_handle);
         if (!stopped) return std::unexpected(stopped.error());
     }
@@ -298,8 +297,19 @@ Status MediaService::deallocate(i32 player_id) {
         (*player)->state == PlayerState::unrealized) {
         return {};
     }
+    // JSR-135 defines deallocate() as the transition that releases scarce or
+    // exclusive resources acquired by prefetch/start. A merely REALIZED
+    // player is already at the target state, so the call is a no-op.
+    if ((*player)->state == PlayerState::realized) return {};
+
     if ((*player)->adapter_handle != 0) {
+        auto time = adapter_->media_time((*player)->adapter_handle);
+        if (time) (*player)->media_time = *time;
+        auto duration = adapter_->duration((*player)->adapter_handle);
+        if (duration) (*player)->duration = *duration;
         (void)adapter_->stop((*player)->adapter_handle);
+        adapter_->close((*player)->adapter_handle);
+        (*player)->adapter_handle = 0;
     }
     (*player)->state = PlayerState::realized;
     (*player)->resume_after_suspend = false;
@@ -378,13 +388,17 @@ Result<i64> MediaService::set_media_time(i32 player_id, i64 microseconds) {
         (*player)->state == PlayerState::closed) {
         return fail(ErrorCode::invalid_state, "player is not realized");
     }
-    auto tone_handle = ensure_tone_handle_unlocked(**player);
-    if (!tone_handle) return std::unexpected(tone_handle.error());
+    const i64 requested = std::max<i64>(0, microseconds);
     if ((*player)->adapter_handle == 0) {
-        return 0;
+        const i64 clamped = (*player)->duration > 0
+            ? std::min(requested, (*player)->duration)
+            : requested;
+        (*player)->media_time = clamped;
+        return clamped;
     }
-    return adapter_->set_media_time((*player)->adapter_handle,
-                                    std::max<i64>(0, microseconds));
+    auto result = adapter_->set_media_time((*player)->adapter_handle, requested);
+    if (result) (*player)->media_time = *result;
+    return result;
 }
 
 Result<PlayerSnapshot> MediaService::snapshot(i32 player_id) {
@@ -393,15 +407,10 @@ Result<PlayerSnapshot> MediaService::snapshot(i32 player_id) {
     if (!player) return std::unexpected(player.error());
     auto synchronized = synchronize_unlocked(**player);
     if (!synchronized) return std::unexpected(synchronized.error());
-    if ((*player)->state >= PlayerState::realized &&
-        (*player)->state != PlayerState::closed &&
-        !(*player)->tone_sequence.empty()) {
-        auto tone_handle = ensure_tone_handle_unlocked(**player);
-        if (!tone_handle) return std::unexpected(tone_handle.error());
-    }
-
     PlayerSnapshot result {
         .state = (*player)->state,
+        .media_time = (*player)->media_time,
+        .duration = (*player)->duration,
         .loop_count = (*player)->loop_count,
         .volume = (*player)->volume,
         .muted = (*player)->muted,
@@ -410,9 +419,15 @@ Result<PlayerSnapshot> MediaService::snapshot(i32 player_id) {
     if ((*player)->adapter_handle != 0 &&
         (*player)->state != PlayerState::closed) {
         auto media_time = adapter_->media_time((*player)->adapter_handle);
-        if (media_time) result.media_time = *media_time;
+        if (media_time) {
+            (*player)->media_time = *media_time;
+            result.media_time = *media_time;
+        }
         auto duration = adapter_->duration((*player)->adapter_handle);
-        if (duration) result.duration = *duration;
+        if (duration) {
+            (*player)->duration = *duration;
+            result.duration = *duration;
+        }
     }
     return result;
 }
@@ -422,6 +437,14 @@ Result<std::optional<MediaEvent>> MediaService::synchronize(i32 player_id) {
     auto player = player_unlocked(player_id);
     if (!player) return std::unexpected(player.error());
     return synchronize_unlocked(**player);
+}
+
+Result<bool> MediaService::event_poll_needed(i32 player_id) {
+    std::scoped_lock lock(mutex_);
+    auto player = player_unlocked(player_id);
+    if (!player) return std::unexpected(player.error());
+    return (*player)->state == PlayerState::started &&
+           (*player)->adapter_handle != 0 && !suspended_;
 }
 
 Status MediaService::set_tone_sequence(i32 player_id,
@@ -445,6 +468,8 @@ Status MediaService::set_tone_sequence(i32 player_id,
         (*player)->adapter_handle = 0;
     }
     (*player)->tone_sequence = std::move(sequence);
+    (*player)->media_time = 0;
+    (*player)->duration = -1;
     return {};
 }
 
@@ -481,8 +506,8 @@ void MediaService::resume() noexcept {
     for (auto& [id, player] : players_) {
         (void)id;
         if (player.state == PlayerState::started &&
-            player.resume_after_suspend && player.adapter_handle != 0) {
-            if (adapter_->start(player.adapter_handle)) {
+            player.resume_after_suspend) {
+            if (start_platform_unlocked(player)) {
                 player.resume_after_suspend = false;
             }
         }
@@ -518,6 +543,18 @@ Status MediaService::realize_unlocked(Player& player) {
         return {};
     }
 
+    auto handle = ensure_platform_handle_unlocked(player);
+    if (!handle) return handle;
+    player.state = PlayerState::realized;
+    return {};
+}
+
+Status MediaService::ensure_platform_handle_unlocked(Player& player) {
+    if (player.adapter_handle != 0) return {};
+    if (is_tone_type(player.content_type)) {
+        return ensure_tone_handle_unlocked(player);
+    }
+
     Result<i32> handle = player.source_kind == SourceKind::data
         ? adapter_->create_data(player.data, player.content_type)
         : adapter_->create_locator(player.locator, player.content_type);
@@ -542,8 +579,41 @@ Status MediaService::realize_unlocked(Player& player) {
         player.adapter_handle = 0;
         return mute;
     }
-    player.state = PlayerState::realized;
+    if (player.media_time > 0) {
+        auto restored = adapter_->set_media_time(*handle, player.media_time);
+        if (!restored) {
+            adapter_->close(*handle);
+            player.adapter_handle = 0;
+            return std::unexpected(restored.error());
+        }
+        player.media_time = *restored;
+    }
+    auto duration = adapter_->duration(*handle);
+    if (duration) player.duration = *duration;
     return {};
+}
+
+Status MediaService::start_platform_unlocked(Player& player) {
+    auto handle = ensure_platform_handle_unlocked(player);
+    if (!handle) return handle;
+    if (player.adapter_handle == 0) {
+        return fail(ErrorCode::invalid_state,
+                    "player has no platform media handle");
+    }
+
+    auto started = adapter_->start(player.adapter_handle);
+    if (started) return {};
+
+    // A platform media-server reset can invalidate a native handle while the
+    // Java Player object remains alive. Retry once from the source retained by
+    // MediaService so the next explicit start()/resume request can recover
+    // even if the host bridge could not rebuild its entry in-place.
+    adapter_->close(player.adapter_handle);
+    player.adapter_handle = 0;
+    auto rebuilt = ensure_platform_handle_unlocked(player);
+    if (!rebuilt) return rebuilt;
+    if (player.adapter_handle == 0) return std::unexpected(started.error());
+    return adapter_->start(player.adapter_handle);
 }
 
 Status MediaService::ensure_tone_handle_unlocked(Player& player) {
@@ -574,6 +644,17 @@ Status MediaService::ensure_tone_handle_unlocked(Player& player) {
         player.adapter_handle = 0;
         return mute;
     }
+    if (player.media_time > 0) {
+        auto restored = adapter_->set_media_time(*handle, player.media_time);
+        if (!restored) {
+            adapter_->close(*handle);
+            player.adapter_handle = 0;
+            return std::unexpected(restored.error());
+        }
+        player.media_time = *restored;
+    }
+    auto duration = adapter_->duration(*handle);
+    if (duration) player.duration = *duration;
     return {};
 }
 
@@ -586,6 +667,8 @@ Result<std::optional<MediaEvent>> MediaService::synchronize_unlocked(
     auto failed = adapter_->has_error(player.adapter_handle);
     if (!failed) return std::unexpected(failed.error());
     if (*failed) {
+        auto time = adapter_->media_time(player.adapter_handle);
+        if (time) player.media_time = *time;
         player.state = PlayerState::prefetched;
         return std::optional<MediaEvent>(MediaEvent {
             .kind = MediaEventKind::error,
@@ -600,11 +683,12 @@ Result<std::optional<MediaEvent>> MediaService::synchronize_unlocked(
     if (!ended) return std::unexpected(ended.error());
     if (!*ended) return std::optional<MediaEvent> {};
     auto time = adapter_->media_time(player.adapter_handle);
+    if (time) player.media_time = *time;
     player.state = PlayerState::prefetched;
     return std::optional<MediaEvent>(MediaEvent {
         .kind = MediaEventKind::end_of_media,
         .player_id = player.id,
-        .media_time = time ? *time : 0,
+        .media_time = time ? *time : player.media_time,
     });
 }
 
@@ -681,6 +765,14 @@ void MediaService::close_unlocked(Player& player) noexcept {
         adapter_->close(player.adapter_handle);
         player.adapter_handle = 0;
     }
+    // A closed JSR-135 Player keeps only its observable terminal state. Drop
+    // potentially large source/tone buffers immediately instead of retaining
+    // them in the service map until the entire MIDlet VM is destroyed.
+    std::vector<u8>().swap(player.data);
+    std::vector<u8>().swap(player.tone_sequence);
+    std::string().swap(player.locator);
+    player.media_time = 0;
+    player.duration = -1;
     player.state = PlayerState::closed;
     player.resume_after_suspend = false;
 }

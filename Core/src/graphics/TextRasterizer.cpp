@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,7 @@
 
 #include "PhoneMEFontData.hpp"
 #include "phoneme/graphics/Graphics.hpp"
+#include "phoneme/vm/PerformanceCounters.hpp"
 
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
@@ -255,6 +257,18 @@ struct PhoneMEFontBin final {
     return ((font.bitmap[bit_index >> 3U] >> (bit_index & 7U)) & 1U) != 0U;
 }
 
+[[nodiscard]] inline bool composite_text_pixel(Pixel source,
+                                               Pixel& destination) noexcept {
+    const u8 source_alpha = alpha(source);
+    if (source_alpha == 0U) return false;
+    const Pixel composited = source_alpha == 255U
+        ? rgb565_roundtrip(source)
+        : rgb565_roundtrip(source_over(source, destination));
+    if (composited == destination) return false;
+    destination = composited;
+    return true;
+}
+
 [[nodiscard]] Status draw_bitmap_text(Image& target,
                                       const Font& logical_font,
                                       std::span<const char32_t> text,
@@ -276,6 +290,25 @@ struct PhoneMEFontBin final {
                            visible_clip.width;
     const i64 clip_bottom = static_cast<i64>(visible_clip.y) +
                             visible_clip.height;
+    auto target_pixels = target.mutable_pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    bool changed = false;
+    i32 dirty_left = target.width();
+    i32 dirty_top = target.height();
+    i32 dirty_right = -1;
+    i32 dirty_bottom = -1;
+    const auto store_pixel = [&](i32 destination_x,
+                                 i32 destination_y) noexcept {
+        Pixel& destination = target_pixels[
+            static_cast<usize>(destination_y) * target_stride +
+            static_cast<usize>(destination_x)];
+        if (!composite_text_pixel(color, destination)) return;
+        changed = true;
+        dirty_left = std::min(dirty_left, destination_x);
+        dirty_top = std::min(dirty_top, destination_y);
+        dirty_right = std::max(dirty_right, destination_x);
+        dirty_bottom = std::max(dirty_bottom, destination_y);
+    };
 
     i64 pen_x = x;
     for (const char32_t character : text) {
@@ -307,27 +340,22 @@ struct PhoneMEFontBin final {
                     destination_x >= clip_right) {
                     continue;
                 }
-                auto stored = target.set_pixel(static_cast<i32>(destination_x),
-                                               static_cast<i32>(destination_y),
-                                               color,
-                                               true);
-                if (!stored) {
-                    return stored;
-                }
+                store_pixel(static_cast<i32>(destination_x),
+                            static_cast<i32>(destination_y));
                 if (logical_font.is_bold() &&
                     destination_x + 1 < clip_right) {
-                    stored = target.set_pixel(
-                        static_cast<i32>(destination_x + 1),
-                        static_cast<i32>(destination_y),
-                        color,
-                        true);
-                    if (!stored) {
-                        return stored;
-                    }
+                    store_pixel(static_cast<i32>(destination_x + 1),
+                                static_cast<i32>(destination_y));
                 }
             }
         }
         pen_x += glyph_advance(font, glyph_index, logical_font);
+    }
+    if (changed) {
+        target.mark_dirty_region(dirty_left,
+                                 dirty_top,
+                                 dirty_right - dirty_left + 1,
+                                 dirty_bottom - dirty_top + 1);
     }
     return {};
 }
@@ -367,6 +395,13 @@ struct PhoneMEFontBin final {
     }
 
     const u32 base_alpha = alpha(color);
+    auto target_pixels = target.mutable_pixels();
+    const usize target_stride = static_cast<usize>(target.width());
+    bool changed = false;
+    i32 dirty_left = target.width();
+    i32 dirty_top = target.height();
+    i32 dirty_right = -1;
+    i32 dirty_bottom = -1;
     for (i64 row = visible_top; row < visible_bottom; ++row) {
         const u8* mask_row = mask.data() +
             static_cast<usize>(row - destination_top) *
@@ -383,14 +418,25 @@ struct PhoneMEFontBin final {
                                       red(color),
                                       green(color),
                                       blue(color));
-            auto stored = target.set_pixel(static_cast<i32>(column),
-                                           static_cast<i32>(row),
-                                           source,
-                                           true);
-            if (!stored) {
-                return stored;
+            const i32 destination_x = static_cast<i32>(column);
+            const i32 destination_y = static_cast<i32>(row);
+            Pixel& destination = target_pixels[
+                static_cast<usize>(destination_y) * target_stride +
+                static_cast<usize>(destination_x)];
+            if (composite_text_pixel(source, destination)) {
+                changed = true;
+                dirty_left = std::min(dirty_left, destination_x);
+                dirty_top = std::min(dirty_top, destination_y);
+                dirty_right = std::max(dirty_right, destination_x);
+                dirty_bottom = std::max(dirty_bottom, destination_y);
             }
         }
+    }
+    if (changed) {
+        target.mark_dirty_region(dirty_left,
+                                 dirty_top,
+                                 dirty_right - dirty_left + 1,
+                                 dirty_bottom - dirty_top + 1);
     }
     return {};
 }
@@ -415,6 +461,106 @@ struct CachedFont final {
     CachedFont(const CachedFont&) = delete;
     CachedFont& operator=(const CachedFont&) = delete;
 };
+
+[[nodiscard]] i32 font_cache_key(const Font& font) noexcept;
+
+constexpr usize kCoreTextMaskCacheMaximumBytes = 512U * 1024U;
+constexpr usize kCoreTextMaskCacheMaximumEntries = 256U;
+constexpr usize kCoreTextMaskCacheMaximumCodePoints = 64U;
+constexpr i32 kCoreTextMaskCacheMaximumWidth = 2'048;
+
+struct CoreTextMaskKey final {
+    i32 font_key {0};
+    std::u32string text;
+
+    [[nodiscard]] bool operator==(const CoreTextMaskKey& other) const noexcept {
+        return font_key == other.font_key && text == other.text;
+    }
+};
+
+struct CoreTextMaskKeyHash final {
+    [[nodiscard]] usize operator()(const CoreTextMaskKey& key) const noexcept {
+        usize hash = static_cast<usize>(static_cast<u32>(key.font_key)) +
+                     0x9E3779B9U;
+        for (char32_t character : key.text) {
+            hash ^= static_cast<usize>(character) + 0x9E3779B9U +
+                    (hash << 6U) + (hash >> 2U);
+        }
+        return hash;
+    }
+};
+
+struct CachedCoreTextMask final {
+    i32 minimum_x {0};
+    i32 width {0};
+    std::vector<u8> mask;
+};
+
+struct CoreTextMaskCache final {
+    std::mutex mutex;
+    std::unordered_map<CoreTextMaskKey,
+                       std::shared_ptr<const CachedCoreTextMask>,
+                       CoreTextMaskKeyHash> entries;
+    std::deque<CoreTextMaskKey> order;
+    usize bytes {0U};
+};
+
+[[nodiscard]] CoreTextMaskCache& core_text_mask_cache() noexcept {
+    static CoreTextMaskCache cache;
+    return cache;
+}
+
+[[nodiscard]] std::shared_ptr<const CachedCoreTextMask>
+cached_core_text_mask(const Font& font,
+                      std::span<const char32_t> text) {
+    if (text.size() > kCoreTextMaskCacheMaximumCodePoints) return {};
+    CoreTextMaskKey key {
+        .font_key = font_cache_key(font),
+        .text = std::u32string(text.begin(), text.end()),
+    };
+    auto& cache = core_text_mask_cache();
+    std::scoped_lock lock(cache.mutex);
+    const auto found = cache.entries.find(key);
+    if (found == cache.entries.end()) {
+        vm::PerformanceCounters::record_core_text_cache(false);
+        return {};
+    }
+    vm::PerformanceCounters::record_core_text_cache(true);
+    return found->second;
+}
+
+void cache_core_text_mask(const Font& font,
+                          std::span<const char32_t> text,
+                          std::shared_ptr<const CachedCoreTextMask> value) {
+    if (!value || text.size() > kCoreTextMaskCacheMaximumCodePoints ||
+        value->width > kCoreTextMaskCacheMaximumWidth ||
+        value->mask.size() > kCoreTextMaskCacheMaximumBytes) {
+        return;
+    }
+    CoreTextMaskKey key {
+        .font_key = font_cache_key(font),
+        .text = std::u32string(text.begin(), text.end()),
+    };
+    auto& cache = core_text_mask_cache();
+    std::scoped_lock lock(cache.mutex);
+    if (cache.entries.contains(key)) return;
+    while ((!cache.order.empty()) &&
+           (cache.entries.size() >= kCoreTextMaskCacheMaximumEntries ||
+            cache.bytes + value->mask.size() >
+                kCoreTextMaskCacheMaximumBytes)) {
+        CoreTextMaskKey oldest = std::move(cache.order.front());
+        cache.order.pop_front();
+        const auto found = cache.entries.find(oldest);
+        if (found == cache.entries.end()) continue;
+        cache.bytes -= found->second->mask.size();
+        cache.entries.erase(found);
+        vm::PerformanceCounters::record_core_text_cache_eviction();
+    }
+    cache.bytes += value->mask.size();
+    cache.order.push_back(key);
+    cache.entries.emplace(std::move(key), std::move(value));
+    vm::PerformanceCounters::observe_core_text_cache_bytes(cache.bytes);
+}
 
 [[nodiscard]] i32 font_cache_key(const Font& font) noexcept {
     return (font.face() & 0xFF) |
@@ -645,6 +791,17 @@ struct CachedFont final {
         return fail(ErrorCode::unsupported_feature,
                     "CoreText fallback font could not be created");
     }
+    if (auto cached = cached_core_text_mask(font, text)) {
+        return composite_text_mask(
+            target,
+            cached->mask,
+            cached->width,
+            static_cast<i64>(x) + cached->minimum_x -
+                kCoreTextFallbackPadding,
+            top,
+            color,
+            clip);
+    }
     CTLineRef line = create_line(resource->font, text);
     if (line == nullptr) {
         return fail(ErrorCode::internal_error,
@@ -690,6 +847,59 @@ struct CachedFont final {
         CFRelease(line);
         return fail(ErrorCode::overflow,
                     "CoreText fallback mask width overflows");
+    }
+
+    const bool cacheable_mask =
+        text.size() <= kCoreTextMaskCacheMaximumCodePoints &&
+        full_mask_width <= kCoreTextMaskCacheMaximumWidth;
+    if (cacheable_mask) {
+        const i32 mask_width = static_cast<i32>(full_mask_width);
+        const usize width_value = static_cast<usize>(mask_width);
+        constexpr usize height_value = static_cast<usize>(kPhoneMEFontHeight);
+        if (width_value <= std::numeric_limits<usize>::max() / height_value) {
+            auto cached = std::make_shared<CachedCoreTextMask>();
+            cached->minimum_x = minimum_x;
+            cached->width = mask_width;
+            cached->mask.assign(width_value * height_value, 0U);
+
+            CGColorSpaceRef color_space = CGColorSpaceCreateDeviceGray();
+            if (color_space != nullptr) {
+                CGContextRef context = CGBitmapContextCreate(
+                    cached->mask.data(),
+                    width_value,
+                    height_value,
+                    8U,
+                    width_value,
+                    color_space,
+                    static_cast<CGBitmapInfo>(kCGImageAlphaNone));
+                CGColorSpaceRelease(color_space);
+                if (context != nullptr) {
+                    CGContextSetAllowsAntialiasing(context, true);
+                    CGContextSetShouldAntialias(context, true);
+                    CGContextSetShouldSmoothFonts(context, true);
+                    CGContextSetGrayFillColor(context, 1.0, 1.0);
+                    CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+                    CGContextSetTextPosition(
+                        context,
+                        static_cast<CGFloat>(
+                            kCoreTextFallbackPadding - minimum_x),
+                        kCoreTextFallbackBaselineFromBottom);
+                    CTLineDraw(line, context);
+                    CGContextRelease(context);
+                    CFRelease(line);
+                    cache_core_text_mask(font, text, cached);
+                    return composite_text_mask(
+                        target,
+                        cached->mask,
+                        cached->width,
+                        static_cast<i64>(x) + minimum_x -
+                            kCoreTextFallbackPadding,
+                        top,
+                        color,
+                        clip);
+                }
+            }
+        }
     }
 
     const Rect target_clip = intersect(clip, target_bounds(target));

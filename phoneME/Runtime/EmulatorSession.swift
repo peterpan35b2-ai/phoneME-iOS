@@ -3,9 +3,9 @@ import Foundation
 
 @MainActor
 final class EmulatorFrameStore: ObservableObject {
-    @Published private(set) var frame: CGImage?
+    @Published private(set) var frame: PhoneMEFrame?
 
-    fileprivate func update(_ frame: CGImage) {
+    fileprivate func update(_ frame: PhoneMEFrame) {
         self.frame = frame
     }
 
@@ -118,7 +118,7 @@ struct RunningJ2MEApplication: Identifiable, Equatable {
 }
 
 private struct EmulatorPresentationSnapshot {
-    let frame: CGImage?
+    let frame: PhoneMEFrame?
     let presentationMode: EmulatorPresentationMode
     let lcdUI: LCDUIState
     let lcdUIImages: [Int32: CGImage]
@@ -136,7 +136,7 @@ final class EmulatorSession: ObservableObject {
     let frameStore = EmulatorFrameStore()
     let fpsStore = EmulatorFPSStore()
     let lcdUIImageStore = LCDUIImageStore()
-    var frame: CGImage? { frameStore.frame }
+    var frame: PhoneMEFrame? { frameStore.frame }
     var lcdUIImages: [Int32: CGImage] { lcdUIImageStore.images }
 
     var isPresentingNativeLCDUI: Bool {

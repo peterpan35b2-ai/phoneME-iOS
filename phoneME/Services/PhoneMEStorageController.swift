@@ -1,6 +1,6 @@
 import Foundation
 
-enum PhoneMEStorageLocation: String, CaseIterable, Identifiable {
+enum PhoneMEStorageLocation: String, CaseIterable, Identifiable, Sendable {
     case local
     case iCloud
 
@@ -139,13 +139,16 @@ final class PhoneMEStorageController: ObservableObject {
         isSwitching = true
         lastErrorMessage = nil
         let sourceRoot = rootURL
-        let fileManager = self.fileManager
 
         do {
             let destinationRoot = try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<URL, Error>) in
                 DispatchQueue.global(qos: .utility).async {
                     do {
+                        // FileManager is not Sendable. Use an executor-local
+                        // instance instead of capturing the MainActor-owned
+                        // controller instance across the @Sendable closure.
+                        let fileManager = FileManager()
                         let destination: URL
                         switch location {
                         case .local:
@@ -203,7 +206,7 @@ final class PhoneMEStorageController: ObservableObject {
         }
     }
 
-    private static func localRootURL(fileManager: FileManager) -> URL {
+    nonisolated private static func localRootURL(fileManager: FileManager) -> URL {
         let documents = fileManager.urls(
             for: .documentDirectory,
             in: .userDomainMask
@@ -211,7 +214,7 @@ final class PhoneMEStorageController: ObservableObject {
         return documents.appendingPathComponent("phoneME", isDirectory: true)
     }
 
-    private static func legacyRootURL(fileManager: FileManager) -> URL {
+    nonisolated private static func legacyRootURL(fileManager: FileManager) -> URL {
         let applicationSupport = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -222,7 +225,7 @@ final class PhoneMEStorageController: ObservableObject {
         )
     }
 
-    private static func resolveICloudRootSynchronously(
+    nonisolated private static func resolveICloudRootSynchronously(
         fileManager: FileManager
     ) -> URL? {
         guard fileManager.ubiquityIdentityToken != nil else { return nil }
@@ -233,7 +236,7 @@ final class PhoneMEStorageController: ObservableObject {
         }
     }
 
-    private static func migrateLegacyStorageIfNeeded(
+    nonisolated private static func migrateLegacyStorageIfNeeded(
         fileManager: FileManager,
         localRoot: URL
     ) {
@@ -258,7 +261,7 @@ final class PhoneMEStorageController: ObservableObject {
         }
     }
 
-    private static func prepareRoot(
+    nonisolated private static func prepareRoot(
         _ root: URL,
         fileManager: FileManager
     ) throws {
@@ -268,7 +271,7 @@ final class PhoneMEStorageController: ObservableObject {
         )
     }
 
-    private static func containsUserData(
+    nonisolated private static func containsUserData(
         _ root: URL,
         fileManager: FileManager
     ) -> Bool {
@@ -282,7 +285,7 @@ final class PhoneMEStorageController: ObservableObject {
         return !contents.isEmpty
     }
 
-    private static func coordinatedMerge(
+    nonisolated private static func coordinatedMerge(
         from source: URL,
         to destination: URL,
         fileManager: FileManager
@@ -323,7 +326,7 @@ final class PhoneMEStorageController: ObservableObject {
         }
     }
 
-    private static func mergeDirectory(
+    nonisolated private static func mergeDirectory(
         from source: URL,
         to destination: URL,
         fileManager: FileManager

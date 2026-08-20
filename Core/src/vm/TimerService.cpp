@@ -191,6 +191,21 @@ Result<i64> TimerService::scheduled_execution_time(ObjectRef task) const {
     return found == tasks_.end() ? 0 : found->second.scheduled_execution_time;
 }
 
+TimerServiceDiagnostics TimerService::diagnostics() const noexcept {
+    std::scoped_lock lock(mutex_);
+    TimerServiceDiagnostics result {
+        .timers = timers_.size(),
+        .task_records = tasks_.size(),
+    };
+    for (const auto& [id, timer] : timers_) {
+        (void)id;
+        if (timer != nullptr && !timer->cancelled) {
+            result.scheduled_tasks += timer->entries.size();
+        }
+    }
+    return result;
+}
+
 Result<std::optional<ObjectRef>> TimerService::run_timer(
     const std::shared_ptr<TimerState>& timer,
     std::stop_token stop_token) {

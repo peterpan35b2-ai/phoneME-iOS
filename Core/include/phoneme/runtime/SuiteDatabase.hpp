@@ -10,6 +10,17 @@
 
 namespace phoneme::runtime {
 
+struct SuiteFileValidationStamp final {
+    bool valid {false};
+    u64 size {0};
+    u64 device {0};
+    u64 inode {0};
+    u64 modified_seconds {0};
+    u64 modified_nanoseconds {0};
+    u64 changed_seconds {0};
+    u64 changed_nanoseconds {0};
+};
+
 struct SuiteDatabaseRecord final {
     SuiteId id;
     std::string identity_key;
@@ -27,6 +38,11 @@ struct SuiteDatabaseRecord final {
     u32 archive_crc32 {0};
     u64 archive_size {0};
     u64 declared_jar_size {0};
+    bool has_signature_metadata {false};
+    SuiteFileValidationStamp jar_validation_stamp;
+    SuiteFileValidationStamp jad_validation_stamp;
+    u32 verified_class_cache_version {0};
+    std::unordered_map<std::string, u64> verified_classes;
 };
 
 struct SuiteDatabaseSnapshot final {

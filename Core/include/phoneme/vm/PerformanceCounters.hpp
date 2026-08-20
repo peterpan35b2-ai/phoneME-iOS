@@ -79,6 +79,24 @@ struct PerformanceCounterSnapshot final {
     u64 scheduler_sleeps {0};
     u64 scheduler_event_wakeups {0};
     u64 scheduler_spurious_wakeups {0};
+
+    u64 canvas_publications {0};
+    u64 canvas_unchanged_publications {0};
+    u64 canvas_dirty_pixels {0};
+    u64 canvas_full_frame_pixels_avoided {0};
+    u64 canvas_publication_nanoseconds {0};
+    u64 frame_backpressure_waits {0};
+    u64 frame_backpressure_nanoseconds {0};
+    u64 maintenance_checks {0};
+    u64 maintenance_background_checks {0};
+    u64 resource_array_cache_hits {0};
+    u64 resource_array_cache_misses {0};
+    u64 resource_array_cache_evictions {0};
+    u64 resource_array_cache_peak_bytes {0};
+    u64 core_text_cache_hits {0};
+    u64 core_text_cache_misses {0};
+    u64 core_text_cache_evictions {0};
+    u64 core_text_cache_peak_bytes {0};
 };
 
 class PerformanceCounters final {
@@ -134,6 +152,18 @@ public:
     static void record_scheduler_sleep() noexcept;
     static void record_scheduler_event_wakeup() noexcept;
     static void record_scheduler_spurious_wakeup() noexcept;
+    static void record_canvas_publication(usize dirty_pixels,
+                                          usize full_frame_pixels,
+                                          u64 elapsed_nanoseconds) noexcept;
+    static void record_canvas_unchanged_publication() noexcept;
+    static void record_frame_backpressure(u64 wait_nanoseconds) noexcept;
+    static void record_maintenance_check(bool background) noexcept;
+    static void record_resource_array_cache(bool hit) noexcept;
+    static void record_resource_array_cache_eviction() noexcept;
+    static void observe_resource_array_cache_bytes(usize bytes) noexcept;
+    static void record_core_text_cache(bool hit) noexcept;
+    static void record_core_text_cache_eviction() noexcept;
+    static void observe_core_text_cache_bytes(usize bytes) noexcept;
 #else
     static constexpr void reset() noexcept {}
     [[nodiscard]] static constexpr PerformanceCounterSnapshot snapshot() noexcept {
@@ -177,6 +207,16 @@ public:
     static constexpr void record_scheduler_sleep() noexcept {}
     static constexpr void record_scheduler_event_wakeup() noexcept {}
     static constexpr void record_scheduler_spurious_wakeup() noexcept {}
+    static constexpr void record_canvas_publication(usize, usize, u64) noexcept {}
+    static constexpr void record_canvas_unchanged_publication() noexcept {}
+    static constexpr void record_frame_backpressure(u64) noexcept {}
+    static constexpr void record_maintenance_check(bool) noexcept {}
+    static constexpr void record_resource_array_cache(bool) noexcept {}
+    static constexpr void record_resource_array_cache_eviction() noexcept {}
+    static constexpr void observe_resource_array_cache_bytes(usize) noexcept {}
+    static constexpr void record_core_text_cache(bool) noexcept {}
+    static constexpr void record_core_text_cache_eviction() noexcept {}
+    static constexpr void observe_core_text_cache_bytes(usize) noexcept {}
 #endif
 };
 

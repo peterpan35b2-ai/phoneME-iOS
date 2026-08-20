@@ -100,6 +100,33 @@ void merge_snapshot(PerformanceCounterSnapshot& destination,
     destination.scheduler_sleeps += source.scheduler_sleeps;
     destination.scheduler_event_wakeups += source.scheduler_event_wakeups;
     destination.scheduler_spurious_wakeups += source.scheduler_spurious_wakeups;
+    destination.canvas_publications += source.canvas_publications;
+    destination.canvas_unchanged_publications +=
+        source.canvas_unchanged_publications;
+    destination.canvas_dirty_pixels += source.canvas_dirty_pixels;
+    destination.canvas_full_frame_pixels_avoided +=
+        source.canvas_full_frame_pixels_avoided;
+    destination.canvas_publication_nanoseconds +=
+        source.canvas_publication_nanoseconds;
+    destination.frame_backpressure_waits += source.frame_backpressure_waits;
+    destination.frame_backpressure_nanoseconds +=
+        source.frame_backpressure_nanoseconds;
+    destination.maintenance_checks += source.maintenance_checks;
+    destination.maintenance_background_checks +=
+        source.maintenance_background_checks;
+    destination.resource_array_cache_hits += source.resource_array_cache_hits;
+    destination.resource_array_cache_misses += source.resource_array_cache_misses;
+    destination.resource_array_cache_evictions +=
+        source.resource_array_cache_evictions;
+    destination.resource_array_cache_peak_bytes = std::max(
+        destination.resource_array_cache_peak_bytes,
+        source.resource_array_cache_peak_bytes);
+    destination.core_text_cache_hits += source.core_text_cache_hits;
+    destination.core_text_cache_misses += source.core_text_cache_misses;
+    destination.core_text_cache_evictions += source.core_text_cache_evictions;
+    destination.core_text_cache_peak_bytes = std::max(
+        destination.core_text_cache_peak_bytes,
+        source.core_text_cache_peak_bytes);
 }
 
 } // namespace
@@ -333,6 +360,73 @@ void PerformanceCounters::record_scheduler_event_wakeup() noexcept {
 
 void PerformanceCounters::record_scheduler_spurious_wakeup() noexcept {
     ++g_local_counters.scheduler_spurious_wakeups;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_canvas_publication(
+    usize dirty_pixels,
+    usize full_frame_pixels,
+    u64 elapsed_nanoseconds) noexcept {
+    ++g_local_counters.canvas_publications;
+    g_local_counters.canvas_dirty_pixels += static_cast<u64>(dirty_pixels);
+    if (full_frame_pixels > dirty_pixels) {
+        g_local_counters.canvas_full_frame_pixels_avoided +=
+            static_cast<u64>(full_frame_pixels - dirty_pixels);
+    }
+    g_local_counters.canvas_publication_nanoseconds += elapsed_nanoseconds;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_canvas_unchanged_publication() noexcept {
+    ++g_local_counters.canvas_unchanged_publications;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_frame_backpressure(u64 wait_nanoseconds) noexcept {
+    ++g_local_counters.frame_backpressure_waits;
+    g_local_counters.frame_backpressure_nanoseconds += wait_nanoseconds;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_maintenance_check(bool background) noexcept {
+    ++g_local_counters.maintenance_checks;
+    if (background) ++g_local_counters.maintenance_background_checks;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_resource_array_cache(bool hit) noexcept {
+    if (hit) ++g_local_counters.resource_array_cache_hits;
+    else ++g_local_counters.resource_array_cache_misses;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_resource_array_cache_eviction() noexcept {
+    ++g_local_counters.resource_array_cache_evictions;
+    mark_dirty();
+}
+
+void PerformanceCounters::observe_resource_array_cache_bytes(usize bytes) noexcept {
+    g_local_counters.resource_array_cache_peak_bytes = std::max(
+        g_local_counters.resource_array_cache_peak_bytes,
+        static_cast<u64>(bytes));
+    mark_dirty();
+}
+
+void PerformanceCounters::record_core_text_cache(bool hit) noexcept {
+    if (hit) ++g_local_counters.core_text_cache_hits;
+    else ++g_local_counters.core_text_cache_misses;
+    mark_dirty();
+}
+
+void PerformanceCounters::record_core_text_cache_eviction() noexcept {
+    ++g_local_counters.core_text_cache_evictions;
+    mark_dirty();
+}
+
+void PerformanceCounters::observe_core_text_cache_bytes(usize bytes) noexcept {
+    g_local_counters.core_text_cache_peak_bytes = std::max(
+        g_local_counters.core_text_cache_peak_bytes,
+        static_cast<u64>(bytes));
     mark_dirty();
 }
 

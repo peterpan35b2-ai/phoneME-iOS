@@ -4,10 +4,60 @@
 #include <limits>
 #include <utility>
 
+#include "phoneme/runtime/ParallelExecutor.hpp"
+
 namespace phoneme::graphics {
 namespace {
 
 constexpr usize kMaximumPixels = 64U * 1024U * 1024U;
+constexpr usize kParallelTransformPixels = 32U * 1024U;
+
+[[nodiscard]] bool regions_touch_or_overlap(const ImageRegion& left,
+                                            const ImageRegion& right) noexcept {
+    const i64 left_right = static_cast<i64>(left.x) + left.width;
+    const i64 left_bottom = static_cast<i64>(left.y) + left.height;
+    const i64 right_right = static_cast<i64>(right.x) + right.width;
+    const i64 right_bottom = static_cast<i64>(right.y) + right.height;
+    return static_cast<i64>(left.x) <= right_right &&
+           static_cast<i64>(right.x) <= left_right &&
+           static_cast<i64>(left.y) <= right_bottom &&
+           static_cast<i64>(right.y) <= left_bottom;
+}
+
+[[nodiscard]] ImageRegion union_region(const ImageRegion& left,
+                                       const ImageRegion& right) noexcept {
+    const i64 x = std::min<i64>(left.x, right.x);
+    const i64 y = std::min<i64>(left.y, right.y);
+    const i64 right_edge = std::max<i64>(
+        static_cast<i64>(left.x) + left.width,
+        static_cast<i64>(right.x) + right.width);
+    const i64 bottom_edge = std::max<i64>(
+        static_cast<i64>(left.y) + left.height,
+        static_cast<i64>(right.y) + right.height);
+    return ImageRegion {
+        .x = static_cast<i32>(x),
+        .y = static_cast<i32>(y),
+        .width = static_cast<i32>(right_edge - x),
+        .height = static_cast<i32>(bottom_edge - y),
+    };
+}
+
+[[nodiscard]] ImageAlphaKind classify_alpha(
+    std::span<const Pixel> pixels) noexcept {
+    ImageAlphaKind kind = ImageAlphaKind::opaque;
+    for (const Pixel pixel : pixels) {
+        const u8 value = alpha(pixel);
+        if (value == 255U) continue;
+        if (value == 0U) {
+            if (kind == ImageAlphaKind::opaque) {
+                kind = ImageAlphaKind::binary;
+            }
+            continue;
+        }
+        return ImageAlphaKind::translucent;
+    }
+    return kind;
+}
 
 [[nodiscard]] std::pair<i32, i32> source_coordinate(
     i32 destination_x,
@@ -47,7 +97,10 @@ Image::Image(i32 width,
     : width_(width),
       height_(height),
       mutable_(mutable_image),
-      pixels_(std::move(pixels)) {}
+      pixels_(std::move(pixels)),
+      alpha_kind_(mutable_image
+          ? ImageAlphaKind::translucent
+          : classify_alpha(pixels_)) {}
 
 Result<Size> validate_dimensions(i32 width, i32 height) {
     if (width <= 0 || height <= 0) {
@@ -144,28 +197,38 @@ Result<Image> Image::transformed_region(const Image& source,
         return std::unexpected(count.error());
     }
     std::vector<Pixel> output(*count, 0U);
-    for (i32 destination_y = 0;
-         destination_y < output_size.height;
-         ++destination_y) {
-        for (i32 destination_x = 0;
-             destination_x < output_size.width;
-             ++destination_x) {
-            const auto [source_x, source_y] = source_coordinate(
-                destination_x,
-                destination_y,
-                width,
-                height,
-                transform);
-            const usize source_index =
-                static_cast<usize>(y + source_y) *
-                    static_cast<usize>(source.width_) +
-                static_cast<usize>(x + source_x);
-            const usize destination_index =
-                static_cast<usize>(destination_y) *
-                    static_cast<usize>(output_size.width) +
-                static_cast<usize>(destination_x);
-            output[destination_index] = source.pixels_[source_index];
+    const usize output_width = static_cast<usize>(output_size.width);
+    const usize output_height = static_cast<usize>(output_size.height);
+    const auto transform_rows = [&](usize row_begin, usize row_end) {
+        for (usize destination_y = row_begin;
+             destination_y < row_end;
+             ++destination_y) {
+            for (usize destination_x = 0U;
+                 destination_x < output_width;
+                 ++destination_x) {
+                const auto [source_x, source_y] = source_coordinate(
+                    static_cast<i32>(destination_x),
+                    static_cast<i32>(destination_y),
+                    width,
+                    height,
+                    transform);
+                const usize source_index =
+                    static_cast<usize>(y + source_y) *
+                        static_cast<usize>(source.width_) +
+                    static_cast<usize>(x + source_x);
+                const usize destination_index =
+                    destination_y * output_width + destination_x;
+                output[destination_index] = source.pixels_[source_index];
+            }
         }
+    };
+    if (*count >= kParallelTransformPixels && output_height >= 4U) {
+        const usize rows_per_chunk = std::max<usize>(
+            1U, 4U * 1024U / std::max<usize>(output_width, 1U));
+        runtime::shared_compute_executor().parallel_for(
+            output_height, 4U, rows_per_chunk, transform_rows);
+    } else {
+        transform_rows(0U, output_height);
     }
     return Image(output_size.width,
                  output_size.height,
@@ -176,6 +239,7 @@ Result<Image> Image::transformed_region(const Image& source,
 void Image::clear_dirty_region() noexcept {
     dirty_ = false;
     dirty_region_ = {};
+    dirty_region_count_ = 0U;
 }
 
 void Image::mark_dirty_region(i32 x,
@@ -194,30 +258,43 @@ void Image::mark_dirty_region(i32 x,
     if (right <= left || bottom <= top) {
         return;
     }
+    ImageRegion region {
+        .x = static_cast<i32>(left),
+        .y = static_cast<i32>(top),
+        .width = static_cast<i32>(right - left),
+        .height = static_cast<i32>(bottom - top),
+    };
     if (!dirty_) {
         dirty_ = true;
-        dirty_region_ = ImageRegion {
-            .x = static_cast<i32>(left),
-            .y = static_cast<i32>(top),
-            .width = static_cast<i32>(right - left),
-            .height = static_cast<i32>(bottom - top),
-        };
+        dirty_region_ = region;
+        dirty_regions_[0] = region;
+        dirty_region_count_ = 1U;
         return;
     }
-    const i64 dirty_right = static_cast<i64>(dirty_region_.x) +
-                            dirty_region_.width;
-    const i64 dirty_bottom = static_cast<i64>(dirty_region_.y) +
-                             dirty_region_.height;
-    const i64 combined_left = std::min<i64>(dirty_region_.x, left);
-    const i64 combined_top = std::min<i64>(dirty_region_.y, top);
-    const i64 combined_right = std::max(dirty_right, right);
-    const i64 combined_bottom = std::max(dirty_bottom, bottom);
-    dirty_region_ = ImageRegion {
-        .x = static_cast<i32>(combined_left),
-        .y = static_cast<i32>(combined_top),
-        .width = static_cast<i32>(combined_right - combined_left),
-        .height = static_cast<i32>(combined_bottom - combined_top),
-    };
+    dirty_region_ = union_region(dirty_region_, region);
+
+    // Preserve a small set of disjoint dirty islands so two distant sprites
+    // do not force conversion of the large empty rectangle between them.
+    // Touching/overlapping islands are merged transitively. If the fixed
+    // budget is exceeded, collapse safely to the bounding rectangle.
+    for (usize index = 0U; index < dirty_region_count_;) {
+        if (!regions_touch_or_overlap(region, dirty_regions_[index])) {
+            ++index;
+            continue;
+        }
+        region = union_region(region, dirty_regions_[index]);
+        --dirty_region_count_;
+        if (index != dirty_region_count_) {
+            dirty_regions_[index] = dirty_regions_[dirty_region_count_];
+        }
+        index = 0U;
+    }
+    if (dirty_region_count_ < dirty_regions_.size()) {
+        dirty_regions_[dirty_region_count_++] = region;
+        return;
+    }
+    dirty_regions_[0] = dirty_region_;
+    dirty_region_count_ = 1U;
 }
 
 Result<Pixel> Image::pixel(i32 x, i32 y) const {

@@ -8,6 +8,8 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FilterInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -242,6 +244,30 @@ public final class VmDifferentialOps {
             fields[MONTH] = JANUARY;
             fields[DATE] = 1;
         }
+
+        public void add(int field, int amount) {
+            fields[field] += amount;
+        }
+
+        public void roll(int field, boolean up) {
+            fields[field] += up ? 1 : -1;
+        }
+
+        public int getMinimum(int field) {
+            return 0;
+        }
+
+        public int getMaximum(int field) {
+            return Integer.MAX_VALUE;
+        }
+
+        public int getGreatestMinimum(int field) {
+            return getMinimum(field);
+        }
+
+        public int getLeastMaximum(int field) {
+            return getMaximum(field);
+        }
     }
 
     private static final class ExposedGregorianCalendar
@@ -280,6 +306,10 @@ public final class VmDifferentialOps {
         }
 
         public boolean useDaylightTime() {
+            return false;
+        }
+
+        public boolean inDaylightTime(Date date) {
             return false;
         }
     }

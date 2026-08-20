@@ -124,6 +124,12 @@ public:
                                        std::u16string value);
     [[nodiscard]] Result<std::u16string> string_value(
         ObjectRef reference) const;
+    [[nodiscard]] Result<usize> string_length(ObjectRef reference) const;
+    [[nodiscard]] Result<u16> string_character(ObjectRef reference,
+                                               usize index) const;
+    [[nodiscard]] Result<i32> string_index_of(ObjectRef reference,
+                                              u16 character,
+                                              usize start = 0U) const;
 
     [[nodiscard]] Status set_weak_referent(ObjectRef reference,
                                            ObjectRef referent);
@@ -159,6 +165,12 @@ private:
                                                 Value value);
     [[nodiscard]] Result<usize> vm_array_length(ObjectRef reference) const;
     [[nodiscard]] Result<std::string> vm_class_name(ObjectRef reference) const;
+    [[nodiscard]] Result<usize> vm_string_length(ObjectRef reference) const;
+    [[nodiscard]] Result<u16> vm_string_character(ObjectRef reference,
+                                                  usize index) const;
+    [[nodiscard]] Result<i32> vm_string_index_of(ObjectRef reference,
+                                                 u16 character,
+                                                 usize start = 0U) const;
 
     struct Object final {
         std::string class_name;

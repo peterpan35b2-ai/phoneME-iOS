@@ -204,6 +204,23 @@ public final class MediaOps implements PlayerListener {
         if (player.getState() != Player.PREFETCHED) {
             return -13;
         }
+        long stoppedTime = player.getMediaTime();
+        player.deallocate();
+        if (player.getState() != Player.REALIZED) {
+            return -23;
+        }
+        if (player.getMediaTime() != stoppedTime) {
+            return -24;
+        }
+        player.prefetch();
+        if (player.getState() != Player.PREFETCHED) {
+            return -25;
+        }
+        player.start();
+        if (player.getState() != Player.STARTED) {
+            return -26;
+        }
+        player.stop();
         player.close();
         if (player.getState() != Player.CLOSED) {
             return -14;

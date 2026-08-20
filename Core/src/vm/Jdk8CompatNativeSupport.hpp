@@ -86,6 +86,26 @@ inline void alias(NativeMethodRegistry& registry,
     return arguments[index].as_long();
 }
 
+[[nodiscard]] inline Result<float> float_argument(
+    std::span<const Value> arguments,
+    usize index) {
+    if (index >= arguments.size()) {
+        return fail(ErrorCode::invalid_argument,
+                    "JDK 8 float argument is missing");
+    }
+    return arguments[index].as_float();
+}
+
+[[nodiscard]] inline Result<double> double_argument(
+    std::span<const Value> arguments,
+    usize index) {
+    if (index >= arguments.size()) {
+        return fail(ErrorCode::invalid_argument,
+                    "JDK 8 double argument is missing");
+    }
+    return arguments[index].as_double();
+}
+
 [[nodiscard]] inline Result<ObjectRef> reference_field(
     Machine& machine,
     ObjectRef object,
@@ -111,6 +131,22 @@ inline void alias(NativeMethodRegistry& registry,
     return value->as_long();
 }
 
+[[nodiscard]] inline Result<float> float_field(Machine& machine,
+                                               ObjectRef object,
+                                               usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_float();
+}
+
+[[nodiscard]] inline Result<double> double_field(Machine& machine,
+                                                 ObjectRef object,
+                                                 usize index) {
+    auto value = machine.heap().field(object, index);
+    if (!value) return std::unexpected(value.error());
+    return value->as_double();
+}
+
 [[nodiscard]] inline Status set_reference_field(Machine& machine,
                                                 ObjectRef object,
                                                 usize index,
@@ -131,6 +167,20 @@ inline void alias(NativeMethodRegistry& registry,
                                            usize index,
                                            i64 value) {
     return machine.heap().set_field(object, index, Value::from_long(value));
+}
+
+[[nodiscard]] inline Status set_float_field(Machine& machine,
+                                            ObjectRef object,
+                                            usize index,
+                                            float value) {
+    return machine.heap().set_field(object, index, Value::from_float(value));
+}
+
+[[nodiscard]] inline Status set_double_field(Machine& machine,
+                                             ObjectRef object,
+                                             usize index,
+                                             double value) {
+    return machine.heap().set_field(object, index, Value::from_double(value));
 }
 
 [[nodiscard]] inline Result<ObjectRef> create_string(Machine& machine,

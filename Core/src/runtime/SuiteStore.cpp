@@ -1,6 +1,7 @@
 #include "phoneme/runtime/SuiteStore.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include <utility>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace phoneme::runtime {
@@ -179,10 +181,189 @@ namespace {
     return std::equal(left.begin(), left.end(), right.begin(), right.end());
 }
 
+[[nodiscard]] bool validation_stamp_equal(
+    const SuiteFileValidationStamp& left,
+    const SuiteFileValidationStamp& right) noexcept {
+    return left.valid == right.valid && left.size == right.size &&
+        left.device == right.device && left.inode == right.inode &&
+        left.modified_seconds == right.modified_seconds &&
+        left.modified_nanoseconds == right.modified_nanoseconds &&
+        left.changed_seconds == right.changed_seconds &&
+        left.changed_nanoseconds == right.changed_nanoseconds;
+}
+
+[[nodiscard]] Result<SuiteFileValidationStamp> file_validation_stamp(
+    const std::filesystem::path& path) {
+    struct stat info {};
+    if (::stat(path.c_str(), &info) != 0) {
+        return fail(ErrorCode::io_error,
+                    "unable to stat managed suite file: " +
+                        std::string(std::strerror(errno)));
+    }
+    if (!S_ISREG(info.st_mode)) {
+        return fail(ErrorCode::io_error,
+                    "managed suite path is not a regular file");
+    }
+#if defined(__APPLE__)
+    const auto modified = info.st_mtimespec;
+    const auto changed = info.st_ctimespec;
+#else
+    const auto modified = info.st_mtim;
+    const auto changed = info.st_ctim;
+#endif
+    return SuiteFileValidationStamp {
+        .valid = true,
+        .size = static_cast<u64>(info.st_size),
+        .device = static_cast<u64>(info.st_dev),
+        .inode = static_cast<u64>(info.st_ino),
+        .modified_seconds = static_cast<u64>(modified.tv_sec),
+        .modified_nanoseconds = static_cast<u64>(modified.tv_nsec),
+        .changed_seconds = static_cast<u64>(changed.tv_sec),
+        .changed_nanoseconds = static_cast<u64>(changed.tv_nsec),
+    };
+}
+
+[[nodiscard]] std::string trim_ascii(std::string_view value) {
+    usize begin = 0U;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    usize end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1U])) != 0) {
+        --end;
+    }
+    return std::string(value.substr(begin, end - begin));
+}
+
+void append_permissions(std::vector<std::string>& output,
+                        std::string_view value) {
+    usize offset = 0U;
+    while (offset <= value.size()) {
+        const usize comma = value.find(',', offset);
+        const usize end = comma == std::string_view::npos ? value.size() : comma;
+        std::string permission = trim_ascii(value.substr(offset, end - offset));
+        if (!permission.empty() &&
+            std::find(output.begin(), output.end(), permission) == output.end()) {
+            output.push_back(std::move(permission));
+        }
+        if (comma == std::string_view::npos) break;
+        offset = comma + 1U;
+    }
+}
+
+[[nodiscard]] SuiteDescriptor descriptor_from_record(
+    const SuiteDatabaseRecord& record) {
+    std::vector<std::string> required_permissions;
+    std::vector<std::string> optional_permissions;
+    if (const auto iterator = record.properties.find("MIDlet-Permissions");
+        iterator != record.properties.end()) {
+        append_permissions(required_permissions, iterator->second);
+    }
+    if (const auto iterator = record.properties.find("MIDlet-Permissions-Opt");
+        iterator != record.properties.end()) {
+        append_permissions(optional_permissions, iterator->second);
+    }
+    std::erase_if(optional_permissions,
+                  [&required_permissions](const std::string& permission) {
+                      return std::find(required_permissions.begin(),
+                                       required_permissions.end(), permission) !=
+                          required_permissions.end();
+                  });
+
+    return SuiteDescriptor {
+        .name = record.name,
+        .vendor = record.vendor,
+        .version = record.version,
+        .jar_url = {},
+        .declared_jar_size = record.declared_jar_size,
+        .midlet_classes = record.midlet_classes,
+        .declared_required_permissions = std::move(required_permissions),
+        .declared_optional_permissions = std::move(optional_permissions),
+        .declared_permissions = record.declared_permissions,
+        .has_permission_declarations = record.has_permission_declarations,
+        .trust_evidence = {},
+        .properties = record.properties,
+        .identity_key = record.identity_key,
+        .identity_sha256 = record.identity_sha256,
+        .archive_sha256 = record.archive_sha256,
+        .archive_crc32 = record.archive_crc32,
+        .archive_size = record.archive_size,
+    };
+}
+
+[[nodiscard]] Result<bool> directory_matches_validation_stamp(
+    const std::filesystem::path& directory,
+    const SuiteDatabaseRecord& record,
+    SuiteDescriptor* validated_descriptor) {
+    if (record.has_signature_metadata || !record.jar_validation_stamp.valid) {
+        return false;
+    }
+    auto jar_stamp = file_validation_stamp(directory / "app.jar");
+    if (!jar_stamp) {
+        if (jar_stamp.error().code == ErrorCode::io_error) return false;
+        return std::unexpected(jar_stamp.error());
+    }
+    if (!validation_stamp_equal(*jar_stamp, record.jar_validation_stamp) ||
+        jar_stamp->size != record.archive_size) {
+        return false;
+    }
+    if (record.jad_relative_path.empty()) {
+        if (record.jad_validation_stamp.valid) return false;
+    } else {
+        if (!record.jad_validation_stamp.valid) return false;
+        auto jad_stamp = file_validation_stamp(directory / "app.jad");
+        if (!jad_stamp) {
+            if (jad_stamp.error().code == ErrorCode::io_error) return false;
+            return std::unexpected(jad_stamp.error());
+        }
+        if (!validation_stamp_equal(*jad_stamp, record.jad_validation_stamp)) {
+            return false;
+        }
+    }
+    if (validated_descriptor != nullptr) {
+        *validated_descriptor = descriptor_from_record(record);
+    }
+    return true;
+}
+
+[[nodiscard]] Result<bool> refresh_validation_stamps(
+    SuiteDatabaseRecord& record,
+    const std::filesystem::path& directory,
+    const SuiteDescriptor& descriptor) {
+    auto jar_stamp = file_validation_stamp(directory / "app.jar");
+    if (!jar_stamp) return std::unexpected(jar_stamp.error());
+
+    SuiteFileValidationStamp jad_stamp;
+    if (!record.jad_relative_path.empty()) {
+        auto stamp = file_validation_stamp(directory / "app.jad");
+        if (!stamp) return std::unexpected(stamp.error());
+        jad_stamp = *stamp;
+    }
+
+    const bool has_signature_metadata =
+        descriptor.trust_evidence.has_signature_metadata();
+    const bool changed =
+        record.has_signature_metadata != has_signature_metadata ||
+        !validation_stamp_equal(record.jar_validation_stamp, *jar_stamp) ||
+        !validation_stamp_equal(record.jad_validation_stamp, jad_stamp);
+    record.has_signature_metadata = has_signature_metadata;
+    record.jar_validation_stamp = *jar_stamp;
+    record.jad_validation_stamp = jad_stamp;
+    return changed;
+}
+
 [[nodiscard]] Result<bool> directory_matches_record(
     const std::filesystem::path& directory,
     const SuiteDatabaseRecord& record,
-    const SuiteInstallerLimits& limits) {
+    const SuiteInstallerLimits& limits,
+    SuiteDescriptor* validated_descriptor = nullptr) {
+    auto cached = directory_matches_validation_stamp(
+        directory, record, validated_descriptor);
+    if (!cached) return std::unexpected(cached.error());
+    if (*cached) return true;
+
     const std::filesystem::path jar_path = directory / "app.jar";
     const std::optional<std::string> jad_path = record.jad_relative_path.empty()
         ? std::nullopt
@@ -213,11 +394,15 @@ namespace {
             *descriptor, identity_scope);
         if (!scoped_identity) return false;
     }
-    return descriptor->identity_key == record.identity_key &&
-           descriptor->version == record.version &&
-           digest_equal(descriptor->identity_sha256, record.identity_sha256) &&
-           digest_equal(descriptor->archive_sha256, record.archive_sha256) &&
-           descriptor->archive_size == record.archive_size;
+    const bool matches = descriptor->identity_key == record.identity_key &&
+        descriptor->version == record.version &&
+        digest_equal(descriptor->identity_sha256, record.identity_sha256) &&
+        digest_equal(descriptor->archive_sha256, record.archive_sha256) &&
+        descriptor->archive_size == record.archive_size;
+    if (matches && validated_descriptor != nullptr) {
+        *validated_descriptor = std::move(*descriptor);
+    }
+    return matches;
 }
 
 [[nodiscard]] std::optional<i32> parse_transaction_id(
@@ -279,7 +464,9 @@ Status SuiteStore::configure(const SuiteStoreConfig& config) {
         return std::unexpected(snapshot.error());
     }
 
-    auto recovered = recover_transactions(*snapshot);
+    std::unordered_map<i32, SuiteDescriptor> validated_descriptors;
+    validated_descriptors.reserve(snapshot->records.size());
+    auto recovered = recover_transactions(*snapshot, &validated_descriptors);
     if (!recovered) {
         root_path_.clear();
         database_.set_path({});
@@ -299,7 +486,12 @@ Status SuiteStore::configure(const SuiteStoreConfig& config) {
             return fail(ErrorCode::malformed_archive,
                         "suite database contains duplicate suite identity or ID");
         }
-        auto suite = suite_from_record(record);
+        const auto validated = validated_descriptors.find(record.id.value);
+        auto suite = suite_from_record(
+            record,
+            validated == validated_descriptors.end()
+                ? nullptr
+                : &validated->second);
         if (!suite) {
             root_path_.clear();
             database_.set_path({});
@@ -805,12 +997,15 @@ Result<Suite> SuiteStore::make_suite(
         .archive_crc32 = descriptor.archive_crc32,
         .archive_size = descriptor.archive_size,
         .declared_jar_size = descriptor.declared_jar_size,
+        .verified_class_cache_version = 0,
+        .verified_classes = {},
         .managed = managed,
     };
 }
 
 Result<Suite> SuiteStore::suite_from_record(
-    const SuiteDatabaseRecord& record) const {
+    const SuiteDatabaseRecord& record,
+    const SuiteDescriptor* validated_descriptor) const {
     const std::string expected_jar = relative_jar_path(record.id);
     const std::string expected_jad = relative_jad_path(record.id);
     if (record.jar_relative_path != expected_jar ||
@@ -827,6 +1022,23 @@ Result<Suite> SuiteStore::suite_from_record(
         : std::optional<std::string>(
               (std::filesystem::path(root_path_) /
                record.jad_relative_path).string());
+
+    // recover_transactions() already inspected and SHA-256-validated the
+    // selected managed JAR. Reuse that exact descriptor (including permission
+    // and signature evidence) instead of parsing/hashing the same archive a
+    // second time during every cold runtime configuration.
+    if (validated_descriptor != nullptr) {
+        auto suite = make_suite(
+            record.id,
+            *validated_descriptor,
+            jar_path.string(),
+            jad_path.value_or(std::string {}),
+            true);
+        if (!suite) return suite;
+        suite->verified_class_cache_version = record.verified_class_cache_version;
+        suite->verified_classes = record.verified_classes;
+        return suite;
+    }
 
     auto descriptor = SuiteInstaller::inspect(
         jar_path.string(), jad_path, installer_limits_);
@@ -861,17 +1073,21 @@ Result<Suite> SuiteStore::suite_from_record(
                     "managed suite files do not match the persistent database");
     }
 
-    return make_suite(
+    auto suite = make_suite(
         record.id,
         *descriptor,
         jar_path.string(),
         jad_path.value_or(std::string {}),
         true);
+    if (!suite) return suite;
+    suite->verified_class_cache_version = record.verified_class_cache_version;
+    suite->verified_classes = record.verified_classes;
+    return suite;
 }
 
 SuiteDatabaseRecord SuiteStore::record_from_suite(
     const Suite& suite) const {
-    return SuiteDatabaseRecord {
+    SuiteDatabaseRecord record {
         .id = suite.id,
         .identity_key = suite.identity_key,
         .identity_sha256 = suite.identity_sha256,
@@ -890,7 +1106,58 @@ SuiteDatabaseRecord SuiteStore::record_from_suite(
         .archive_crc32 = suite.archive_crc32,
         .archive_size = suite.archive_size,
         .declared_jar_size = suite.declared_jar_size,
+        .has_signature_metadata = suite.trust_evidence.has_signature_metadata(),
+        .verified_class_cache_version = suite.verified_class_cache_version,
+        .verified_classes = suite.verified_classes,
     };
+    if (auto stamp = file_validation_stamp(suite.jar_path); stamp) {
+        record.jar_validation_stamp = *stamp;
+    }
+    if (!suite.jad_path.empty()) {
+        if (auto stamp = file_validation_stamp(suite.jad_path); stamp) {
+            record.jad_validation_stamp = *stamp;
+        }
+    }
+    return record;
+}
+
+Status SuiteStore::update_verified_classes(
+    SuiteId id,
+    u32 cache_version,
+    const std::unordered_map<std::string, u64>& verified_classes) {
+    if (!id.valid()) {
+        return fail(ErrorCode::invalid_argument, "suite ID is invalid");
+    }
+    auto iterator = suites_.find(id.value);
+    if (iterator == suites_.end()) {
+        return fail(ErrorCode::invalid_argument, "suite ID does not exist");
+    }
+    Suite& suite = iterator->second;
+    if (!suite.managed) return {};
+    if (suite.verified_class_cache_version == cache_version &&
+        suite.verified_classes == verified_classes) {
+        return {};
+    }
+    if (database_generation_ == std::numeric_limits<u64>::max()) {
+        return fail(ErrorCode::out_of_range,
+                    "suite database generation exhausted while caching verified classes");
+    }
+
+    const u32 previous_version = suite.verified_class_cache_version;
+    auto previous_classes = suite.verified_classes;
+    suite.verified_class_cache_version = cache_version;
+    suite.verified_classes = verified_classes;
+
+    SuiteDatabaseSnapshot snapshot =
+        snapshot_with_generation(database_generation_ + 1U);
+    auto committed = database_.commit(snapshot);
+    if (!committed) {
+        suite.verified_class_cache_version = previous_version;
+        suite.verified_classes = std::move(previous_classes);
+        return std::unexpected(committed.error());
+    }
+    database_generation_ = snapshot.generation;
+    return {};
 }
 
 SuiteDatabaseSnapshot SuiteStore::snapshot_with_generation(
@@ -931,14 +1198,15 @@ SuiteId SuiteStore::allocate_id(
 }
 
 Status SuiteStore::recover_transactions(
-    SuiteDatabaseSnapshot& snapshot) {
+    SuiteDatabaseSnapshot& snapshot,
+    std::unordered_map<i32, SuiteDescriptor>* validated_descriptors) {
     bool directory_changed = false;
     bool database_changed = false;
     std::vector<i32> referenced_ids;
     referenced_ids.reserve(snapshot.records.size());
     std::vector<SuiteDatabaseRecord> recovered_records;
     recovered_records.reserve(snapshot.records.size());
-    for (const SuiteDatabaseRecord& record : snapshot.records) {
+    for (SuiteDatabaseRecord& record : snapshot.records) {
         const std::filesystem::path final_path =
             suite_directory(root_path_, record.id);
         const std::filesystem::path stage_path =
@@ -955,34 +1223,41 @@ Status SuiteStore::recover_transactions(
         if (!backup_exists) return std::unexpected(backup_exists.error());
         if (!tombstone_exists) return std::unexpected(tombstone_exists.error());
 
+        SuiteDescriptor final_descriptor;
+        SuiteDescriptor backup_descriptor;
+        SuiteDescriptor tombstone_descriptor;
         Result<bool> final_matches = false;
         Result<bool> backup_matches = false;
         Result<bool> tombstone_matches = false;
         if (*final_exists) {
             final_matches = directory_matches_record(
-                final_path, record, installer_limits_);
+                final_path, record, installer_limits_, &final_descriptor);
             if (!final_matches) return std::unexpected(final_matches.error());
         }
         if (*backup_exists) {
             backup_matches = directory_matches_record(
-                backup_path, record, installer_limits_);
+                backup_path, record, installer_limits_, &backup_descriptor);
             if (!backup_matches) return std::unexpected(backup_matches.error());
         }
         if (*tombstone_exists) {
             tombstone_matches = directory_matches_record(
-                tombstone_path, record, installer_limits_);
+                tombstone_path, record, installer_limits_, &tombstone_descriptor);
             if (!tombstone_matches) {
                 return std::unexpected(tombstone_matches.error());
             }
         }
 
         const std::filesystem::path* selected = nullptr;
+        SuiteDescriptor* selected_descriptor = nullptr;
         if (*final_exists && *final_matches) {
             selected = &final_path;
+            selected_descriptor = &final_descriptor;
         } else if (*backup_exists && *backup_matches) {
             selected = &backup_path;
+            selected_descriptor = &backup_descriptor;
         } else if (*tombstone_exists && *tombstone_matches) {
             selected = &tombstone_path;
+            selected_descriptor = &tombstone_descriptor;
         }
         if (selected == nullptr) {
             // A managed JAR may be missing or have been modified outside the
@@ -1022,6 +1297,17 @@ Status SuiteStore::recover_transactions(
         auto removed_stage = remove_tree(stage_path);
         if (!removed_stage) return removed_stage;
         directory_changed = directory_changed || *stage_exists;
+
+        if (selected_descriptor != nullptr) {
+            auto refreshed = refresh_validation_stamps(
+                record, final_path, *selected_descriptor);
+            if (!refreshed) return std::unexpected(refreshed.error());
+            database_changed = database_changed || *refreshed;
+            if (validated_descriptors != nullptr) {
+                validated_descriptors->insert_or_assign(
+                    record.id.value, *selected_descriptor);
+            }
+        }
         recovered_records.push_back(record);
     }
 

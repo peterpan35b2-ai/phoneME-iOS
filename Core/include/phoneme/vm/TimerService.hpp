@@ -15,6 +15,12 @@ namespace phoneme::vm {
 
 class Machine;
 
+struct TimerServiceDiagnostics final {
+    usize timers {0U};
+    usize scheduled_tasks {0U};
+    usize task_records {0U};
+};
+
 class TimerService final {
 public:
     explicit TimerService(Machine& machine) noexcept;
@@ -33,6 +39,7 @@ public:
     [[nodiscard]] Status cancel_timer(ObjectRef timer);
     [[nodiscard]] Result<bool> cancel_task(ObjectRef task);
     [[nodiscard]] Result<i64> scheduled_execution_time(ObjectRef task) const;
+    [[nodiscard]] TimerServiceDiagnostics diagnostics() const noexcept;
 
     void append_reference_roots(std::vector<ObjectRef>& roots) const;
     void shutdown() noexcept;

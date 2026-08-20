@@ -240,6 +240,10 @@ struct JitStatistics final {
     u64 background_compile_published {0};
     u64 background_compile_discarded {0};
     u64 background_compile_time_nanoseconds {0};
+    u64 background_compile_worker_count {0};
+    u64 background_compile_queue_peak {0};
+    u64 background_compile_render_cooldown_waits {0};
+    u64 background_compile_render_cooldown_nanoseconds {0};
     u64 startup_compile_attempts {0};
     u64 startup_compiled_methods {0};
     u64 startup_compile_deferred {0};
@@ -266,6 +270,7 @@ public:
 
     void set_enabled(bool enabled) noexcept;
     void set_startup_mode(bool enabled) noexcept;
+    void note_frame_published() noexcept;
     void set_inline_resolver(JitInlineResolverHooks hooks) noexcept;
     void refresh_availability() noexcept;
     void clear_cache() noexcept;

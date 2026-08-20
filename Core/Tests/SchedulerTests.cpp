@@ -271,6 +271,12 @@ int main(int argc, char** argv) {
             60,
             40,
             12);
+        const auto native_overproduction_elapsed = measure_frame_pacing(
+            classes,
+            phoneme::vm::FramePacingMode::native,
+            60,
+            0,
+            12);
         const auto override_elapsed = measure_frame_pacing(
             classes,
             phoneme::vm::FramePacingMode::override_game_loop,
@@ -311,8 +317,22 @@ int main(int argc, char** argv) {
         const auto cap_reconfiguration_release =
             measure_cap_reconfiguration_release(classes);
 
+        std::cout << "frame_pacing native_ms=" << native_elapsed.count()
+                  << " native_overproduction_ms="
+                  << native_overproduction_elapsed.count()
+                  << " override_ms=" << override_elapsed.count()
+                  << " override_async_ms="
+                  << override_async_repaint_elapsed.count()
+                  << " cap_ms=" << capped_elapsed.count()
+                  << " cap_busy_ms=" << capped_busy_loop_elapsed.count()
+                  << '\n';
+
         require(native_elapsed >= std::chrono::milliseconds(400),
                 "native pacing preserves the game's requested sleeps");
+        require(native_overproduction_elapsed >= std::chrono::milliseconds(90) &&
+                    native_overproduction_elapsed <=
+                        std::chrono::milliseconds(260),
+                "native pacing backpressures only sustained frames above the presentation rate");
         require(override_elapsed >= std::chrono::milliseconds(180) &&
                     override_elapsed <= std::chrono::milliseconds(420) &&
                     override_elapsed + std::chrono::milliseconds(100) <

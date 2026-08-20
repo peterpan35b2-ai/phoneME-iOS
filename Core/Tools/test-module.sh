@@ -14,6 +14,7 @@ Modules:
   builtin-registry
   graphics
   graphics-vm
+  parallel-executor
   push
   canvas-graphics
   game-api
@@ -49,6 +50,7 @@ case "$MODULE" in
   builtin-registry) SCRIPT="$SCRIPT_DIR/test-builtin-registry.sh" ;;
   graphics) SCRIPT="$SCRIPT_DIR/test-graphics-host.sh" ;;
   graphics-vm) SCRIPT="$SCRIPT_DIR/test-graphics-vm-host.sh" ;;
+  parallel-executor) SCRIPT="$SCRIPT_DIR/test-parallel-executor-host.sh" ;;
   push) SCRIPT="$SCRIPT_DIR/test-push-host.sh" ;;
   canvas-graphics) SCRIPT="$SCRIPT_DIR/test-canvas-graphics-host.sh" ;;
   game-api) SCRIPT="$SCRIPT_DIR/test-game-api-host.sh" ;;

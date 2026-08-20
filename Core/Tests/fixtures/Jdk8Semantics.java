@@ -713,6 +713,334 @@ public final class Jdk8Semantics {
         return result;
     }
 
+    public static int practicalHeadlessJdk8Api() throws Exception {
+        int result = 0;
+
+        java.util.Comparator lexical = (left, right) ->
+            ((String)left).compareTo((String)right);
+        if (java.util.Objects.isNull(null)
+                && java.util.Objects.nonNull("value")
+                && java.util.Objects.compare("a", "b", lexical) < 0
+                && java.util.Objects.compare("same", "same", lexical) == 0
+                && java.util.Objects.compare("same", "same", null) == 0) {
+            result |= 1;
+        }
+
+        final int[] consumed = new int[] {0};
+        java.util.Optional optional = java.util.Optional.of("abc")
+            .filter(value -> ((String)value).length() == 3)
+            .map(value -> ((String)value).toUpperCase());
+        optional.ifPresent(value -> consumed[0] = ((String)value).length());
+        java.util.Optional same = java.util.Optional.of("ABC");
+        java.util.Optional empty = java.util.Optional.empty();
+        Object fallback = empty.orElseGet(() -> "fallback");
+        if (optional.equals(same) && optional.hashCode() == same.hashCode()
+                && optional.toString().equals("Optional[ABC]")
+                && empty.toString().equals("Optional.empty")
+                && fallback.equals("fallback") && consumed[0] == 3) {
+            result |= 2;
+        }
+
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(24);
+        buffer.putShort((short)0x1234);
+        buffer.putInt(0x55667788);
+        buffer.putLong(0x0102030405060708L);
+        buffer.put(20, (byte)0x7f);
+        int written = buffer.position();
+        buffer.flip();
+        boolean binaryOk = buffer.limit() == written
+            && buffer.getShort() == (short)0x1234
+            && buffer.getInt() == 0x55667788
+            && buffer.getLong() == 0x0102030405060708L;
+        buffer.clear().limit(21).rewind();
+        if (binaryOk && buffer.capacity() == 24 && buffer.limit() == 21
+                && buffer.position() == 0 && buffer.hasRemaining()
+                && buffer.get(20) == (byte)0x7f) {
+            result |= 4;
+        }
+
+        java.util.concurrent.atomic.AtomicInteger atomicInt =
+            new java.util.concurrent.atomic.AtomicInteger(3);
+        boolean intCas = atomicInt.compareAndSet(3, 7);
+        int intOld = atomicInt.getAndIncrement();
+        int intNow = atomicInt.addAndGet(4);
+        if (intCas && intOld == 7 && intNow == 12
+                && atomicInt.longValue() == 12L
+                && atomicInt.toString().equals("12")) {
+            result |= 8;
+        }
+
+        java.util.concurrent.atomic.AtomicLong atomicLong =
+            new java.util.concurrent.atomic.AtomicLong(10L);
+        long longOld = atomicLong.getAndAdd(5L);
+        boolean longCas = atomicLong.weakCompareAndSet(15L, -2L);
+        long longNow = atomicLong.decrementAndGet();
+        if (longOld == 10L && longCas && longNow == -3L
+                && atomicLong.intValue() == -3
+                && atomicLong.toString().equals("-3")) {
+            result |= 16;
+        }
+
+        java.util.concurrent.atomic.AtomicBoolean atomicBoolean =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+        boolean booleanOld = atomicBoolean.getAndSet(true);
+        boolean booleanCas = atomicBoolean.compareAndSet(true, false);
+        if (!booleanOld && booleanCas && !atomicBoolean.get()
+                && atomicBoolean.toString().equals("false")) {
+            result |= 32;
+        }
+
+        Object firstReference = new Object();
+        Object secondReference = new Object();
+        java.util.concurrent.atomic.AtomicReference atomicReference =
+            new java.util.concurrent.atomic.AtomicReference(firstReference);
+        boolean referenceCas = atomicReference.compareAndSet(
+            firstReference, secondReference);
+        Object referenceOld = atomicReference.getAndSet(null);
+        if (referenceCas && referenceOld == secondReference
+                && atomicReference.get() == null) {
+            result |= 64;
+        }
+
+        Object[] deepLeft = new Object[] {
+            new int[] {1, 2, 3}, new Object[] {"x", null}
+        };
+        Object[] deepRight = new Object[] {
+            new int[] {1, 2, 3}, new Object[] {"x", null}
+        };
+        boolean suppliedMessage = false;
+        try {
+            java.util.Objects.requireNonNull(null, () -> "missing-value");
+        } catch (NullPointerException expected) {
+            suppliedMessage = "missing-value".equals(expected.getMessage());
+        }
+        if (java.util.Objects.deepEquals(deepLeft, deepRight)
+                && suppliedMessage) {
+            result |= 128;
+        }
+
+        java.util.Optional flattened = java.util.Optional.of("ab")
+            .flatMap(value -> java.util.Optional.of(
+                ((String)value).toUpperCase()));
+        boolean suppliedException = false;
+        try {
+            java.util.Optional.empty().orElseThrow(
+                () -> new IllegalStateException("empty-optional"));
+        } catch (IllegalStateException expected) {
+            suppliedException = "empty-optional".equals(expected.getMessage());
+        }
+        if (flattened.get().equals("AB") && suppliedException) {
+            result |= 256;
+        }
+
+        java.nio.ByteBuffer ranged = java.nio.ByteBuffer.allocate(32);
+        byte[] source = new byte[] {9, 10, 11, 12, 13};
+        ranged.put(source, 1, 3);
+        ranged.putShort(6, (short)0x4455);
+        ranged.putInt(8, 0x66778899);
+        ranged.putLong(16, 0x0102030405060708L);
+        byte[] destination = new byte[5];
+        ranged.rewind();
+        ranged.get(destination, 1, 3);
+        java.nio.Buffer bufferState = ranged;
+        bufferState.position(2).mark().position(3).reset();
+        boolean underflow = false;
+        boolean overflow = false;
+        try {
+            java.nio.ByteBuffer.allocate(0).get();
+        } catch (java.nio.BufferUnderflowException expected) {
+            underflow = true;
+        }
+        try {
+            java.nio.ByteBuffer.allocate(0).put((byte)1);
+        } catch (java.nio.BufferOverflowException expected) {
+            overflow = true;
+        }
+        if (destination[1] == 10 && destination[2] == 11
+                && destination[3] == 12
+                && bufferState.position() == 2
+                && ranged.getShort(6) == (short)0x4455
+                && ranged.getInt(8) == 0x66778899
+                && ranged.getLong(16) == 0x0102030405060708L
+                && underflow && overflow) {
+            result |= 512;
+        }
+
+        int intBeforeUpdate = atomicInt.getAndUpdate(value -> value * 2);
+        int intAfterAccumulate = atomicInt.accumulateAndGet(
+            3, (left, right) -> left + right);
+        if (intBeforeUpdate == 12 && intAfterAccumulate == 27) {
+            result |= 1024;
+        }
+
+        long longAfterUpdate = atomicLong.updateAndGet(value -> value * -2L);
+        long longBeforeAccumulate = atomicLong.getAndAccumulate(
+            4L, (left, right) -> left + right);
+        if (longAfterUpdate == 6L && longBeforeAccumulate == 6L
+                && atomicLong.get() == 10L) {
+            result |= 2048;
+        }
+
+        atomicReference.set("x");
+        Object referenceUpdated = atomicReference.updateAndGet(
+            value -> ((String)value) + "y");
+        Object referenceBeforeAccumulate = atomicReference.getAndAccumulate(
+            "z", (left, right) -> ((String)left) + ((String)right));
+        if (referenceUpdated.equals("xy")
+                && referenceBeforeAccumulate.equals("xy")
+                && atomicReference.toString().equals("xyz")) {
+            result |= 4096;
+        }
+
+        final int[] primitiveConsumed = new int[] {0};
+        java.util.OptionalInt optionalInt = java.util.OptionalInt.of(7);
+        optionalInt.ifPresent(value -> primitiveConsumed[0] += value);
+        java.util.OptionalLong optionalLong = java.util.OptionalLong.empty();
+        long suppliedLong = optionalLong.orElseGet(() -> 19L);
+        java.util.OptionalDouble optionalDouble = java.util.OptionalDouble.of(2.5);
+        final double[] consumedDouble = new double[] {0.0};
+        optionalDouble.ifPresent(value -> consumedDouble[0] = value);
+        boolean emptyIntThrows = false;
+        try {
+            java.util.OptionalInt.empty().getAsInt();
+        } catch (java.util.NoSuchElementException expected) {
+            emptyIntThrows = true;
+        }
+        if (optionalInt.getAsInt() == 7
+                && optionalInt.orElse(1) == 7
+                && java.util.OptionalInt.empty().orElse(11) == 11
+                && optionalInt.equals(java.util.OptionalInt.of(7))
+                && optionalInt.hashCode() == 7
+                && optionalInt.toString().equals("OptionalInt[7]")
+                && java.util.OptionalLong.empty().toString()
+                    .equals("OptionalLong.empty")
+                && suppliedLong == 19L
+                && optionalDouble.getAsDouble() == 2.5
+                && consumedDouble[0] == 2.5
+                && java.util.OptionalDouble.of(Double.NaN).equals(
+                    java.util.OptionalDouble.of(Double.NaN))
+                && !java.util.OptionalDouble.of(0.0).equals(
+                    java.util.OptionalDouble.of(-0.0))
+                && primitiveConsumed[0] == 7 && emptyIntThrows) {
+            result |= 8192;
+        }
+
+        java.nio.ByteBuffer ordered = java.nio.ByteBuffer.allocate(32);
+        boolean defaultBigEndian = ordered.order() == java.nio.ByteOrder.BIG_ENDIAN;
+        ordered.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        ordered.putInt(0x01020304);
+        ordered.putChar('V');
+        ordered.putFloat(1.25F);
+        ordered.putDouble(-3.5);
+        byte[] orderedBytes = ordered.array();
+        ordered.flip();
+        if (defaultBigEndian
+                && ordered.order() == java.nio.ByteOrder.LITTLE_ENDIAN
+                && orderedBytes[0] == 4 && orderedBytes[1] == 3
+                && orderedBytes[2] == 2 && orderedBytes[3] == 1
+                && ordered.getInt() == 0x01020304
+                && ordered.getChar() == 'V'
+                && Float.floatToIntBits(ordered.getFloat())
+                    == Float.floatToIntBits(1.25F)
+                && Double.doubleToLongBits(ordered.getDouble())
+                    == Double.doubleToLongBits(-3.5)
+                && java.nio.ByteOrder.BIG_ENDIAN.toString().equals("BIG_ENDIAN")
+                && (java.nio.ByteOrder.nativeOrder() == java.nio.ByteOrder.BIG_ENDIAN
+                    || java.nio.ByteOrder.nativeOrder()
+                        == java.nio.ByteOrder.LITTLE_ENDIAN)) {
+            result |= 16384;
+        }
+
+        java.util.concurrent.ConcurrentHashMap concurrentMap =
+            new java.util.concurrent.ConcurrentHashMap(4);
+        concurrentMap.put("a", Integer.valueOf(1));
+        Object absent = concurrentMap.putIfAbsent("a", Integer.valueOf(9));
+        Object inserted = concurrentMap.computeIfAbsent(
+            "b", key -> Integer.valueOf(2));
+        Object present = concurrentMap.computeIfPresent(
+            "b", (key, value) -> Integer.valueOf(((Integer)value).intValue() + 3));
+        Object computed = concurrentMap.compute(
+            "c", (key, value) -> Integer.valueOf(value == null ? 7 : 0));
+        Object merged = concurrentMap.merge(
+            "a", Integer.valueOf(4),
+            (left, right) -> Integer.valueOf(
+                ((Integer)left).intValue() + ((Integer)right).intValue()));
+        boolean replaced = concurrentMap.replace(
+            "c", Integer.valueOf(7), Integer.valueOf(8));
+        boolean removedPair = concurrentMap.remove("c", Integer.valueOf(8));
+        final int[] mapSum = new int[] {0};
+        concurrentMap.forEach((key, value) ->
+            mapSum[0] += ((Integer)value).intValue());
+        java.util.concurrent.ConcurrentHashMap.KeySetView keyView =
+            concurrentMap.keySet();
+        java.util.concurrent.ConcurrentHashMap.KeySetView independentSet =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+        independentSet.add("free");
+        boolean nullRejected = false;
+        try {
+            concurrentMap.put(null, Integer.valueOf(1));
+        } catch (NullPointerException expected) {
+            nullRejected = true;
+        }
+        if (((Integer)absent).intValue() == 1
+                && ((Integer)inserted).intValue() == 2
+                && ((Integer)present).intValue() == 5
+                && ((Integer)computed).intValue() == 7
+                && ((Integer)merged).intValue() == 5
+                && replaced && removedPair
+                && concurrentMap.mappingCount() == 2L
+                && mapSum[0] == 10 && keyView.contains("a")
+                && keyView.contains("b") && independentSet.contains("free")
+                && nullRejected) {
+            result |= 32768;
+        }
+
+        java.util.concurrent.CountDownLatch latch =
+            new java.util.concurrent.CountDownLatch(1);
+        boolean timedOut = !latch.await(
+            1L, java.util.concurrent.TimeUnit.MILLISECONDS);
+        latch.countDown();
+        boolean released = latch.await(
+            1L, java.util.concurrent.TimeUnit.MILLISECONDS);
+        latch.countDown();
+        if (timedOut && released && latch.getCount() == 0L
+                && latch.toString().indexOf("Count = 0") >= 0) {
+            result |= 65536;
+        }
+
+        java.util.concurrent.FutureTask directFuture =
+            new java.util.concurrent.FutureTask(() -> Integer.valueOf(42));
+        directFuture.run();
+        java.util.concurrent.FutureTask cancelledFuture =
+            new java.util.concurrent.FutureTask(() -> Integer.valueOf(1));
+        boolean cancelled = cancelledFuture.cancel(false);
+        boolean cancellationThrown = false;
+        try {
+            cancelledFuture.get();
+        } catch (java.util.concurrent.CancellationException expected) {
+            cancellationThrown = true;
+        }
+        java.util.concurrent.ExecutorService executor =
+            java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.Future async = executor.submit(
+            () -> Integer.valueOf(33));
+        Object asyncResult = async.get(
+            2L, java.util.concurrent.TimeUnit.SECONDS);
+        executor.shutdown();
+        boolean terminated = executor.awaitTermination(
+            20L, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (((Integer)directFuture.get()).intValue() == 42
+                && directFuture.isDone() && !directFuture.isCancelled()
+                && cancelled && cancelledFuture.isDone()
+                && cancelledFuture.isCancelled() && cancellationThrown
+                && ((Integer)asyncResult).intValue() == 33
+                && executor.isShutdown() && terminated) {
+            result |= 131072;
+        }
+
+        return result;
+    }
+
     public static int arraysRangeSortApi() {
         int[] values = new int[] {9, 4, 3, 2, 8};
         java.util.Arrays.sort(values, 1, 4);

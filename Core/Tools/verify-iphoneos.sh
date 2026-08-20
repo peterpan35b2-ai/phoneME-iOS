@@ -64,7 +64,7 @@ if rg -n 'Vendor/phoneME|phoneME/Resources/PhoneMERuntime|_MergedSrc' \
 fi
 
 if rg -n --glob '*.{cpp,hpp,h}' \
-  'reinterpret_cast<\s*(u?int(8|16|32)_t|u?int(8|16|32)|int|long)|\(\s*(u?int(8|16|32)_t|int|long)\s*\)\s*[A-Za-z_][A-Za-z0-9_]*\s*\*' \
+  'reinterpret_cast<\s*(u?int(8|16|32)_t|u?int(8|16|32)|int\b|long\b)|\(\s*(u?int(8|16|32)_t|int\b|long\b)\s*\)\s*[A-Za-z_][A-Za-z0-9_]*\s*\*' \
   "$CORE_ROOT/include" "$CORE_ROOT/src" >/dev/null; then
   echo "Core contains a pointer-to-narrow-integer cast." >&2
   exit 1

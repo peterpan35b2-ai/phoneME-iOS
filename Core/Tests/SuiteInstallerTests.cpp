@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "phoneme/runtime/JadParser.hpp"
@@ -314,6 +315,24 @@ void test_install_flow(const std::filesystem::path& root,
     check(store.load_class(id, "SuiteApp").has_value(),
           "load suite class after restart");
 
+    const std::unordered_map<std::string, phoneme::u64> verified_classes {
+        {"SuiteApp", 0x123456789ABCDEF0ULL},
+    };
+    auto cached_verified = store.update_verified_classes(
+        id, 1U, verified_classes);
+    check(cached_verified.has_value(),
+          "persist verified-class startup cache");
+    store.clear();
+    auto restarted_with_verified_cache =
+        store.configure(SuiteStoreConfig {.root_path = root.string()});
+    check(restarted_with_verified_cache.has_value(),
+          "reload verified-class startup cache after restart");
+    const auto* cached_suite = store.find(id);
+    check(cached_suite != nullptr &&
+              cached_suite->verified_class_cache_version == 1U &&
+              cached_suite->verified_classes == verified_classes,
+          "preserve verified-class startup cache in suite database");
+
     const std::filesystem::path rms_marker =
         root / "rms" / std::to_string(id.value) / "marker.bin";
     std::filesystem::create_directories(rms_marker.parent_path(), error);
@@ -326,6 +345,10 @@ void test_install_flow(const std::filesystem::path& root,
     const auto* upgraded_suite = store.find(id);
     check(upgraded_suite != nullptr && upgraded_suite->version == "1.1.0",
           "upgrade replaces suite version");
+    check(upgraded_suite != nullptr &&
+              upgraded_suite->verified_class_cache_version == 0U &&
+              upgraded_suite->verified_classes.empty(),
+          "suite upgrade invalidates verified-class startup cache");
     check(std::filesystem::exists(rms_marker, error) && !error,
           "upgrade preserves RMS data");
 

@@ -14,6 +14,7 @@
 
 #include "phoneme/archive/ZipArchive.hpp"
 #include "phoneme/runtime/Runtime.hpp"
+#include "phoneme/runtime/WorkCoordinator.hpp"
 
 namespace {
 
@@ -286,6 +287,19 @@ int32_t phoneme_configure_jit(PhoneMERuntimeRef runtime, int32_t enabled) {
         return PHONEME_ERROR_INVALID_ARGUMENT;
     }
     return status_code(instance, instance->configure_jit(enabled != 0));
+}
+
+int32_t phoneme_set_thermal_pressure(PhoneMERuntimeRef runtime,
+                                     int32_t pressure) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr || pressure < PHONEME_THERMAL_NOMINAL ||
+        pressure > PHONEME_THERMAL_CRITICAL) {
+        return PHONEME_ERROR_INVALID_ARGUMENT;
+    }
+    phoneme::runtime::shared_work_coordinator().set_thermal_pressure(
+        static_cast<phoneme::runtime::ThermalPressure>(pressure));
+    instance->clear_error();
+    return PHONEME_OK;
 }
 
 int32_t phoneme_jit_status(void) {
@@ -899,6 +913,69 @@ const uint8_t* phoneme_acquire_frame_rgba_since(
     if (width != nullptr) width[0] = frame->metadata.dimensions.width;
     if (height != nullptr) height[0] = frame->metadata.dimensions.height;
     if (generation != nullptr) generation[0] = frame->metadata.generation;
+    return frame->pixels;
+}
+
+const uint8_t* phoneme_acquire_current_frame_rgba_since(
+    PhoneMERuntimeRef runtime,
+    uint64_t previous_generation,
+    int32_t* width,
+    int32_t* height,
+    uint64_t* generation) {
+    return phoneme_acquire_current_frame_rgba_regions_since(
+        runtime,
+        previous_generation,
+        width,
+        height,
+        generation,
+        nullptr,
+        0,
+        nullptr);
+}
+
+const uint8_t* phoneme_acquire_current_frame_rgba_regions_since(
+    PhoneMERuntimeRef runtime,
+    uint64_t previous_generation,
+    int32_t* width,
+    int32_t* height,
+    uint64_t* generation,
+    PhoneMEFrameDamageRegion* regions,
+    int32_t region_capacity,
+    int32_t* region_count) {
+    Runtime* instance = cast_runtime(runtime);
+    if (instance == nullptr) return nullptr;
+
+    // iOS polls LCDUI/Canvas immediately before presentation. Re-pumping here
+    // would execute Java callbacks twice per host display tick, increase
+    // wakeups, and make zero-copy presentation more expensive than the old
+    // copy path. Only acquire the completed framebuffer produced by that poll.
+    instance->release_current_frame_rgba();
+    const auto frame = instance->acquire_current_frame_rgba_since(
+        previous_generation);
+    if (!frame.has_value()) return nullptr;
+    if (width != nullptr) width[0] = frame->metadata.dimensions.width;
+    if (height != nullptr) height[0] = frame->metadata.dimensions.height;
+    if (generation != nullptr) generation[0] = frame->metadata.generation;
+    const std::size_t total_regions = frame->damage_regions.size();
+    const int32_t reported_region_count = total_regions >
+            static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
+        ? std::numeric_limits<int32_t>::max()
+        : static_cast<int32_t>(total_regions);
+    if (region_count != nullptr) region_count[0] = reported_region_count;
+    if (regions != nullptr && region_capacity > 0) {
+        const std::size_t writable = std::min<std::size_t>(
+            total_regions,
+            static_cast<std::size_t>(region_capacity));
+        for (std::size_t index = 0U; index < writable; ++index) {
+            const auto& source = frame->damage_regions[index];
+            regions[index] = PhoneMEFrameDamageRegion {
+                .x = source.x,
+                .y = source.y,
+                .width = source.width,
+                .height = source.height,
+            };
+        }
+    }
     return frame->pixels;
 }
 

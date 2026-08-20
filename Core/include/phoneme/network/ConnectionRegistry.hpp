@@ -44,6 +44,12 @@ struct OpenedConnection final {
     ConnectionKind kind {ConnectionKind::stream};
 };
 
+struct ConnectionRegistryDiagnostics final {
+    usize connections {0U};
+    usize pending_operations {0U};
+    NetworkAdapterDiagnostics adapter;
+};
+
 class ConnectionRegistry final {
 public:
     ConnectionRegistry();
@@ -58,6 +64,7 @@ public:
     void set_blocking_hooks(NetworkBlockingHooks hooks);
     void set_owner(i32 owner) noexcept;
     [[nodiscard]] i32 owner() const noexcept;
+    [[nodiscard]] ConnectionRegistryDiagnostics diagnostics() const noexcept;
 
     [[nodiscard]] Result<OpenedConnection> open(
         std::string_view url,

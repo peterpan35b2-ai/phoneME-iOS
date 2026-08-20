@@ -27,7 +27,7 @@ enum EmulatorState: Equatable {
 
 @MainActor
 final class EmbeddedPhoneMEEngine: NSObject {
-    var onFrame: ((CGImage) -> Void)?
+    var onFrame: ((PhoneMEFrame) -> Void)?
     var onLCDUIEvents: (([PhoneMECAPI.LCDUIEvent]) -> Void)?
     var onLCDUIImages: (([Int32: CGImage]) -> Void)?
     var onStateChange: ((EmulatorState) -> Void)?
@@ -405,11 +405,29 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
     override init() {
         super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleThermalStateDidChange),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
         // Prepare the immutable runtime payload once. All access to the C ABI
         // is serialized through this same queue; the VM itself owns its worker
         // pthread, so another Swift-side worker layer is unnecessary.
         runtimeQueue.async {
             _ = try? PhoneMERuntimeResources.prepare()
+        }
+    }
+
+    @objc private func handleThermalStateDidChange() {
+        applyCurrentThermalPressure()
+    }
+
+    private func applyCurrentThermalPressure() {
+        guard let api, let runtime else { return }
+        let pressure = PhoneMECAPI.currentThermalPressure
+        runtimeQueue.async {
+            _ = api.setThermalPressure(runtime, pressure: pressure)
         }
     }
 
@@ -631,6 +649,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                     self.api = loadedAPI
                     self.runtime = createdRuntime
+                    self.applyCurrentThermalPressure()
                     self.runtimeIsSuspended = false
                     self.runtimeSuspensionRequested = false
                     self.setState(.running)
@@ -711,6 +730,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     guard let self else { return }
                     self.api = loadedAPI
                     self.runtime = createdRuntime
+                    self.applyCurrentThermalPressure()
                 }
             } catch {
                 // Library preparation is opportunistic. Do not poison the
@@ -933,6 +953,21 @@ final class EmbeddedPhoneMEEngine: NSObject {
                 let resolvedSuiteID: Int32
                 if let preparedSuiteID = context.suiteIDs[gameID] {
                     resolvedSuiteID = preparedSuiteID
+                } else if let installedSuiteID = loadedAPI.findInstalledSuite(
+                    createdRuntime,
+                    vendor: mediaArtist,
+                    name: mediaTitle,
+                    version: suiteVersion,
+                    identityNamespace: gameID.uuidString.lowercased()
+                ) {
+                    // A fresh iOS process starts with an empty in-memory
+                    // game->suite map even though SuiteStore has already
+                    // recovered the managed suite database. Reuse that suite
+                    // by its persisted MIDP identity instead of inspecting,
+                    // hashing and comparing the original imported JAR again
+                    // on every launch.
+                    context.suiteIDs[gameID] = installedSuiteID
+                    resolvedSuiteID = installedSuiteID
                 } else {
                     let install = loadedAPI.installJar(
                         createdRuntime,
@@ -1173,6 +1208,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
                     }
                     self.api = loadedAPI
                     self.runtime = createdRuntime
+                    self.applyCurrentThermalPressure()
                     self.foregroundGameID = gameID
                     self.foregroundAppID = appID
                     self.pendingForegroundGameID = nil
@@ -2324,7 +2360,7 @@ final class EmbeddedPhoneMEEngine: NSObject {
 
                     let frame = snapshot.wantsFrame
                         && snapshot.visibleScreen?.usesNativeLCDUI != true
-                        ? api.copyFrame(
+                        ? api.presentationFrame(
                             runtime,
                             after: snapshot.previousFrameGeneration
                         )
@@ -2376,9 +2412,9 @@ final class EmbeddedPhoneMEEngine: NSObject {
         )
     }
 
-    private func deliver(_ frame: (image: CGImage, generation: UInt64)) {
+    private func deliver(_ frame: PhoneMEFrame) {
         lastFrameGeneration = frame.generation
-        onFrame?(frame.image)
+        onFrame?(frame)
 
         fpsFrameCount += 1
         let nowNanoseconds = DispatchTime.now().uptimeNanoseconds

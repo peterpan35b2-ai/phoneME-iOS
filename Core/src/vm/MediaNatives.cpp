@@ -1151,12 +1151,13 @@ void register_player(NativeMethodRegistry& registry) {
 
     const auto lifecycle = [&](std::string name,
                                auto operation) {
+        const bool closes_player = name == "close";
         add(registry,
             "javax/microedition/media/IOSPlayer",
             std::move(name),
             "()V",
-            [operation](Machine& machine,
-                        std::span<const Value> arguments)
+            [operation, closes_player](Machine& machine,
+                                       std::span<const Value> arguments)
                 -> Result<std::optional<Value>> {
                 auto player = receiver(arguments);
                 if (!player) return std::unexpected(player.error());
@@ -1164,6 +1165,14 @@ void register_player(NativeMethodRegistry& registry) {
                 if (!id) return std::unexpected(id.error());
                 auto result = operation(machine.media(), *id);
                 if (!result) return map_media_error(result.error());
+                if (closes_player) {
+                    // close() is terminal and the MediaService resource is
+                    // already gone at this point. Remove the dispatcher
+                    // registration before invoking user listeners so a
+                    // failing CLOSED callback cannot retain a stale ObjectRef
+                    // for the rest of the VM lifetime.
+                    machine.media_events().unregister_player(*id);
+                }
                 if constexpr (requires { result->has_value(); }) {
                     if (result->has_value()) {
                         auto dispatched = dispatch_event_impl(
@@ -1173,7 +1182,9 @@ void register_player(NativeMethodRegistry& registry) {
                         }
                     }
                 }
-                machine.media_events().wake();
+                if (!closes_player) {
+                    machine.media_events().wake();
+                }
                 return std::optional<Value> {};
             });
     };

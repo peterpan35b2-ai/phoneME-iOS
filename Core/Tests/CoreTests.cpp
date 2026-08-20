@@ -161,7 +161,43 @@ void write_performance_snapshot() {
            << "    \"event_wakeups\": "
            << snapshot.scheduler_event_wakeups << ",\n"
            << "    \"spurious_wakeups\": "
-           << snapshot.scheduler_spurious_wakeups << "\n"
+           << snapshot.scheduler_spurious_wakeups << ",\n"
+           << "    \"maintenance_checks\": "
+           << snapshot.maintenance_checks << ",\n"
+           << "    \"maintenance_background_checks\": "
+           << snapshot.maintenance_background_checks << ",\n"
+           << "    \"frame_backpressure_waits\": "
+           << snapshot.frame_backpressure_waits << ",\n"
+           << "    \"frame_backpressure_nanoseconds\": "
+           << snapshot.frame_backpressure_nanoseconds << "\n"
+           << "  },\n"
+           << "  \"graphics\": {\n"
+           << "    \"canvas_publications\": "
+           << snapshot.canvas_publications << ",\n"
+           << "    \"canvas_unchanged_publications\": "
+           << snapshot.canvas_unchanged_publications << ",\n"
+           << "    \"canvas_dirty_pixels\": "
+           << snapshot.canvas_dirty_pixels << ",\n"
+           << "    \"canvas_full_frame_pixels_avoided\": "
+           << snapshot.canvas_full_frame_pixels_avoided << ",\n"
+           << "    \"canvas_publication_nanoseconds\": "
+           << snapshot.canvas_publication_nanoseconds << ",\n"
+           << "    \"core_text_cache_hits\": "
+           << snapshot.core_text_cache_hits << ",\n"
+           << "    \"core_text_cache_misses\": "
+           << snapshot.core_text_cache_misses << ",\n"
+           << "    \"core_text_cache_evictions\": "
+           << snapshot.core_text_cache_evictions << ",\n"
+           << "    \"core_text_cache_peak_bytes\": "
+           << snapshot.core_text_cache_peak_bytes << "\n"
+           << "  },\n"
+           << "  \"resource_cache\": {\n"
+           << "    \"hits\": " << snapshot.resource_array_cache_hits << ",\n"
+           << "    \"misses\": " << snapshot.resource_array_cache_misses << ",\n"
+           << "    \"evictions\": "
+           << snapshot.resource_array_cache_evictions << ",\n"
+           << "    \"peak_bytes\": "
+           << snapshot.resource_array_cache_peak_bytes << "\n"
            << "  },\n"
            << "  \"opcode_counts\": [";
     for (std::size_t index = 0; index < snapshot.opcode_counts.size(); ++index) {
@@ -3880,6 +3916,8 @@ void test_machine_extended_opcodes(const std::string& fixture_jar) {
                                "native String failures unwind through Java catch blocks");
     require_jdk8_string_result("jdk8CoreCompatApi", 32767,
                                "execute JDK 8 compatibility APIs implemented by Core");
+    require_jdk8_string_result("practicalHeadlessJdk8Api", 262143,
+                               "execute practical headless JDK 8 compatibility APIs");
     require_jdk8_string_result("arraysRangeSortApi", 1,
                                "sort bounded int-array ranges with JDK semantics");
     require_jdk8_string_result("regexApi", 15,
@@ -9158,6 +9196,7 @@ void test_framebuffer_sizes() {
     require(frame.generation == before_exchange + 1U &&
                 !frame.rgba.empty() && frame.rgba.front() == 7U,
             "framebuffer exchange publishes the replacement pixels");
+
     std::vector<phoneme::u8> too_small(4U, 0U);
     const auto changed_metadata = framebuffer.copy_rgba_since(
         before_exchange, too_small);
@@ -9172,6 +9211,67 @@ void test_framebuffer_sizes() {
                 copied_metadata->generation == frame.generation &&
                 copied.front() == 7U,
             "changed-frame copy publishes pixels under one framebuffer lock");
+
+    const auto before_partial = framebuffer.metadata().generation;
+    constexpr std::array<phoneme::u8, 4> partial_pixel {
+        0xAAU, 0xBBU, 0xCCU, 0xDDU,
+    };
+    require(framebuffer.update_region(
+                {320, 240}, 1, 0, 1, 1, partial_pixel).has_value(),
+            "update framebuffer subregion without replacing full storage");
+    const auto partial = framebuffer.snapshot();
+    require(partial.generation == before_partial + 1U &&
+                partial.rgba.size() == frame.rgba.size() &&
+                partial.rgba[4U] == 0xAAU &&
+                partial.rgba[5U] == 0xBBU &&
+                partial.rgba[6U] == 0xCCU &&
+                partial.rgba[7U] == 0xDDU &&
+                partial.rgba.front() == 7U &&
+                partial.rgba[8U] == 7U,
+            "partial framebuffer update patches only the requested pixel");
+    {
+        auto lease = framebuffer.acquire_rgba_since(before_partial);
+        require(lease.has_value() &&
+                    lease->damage_regions().size() == 1U &&
+                    lease->damage_regions()[0].x == 1 &&
+                    lease->damage_regions()[0].y == 0 &&
+                    lease->damage_regions()[0].width == 1 &&
+                    lease->damage_regions()[0].height == 1,
+                "framebuffer read lease preserves partial damage metadata");
+    }
+
+    const auto before_batch = framebuffer.metadata().generation;
+    constexpr std::array<phoneme::u8, 4> first_batch_pixel {
+        1U, 2U, 3U, 4U,
+    };
+    constexpr std::array<phoneme::u8, 4> second_batch_pixel {
+        5U, 6U, 7U, 8U,
+    };
+    const std::array<phoneme::runtime::FrameRegionUpdate, 2> batch {{
+        {.x = 0, .y = 1, .width = 1, .height = 1, .rgba = first_batch_pixel},
+        {.x = 319, .y = 239, .width = 1, .height = 1,
+         .rgba = second_batch_pixel},
+    }};
+    require(framebuffer.update_regions({320, 240}, batch).has_value(),
+            "batch distant framebuffer regions under one publication");
+    const auto batched = framebuffer.snapshot();
+    const phoneme::usize last_pixel = (320U * 240U - 1U) * 4U;
+    require(batched.generation == before_batch + 1U &&
+                batched.rgba[320U * 4U] == 1U &&
+                batched.rgba[320U * 4U + 3U] == 4U &&
+                batched.rgba[last_pixel] == 5U &&
+                batched.rgba[last_pixel + 3U] == 8U,
+            "batch partial updates publish atomically with one generation");
+    {
+        auto lease = framebuffer.acquire_rgba_since(before_batch);
+        require(lease.has_value() &&
+                    lease->damage_regions().size() == 2U &&
+                    lease->damage_regions()[0].x == 0 &&
+                    lease->damage_regions()[0].y == 1 &&
+                    lease->damage_regions()[1].x == 319 &&
+                    lease->damage_regions()[1].y == 239,
+                "batched framebuffer damage islands reach display readers");
+    }
     require(!framebuffer.resize({0, 240}).has_value(),
             "reject zero framebuffer width");
 }
