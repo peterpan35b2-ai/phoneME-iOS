@@ -394,7 +394,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
     private var runtimeIsSuspended = false
     private var runtimeSuspensionRequested = false
     private var shouldRunInForeground = true
-    private var lastFrameGeneration: UInt64 = 0
     private var launchIdentifier = UUID()
     private let continuousInputBuffer = ContinuousInputBuffer()
     private var renderRequestBuffer = RenderRequestBuffer()
@@ -428,252 +427,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
         let pressure = PhoneMECAPI.currentThermalPressure
         runtimeQueue.async {
             _ = api.setThermalPressure(runtime, pressure: pressure)
-        }
-    }
-
-    func start(
-        gameID: UUID,
-        jarURL: URL,
-        mainClass: String,
-        mediaTitle: String,
-        mediaArtist: String,
-        mediaArtworkPath: String?,
-        screenWidth: Int,
-        screenHeight: Int,
-        frameRateLimit: Int,
-        framePacingMode: GameProfile.FramePacingMode,
-        heapSizeMegabytes: Int,
-        immediateProcessing: Bool,
-        parallelScreenRedrawing: Bool,
-        autoTranslateToVietnamese: Bool,
-        translationProvider: TranslationProvider,
-        translationSourceLanguage: TranslationSourceLanguage,
-        keyUp: Int32,
-        keyDown: Int32,
-        keyLeft: Int32,
-        keyRight: Int32,
-        keyFire: Int32,
-        keySoftLeft: Int32,
-        keySoftRight: Int32
-    ) {
-        let previousAPI = api
-        let previousRuntime = runtime
-        let previousNeedsResume = runtimeIsSuspended
-            || runtimeSuspensionRequested
-        // Remove the public handles and stop polling immediately. The actual
-        // resume/stop/destroy sequence stays on runtimeQueue so it cannot race
-        // an in-flight suspend request or framebuffer operation.
-        clearCurrentRuntime()
-
-        let requestedFPS = GameProfile.resolvedFrameRate(
-            frameRateLimit,
-            mode: framePacingMode
-        )
-        let requestedHeapSizeMegabytes =
-            GameProfile.resolvedHeapSizeMegabytes(heapSizeMegabytes)
-        // Native input wakes the MIDP select loop directly, so the host bridge
-        // does not need a 120 Hz polling floor. Framebuffer delivery and active
-        // LCDUI synchronization follow the selected cadence up to 60 FPS; the
-        // core separately applies render-loop override semantics when enabled.
-        framePollingFramesPerSecond = requestedFPS
-        fpsMeasurementStartNanoseconds = DispatchTime.now()
-            .uptimeNanoseconds
-        setState(.starting)
-
-        // Frame reads always run outside the main thread. These legacy fields
-        // remain decodable for existing profiles but no longer raise cadence.
-        _ = immediateProcessing
-        _ = parallelScreenRedrawing
-
-        let currentLaunchIdentifier = UUID()
-        let cleanupQueue = runtimeQueue
-        let inputQueue = inputQueue
-        let pollQueue = pollQueue
-        let renderQueue = renderQueue
-        launchIdentifier = currentLaunchIdentifier
-
-        runtimeQueue.async { [weak self] in
-            if let previousAPI, let previousRuntime {
-                // No host callback may retain the old runtime while it is
-                // being freed. These barriers only wait for already-submitted
-                // work; new work is rejected because clearCurrentRuntime()
-                // removed the public handle first.
-                inputQueue.sync { }
-                pollQueue.sync { }
-                renderQueue.sync { }
-                if previousNeedsResume {
-                    previousAPI.resume(previousRuntime)
-                }
-                previousAPI.stop(previousRuntime)
-                previousAPI.destroyRuntime(previousRuntime)
-            }
-
-            do {
-                let loadedAPI = try PhoneMECAPI.load(gameID: gameID)
-                guard let createdRuntime = loadedAPI.createRuntime() else {
-                    throw PhoneMECoreError.runtimeCreationFailed
-                }
-
-                let translationResult = loadedAPI.configureTranslation(
-                    createdRuntime,
-                    enabled: autoTranslateToVietnamese,
-                    provider: translationProvider,
-                    sourceLanguage: translationSourceLanguage
-                )
-                guard translationResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: translationResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-
-                let keymapResult = loadedAPI.configureKeymap(
-                    createdRuntime,
-                    up: keyUp,
-                    down: keyDown,
-                    left: keyLeft,
-                    right: keyRight,
-                    fire: keyFire,
-                    softLeft: keySoftLeft,
-                    softRight: keySoftRight
-                )
-                guard keymapResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: keymapResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-
-                let frameRateResult = loadedAPI.configureApplicationFramePacing(
-                    createdRuntime,
-                    appID: 1,
-                    framesPerSecond: requestedFPS,
-                    mode: framePacingMode
-                )
-                guard frameRateResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: frameRateResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-
-                let heapResult = loadedAPI.configureApplicationHeap(
-                    createdRuntime,
-                    appID: 1,
-                    heapMegabytes: requestedHeapSizeMegabytes
-                )
-                guard heapResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: heapResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-
-                let install = loadedAPI.installJar(
-                    createdRuntime,
-                    jarURL: jarURL,
-                    identityNamespace: gameID.uuidString.lowercased()
-                )
-                guard install.status == 0, let suiteID = install.suiteID else {
-                    let error = loadedAPI.failure(
-                        status: install.status,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-                let trustResult = loadedAPI.setSuiteTrusted(
-                    createdRuntime,
-                    suiteID: suiteID
-                )
-                guard trustResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: trustResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-                let systemStartResult = loadedAPI.startSystem(createdRuntime)
-                guard systemStartResult == 0 else {
-                    let error = loadedAPI.failure(
-                        status: systemStartResult,
-                        runtime: createdRuntime
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-                let result = loadedAPI.startMidlet(
-                    createdRuntime,
-                    suiteID: suiteID,
-                    mainClass: mainClass,
-                    appID: 1,
-                    screenWidth: screenWidth,
-                    screenHeight: screenHeight
-                )
-                guard result == 0 else {
-                    let error = loadedAPI.failure(
-                        status: result,
-                        runtime: createdRuntime,
-                        appID: 1
-                    )
-                    loadedAPI.destroyRuntime(createdRuntime)
-                    throw error
-                }
-
-                Self.configureMediaMetadata(
-                    title: mediaTitle,
-                    artist: mediaArtist,
-                    artworkPath: mediaArtworkPath
-                )
-
-                DispatchQueue.main.async {
-                    guard
-                        let self,
-                        self.launchIdentifier == currentLaunchIdentifier
-                    else {
-                        cleanupQueue.async {
-                            loadedAPI.stop(createdRuntime)
-                            loadedAPI.destroyRuntime(createdRuntime)
-                        }
-                        return
-                    }
-
-                    self.api = loadedAPI
-                    self.runtime = createdRuntime
-                    self.applyCurrentThermalPressure()
-                    self.runtimeIsSuspended = false
-                    self.runtimeSuspensionRequested = false
-                    self.setState(.running)
-                    self.startPolling(
-                        api: loadedAPI,
-                        runtime: createdRuntime,
-                        launchIdentifier: currentLaunchIdentifier
-                    )
-                    if !self.shouldRunInForeground {
-                        self.enterBackground()
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async { [weak self] in
-                    guard
-                        let self,
-                        self.launchIdentifier == currentLaunchIdentifier
-                    else {
-                        return
-                    }
-                    self.clearCurrentRuntime()
-                    self.setState(.failed(error.localizedDescription))
-                }
-            }
         }
     }
 
@@ -886,8 +639,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
         frameRateLimit: Int,
         framePacingMode: GameProfile.FramePacingMode,
         heapSizeMegabytes: Int,
-        immediateProcessing: Bool,
-        parallelScreenRedrawing: Bool,
         autoTranslateToVietnamese: Bool,
         translationProvider: TranslationProvider,
         translationSourceLanguage: TranslationSourceLanguage,
@@ -908,8 +659,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
         framePollingFramesPerSecond = requestedFPS
         fpsMeasurementStartNanoseconds = DispatchTime.now()
             .uptimeNanoseconds
-        _ = immediateProcessing
-        _ = parallelScreenRedrawing
 
         let previousPendingGameID = pendingForegroundGameID
         launchToken.cancel()
@@ -2413,7 +2162,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
     }
 
     private func deliver(_ frame: PhoneMEFrame) {
-        lastFrameGeneration = frame.generation
         onFrame?(frame)
 
         fpsFrameCount += 1
@@ -2552,7 +2300,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
         }
         pollTimer = nil
         pollTimerIsSuspended = false
-        lastFrameGeneration = 0
         continuousInputBuffer.reset()
         renderRequestBuffer = RenderRequestBuffer()
         fpsFrameCount = 0
@@ -2577,7 +2324,6 @@ final class EmbeddedPhoneMEEngine: NSObject {
         pollTimerIsSuspended = false
         runtimeIsSuspended = false
         runtimeSuspensionRequested = false
-        lastFrameGeneration = 0
         continuousInputBuffer.reset()
         // Give the next launch a fresh coalescing state. Any old render worker
         // retains the previous buffer and is rejected by launchIdentifier.

@@ -192,24 +192,14 @@ namespace phoneme::vm
         ObjectRef thread);
     void configure_frame_pacing(i32 frames_per_second,
                                 FramePacingMode mode) noexcept;
-    void configure_jit(bool enabled) noexcept { jit_.set_enabled(enabled); }
-    void configure_jit_startup(bool enabled) noexcept {
-      jit_.set_startup_mode(enabled);
-    }
-    [[nodiscard]] Status configure_jit_profile(std::string path) {
-      return jit_.configure_profile(std::move(path));
-    }
-    [[nodiscard]] Status flush_jit_profile() { return jit_.flush_profile(); }
-    [[nodiscard]] bool jit_enabled() const noexcept { return jit_.enabled(); }
-    [[nodiscard]] bool jit_startup_mode() const noexcept {
-      return jit_.startup_mode();
-    }
-    [[nodiscard]] JitAvailability jit_availability() const noexcept {
-      return jit_.availability();
-    }
-    [[nodiscard]] JitStatistics jit_statistics() const noexcept {
-      return jit_.statistics();
-    }
+    void configure_jit(bool enabled) noexcept;
+    void configure_jit_startup(bool enabled) noexcept;
+    [[nodiscard]] Status configure_jit_profile(std::string path);
+    [[nodiscard]] Status flush_jit_profile();
+    [[nodiscard]] bool jit_enabled() const noexcept;
+    [[nodiscard]] bool jit_startup_mode() const noexcept;
+    [[nodiscard]] JitAvailability jit_availability() const noexcept;
+    [[nodiscard]] JitStatistics jit_statistics() const noexcept;
     void pace_frame_publication();
     void note_frame_pacing_boundary() noexcept;
     void note_frame_pacing_request() noexcept;

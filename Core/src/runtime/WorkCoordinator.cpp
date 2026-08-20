@@ -55,10 +55,12 @@ void WorkCoordinator::begin_frame_work() noexcept {
 }
 
 void WorkCoordinator::end_frame_work() noexcept {
-    const u32 previous = active_frame_jobs_.fetch_sub(
-        1U, std::memory_order_acq_rel);
-    if (previous == 0U) {
-        active_frame_jobs_.store(0U, std::memory_order_release);
+    u32 current = active_frame_jobs_.load(std::memory_order_acquire);
+    while (current != 0U &&
+           !active_frame_jobs_.compare_exchange_weak(
+               current, current - 1U,
+               std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
     }
 }
 

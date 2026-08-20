@@ -19,7 +19,6 @@ final class GameProfileStore: ObservableObject {
     private let keyboardPaletteMigrationKey = "phoneME.gameProfiles.keyboardPaletteV3"
     private let displayScaleMigrationKey = "phoneME.gameProfiles.displayScaleV4"
     private let displayGravityMigrationKey = "phoneME.gameProfiles.displayGravityV5"
-    private let parallelRedrawMigrationKey = "phoneME.gameProfiles.parallelRedrawV6"
     private let nativeInputDefaultsMigrationKey = "phoneME.gameProfiles.nativeInputDefaultsV7"
     private let frameRate60MigrationKey = "phoneME.gameProfiles.frameRate60V8"
     private let fpsOverrideOffMigrationKey = "phoneME.gameProfiles.fpsOverrideOffV9"
@@ -71,7 +70,6 @@ final class GameProfileStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: keyboardPaletteMigrationKey)
             UserDefaults.standard.set(true, forKey: displayScaleMigrationKey)
             UserDefaults.standard.set(true, forKey: displayGravityMigrationKey)
-            UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
             UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
             UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
             UserDefaults.standard.set(true, forKey: fpsOverrideOffMigrationKey)
@@ -169,21 +167,6 @@ final class GameProfileStore: ObservableObject {
                 changed = true
             }
             defaults.set(true, forKey: displayGravityMigrationKey)
-            if changed {
-                persist()
-            }
-        }
-
-        // Frame conversion used to run synchronously on the main thread by
-        // default. Move existing profiles to the render queue so large combat
-        // effects cannot stall touch handling and SwiftUI composition.
-        if !defaults.bool(forKey: parallelRedrawMigrationKey) {
-            var changed = false
-            for id in profiles.keys where profiles[id]?.parallelScreenRedrawing == false {
-                profiles[id]?.parallelScreenRedrawing = true
-                changed = true
-            }
-            defaults.set(true, forKey: parallelRedrawMigrationKey)
             if changed {
                 persist()
             }

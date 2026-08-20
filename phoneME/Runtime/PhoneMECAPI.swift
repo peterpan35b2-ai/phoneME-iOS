@@ -1391,17 +1391,13 @@ final class PhoneMECAPI: @unchecked Sendable {
         var height: Int32 = 0
         var generation: UInt64 = 0
         var damageCount: Int32 = 0
-        var damageStorage = Array(
-            repeating: PhoneMEFrameDamageRegion(
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0
-            ),
-            count: 32
-        )
-        let pixels = damageStorage.withUnsafeMutableBufferPointer { storage in
-            phoneme_acquire_current_frame_rgba_regions_since(
+        let maximumDamageRegions = 32
+        var currentDamageRegions: [PhoneMEFrameDamage]?
+        let pixels = withUnsafeTemporaryAllocation(
+            of: PhoneMEFrameDamageRegion.self,
+            capacity: maximumDamageRegions
+        ) { storage in
+            let acquired = phoneme_acquire_current_frame_rgba_regions_since(
                 runtime.rawValue,
                 previousGeneration,
                 &width,
@@ -1411,6 +1407,24 @@ final class PhoneMECAPI: @unchecked Sendable {
                 Int32(storage.count),
                 &damageCount
             )
+            guard damageCount >= 0,
+                  damageCount <= Int32(storage.count) else {
+                currentDamageRegions = nil
+                return acquired
+            }
+            var regions: [PhoneMEFrameDamage] = []
+            regions.reserveCapacity(Int(damageCount))
+            for index in 0..<Int(damageCount) {
+                let region = storage[index]
+                regions.append(PhoneMEFrameDamage(
+                    x: Int(region.x),
+                    y: Int(region.y),
+                    width: Int(region.width),
+                    height: Int(region.height)
+                ))
+            }
+            currentDamageRegions = regions
+            return acquired
         }
         guard let pixels else {
             return nil
@@ -1431,20 +1445,6 @@ final class PhoneMECAPI: @unchecked Sendable {
             return nil
         }
 
-        let currentDamageRegions: [PhoneMEFrameDamage]? = {
-            guard damageCount >= 0,
-                  damageCount <= Int32(damageStorage.count) else {
-                return nil
-            }
-            return damageStorage.prefix(Int(damageCount)).map { region in
-                PhoneMEFrameDamage(
-                    x: Int(region.x),
-                    y: Int(region.y),
-                    width: Int(region.width),
-                    height: Int(region.height)
-                )
-            }
-        }()
         let uploadPlan = metalDamageHistory.planAndRecord(
             textureGeneration: lease.contentGeneration,
             previousPresentedGeneration: previousGeneration,

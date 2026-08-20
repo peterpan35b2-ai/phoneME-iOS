@@ -36,7 +36,6 @@ final class ProfileTemplateStore: ObservableObject {
     private let keyboardLayoutMigrationKey = "phoneME.profileTemplates.keyboardLayoutV2"
     private let keyboardPaletteMigrationKey = "phoneME.profileTemplates.keyboardPaletteV3"
     private let displayGravityMigrationKey = "phoneME.profileTemplates.displayGravityV5"
-    private let parallelRedrawMigrationKey = "phoneME.profileTemplates.parallelRedrawV6"
     private let nativeInputDefaultsMigrationKey = "phoneME.profileTemplates.nativeInputDefaultsV7"
     private let frameRate60MigrationKey = "phoneME.profileTemplates.frameRate60V8"
     private let fpsOverrideOffMigrationKey = "phoneME.profileTemplates.fpsOverrideOffV9"
@@ -122,7 +121,6 @@ final class ProfileTemplateStore: ObservableObject {
             UserDefaults.standard.set(true, forKey: keyboardLayoutMigrationKey)
             UserDefaults.standard.set(true, forKey: keyboardPaletteMigrationKey)
             UserDefaults.standard.set(true, forKey: displayGravityMigrationKey)
-            UserDefaults.standard.set(true, forKey: parallelRedrawMigrationKey)
             UserDefaults.standard.set(true, forKey: nativeInputDefaultsMigrationKey)
             UserDefaults.standard.set(true, forKey: frameRate60MigrationKey)
             UserDefaults.standard.set(true, forKey: fpsOverrideOffMigrationKey)
@@ -181,18 +179,6 @@ final class ProfileTemplateStore: ObservableObject {
                 changed = true
             }
             defaults.set(true, forKey: displayGravityMigrationKey)
-            if changed {
-                persist()
-            }
-        }
-
-        if !defaults.bool(forKey: parallelRedrawMigrationKey) {
-            var changed = false
-            for index in templates.indices where !templates[index].profile.parallelScreenRedrawing {
-                templates[index].profile.parallelScreenRedrawing = true
-                changed = true
-            }
-            defaults.set(true, forKey: parallelRedrawMigrationKey)
             if changed {
                 persist()
             }

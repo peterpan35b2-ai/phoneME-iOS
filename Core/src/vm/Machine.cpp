@@ -3555,6 +3555,59 @@ namespace phoneme::vm
     scheduler_.configure_frame_pacing(frames_per_second, mode);
   }
 
+  void Machine::configure_jit(bool enabled) noexcept
+  {
+    // JIT cache mutation must never race a Java thread entering compiled code.
+    // Runtime host calls can arrive while lifecycle/game threads are active;
+    // serialize configuration with the same recursive execution gate used by
+    // interpreter/JIT execution rather than relying on Runtime's host-only
+    // operation mutex.
+    std::scoped_lock execution_lock(execution_mutex_);
+    jit_.set_enabled(enabled);
+  }
+
+  void Machine::configure_jit_startup(bool enabled) noexcept
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    jit_.set_startup_mode(enabled);
+  }
+
+  Status Machine::configure_jit_profile(std::string path)
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.configure_profile(std::move(path));
+  }
+
+  Status Machine::flush_jit_profile()
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.flush_profile();
+  }
+
+  bool Machine::jit_enabled() const noexcept
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.enabled();
+  }
+
+  bool Machine::jit_startup_mode() const noexcept
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.startup_mode();
+  }
+
+  JitAvailability Machine::jit_availability() const noexcept
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.availability();
+  }
+
+  JitStatistics Machine::jit_statistics() const noexcept
+  {
+    std::scoped_lock execution_lock(execution_mutex_);
+    return jit_.statistics();
+  }
+
   void Machine::pace_frame_publication()
   {
     scheduler_.pace_current_frame_publication(*this);

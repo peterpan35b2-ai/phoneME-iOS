@@ -666,23 +666,6 @@ void Scheduler::pace_current_frame_publication(Machine& machine) {
 
     const auto now = std::chrono::steady_clock::now();
 
-    // Feed actual publication cadence into the shared CPU budget. This is
-    // independent of frame-pacing mode: background JIT should yield whenever
-    // the game is consuming most of its frame budget, even in native mode.
-    if (tls_pressure_frame_boundary_valid_ &&
-        now >= tls_pressure_frame_boundary_time_) {
-        const i64 elapsed =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                now - tls_pressure_frame_boundary_time_).count();
-        const i64 target = frame_interval_nanoseconds_.load(
-            std::memory_order_acquire);
-        if (elapsed > 0 && target > 0) {
-            runtime::shared_work_coordinator().note_frame_interval(
-                static_cast<u64>(elapsed), static_cast<u64>(target));
-        }
-    }
-    tls_pressure_frame_boundary_time_ = now;
-    tls_pressure_frame_boundary_valid_ = true;
     if (!deadline.has_value() || now >= *deadline) return;
 
     // This is a presentation gate, not Java Thread.sleep. Keep the interrupt
@@ -732,6 +715,28 @@ void Scheduler::note_current_frame_boundary() noexcept {
     }
 
     const auto now = std::chrono::steady_clock::now();
+
+    // Feed the *actual* publication-to-publication cadence into the shared
+    // native CPU budget at the frame boundary itself. Doing this from
+    // pace_current_frame_publication() missed ordinary native-paced games,
+    // because that function intentionally returns early until sustained
+    // overproduction activates backpressure. A game that is already missing
+    // frame deadlines must suppress speculative JIT/native background work
+    // even when host pacing is otherwise inactive.
+    if (tls_pressure_frame_boundary_valid_ &&
+        now >= tls_pressure_frame_boundary_time_) {
+        const i64 elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now - tls_pressure_frame_boundary_time_).count();
+        const i64 target = frame_interval_nanoseconds_.load(
+            std::memory_order_acquire);
+        if (elapsed > 0 && target > 0) {
+            runtime::shared_work_coordinator().note_frame_interval(
+                static_cast<u64>(elapsed), static_cast<u64>(target));
+        }
+    }
+    tls_pressure_frame_boundary_time_ = now;
+    tls_pressure_frame_boundary_valid_ = true;
 
     // A published framebuffer is a real cooperative progress boundary. Do not
     // carry the sustained-busy quantum streak across frames; otherwise a

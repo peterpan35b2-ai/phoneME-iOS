@@ -335,8 +335,6 @@ struct GameProfile: Codable, Equatable {
     var screenGravity: ScreenGravity = .top
     var scaleType: ScaleType = .fit
     var filtering = false
-    var immediateProcessing = false
-    var parallelScreenRedrawing = true
     var forceFullscreen = false
     var showFPS = false
     // Optional values keep older profile JSON decodable. Missing/nil follows

@@ -433,8 +433,6 @@ final class EmulatorSession: ObservableObject {
             frameRateLimit: profile.frameRateLimit,
             framePacingMode: profile.effectiveFramePacingMode,
             heapSizeMegabytes: profile.effectiveHeapSizeMegabytes,
-            immediateProcessing: profile.immediateProcessing,
-            parallelScreenRedrawing: profile.parallelScreenRedrawing,
             autoTranslateToVietnamese: profile.isAutoTranslationEnabled,
             translationProvider: TranslationProvider.selected,
             translationSourceLanguage:

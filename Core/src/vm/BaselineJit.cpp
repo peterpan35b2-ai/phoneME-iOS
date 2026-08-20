@@ -8987,8 +8987,8 @@ public:
         JitStatistics result = stats_;
         result.background_compile_queue_peak =
             background_compile_queue_peak_.load(std::memory_order_acquire);
-        result.background_compile_worker_count = static_cast<u64>(
-            background_workers_.size());
+        result.background_compile_worker_count =
+            background_compile_worker_count_.load(std::memory_order_acquire);
         result.background_compile_render_cooldown_waits =
             background_compile_render_cooldown_waits_.load(
                 std::memory_order_acquire);
@@ -10231,6 +10231,9 @@ private:
                 background_compile_loop(index);
             });
         }
+        background_compile_worker_count_.store(
+            static_cast<u64>(background_workers_.size()),
+            std::memory_order_release);
         return !background_workers_.empty();
     }
 
@@ -10245,6 +10248,7 @@ private:
             if (worker.joinable()) worker.join();
         }
         background_workers_.clear();
+        background_compile_worker_count_.store(0U, std::memory_order_release);
         std::scoped_lock lock(background_mutex_);
         background_tasks_.clear();
         background_results_.clear();
@@ -10560,6 +10564,7 @@ private:
     const u64 render_compile_cooldown_nanoseconds_ {
         configured_render_compile_cooldown_nanoseconds()};
     std::atomic<u64> background_compile_queue_peak_ {0U};
+    std::atomic<u64> background_compile_worker_count_ {0U};
     std::atomic<u64> background_compile_render_cooldown_waits_ {0U};
     std::atomic<u64> background_compile_render_cooldown_nanoseconds_ {0U};
     JitAvailability availability_ {JitAvailability::unavailable};

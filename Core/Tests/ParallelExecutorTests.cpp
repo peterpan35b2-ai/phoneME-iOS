@@ -31,8 +31,12 @@ void test_exact_once_partitioning() {
             }
         });
 
-    require(executor.active_worker_count() == 3U,
-            "parallel executor starts requested workers");
+    const auto admitted = std::min<phoneme::u32>(
+        executor.worker_limit(),
+        phoneme::runtime::shared_work_coordinator().helper_limit(
+            phoneme::runtime::WorkClass::frame_critical, kItems));
+    require(executor.active_worker_count() == admitted,
+            "parallel executor creates only workers admitted for the job");
     for (const auto& visit : visits) {
         require(visit.load(std::memory_order_relaxed) == 1U,
                 "parallel executor visits each item exactly once");
@@ -109,6 +113,9 @@ void test_shared_work_budget() {
     coordinator.note_frame_interval(10U, 10U);
     require(coordinator.background_work_allowed(),
             "healthy nominal frame admits background work");
+    coordinator.end_frame_work();
+    require(coordinator.active_frame_jobs() == 0U,
+            "unbalanced frame-work release cannot underflow the coordinator");
     coordinator.begin_frame_work();
     require(!coordinator.background_work_allowed(),
             "frame work suppresses background work");

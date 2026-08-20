@@ -60,11 +60,17 @@ u32 ParallelExecutor::active_worker_count() const noexcept {
     return static_cast<u32>(workers_.size());
 }
 
-void ParallelExecutor::ensure_workers() {
-    if (!workers_.empty() || worker_limit_ == 0U) return;
+void ParallelExecutor::ensure_workers(u32 required_worker_count) {
+    if (worker_limit_ == 0U || required_worker_count == 0U) return;
+    const u32 target = std::min(worker_limit_, required_worker_count);
+    std::scoped_lock lock(state_mutex_);
+    if (workers_.size() >= target) return;
     workers_.reserve(worker_limit_);
-    for (u32 index = 0U; index < worker_limit_; ++index) {
-        workers_.emplace_back([this, index] { worker_loop(index); });
+    const u64 observed_generation = generation_;
+    while (workers_.size() < target) {
+        workers_.emplace_back([this, observed_generation] {
+            worker_loop(observed_generation);
+        });
     }
 }
 
@@ -114,27 +120,36 @@ void ParallelExecutor::parallel_for(WorkClass work_class,
     }
 
     std::unique_lock submission_lock(submission_mutex_);
-    ensure_workers();
-    if (workers_.empty()) {
+    ensure_workers(helper_count);
+
+    u32 admitted_helpers = 0U;
+    {
+        std::scoped_lock lock(state_mutex_);
+        admitted_helpers = std::min<u32>(
+            helper_count, static_cast<u32>(workers_.size()));
+        if (admitted_helpers != 0U) {
+            current_task_ = &task;
+            current_item_count_ = item_count;
+            current_chunk_items_ = std::max<usize>(chunk_items, 1U);
+            current_helper_count_ = admitted_helpers;
+            helper_slots_remaining_ = admitted_helpers;
+            next_item_.store(0U, std::memory_order_release);
+            completed_workers_ = 0U;
+            ++generation_;
+        }
+    }
+    if (admitted_helpers == 0U) {
         task(0U, item_count);
         return;
     }
 
-    {
-        std::scoped_lock lock(state_mutex_);
-        current_task_ = &task;
-        current_item_count_ = item_count;
-        current_chunk_items_ = std::max<usize>(chunk_items, 1U);
-        current_helper_count_ = std::min<u32>(
-            helper_count, static_cast<u32>(workers_.size()));
-        next_item_.store(0U, std::memory_order_release);
-        completed_workers_ = 0U;
-        ++generation_;
-    }
-
     const bool frame_work = work_class == WorkClass::frame_critical;
     if (frame_work) coordinator.begin_frame_work();
-    work_condition_.notify_all();
+    if (admitted_helpers == 1U) {
+        work_condition_.notify_one();
+    } else {
+        work_condition_.notify_all();
+    }
 
     // The submitting VM/native thread is also a worker. This keeps latency low
     // and means an N-worker pool consumes N+1 cores only while useful work is
@@ -144,19 +159,19 @@ void ParallelExecutor::parallel_for(WorkClass work_class,
     {
         std::unique_lock lock(state_mutex_);
         completion_condition_.wait(lock, [this] {
-            return completed_workers_ == workers_.size();
+            return completed_workers_ == current_helper_count_;
         });
         current_task_ = nullptr;
         current_item_count_ = 0U;
         current_helper_count_ = 0U;
+        helper_slots_remaining_ = 0U;
     }
     if (frame_work) coordinator.end_frame_work();
 }
 
-void ParallelExecutor::worker_loop(u32 worker_index) noexcept {
-    u64 observed_generation = 0U;
+void ParallelExecutor::worker_loop(u64 observed_generation) noexcept {
     for (;;) {
-        u32 helper_count = 0U;
+        bool participates = false;
         {
             std::unique_lock lock(state_mutex_);
             work_condition_.wait(lock, [this, observed_generation] {
@@ -164,15 +179,19 @@ void ParallelExecutor::worker_loop(u32 worker_index) noexcept {
             });
             if (stopping_) return;
             observed_generation = generation_;
-            helper_count = current_helper_count_;
+            if (helper_slots_remaining_ != 0U) {
+                --helper_slots_remaining_;
+                participates = true;
+            }
         }
 
-        if (worker_index < helper_count) drain_current_job();
+        if (!participates) continue;
+        drain_current_job();
 
         {
             std::scoped_lock lock(state_mutex_);
             ++completed_workers_;
-            if (completed_workers_ == workers_.size()) {
+            if (completed_workers_ == current_helper_count_) {
                 completion_condition_.notify_one();
             }
         }

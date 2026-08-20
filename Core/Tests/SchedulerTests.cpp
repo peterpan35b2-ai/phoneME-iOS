@@ -12,6 +12,7 @@
 #include "phoneme/vm/ClassRepository.hpp"
 #include "phoneme/vm/Machine.hpp"
 #include "phoneme/vm/MediaEventDispatch.hpp"
+#include "phoneme/runtime/WorkCoordinator.hpp"
 
 namespace phoneme::vm {
 
@@ -271,6 +272,8 @@ int main(int argc, char** argv) {
             60,
             40,
             12);
+        const auto native_frame_pressure =
+            phoneme::runtime::shared_work_coordinator().frame_pressure();
         const auto native_overproduction_elapsed = measure_frame_pacing(
             classes,
             phoneme::vm::FramePacingMode::native,
@@ -329,6 +332,8 @@ int main(int argc, char** argv) {
 
         require(native_elapsed >= std::chrono::milliseconds(400),
                 "native pacing preserves the game's requested sleeps");
+        require(native_frame_pressure >= phoneme::runtime::FramePressure::high,
+                "native-paced missed deadlines suppress background native work");
         require(native_overproduction_elapsed >= std::chrono::milliseconds(90) &&
                     native_overproduction_elapsed <=
                         std::chrono::milliseconds(260),

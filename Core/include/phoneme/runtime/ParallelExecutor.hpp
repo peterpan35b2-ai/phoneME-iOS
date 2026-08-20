@@ -45,8 +45,8 @@ public:
     [[nodiscard]] u32 active_worker_count() const noexcept;
 
 private:
-    void ensure_workers();
-    void worker_loop(u32 worker_index) noexcept;
+    void ensure_workers(u32 required_worker_count);
+    void worker_loop(u64 observed_generation) noexcept;
     void drain_current_job() noexcept;
 
     const u32 worker_limit_;
@@ -59,6 +59,7 @@ private:
     usize current_item_count_ {0U};
     usize current_chunk_items_ {1U};
     u32 current_helper_count_ {0U};
+    u32 helper_slots_remaining_ {0U};
     std::atomic<usize> next_item_ {0U};
     u64 generation_ {0U};
     usize completed_workers_ {0U};
