@@ -770,22 +770,18 @@ void Scheduler::cooperative_quantum(Machine& machine) {
         std::this_thread::sleep_for(backoff);
     } else if (foreground_peer_runnable ||
                (tls_unblocked_quantum_count_ & 7U) == 0U) {
-        // A real frame publication resets tls_unblocked_quantum_count_. On the
-        // browser, a thread that keeps crossing scheduler quanta without ever
-        // reaching such a progress boundary is therefore a genuine busy loop.
+        // A real frame publication resets tls_unblocked_quantum_count_. A
+        // thread that keeps crossing scheduler quanta without ever reaching
+        // such a progress boundary is therefore a genuine busy loop.
         // Give sustained loops a short host sleep so a malformed/uncapped
         // MIDlet cannot pin a mobile CPU core at 100%. Healthy foreground game
         // loops keep the cheaper yield path and retain input/thread fairness.
-#if defined(__EMSCRIPTEN__)
         if (tls_unblocked_quantum_count_ >= 16U) {
             std::this_thread::sleep_for(std::min(
                 backoff, std::chrono::microseconds(1'000)));
         } else {
             std::this_thread::yield();
         }
-#else
-        std::this_thread::yield();
-#endif
     }
     machine.resume_execution_after_blocking(depth);
     if (unpaced_execution) tls_unblocked_quantum_count_ = 0U;
