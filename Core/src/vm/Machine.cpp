@@ -6003,10 +6003,29 @@ namespace phoneme::vm
 
     if (operation == JitRuntimeOperation::budget_safepoint)
     {
-      // Compiled code ran out of its native budget window. The trampoline
-      // captures the deopt frame for this pc; returning deoptimize makes the
-      // entry path hand back a resumable JitDeoptState instead of failing.
-      return static_cast<u32>(JitRuntimeStatus::deoptimize);
+      if (!execution->progress_watchdog || frame_base == nullptr)
+        return static_cast<u32>(JitRuntimeStatus::deoptimize);
+
+      auto* frame_bytes = reinterpret_cast<u8*>(
+          const_cast<u64*>(frame_base));
+      auto* initial_budget = reinterpret_cast<u32*>(
+          frame_bytes + kJitRuntimeBudgetInitialByteOffset);
+      auto* remaining_budget = reinterpret_cast<u32*>(
+          frame_bytes + kJitRuntimeBudgetRemainingByteOffset);
+      if (*initial_budget == 0U || *remaining_budget > *initial_budget)
+        return static_cast<u32>(JitRuntimeStatus::deoptimize);
+      const u64 window_consumed =
+          static_cast<u64>(*initial_budget - *remaining_budget);
+      if (window_consumed == 0U ||
+          window_consumed > execution->progress_total_budget ||
+          execution->progress_reset_instructions >
+              execution->progress_total_budget - window_consumed)
+      {
+        return static_cast<u32>(JitRuntimeStatus::budget_exhausted);
+      }
+      execution->progress_reset_instructions += window_consumed;
+      *remaining_budget = *initial_budget;
+      return static_cast<u32>(JitRuntimeStatus::success);
     }
 
     if (operation == JitRuntimeOperation::match_exception_handler)
@@ -6062,6 +6081,55 @@ namespace phoneme::vm
         frame_base,
         consumed_instructions,
         result_bits);
+
+    const auto completed_java_call = [operation]() noexcept {
+      switch (operation)
+      {
+      case JitRuntimeOperation::invoke_virtual:
+      case JitRuntimeOperation::invoke_special:
+      case JitRuntimeOperation::invoke_static:
+      case JitRuntimeOperation::invoke_interface:
+      case JitRuntimeOperation::invoke_dynamic:
+        return true;
+      default:
+        return false;
+      }
+    };
+    if (execution->progress_watchdog && frame_base != nullptr &&
+        status == static_cast<u32>(JitRuntimeStatus::success) &&
+        completed_java_call())
+    {
+      auto* frame_bytes = reinterpret_cast<u8*>(
+          const_cast<u64*>(frame_base));
+      auto* initial_budget = reinterpret_cast<u32*>(
+          frame_bytes + kJitRuntimeBudgetInitialByteOffset);
+      auto* remaining_budget = reinterpret_cast<u32*>(
+          frame_bytes + kJitRuntimeBudgetRemainingByteOffset);
+      const u64 window_consumed = *initial_budget >= *remaining_budget
+          ? static_cast<u64>(*initial_budget - *remaining_budget)
+          : 0U;
+      const u64 nested_consumed = consumed_instructions != nullptr
+          ? static_cast<u64>(*consumed_instructions)
+          : 0U;
+      const u64 reset_cost = window_consumed + nested_consumed;
+      const u64 already_accounted = execution->progress_reset_instructions;
+      if (reset_cost > execution->progress_total_budget ||
+          already_accounted > execution->progress_total_budget - reset_cost)
+      {
+        return static_cast<u32>(JitRuntimeStatus::budget_exhausted);
+      }
+      execution->progress_reset_instructions += reset_cost;
+
+      // emit_runtime_call() reloads this slot and then subtracts the nested
+      // call's bytecode count. Pre-credit that exact count so the subtraction
+      // leaves a fresh watchdog window, matching the interpreter's
+      // `watchdog_instructions = 0` after a completed nested call.
+      const u64 replenished = static_cast<u64>(*initial_budget) +
+          nested_consumed;
+      if (replenished > static_cast<u64>(std::numeric_limits<u32>::max()))
+        return static_cast<u32>(JitRuntimeStatus::budget_exhausted);
+      *remaining_budget = static_cast<u32>(replenished);
+    }
     if (consumed_instructions != nullptr)
       execution->nested_instructions += *consumed_instructions;
 
@@ -8029,6 +8097,11 @@ namespace phoneme::vm
                 ? parent_context->append_outer_roots
                 : nullptr,
             .extra_root_values = chained_arguments,
+            .progress_watchdog = parent_context != nullptr &&
+                parent_context->progress_watchdog,
+            .progress_total_budget = parent_context != nullptr
+                ? parent_context->progress_total_budget
+                : 0U,
         };
         if (resolved_target->method->code.has_value())
         {
@@ -8063,6 +8136,14 @@ namespace phoneme::vm
         }
         if (fast->has_value())
         {
+          const u64 fast_instructions =
+              static_cast<u64>((*fast)->bytecode_instructions) +
+              chained_context.progress_reset_instructions;
+          if (fast_instructions >
+              static_cast<u64>(std::numeric_limits<u32>::max()))
+          {
+            return static_cast<u32>(JitRuntimeStatus::budget_exhausted);
+          }
           if ((*fast)->deopt_state.has_value())
           {
             auto resumed = prepare_invocation(
@@ -8071,11 +8152,15 @@ namespace phoneme::vm
               return static_cast<u32>(JitRuntimeStatus::fatal_runtime_error);
             resumed->resume_jit_deopt_state =
                 std::move((*fast)->deopt_state);
-            resumed->resume_jit_instructions =
-                (*fast)->bytecode_instructions;
+            resumed->resume_jit_instructions = fast_instructions;
             resumed->resume_jit_nested_instructions =
                 chained_context.nested_instructions;
-            auto completed = execute(std::move(*resumed), nested_budget);
+            auto completed = execute(
+                std::move(*resumed),
+                nested_budget,
+                chained_context.progress_watchdog
+                    ? InstructionBudgetMode::progress_watchdog
+                    : InstructionBudgetMode::total);
             if (!completed)
             {
               if (completed.error().code == ErrorCode::invalid_state &&
@@ -8129,7 +8214,7 @@ namespace phoneme::vm
 
           if (consumed_instructions != nullptr)
           {
-            *consumed_instructions = (*fast)->bytecode_instructions;
+            *consumed_instructions = static_cast<u32>(fast_instructions);
           }
           if ((*fast)->exception.has_value())
           {
@@ -8171,7 +8256,7 @@ namespace phoneme::vm
                          resolved_target->owner->name().c_str(),
                          resolved_target->method->name.c_str(),
                          resolved_target->method->descriptor.c_str(),
-                         static_cast<unsigned>((*fast)->bytecode_instructions),
+                         static_cast<unsigned>(fast_instructions),
                          chained_context.nested_instructions != 0U ? 1 : 0);
           }
           return static_cast<u32>(JitRuntimeStatus::success);
@@ -14508,6 +14593,13 @@ namespace phoneme::vm
                 .outer_roots_context = &frames,
                 .append_outer_roots = &append_execution_frame_roots,
                 .extra_root_values = nested->arguments,
+                .progress_watchdog =
+                    budget_mode == InstructionBudgetMode::progress_watchdog,
+                .progress_total_budget =
+                    budget_mode == InstructionBudgetMode::progress_watchdog &&
+                            executed < progress_total_budget
+                        ? progress_total_budget - executed
+                        : 0U,
             };
             if (nested->method.method->code.has_value())
             {
@@ -14549,7 +14641,19 @@ namespace phoneme::vm
             if (jitted->has_value())
             {
               const u64 jit_instructions =
-                  static_cast<u64>((*jitted)->bytecode_instructions);
+                  static_cast<u64>((*jitted)->bytecode_instructions) +
+                  jit_context.progress_reset_instructions;
+              if (jit_instructions >
+                  static_cast<u64>(std::numeric_limits<u32>::max()))
+              {
+                auto released = release_synchronized_monitor(*nested_monitor);
+                if (!released)
+                  return std::unexpected(released.error());
+                return std::unexpected(vm_instruction_budget_error(
+                    nested->method.owner->name(),
+                    nested->method.method->name,
+                    nested->method.method->descriptor));
+              }
               executed += jit_instructions;
               separately_accounted_nested_instructions +=
                   jit_context.nested_instructions;

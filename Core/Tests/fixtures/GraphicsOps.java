@@ -69,16 +69,11 @@ public final class GraphicsOps {
             return false;
         }
 
-        boolean selfImageRejected = false;
-        try {
-            graphics.drawImage(canvas, 0, 0,
-                               Graphics.LEFT | Graphics.TOP);
-        } catch (IllegalArgumentException expected) {
-            selfImageRejected = true;
-        }
-        if (!selfImageRejected) {
-            return false;
-        }
+        // drawImage self-source is unspecified by MIDP and is accepted by
+        // classic Nokia/Gameloft titles. The native renderer snapshots an
+        // overlapping source region so this remains deterministic.
+        graphics.drawImage(canvas, 0, 0,
+                           Graphics.LEFT | Graphics.TOP);
 
         Image source = Image.createRGBImage(
                 new int[] {0xFFFF0000}, 1, 1, true);

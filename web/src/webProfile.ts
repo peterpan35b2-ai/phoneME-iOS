@@ -60,7 +60,7 @@ export const DEFAULT_GAME_PROFILE: WebGameProfile = {
   rotationLocked: false,
   autoTranslateEnabled: false,
   translationSourceLanguage: "auto",
-  heapSizeMegabytes: 64,
+  heapSizeMegabytes: 128,
   fontSmall: 18,
   fontMedium: 22,
   fontLarge: 26,

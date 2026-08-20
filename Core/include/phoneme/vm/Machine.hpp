@@ -586,6 +586,9 @@ namespace phoneme::vm
       std::vector<ObjectRef> published_roots;
       std::optional<ObjectRef> pending_throwable;
       u64 nested_instructions{0U};
+      bool progress_watchdog{false};
+      u64 progress_total_budget{0U};
+      u64 progress_reset_instructions{0U};
     };
 
     struct LambdaBinding final

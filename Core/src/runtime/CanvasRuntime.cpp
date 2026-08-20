@@ -1145,12 +1145,16 @@ Result<bool> CanvasRuntime::invoke_paint(
         kCanvasPaintWatchdogInstructionBudget,
         vm::InstructionBudgetMode::progress_watchdog);
     if (!result) {
-        if (result.error().code == ErrorCode::invalid_state &&
-            result.error().message.starts_with(
-                "VM progress watchdog was exhausted")) {
+        const bool budget_exhausted =
+            result.error().code == ErrorCode::invalid_state &&
+            (result.error().message.starts_with(
+                 "VM progress watchdog was exhausted") ||
+             result.error().message.starts_with(
+                 "VM instruction budget was exhausted"));
+        if (budget_exhausted) {
             std::string diagnostic =
                 "callback paint(Ljavax/microedition/lcdui/Graphics;)V "
-                "made no progress before watchdog expiry: ";
+                "exceeded its progress budget: ";
             diagnostic += result.error().message;
             append_canvas_diagnostic(machine_, diagnostic);
             return false;

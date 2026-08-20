@@ -241,8 +241,10 @@ constexpr u32 kRuntimeContextOffset = 0U;
 constexpr u32 kRuntimeDispatchOffset = 8U;
 constexpr u32 kResultPointerOffset = 16U;
 constexpr u32 kReturnAddressOffset = 24U;
-constexpr u32 kBudgetInitialOffset = 32U;
-constexpr u32 kBudgetRemainingOffset = 36U;
+constexpr u32 kBudgetInitialOffset =
+    static_cast<u32>(kJitRuntimeBudgetInitialByteOffset);
+constexpr u32 kBudgetRemainingOffset =
+    static_cast<u32>(kJitRuntimeBudgetRemainingByteOffset);
 constexpr u32 kRuntimeResultOffset = 40U;
 constexpr u32 kJitFrameHeaderBytes =
     static_cast<u32>(kJitRuntimeFrameHeaderBytes);
@@ -5856,6 +5858,7 @@ compute_constant_flow(
         // frame is captured at this pc. Without it a budget exhaustion would
         // fall into the no-state deopt path and re-execute side effects.
         requires_runtime_dispatch = true;
+        const u32 original_cost = cost;
         std::vector<usize> exhausted_branches;
         while (cost != 0U) {
             const u32 chunk = std::min(cost, 4'095U);
@@ -5877,7 +5880,19 @@ compute_constant_flow(
                           31U,
                           31U,
                           bytecode_pc);
-        terminal_deopt_patches.push_back(emitter.emit_branch_placeholder());
+        // In total-budget mode the runtime returns a deopt status and the
+        // failure edge above captures/resumes in the interpreter. A
+        // progress-watchdog invocation may instead replenish its native JIT
+        // window and return success; charge this instruction against that
+        // fresh window before continuing compiled execution.
+        u32 slow_cost = original_cost;
+        while (slow_cost != 0U) {
+            const u32 chunk = std::min(slow_cost, 4'095U);
+            emitter.sub_imm_w(kBudgetRemaining,
+                              kBudgetRemaining,
+                              chunk);
+            slow_cost -= chunk;
+        }
         const usize resume_position = emitter.position();
         if (!emitter.patch_branch(continue_branch, resume_position))
             return false;

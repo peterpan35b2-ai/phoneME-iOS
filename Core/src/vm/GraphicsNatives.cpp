@@ -1717,12 +1717,6 @@ void register_graphics_natives(NativeMethodRegistry& registry) {
             if (!x) return std::unexpected(x.error());
             if (!y) return std::unexpected(y.error());
             if (!anchor) return std::unexpected(anchor.error());
-            // phoneME's Graphics.render rejects drawing an Image back into the
-            // same mutable Image that owns this Graphics object.
-            if (source_reference->bits == bound->context->target_key) {
-                return fail_java("java/lang/IllegalArgumentException",
-                                 "drawImage source equals destination");
-            }
             auto source = image_payload(machine, *source_reference);
             if (!source) return std::unexpected(source.error());
             machine.intercept_image_draw(ImageDrawEvent {

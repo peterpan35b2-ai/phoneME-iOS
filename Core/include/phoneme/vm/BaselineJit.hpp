@@ -128,6 +128,9 @@ enum class JitExceptionKind : u8 {
 };
 
 inline constexpr u32 kJitRuntimeNoSafepointOperandFlag = 0x8000'0000U;
+
+inline constexpr usize kJitRuntimeBudgetInitialByteOffset = 32U;
+inline constexpr usize kJitRuntimeBudgetRemainingByteOffset = 36U;
 inline constexpr usize kJitRuntimeConsumedByteOffset = 48U;
 inline constexpr usize kJitRuntimeLocalSlotsByteOffset = 52U;
 inline constexpr usize kJitRuntimeStackDepthByteOffset = 56U;

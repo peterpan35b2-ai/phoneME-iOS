@@ -380,7 +380,7 @@ struct GameProfile: Codable, Equatable {
 
     static let defaultFrameRate = 30
     static let maximumFrameRate = 60
-    static let defaultHeapSizeMegabytes = 256
+    static let defaultHeapSizeMegabytes = 128
     static let minimumHeapSizeMegabytes = 1
     static let maximumHeapSizeMegabytes = 512
     static let `default` = GameProfile()
