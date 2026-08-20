@@ -3,6 +3,9 @@ import Foundation
 @MainActor
 final class GameProfileStore: ObservableObject {
     @Published private(set) var profiles: [UUID: GameProfile] = [:]
+    /// Last persist failure; presented as an alert so a full disk does not
+    /// silently eat the user's edit. Cleared by the presenting view.
+    @Published var lastSaveError: String?
 
     private let fileManager: FileManager
     private let storage: PhoneMEStorageController
@@ -231,7 +234,12 @@ final class GameProfileStore: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
-        guard let data = try? encoder.encode(stored) else { return }
-        try? data.write(to: metadataURL, options: .atomic)
+        do {
+            let data = try encoder.encode(stored)
+            try data.write(to: metadataURL, options: .atomic)
+            lastSaveError = nil
+        } catch {
+            lastSaveError = error.localizedDescription
+        }
     }
 }

@@ -7,6 +7,9 @@ final class WorkspaceStore: ObservableObject {
     static let maximumPanelCount = 12
 
     @Published private(set) var workspaces: [EmulatorWorkspace] = []
+    /// Last persist failure; presented as an alert so a full disk does not
+    /// silently eat the user's edit. Cleared by the presenting view.
+    @Published var lastSaveError: String?
 
     private let fileManager: FileManager
     private let storage: PhoneMEStorageController
@@ -737,8 +740,13 @@ final class WorkspaceStore: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(workspaces) else { return }
-        try? data.write(to: metadataURL, options: .atomic)
+        do {
+            let data = try encoder.encode(workspaces)
+            try data.write(to: metadataURL, options: .atomic)
+            lastSaveError = nil
+        } catch {
+            lastSaveError = error.localizedDescription
+        }
     }
 }
 

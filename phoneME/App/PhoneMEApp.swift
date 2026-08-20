@@ -105,6 +105,10 @@ struct PhoneMEApp: App {
                     workspaceRuntime.flushAllRecordStores()
                 }
 #endif
+                .alert("Save Error", isPresented: saveErrorBinding) {
+                } message: {
+                    Text(activeSaveError ?? "")
+                }
         }
 
 #if os(macOS)
@@ -333,6 +337,25 @@ struct PhoneMEApp: App {
         backgroundExecution.setRunningApplicationCount(
             session.runningApplications.count
                 + workspaceRuntime.runningApplicationCount
+        )
+    }
+
+    private var activeSaveError: String? {
+        profiles.lastSaveError
+            ?? profileTemplates.lastSaveError
+            ?? workspaceStore.lastSaveError
+    }
+
+    private var saveErrorBinding: Binding<Bool> {
+        Binding(
+            get: { activeSaveError != nil },
+            set: { shown in
+                if !shown {
+                    profiles.lastSaveError = nil
+                    profileTemplates.lastSaveError = nil
+                    workspaceStore.lastSaveError = nil
+                }
+            }
         )
     }
 
