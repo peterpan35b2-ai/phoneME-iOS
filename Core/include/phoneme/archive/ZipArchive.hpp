@@ -27,8 +27,8 @@ struct ZipEntry final {
 };
 
 struct ZipLimits final {
-    u64 maximum_archive_bytes {128U * 1024U * 1024U};
-    usize maximum_entries {10'000U};
+    u64 maximum_archive_bytes {256U * 1024U * 1024U};
+    usize maximum_entries {65'000U};
     u64 maximum_entry_uncompressed_bytes {64U * 1024U * 1024U};
     u64 maximum_total_uncompressed_bytes {256U * 1024U * 1024U};
     u64 compression_ratio_threshold_bytes {1024U * 1024U};
