@@ -15,7 +15,7 @@ jobs:
       - name: Cài Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Cài CMake
         run: brew install cmake
