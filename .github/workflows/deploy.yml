@@ -1,0 +1,40 @@
+name: Build và Deploy Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cài CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Cài Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Kiểm tra emcc
+        run: emcc --version
+
+      - name: Cài npm packages
+        working-directory: web
+        run: npm install
+
+      - name: Build và Deploy (build:wasm → tsc → vite build → wrangler)
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
